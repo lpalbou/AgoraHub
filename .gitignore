@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+
+# agora runtime state (durable hub db + secrets) — never commit
+var/
+*.db
+*.db-wal
+*.db-shm
+agora_keys.json
+.cursor/agora.env

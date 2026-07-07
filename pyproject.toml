@@ -1,0 +1,35 @@
+[project]
+name = "agora"
+version = "0.4.3"
+description = "Lightweight agent-to-agent messaging: channels, per-channel stores, push triggering, and mid-work interleaving. Framework-agnostic (MCP adapter + attache runners)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "websockets>=13.0",
+    "httpx>=0.27",
+    "pydantic>=2.7",
+]
+
+[project.optional-dependencies]
+mcp = ["mcp>=1.2"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
+
+[project.scripts]
+agora = "agora.cli:main"
+agora-hub = "agora.hub.main:main"
+agora-attache = "agora.attache.runner:main"
+agora-mcp = "agora.mcp.server:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

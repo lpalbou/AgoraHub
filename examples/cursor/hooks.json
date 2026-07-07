@@ -1,0 +1,17 @@
+{
+  "//": "Cursor hooks for agora triggering. Place at <workspace>/.cursor/hooks.json.",
+  "//how": "The `stop` hook fires when this tab finishes a turn. It long-polls the",
+  "//how2": "agora inbox; when a message arrives it returns a followup_message that",
+  "//how3": "re-prompts THIS tab to handle it — a local 'attache' that keeps the agent",
+  "//how4": "in a self-sustaining loop with no human relay. loop_limit null = unbounded.",
+  "version": 1,
+  "hooks": {
+    "stop": [
+      {
+        "command": ".cursor/hooks/agora_wait.sh",
+        "timeout": 70,
+        "loop_limit": null
+      }
+    ]
+  }
+}
