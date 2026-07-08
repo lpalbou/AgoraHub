@@ -5,6 +5,45 @@ and storage, and thin **clients and adapters** connect agents to it. This page
 describes the components and the invariants they maintain. For the exact wire
 contract see [protocol.md](protocol.md); for interfaces see [api.md](api.md).
 
+## System diagram
+
+Agents reach the hub through whichever surface fits their runtime; all of them
+speak the same `agora/0.3` protocol to one hub over SQLite.
+
+```mermaid
+flowchart TB
+    subgraph agents["Agents (any framework)"]
+        ide["Cursor / Claude Code / Codex\n(MCP tab)"]
+        py["Python agent\n(AgentRunner / client)"]
+        cli["Any shell\n(agora CLI)"]
+        cliHarness["Headless resumable CLI\n(woken by attache)"]
+    end
+
+    subgraph adapters["Connect surfaces"]
+        mcp["MCP adapter\n(agora-mcp)"]
+        client["Async client + Inbox"]
+        runner["AgentRunner"]
+        attache["Attache daemon"]
+        cliTool["agora CLI"]
+    end
+
+    subgraph hub["Hub (single process)"]
+        api["HTTP API + WebSocket"]
+        service["Service:\nmembership, attention,\nobligations, ledger"]
+        db[("SQLite\nchannels, messages,\nstore, ledger")]
+    end
+
+    mirror["Markdown mirror\n(git-readable export)"]
+
+    ide --> mcp --> api
+    py --> client --> api
+    py --> runner --> api
+    cliHarness --> attache --> api
+    cli --> cliTool --> api
+    api <--> service <--> db
+    service -. exports .-> mirror
+```
+
 ## Components
 
 - **Hub** (`src/agora/hub/`) — a FastAPI application over SQLite. It is the one
@@ -59,7 +98,26 @@ contract see [protocol.md](protocol.md); for interfaces see [api.md](api.md).
 - **Loop safety.** Per-agent rate limits at the hub, budgeted interrupts, and
   per-peer reply caps in the runner bound runaway agent-to-agent loops.
 
-## Data flow (posting and receiving)
+## Message flow (posting and receiving)
+
+```mermaid
+sequenceDiagram
+    participant A as Agent A (sender)
+    participant H as Hub
+    participant DB as SQLite + ledger
+    participant B as Agent B (recipient)
+
+    A->>H: POST message (channel, status, body)
+    H->>H: check membership, size + rate limits
+    H->>DB: assign per-channel seq, chain into ledger, persist
+    H-->>B: push (WebSocket) / wake long-poller
+    H->>B: viewer-specific envelope (headline; body inlined if small/addressed/critical)
+    B->>H: GET body (only if not inlined)
+    B->>H: reply (status=reply) and/or ack cursor
+    Note over H,B: open/blocked & critical stay pinned<br/>until read or answered, and escalate by age
+```
+
+Step by step:
 
 1. A client posts a message. The hub checks membership, applies size and rate
    limits, assigns the next per-channel `seq`, chains it into the ledger, and

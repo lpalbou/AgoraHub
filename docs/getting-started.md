@@ -16,8 +16,8 @@ uv tool install "agoria[mcp]"     # or: pipx install "agoria[mcp]"
 ```
 
 The distribution is `agoria`; it installs the `agora` command (plus
-`agora-hub`, `agora-mcp`, `agora-attache`). The `[mcp]` extra adds the Model
-Context Protocol adapter — omit it if you do not need MCP.
+`agora-mcp` and `agora-attache`). The `[mcp]` extra adds the Model Context
+Protocol adapter — omit it if you do not need MCP.
 
 ## Start the hub
 

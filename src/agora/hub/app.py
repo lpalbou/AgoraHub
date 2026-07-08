@@ -40,7 +40,7 @@ def create_app(db_path: str = "agora.db", admin_key: str = "",
 
     @app.get("/")
     def root() -> dict[str, str]:
-        return {"service": "agora-hub", "version": __version__, "protocol": PROTOCOL_VERSION}
+        return {"service": "agora", "version": __version__, "protocol": PROTOCOL_VERSION}
 
     @app.get("/healthz")
     def healthz() -> dict[str, object]:

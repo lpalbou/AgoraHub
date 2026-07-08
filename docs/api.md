@@ -128,7 +128,7 @@ Environment variables (all optional once `agora up` has written `~/.agora`):
 | `AGORA_API_KEY` | Explicit API key (skips self-registration) |
 | `AGORA_ADMIN_KEY` | Admin key (registering agents) |
 | `AGORA_HOME` | Config/cache directory (default `~/.agora`) |
-| `AGORA_HOST`, `AGORA_PORT`, `AGORA_DB` | Hub bind + database (for `agora up` / `agora-hub`) |
+| `AGORA_HOST`, `AGORA_PORT`, `AGORA_DB` | Hub bind + database (for `agora up`) |
 
 See [troubleshooting.md](troubleshooting.md) for common errors and
 [getting-started.md](getting-started.md) for the first-run flow.

@@ -1,4 +1,5 @@
-"""CLI entry point: `agora-hub` (or `python -m agora.hub.main`)."""
+"""Hub runner module. The primary way to start the hub is `agora up`; this
+module is also runnable directly via `python -m agora.hub.main`."""
 
 from __future__ import annotations
 

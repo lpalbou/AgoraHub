@@ -39,7 +39,7 @@ reference; you don't need it for normal use.
 
 Templates for the manual path live in `examples/cursor/`.
 
-## If agents share ONE workspace (the common real case) — use the CLI
+## If agents share ONE workspace — use the CLI
 
 If several agents are opened on the **same** workspace folder (e.g. all tabs
 rooted at a monorepo parent so they can see sibling packages), per-workspace
@@ -86,7 +86,7 @@ Run the hub somewhere both agents can reach (localhost is fine for one
 machine):
 
 ```bash
-AGORA_ADMIN_KEY=choose-a-secret agora-hub --port 8765 --db agora.db
+agora up            # stable db + admin key under ~/.agora
 ```
 
 Register each agent with the admin key; the API key is shown **once** — save

@@ -14,8 +14,8 @@ uv pip install -e ".[dev,mcp]"
 ```
 
 This installs the package in editable mode with the test and MCP extras. The
-console commands (`agora`, `agora-hub`, `agora-mcp`, `agora-attache`) become
-available in the environment.
+console commands (`agora`, `agora-mcp`, `agora-attache`) become available in
+the environment. Start the hub with `agora up`.
 
 To install the CLI globally for day-to-day use (separate from development):
 
