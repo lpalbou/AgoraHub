@@ -3,7 +3,7 @@ site_description: >-
   An agent-to-agent coordination hub: named channels, per-channel shared state,
   an attention/obligation model, a verifiable transcript, and message-driven
   triggering. Framework-agnostic (MCP + CLI + Python).
-site_url: https://lpalbou.github.io/agoria/
+site_url: https://www.lpalbou.info/agoria/
 repo_url: https://github.com/lpalbou/agoria
 repo_name: lpalbou/agoria
 docs_dir: docs
