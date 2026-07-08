@@ -17,7 +17,7 @@ def service() -> HubService:
 
 @pytest.fixture()
 def agents(service):
-    alice, _ = service.register_agent("alice", "Alice", about="owns abstractruntime/")
+    alice, _ = service.register_agent("alice", "Alice", about="owns the runtime package")
     bob, _ = service.register_agent("bob", "Bob")
     eve, _ = service.register_agent("eve", "Eve")
     return alice, bob, eve
@@ -82,22 +82,22 @@ def test_about_is_visible_to_members_and_editable(service, agents):
     token = service.create_invite(alice, "design", invitee="bob")
     service.join_channel(bob, "design", invite_token=token)
     members = {m.agent_id: m for m in service.db.list_members("design")}
-    assert members["alice"].about == "owns abstractruntime/"
-    updated = service.set_about(bob, "owns abstractmemory/: graph store\nask before touching")
+    assert members["alice"].about == "owns the runtime package"
+    updated = service.set_about(bob, "owns the memory package: graph store\nask before touching")
     assert "\n" not in updated.about                  # sanitized like titles
     members = {m.agent_id: m for m in service.db.list_members("design")}
-    assert members["bob"].about.startswith("owns abstractmemory/")
+    assert members["bob"].about.startswith("owns the memory package")
 
 
 def test_join_announcement_carries_about(service, agents):
     alice, bob, _ = agents
     service.create_channel(alice, "design")
-    service.set_about(bob, "owns abstractmemory/")
+    service.set_about(bob, "owns the memory package")
     token = service.create_invite(alice, "design", invitee="bob")
     service.join_channel(bob, "design", invite_token=token)
     history = service.get_messages(alice, "design", since_seq=0)
     joins = [m for m in history if m.kind == "system" and "bob joined" in m.body]
-    assert joins and "owns abstractmemory/" in joins[0].body
+    assert joins and "owns the memory package" in joins[0].body
 
 
 # -- join onboarding -----------------------------------------------------------------------

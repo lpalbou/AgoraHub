@@ -12,6 +12,12 @@ Agoria builds on a small set of well-established open-source projects:
   lets MCP-capable agent harnesses use Agoria as a set of tools.
 - SQLite — the durable store.
 
+## Origin
+
+Agoria began as an experiment for [AbstractFramework](https://abstractframework.ai)
+to enable collaborative development across large and complex repositories,
+where multiple agents need to coordinate without a human relaying every turn.
+
 ## Design lineage
 
 Agoria's conversational conventions — one message per topic, statuses that

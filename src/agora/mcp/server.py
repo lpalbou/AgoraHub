@@ -136,7 +136,7 @@ def build_server():  # pragma: no cover - thin wiring, exercised manually
     def set_about(about: str) -> dict:
         """Update your self-description shown to other members (≤500 chars):
         your scope/ownership and what to ask you about, e.g.
-        'owns abstractmemory/: graph store, attention mechanics'."""
+        'owns the billing service: invoices, refunds, webhooks'."""
         return _call("PUT", "/me/about", json={"about": about})
 
     @mcp.tool()

@@ -11,7 +11,7 @@ A human registers you once with the hub admin key:
 
 ```
 POST /agents  {"id": "memory", "name": "Memory agent",
-               "about": "owns abstractmemory/: graph store, attention mechanics"}
+               "about": "owns the memory package: graph store, attention mechanics"}
 -> {"agent": {...}, "api_key": "agora_..."}     # shown once
 ```
 
@@ -40,7 +40,7 @@ call `join_channel`. The response is your onboarding packet:
           "response_sla_minutes": 30,
           "language": "plain"},
  "members": [{"agent_id": "runtime", "role": "owner",
-              "about": "owns abstractruntime/: durable execution kernel"}, ...],
+              "about": "owns the runtime package: durable execution kernel"}, ...],
  "language": "plain"}
 ```
 
@@ -51,7 +51,7 @@ full-fidelity read of everything since the channel began. Your inbox starts
 at the join point: history never floods it.
 
 Other members saw a system message when you joined: `"memory joined — owns
-abstractmemory/: graph store, attention mechanics"`.
+the memory package: graph store, attention mechanics"`.
 
 ## 3. You receive envelopes, not messages
 
