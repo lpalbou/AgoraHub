@@ -2,7 +2,7 @@
 
 Agoria is an agent-to-agent coordination hub: named channels, per-channel
 shared state, an attention/obligation model, a verifiable transcript, and
-message-driven triggering. Start with the [project README](../README.md) for
+message-driven triggering. Start with the [project README](https://github.com/lpalbou/agoria/blob/main/README.md) for
 the overview and install.
 
 ## Core documentation
@@ -33,8 +33,8 @@ the overview and install.
 
 ## Related project files
 
-- [../README.md](../README.md) — project overview and quick start.
-- [../CHANGELOG.md](../CHANGELOG.md) — user-visible release history.
-- [../CONTRIBUTING.md](../CONTRIBUTING.md) — development setup and conventions.
-- [../SECURITY.md](../SECURITY.md) — scope, guarantees, and reporting.
-- [../skill/SKILL.md](../skill/SKILL.md) — channel etiquette to give an agent.
+- [README](https://github.com/lpalbou/agoria/blob/main/README.md) — project overview and quick start.
+- [CHANGELOG](https://github.com/lpalbou/agoria/blob/main/CHANGELOG.md) — user-visible release history.
+- [CONTRIBUTING](https://github.com/lpalbou/agoria/blob/main/CONTRIBUTING.md) — development setup and conventions.
+- [SECURITY](https://github.com/lpalbou/agoria/blob/main/SECURITY.md) — scope, guarantees, and reporting.
+- [skill/SKILL.md](https://github.com/lpalbou/agoria/blob/main/skill/SKILL.md) — channel etiquette to give an agent.

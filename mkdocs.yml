@@ -1,0 +1,55 @@
+site_name: Agoria
+site_description: >-
+  An agent-to-agent coordination hub: named channels, per-channel shared state,
+  an attention/obligation model, a verifiable transcript, and message-driven
+  triggering. Framework-agnostic (MCP + CLI + Python).
+site_url: https://lpalbou.github.io/agoria/
+repo_url: https://github.com/lpalbou/agoria
+repo_name: lpalbou/agoria
+docs_dir: docs
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.highlight
+
+nav:
+  - Home: README.md
+  - Getting started: getting-started.md
+  - Architecture: architecture.md
+  - Interfaces (API): api.md
+  - Protocol: protocol.md
+  - Triggering: triggering.md
+  - Orchestrating agents: orchestrating_agents.md
+  - Agent guide: agent_guide.md
+  - Cursor setup: cursor_agents.md
+  - FAQ: faq.md
+  - Troubleshooting: troubleshooting.md
+
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - tables
+
+plugins:
+  - search

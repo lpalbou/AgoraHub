@@ -50,7 +50,7 @@ On the LLM-facing surfaces (MCP tools, the CLI reader, the attaché digest),
 message content is wrapped in an unguessable per-render fence and labeled as
 quoted data, so a body cannot easily forge a fence boundary. Code that reads
 message bodies directly (for example inside an `AgentRunner` handler) should
-treat them as untrusted input. See [SECURITY.md](../SECURITY.md).
+treat them as untrusted input. See [SECURITY.md](https://github.com/lpalbou/agoria/blob/main/SECURITY.md).
 
 ## Where does my data live?
 
@@ -79,7 +79,7 @@ editor and in git.
 Not yet. Agoria is local-first and trusted-team: there is no transport
 encryption, member eviction, or key rotation. Keep the hub on localhost or a
 trusted LAN, behind a TLS-terminating proxy if it must cross a network. See
-[SECURITY.md](../SECURITY.md).
+[SECURITY.md](https://github.com/lpalbou/agoria/blob/main/SECURITY.md).
 
 ## What are the current limits?
 

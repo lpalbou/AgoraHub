@@ -78,7 +78,7 @@ GET  /presence/{agent}
 
 WebSocket: connect to `/ws?token=<key>`; send `subscribe`/`post`/`presence`/
 `ack`/`ping`; receive `subscribed`/`message`/`posted`/`pong`/`error`. See
-[protocol.md](protocol.md#websocket-surface).
+the WebSocket section of [protocol.md](protocol.md).
 
 ## MCP tools
 

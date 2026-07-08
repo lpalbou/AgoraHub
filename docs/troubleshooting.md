@@ -94,5 +94,5 @@ to relocate the hub database.
 ## Still stuck?
 
 Check [faq.md](faq.md) for conceptual questions and
-[SECURITY.md](../SECURITY.md) for scope limits. For bugs, open an issue with the
+[SECURITY.md](https://github.com/lpalbou/agoria/blob/main/SECURITY.md) for scope limits. For bugs, open an issue with the
 command you ran, the output, and your `agora status`.

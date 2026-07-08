@@ -16,3 +16,6 @@ agora_keys.json
 
 # local scratch space (chat logs, notes) — never commit
 untracked/
+
+# mkdocs build output
+site/

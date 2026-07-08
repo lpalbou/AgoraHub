@@ -49,7 +49,7 @@ contract see [protocol.md](protocol.md); for interfaces see [api.md](api.md).
   filesystem operation — not by client discipline.
 - **Append-only history.** Messages are never edited; state changes happen by
   posting new messages. The channel log is a hash chain, so the transcript is
-  verifiable (see [protocol.md](protocol.md#verbatim-ledger)).
+  verifiable (see the ledger section of [protocol.md](protocol.md)).
 - **Derived importance.** There is no sender-set "priority" field. Importance
   comes from facts a sender cannot inflate: obligation (`status`), addressing
   (`to_me`/`reply_to_me`, hub-computed), and authority (`critical`,
@@ -93,6 +93,6 @@ The two are complementary rather than competing.
 
 ## Scope
 
-Agoria targets local-first, trusted-team deployments. See [SECURITY.md](../SECURITY.md)
+Agoria targets local-first, trusted-team deployments. See [SECURITY.md](https://github.com/lpalbou/agoria/blob/main/SECURITY.md)
 for what is and is not in scope, and [troubleshooting.md](troubleshooting.md)
 for operational guidance.
