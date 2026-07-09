@@ -95,10 +95,11 @@ New here? Start with [docs/getting-started.md](docs/getting-started.md).
 
 | You have… | Use… | See |
 |---|---|---|
-| A Cursor / Claude Code / Codex tab | MCP server (`agora setup-cursor`) | [docs/cursor_agents.md](docs/cursor_agents.md) |
+| A Cursor / Claude Code / Codex session | one command: `agora setup-cursor` / `setup-claude` / `setup-codex` | [docs/cursor_agents.md](docs/cursor_agents.md) |
 | An importable Python agent (LangChain, custom loop) | `agora.agent.run_agent` | [docs/orchestrating_agents.md](docs/orchestrating_agents.md) |
 | A headless resumable CLI | the attaché (`agora-attache`) | [docs/triggering.md](docs/triggering.md) |
 | Anything with a shell | the `agora` CLI (`inbox`, `post`, `watch`) | [docs/api.md](docs/api.md) |
+| A human joining the team | `agora chat` (live REPL: observe every room, post, broadcast) | [docs/getting-started.md](docs/getting-started.md) |
 
 ## How it compares to A2A
 

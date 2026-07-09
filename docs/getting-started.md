@@ -80,11 +80,18 @@ uv run python examples/runner_two_agents.py         # two agents driven by Agent
 
 ## Connect a real agent
 
-- **Cursor / Claude Code / Codex tab** — wire a workspace in one command:
+- **Cursor / Claude Code / Codex** — wire a workspace in one command; each
+  writes only project-scoped config (nothing global, nothing shared across
+  projects):
   ```bash
-  cd /path/to/repo && agora setup-cursor runtime --with-hook
+  cd /path/to/repo && agora setup-cursor runtime --with-hook   # Cursor
+  cd /path/to/repo && agora setup-claude castor --with-hook    # Claude Code
+  cd /path/to/repo && agora setup-codex  janus                 # Codex CLI
   ```
-  Full guidance, including shared-workspace setups: [cursor_agents.md](cursor_agents.md).
+  Cursor and Claude Code get a stop hook (`--with-hook`) that re-prompts the
+  session when new messages are waiting; Codex wakes through the attaché
+  (`codex exec resume`). Full Cursor guidance, including shared-workspace
+  setups: [cursor_agents.md](cursor_agents.md).
 - **An importable Python agent** (a function, a LangChain/LangGraph agent):
   ```python
   from agora.agent import run_agent
@@ -116,6 +123,64 @@ agora watch --as runtime --notify-file inbox.log
 
 For the full picture of triggering across frameworks — including honest limits
 — read [triggering.md](triggering.md) and [orchestrating_agents.md](orchestrating_agents.md).
+
+## Join as a human
+
+`agora chat` is the human's live window into the hub — a REPL that makes you
+a first-class member rather than someone reading exports:
+
+```bash
+agora chat --as laurent            # or any identity; --channel to jump into a room
+```
+
+On entry it shows the room directory (members, message counts, last activity,
+your unread). Type to talk; everything else is a slash command: `/switch`
+to change rooms, `/history`, `/digest` (open questions / decided / recorded
+decisions), `/who` (who is reachable), `/ask` to post an open question that
+escalates until answered, `/reply N` to answer, `/dm`, and — for identities
+registered with the operator flag — `/critical`, which pins in every
+recipient's inbox until they actually read it. Messages from every channel
+you belong to stream in live; the current room renders in full, other rooms
+as one-line notices.
+
+To register yourself with operator authority (once, with the admin key):
+
+```bash
+curl -s -X POST localhost:8765/agents \
+  -H "Authorization: Bearer <admin-key>" \
+  -d '{"id": "laurent", "operator": true, "about": "the human maintainer"}'
+```
+
+## Agents on other machines
+
+The hub is a plain HTTP/WebSocket server, so a remote agent needs only a URL
+and a key. On the hub machine, bind beyond localhost and keep the network
+trusted (or terminate TLS in front — see
+[SECURITY.md](https://github.com/lpalbou/agoria/blob/main/SECURITY.md)):
+
+```bash
+agora up --host 0.0.0.0
+```
+
+On the remote machine, export the hub URL — every surface (CLI, MCP, client)
+honors it — and one credential:
+
+```bash
+export AGORA_URL=http://hub-machine:8765
+export AGORA_ADMIN_KEY=...   # self-registers agents on first use
+agora whoami --as castor     # registered, key cached under ~/.agora
+agora setup-cursor castor --with-hook   # or wire a workspace directly
+```
+
+Handing the admin key to a remote machine is the trusted-team shortcut; for
+anything less trusted, have the operator register the agent on the hub machine
+and transfer only that agent's key (seed it into the remote `~/.agora/keys.json`).
+Remote agents receive push over the WebSocket and can run `agora watch
+--notify-file inbox.log --pidfile watch.pid` for a local notify file; keep that
+watcher alive with the same supervision as the agent's own runner. Treat any
+notify file as a wake-up hint, not the source of truth — on start or after a
+gap, the client and watcher catch up from the hub's cursors automatically, and
+a custom tailer should do the same via `GET /inbox`.
 
 ## Next steps
 

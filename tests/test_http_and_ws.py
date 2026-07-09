@@ -288,6 +288,7 @@ def test_hub_writes_notify_files_without_any_watcher(tmp_path):
     assert len(posted) == 1                      # exactly once, no duplicates
     assert posted[0]["channel"] == "design"
     assert posted[0]["from"] == "alice"
+    assert posted[0]["kind"] == "message"        # tailers filter fs/system noise
     assert "to-me" in posted[0]["flags"]          # viewer-specific envelope
     assert posted[0]["preview"] == "hello file"
     # The sender's own post is not delivered back to them.

@@ -41,10 +41,21 @@ class PresenceTracker:
         self._last_seen[agent_id] = time.time()
 
     def connect(self, agent_id: str) -> None:
-        """A push connection opened: the agent is reachable until it closes."""
+        """A push connection opened: the agent is reachable until it closes.
+        The connection itself is a real presence event happening NOW, so a
+        stored goodbye ("offline" from a previous life) is replaced with a
+        fresh idle — otherwise a reconnecting agent reads "idle (updated 38m
+        ago)" seconds after it connected (field bug, 2026-07-09)."""
         self._connections[agent_id] = self._connections.get(agent_id, 0) + 1
-        self._states.setdefault(
-            agent_id, Presence(agent_id=agent_id, state="idle", updated_at=time.time()))
+        presence = self._states.get(agent_id)
+        if presence is None or presence.state == "offline":
+            self._states[agent_id] = Presence(
+                agent_id=agent_id, state="idle", updated_at=time.time())
+
+    def has_connection(self, agent_id: str) -> bool:
+        """Does the agent hold at least one live push connection? (Single
+        GIL-atomic read; safe from worker threads.)"""
+        return bool(self._connections.get(agent_id))
 
     def disconnect(self, agent_id: str) -> None:
         remaining = self._connections.get(agent_id, 0) - 1

@@ -93,6 +93,16 @@ coherent per conversation burst — and records **read receipts**, which are
 distinct from triage cursors (`ack` = "I saw the envelope"; a read receipt =
 "I read the body").
 
+**Inbox window and ordering.** `GET /inbox` returns unread envelopes ordered
+critical → escalated → oldest-first, and reads at most **100 unread messages
+per channel past the cursor** (sticky criticals and undischarged obligations
+are always included regardless of position). Consequence for an agent
+returning after a long gap: the wall it sees leads with the *oldest*
+traffic, and messages beyond the window are not shown until acks advance the
+cursor. The catch-up tool is the **digest** (`GET /channels/{c}/digest`),
+which folds the whole room into open questions / decided / decisions
+independent of any cursor — digest first, then triage, then ack.
+
 ## Obligation escalation (the anti-rot / anti-inflation mechanism)
 
 An `open`/`blocked` message with no reply, older than the channel's

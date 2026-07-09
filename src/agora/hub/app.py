@@ -15,7 +15,9 @@ from .service import HubService
 
 def create_app(db_path: str = "agora.db", admin_key: str = "",
                rate_per_minute: float = 60.0,
-               notify_dir: str | None = None) -> FastAPI:
+               notify_dir: str | None = None,
+               wake_config: dict | None = None,
+               wake_log: str | None = None) -> FastAPI:
     if not admin_key:
         raise ValueError("an admin key is required (set AGORA_ADMIN_KEY)")
     sink = None
@@ -24,6 +26,19 @@ def create_app(db_path: str = "agora.db", admin_key: str = "",
         sink = NotifySink(notify_dir)
     service = HubService(Database(db_path), rate_per_minute=rate_per_minute,
                          notify_sink=sink)
+    if wake_config:
+        # Wake sink after the service: its digest/presence callbacks close
+        # over the service (the sink is pure last-mile, no service logic).
+        from ..models import AgentInfo
+        from ..render import render_digest
+        from .wake_sink import WakeSink
+        service.wake_sink = WakeSink(
+            wake_config,
+            digest_fn=lambda aid: render_digest(
+                service.inbox(AgentInfo(id=aid, name=aid))),
+            has_connection=service.presence.has_connection,
+            state_fn=lambda aid: service.presence.get(aid).state,
+            log_path=wake_log)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -31,6 +46,15 @@ def create_app(db_path: str = "agora.db", admin_key: str = "",
         # WebSocket connects still marshals fan-out wake-ups onto this loop
         # (rather than running inline on a worker thread).
         service.bind_loop(asyncio.get_running_loop())
+        if service.wake_sink is not None:
+            # Startup sweep: obligations that were already pending when the
+            # hub restarted must re-arm their wakes (debounce timers died
+            # with the old process; without this, a restart 'changes
+            # nothing' until the next new delivery).
+            pending = [row["agent_id"] for row in service.agent_status_overview()
+                       if row["pending_obligations"]
+                       and not service.presence.has_connection(row["agent_id"])]
+            service.wake_sink.sweep(pending)
         try:
             yield
         finally:

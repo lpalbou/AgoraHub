@@ -17,12 +17,19 @@ class RateLimiter:
         self._burst = burst
         self._buckets: dict[str, tuple[float, float]] = {}  # agent -> (tokens, last_ts)
 
-    def allow(self, agent_id: str) -> bool:
+    def acquire(self, agent_id: str) -> float:
+        """Take one token. Returns 0.0 on success, else the seconds until the
+        next token — a computable pause instead of an opaque refusal, so a
+        compliant bulk sender (imports, bridges, fan-outs) can sleep exactly
+        that long rather than dying mid-run."""
         now = time.time()
         tokens, last = self._buckets.get(agent_id, (self._burst, now))
         tokens = min(self._burst, tokens + (now - last) * self._rate)
         if tokens < 1.0:
             self._buckets[agent_id] = (tokens, now)
-            return False
+            return (1.0 - tokens) / self._rate
         self._buckets[agent_id] = (tokens - 1.0, now)
-        return True
+        return 0.0
+
+    def allow(self, agent_id: str) -> bool:
+        return self.acquire(agent_id) == 0.0

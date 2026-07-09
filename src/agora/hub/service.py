@@ -11,6 +11,7 @@ import asyncio
 import json
 import re
 import time
+from collections import deque
 from typing import Any
 
 from ..db import Database
@@ -66,7 +67,7 @@ class HubError(Exception):
 class HubService:
     def __init__(self, db: Database, *, rate_per_minute: float = 60.0,
                  interrupts_per_hour: int = 6, criticals_per_hour: int = 5,
-                 notify_sink=None) -> None:
+                 notify_sink=None, wake_sink=None) -> None:
         self.db = db
         # One shared binder so fan-out and long-poll wakes marshal onto the
         # same serving loop from synchronous (threadpool) request handlers.
@@ -82,6 +83,13 @@ class HubService:
         # resident processes — the hub maintains each local agent's
         # <id>-inbox.log itself, the way the file mailbox's filesystem did.
         self.notify_sink = notify_sink
+        # Hub-driven wakes (see hub/wake_sink.py): the alarm clock in the one
+        # process that must exist anyway — resumes turn-gated harness sessions
+        # when wake-worthy traffic lands and no live push consumer exists.
+        self.wake_sink = wake_sink
+        # Refused sends, per agent (ring buffer): makes "can this agent send?"
+        # verifiable by the operator instead of assumed.
+        self.refusals: dict[str, deque] = {}
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Record the serving event loop. Called by every async entry point
@@ -319,6 +327,19 @@ class HubService:
         return "open"
 
     def post_message(self, agent: AgentInfo, channel: str, payload: PostMessage) -> Message:
+        """Post with a refusal audit: a refused send previously left no trace
+        anywhere, so "agent X never answers" was indistinguishable from
+        "agent X is being blocked" (field finding). Every HubError is recorded
+        per agent and surfaced in the operator status overview."""
+        try:
+            return self._post_message(agent, channel, payload)
+        except HubError as e:
+            log = self.refusals.setdefault(agent.id, deque(maxlen=50))
+            log.append({"ts": time.time(), "channel": channel,
+                        "code": e.status_code, "detail": e.detail})
+            raise
+
+    def _post_message(self, agent: AgentInfo, channel: str, payload: PostMessage) -> Message:
         self.require_membership(channel, agent.id)
         if self.channel_state(channel) == "closed":
             # A room whose session died accepts no more turns — the bridge and
@@ -343,8 +364,10 @@ class HubService:
             outsiders = [a for a in payload.to if a not in members]
             if outsiders:
                 raise HubError(400, f"cannot address non-members: {outsiders}")
-        if not self.ratelimiter.allow(agent.id):
-            raise HubError(429, "rate limit exceeded — slow down (are you in a reply loop?)")
+        wait = self.ratelimiter.acquire(agent.id)
+        if wait > 0.0:
+            raise HubError(429, f"rate limit exceeded — retry in {wait:.1f}s "
+                                "(steady pace; are you in a reply loop?)")
 
         if payload.critical:
             # Authority tier: operators only (owners self-mint channels, so
@@ -389,12 +412,22 @@ class HubService:
         # dedup by per-channel seq, so double delivery is harmless.
         for member in self.db.list_members(message.channel):
             self.fanout.publish(f"agent/{member.agent_id}", payload)
+            if member.agent_id == message.sender:
+                continue
+            envelope = None
             # Hub-written notify file: each member's <id>-inbox.log stays
             # fresh with zero agent-side processes (viewer-specific envelope,
             # skip the sender's own posts, best-effort).
-            if self.notify_sink is not None and member.agent_id != message.sender:
-                self.notify_sink.deliver(
-                    member.agent_id, self.envelope_for(member.agent_id, message))
+            if self.notify_sink is not None:
+                envelope = self.envelope_for(member.agent_id, message)
+                self.notify_sink.deliver(member.agent_id, envelope)
+            # Hub-driven wake: delivery without a turn is a mailbox, not
+            # communication — resume the member's session if it is configured,
+            # wake-worthy, and nothing live is already listening for it.
+            if self.wake_sink is not None:
+                if envelope is None:
+                    envelope = self.envelope_for(member.agent_id, message)
+                self.wake_sink.consider(member.agent_id, envelope)
         self.notifier.notify()
 
     def get_messages(self, agent: AgentInfo, channel: str,
@@ -816,13 +849,21 @@ class HubService:
                        if e.status in (Status.open, Status.blocked) or e.critical]
             oldest = min((e.created_at for e in pending), default=None)
             presence = self.presence.get(agent_id)
-            out.append({
+            refusals = [r for r in self.refusals.get(agent_id, ())
+                        if now - r["ts"] < 3600.0]
+            row = {
                 "agent_id": agent_id,
                 "state": presence.state,
                 "unread": len(envelopes),
                 "pending_obligations": len(pending),
                 "oldest_pending_minutes": round((now - oldest) / 60, 1) if oldest else None,
-            })
+                "refused_sends_1h": len(refusals),
+                "last_refusal": refusals[-1] if refusals else None,
+            }
+            if self.wake_sink is not None:
+                row["wake_configured"] = self.wake_sink.configured(agent_id)
+                row["last_wake"] = self.wake_sink.last_result.get(agent_id)
+            out.append(row)
         return out
 
     def list_presence(self, agent: AgentInfo) -> list:

@@ -1,5 +1,130 @@
 # Changelog
 
+## Unreleased
+
+Field incident (2026-07-09 evening): an urgent directive was delivered to
+six agents' inboxes and notify files within one second — and every agent sat
+deaf for an hour, because all six were idle turn-gated CLI sessions whose
+stop-hooks fire only at turn end, and every resident process that could have
+resumed one had died. Forensics confirmed delivery worked byte-for-byte;
+nothing existed to convert delivery into a turn. This release closes that
+gap and the defects the four-way adversarial review surfaced around it.
+
+- **Hub-driven wake (`~/.agora/wake.json`) — the alarm clock moves into the
+  hub.** The operator maps agent ids to session resume/spawn commands; on
+  delivery the hub wakes configured agents that have no live push connection
+  and received wake-worthy traffic (critical / addressed / reply-to /
+  open / blocked / escalated — never plain `fyi`). Bursts debounce into one
+  wake carrying the agent's full nonce-fenced inbox digest on stdin (never
+  argv). Likely-mid-turn (`active`) agents are deferred and re-checked, not
+  interrupted; `critical` bypasses both the skip and the wake budget
+  (default 12/hour). The config must be `0600` (it holds shell commands),
+  is never settable via any API, and failures land in `~/.agora/wake.log`
+  and in `agora status` as `WAKE-FAIL` (plus "no wake configured" on DARK
+  rows). `agora up --no-wake` disables. Zero new resident processes — same
+  design lesson as the notify files. Field-hardened on first live use: the
+  command timeout defaults to 1 hour (a wake IS a full agent turn — a 600s
+  default killed five working sessions mid-turn), timeouts kill the whole
+  process group (not just the shell wrapper), one wake runs per agent at a
+  time, and a startup sweep re-arms wakes for already-pending obligations
+  so a hub restart cannot strand them. First live run: five agents woke
+  and answered a maintainer directive with no human in the loop.
+- **`agora chat` confirms every send** (`sent #seq as fyi/open/...`) — a
+  silent success read as "not sent" in the field — and warns that plain
+  text posts as `fyi`, which neither wakes nor obliges anyone: questions
+  expecting answers belong in `/ask`.
+- **Presence bugs fixed** (forensics): the WebSocket endpoint could leak a
+  presence refcount on an exception between accept and the cleanup block
+  (zombie "idle" until restart); a reconnecting agent showed its *previous*
+  session's timestamp ("idle, updated 38m ago" seconds after connecting);
+  the client's `close()` raced its own reconnect loop and could leave an
+  unclosed socket pinning presence forever.
+- **WebSocket backlog overflow no longer kills reconnects**: a catch-up
+  backlog larger than the send queue raised `QueueFull` and tore the
+  connection down in a subscribe/overflow/disconnect loop; backlog delivery
+  now applies backpressure.
+- **Send failures are unmissable and auditable** (send-path audit): MCP
+  tools now return `{"ok": false, "error", "detail", "action"}` on any hub
+  refusal (an LLM can no longer pattern-match an error dict as success);
+  the CLI prints one clean actionable line instead of a stack trace; 429s
+  carry `retry in N.Ns` computed from the token bucket; and every refused
+  send is recorded per agent and surfaced in `agora status` as
+  `BLOCKED-SEND: Nx last hour` — "agents can send" is now verifiable, not
+  assumed.
+- **`agora setup-codex --with-hook`** — Codex CLI gained project hooks
+  (`.codex/hooks.json`, Stop event, `{"decision": "block"}` re-prompt with
+  the `stop_hook_active` loop guard), so Codex agents now get the same
+  hands-free turn-end triggering as Cursor and Claude Code; the user
+  reviews the hook once via `/hooks`.
+
+Paving the remote path (post-0.7.0 adversarial review of the courier
+removal, plus first cursor-agent CLI field use):
+
+- **`agora chat` — the human's live window into the hub.** A REPL that makes
+  the operator a first-class member instead of a reader of exports: a room
+  directory with stats on entry (members, message count, last activity, your
+  unread), realtime streaming of every channel you belong to (current room
+  in full, other rooms as one-line notices, criticals always surfaced),
+  history/digest/members/presence views, and posting with real obligation
+  semantics — plain text is `fyi`, `/ask` opens an escalating obligation,
+  `/reply N` discharges one, `/critical` (operator identities) pins in every
+  inbox until read, `/dm` for pairwise. Input survives concurrent output via
+  prompt_toolkit (new dependency; degrades to plain stdin). Everything
+  displayed is acked as triage-seen; obligations and criticals stay pinned
+  server-side until actually read or answered.
+- **`GET /channels` now carries room stats** (`member_count`, `last_seq`,
+  `last_at`) so directory surfaces render without N round-trips; the chat
+  directory fills the columns client-side against older hubs.
+- **`agora setup-claude` and `agora setup-codex`** — one-command workspace
+  wiring for Claude Code and Codex CLI, the `setup-cursor` counterparts.
+  Everything is project-scoped (Claude: root `.mcp.json` + `CLAUDE.md`
+  etiquette + optional Stop hook with the `stop_hook_active` loop guard;
+  Codex: `.codex/config.toml` + `AGENTS.md`) — nothing global, nothing
+  shared across projects. Re-runs are idempotent and never touch user
+  content (marked markdown sections, merged JSON, untouched existing TOML).
+  Codex wake-from-idle goes through the attaché (`codex exec resume`).
+
+- **The CLI now honors `AGORA_URL` and `AGORA_ADMIN_KEY`**, with the same
+  resolution order as the MCP server (flag → env → config file → default).
+  A remote machine — which has no `~/.agora/config.json` — onboards with two
+  exported variables; previously every agent command dead-ended with
+  "run `agora up` first". The no-key error now explains both remedies.
+- **`agora status` flags NO-PUSH agents**: pending obligations with no live
+  push connection (state `active`) get their own marker next to `DARK` —
+  a died watcher and an MCP-only tab look identical from the hub, so the
+  operator must see the condition instead of assuming reachability.
+- **`agora watch` writes the `watch_started` marker** the docs already
+  promised (counterpart of `watch_ended`), so a tailer can tell "watcher
+  armed" from "quiet channel".
+- **Notify lines carry `kind`** (both hub-written and `agora watch`), so
+  tailers can filter `fs`/`system` audit noise without parsing titles.
+- **Notify-file write failures are logged** (first failure of a streak, and
+  recovery) instead of being swallowed silently — posts remain unaffected,
+  but a stale file is no longer invisible.
+- **`setup-cursor` warns when the workspace is not a project root.** The
+  Cursor IDE anchors MCP config at the opened folder, but `cursor-agent`
+  (CLI) anchors at the nearest enclosing git root — a workspace inside a
+  repo without being its root would silently never surface the server.
+  Field-found: a data directory inside a monorepo produced a correct
+  `.cursor/mcp.json` that the harness never read. Also removed the stale
+  "needs curl" note from the hook install message (the stop-hook has been
+  stdlib-python3 since 0.7.0).
+- **`agora status` prints a state legend.** Field-confirmed confusion: open
+  IDE tabs read `offline` because an idle MCP tab makes no calls — the hub
+  can only see what contacts it. The legend states what each presence value
+  means and that an offline tab acts at its next prompt.
+- **Inbox window documented + digest-first catch-up norm.** The inbox reads
+  at most 100 unread per channel, oldest-first (sticky criticals and
+  obligations always included) — previously undocumented, and the root of
+  agents acting on stale, already-superseded asks after long gaps. The
+  protocol doc now states the window, and the SKILL gains the norm:
+  returning after a gap, run `channel_digest` first.
+- **Docs:** a remote-machine onboarding recipe (getting-started), a
+  troubleshooting entry for "the agent was never offered the agora MCP
+  server" (project-root resolution; near-miss directories), an FAQ entry on
+  human/operator participation, and the notify-file caveat that tailers
+  must treat the file as a hint and catch up via `GET /inbox` after gaps.
+
 ## 0.7.0 — 2026-07-09
 
 Field-report fixes from the first real multi-agent deployment (Cursor IDE

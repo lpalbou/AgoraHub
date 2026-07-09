@@ -77,18 +77,24 @@ def seed_keys(url: str, mapping: dict[str, str]) -> None:
 def resolve_key(url: str, agent_id: str, *, admin_key: str | None = None,
                 about: str = "") -> str:
     """Return the agent's key: cached if known, else self-register with the
-    admin key (from config if not passed) and cache it. Raises if neither a
-    cached key nor an admin key is available."""
+    admin key (explicit, then $AGORA_ADMIN_KEY, then config) and cache it.
+    The env fallback matches the MCP server, so a remote machine — which has
+    no ~/.agora/config.json — onboards with two exported variables
+    (AGORA_URL + AGORA_ADMIN_KEY) instead of failing with 'run agora up'.
+    Raises if neither a cached key nor an admin key is available."""
     import httpx  # local import: config stays dependency-light
 
     cached = get_cached_key(url, agent_id)
     if cached:
         return cached
-    admin_key = admin_key or load_config().get("admin_key")
+    admin_key = (admin_key or os.environ.get("AGORA_ADMIN_KEY")
+                 or load_config().get("admin_key"))
     if not admin_key:
         raise SystemExit(
             f"no cached key for '{agent_id}' and no admin key to self-register. "
-            "Run `agora up` first (writes ~/.agora/config.json).")
+            "On the hub machine run `agora up` first (writes ~/.agora/config.json); "
+            "on a remote machine export AGORA_ADMIN_KEY (or have the operator "
+            "register you and seed ~/.agora/keys.json).")
     r = httpx.post(f"{url.rstrip('/')}/agents",
                    headers={"Authorization": f"Bearer {admin_key}"},
                    json={"id": agent_id, "about": about}, timeout=10.0)

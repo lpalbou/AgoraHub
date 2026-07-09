@@ -60,15 +60,27 @@ def cmd_up(args: argparse.Namespace) -> None:
     # are ever needed on the hub's machine. --notify-dir '' disables.
     notify_dir = args.notify_dir if args.notify_dir is not None else str(home)
 
+    # Hub-driven wakes: operator-authored ~/.agora/wake.json maps agent ids to
+    # session-resume/spawn commands; the hub runs them when wake-worthy traffic
+    # lands for an agent with no live push connection. The alarm clock lives in
+    # the one process that must exist anyway — nothing else to keep alive.
+    from .hub.wake_sink import default_wake_path, load_wake_config
+    wake_config = None if args.no_wake else load_wake_config(default_wake_path())
+
     print(f"agora hub → {url}")
     print(f"  db:     {db_path}")
     print(f"  config: {_config.home() / 'config.json'} (admin key saved; agents self-register)")
     if notify_dir:
         print(f"  notify: {notify_dir}/<agent>-inbox.log (hub-written; nothing to run)")
-    print("  set up a Cursor agent:  agora setup-cursor <agent-id>   (run in its workspace)")
+    if wake_config:
+        print(f"  wake:   enabled for {len(wake_config['agents'])} agent(s) "
+              f"({_config.home() / 'wake.json'}; failures -> wake.log)")
+    print("  set up a Cursor agent:  agora setup-cursor <agent-id> --with-hook  (run in its workspace)")
     app = create_app(db_path=db_path, admin_key=admin_key,
                      rate_per_minute=args.rate_per_minute,
-                     notify_dir=notify_dir or None)
+                     notify_dir=notify_dir or None,
+                     wake_config=wake_config,
+                     wake_log=str(_config.home() / "wake.log"))
     # Pin WS keepalive explicitly: connection-derived presence relies on dead
     # sockets being detected within a bounded window (audit M4). Defaults can
     # differ per uvicorn/ws backend; make the bound deliberate.
@@ -139,6 +151,20 @@ def cmd_setup_cursor(args: argparse.Namespace) -> None:
     if args.with_hook:
         _install_hook(cursor, url, args.agent)
 
+    # Harnesses anchor per-project config at the project ROOT. The Cursor IDE
+    # uses the folder you open; cursor-agent (CLI) uses the nearest enclosing
+    # git root. A workspace that is inside a repo without being its root will
+    # silently never surface this MCP config to cursor-agent — warn now
+    # instead of letting the user discover it as a missing server.
+    if not (workspace / ".git").exists():
+        git_root = next((p for p in workspace.parents if (p / ".git").exists()), None)
+        if git_root is not None:
+            print(f"note: '{workspace}' is not a git root; cursor-agent (CLI) will"
+                  f" anchor at '{git_root}' and ignore this folder's .cursor/."
+                  " Open the folder directly in the Cursor IDE, run cursor-agent"
+                  " from a folder that is its own repo, or use the terminal CLI"
+                  f" (`agora inbox --as {args.agent}`) which needs no MCP config.")
+
 
 def _install_hook(cursor: Path, url: str, agent_id: str) -> None:
     """Optional stop-hook: re-prompt the tab ONLY when messages are already
@@ -206,7 +232,62 @@ def _install_hook(cursor: Path, url: str, agent_id: str) -> None:
                       'else:\n'
                       '    print("{}")\n')
     script.chmod(0o755)
-    print(f"  wrote {cursor / 'hooks.json'} + {script} (stop-hook triggering; needs curl)")
+    print(f"  wrote {cursor / 'hooks.json'} + {script} (stop-hook triggering)")
+
+
+def cmd_setup_claude(args: argparse.Namespace) -> None:
+    """Wire a workspace as a Claude Code agent: project-scoped `.mcp.json`
+    (approved once via /mcp), etiquette in CLAUDE.md, and optionally a Stop
+    hook that re-prompts the session only when NEW messages are waiting."""
+    from .setup_harness import setup_claude
+
+    workspace = Path(args.workspace).expanduser().resolve()
+    if not workspace.is_dir():
+        sys.exit(f"workspace not found: {workspace}")
+    url = args.url or _config.load_config().get("url") or _default_url(DEFAULT_PORT)
+    written = setup_claude(workspace, args.agent, url, args.about or "",
+                           _resolve_mcp_command(), args.with_hook)
+    print(f"configured '{workspace.name}' as agora agent '{args.agent}' (Claude Code):")
+    for path in written:
+        print(f"  wrote {path}")
+    print("Run `claude` in this folder and approve the 'agora' MCP server (/mcp).")
+    _warn_if_not_project_root(workspace, args.agent)
+
+
+def cmd_setup_codex(args: argparse.Namespace) -> None:
+    """Wire a workspace as a Codex CLI agent: project-scoped
+    `.codex/config.toml` (trusted on first run) and etiquette in AGENTS.md."""
+    from .setup_harness import setup_codex
+
+    workspace = Path(args.workspace).expanduser().resolve()
+    if not workspace.is_dir():
+        sys.exit(f"workspace not found: {workspace}")
+    url = args.url or _config.load_config().get("url") or _default_url(DEFAULT_PORT)
+    written = setup_codex(workspace, args.agent, url, args.about or "",
+                          _resolve_mcp_command(), with_hook=args.with_hook)
+    print(f"configured '{workspace.name}' as agora agent '{args.agent}' (Codex CLI):")
+    for path in written:
+        print(f"  wrote {path}")
+    print("Run `codex` in this folder and trust the project when prompted.")
+    if args.with_hook:
+        print("Then review/approve the Stop hook once via /hooks (re-approve "
+              "if the hook file ever changes).")
+    print("Wake-from-idle without a running turn: hub wake (~/.agora/wake.json) "
+          "or an attaché (`codex exec resume --last \"$(cat)\"`).")
+    _warn_if_not_project_root(workspace, args.agent)
+
+
+def _warn_if_not_project_root(workspace: Path, agent_id: str) -> None:
+    """Harnesses anchor per-project config at the project root (git root for
+    CLI harnesses) — warn when this folder isn't one (same trap as Cursor)."""
+    if (workspace / ".git").exists():
+        return
+    git_root = next((p for p in workspace.parents if (p / ".git").exists()), None)
+    if git_root is not None:
+        print(f"note: '{workspace}' is not a git root; CLI harnesses may anchor"
+              f" at '{git_root}' and ignore this folder's config. Prefer a"
+              " folder that is its own repo, or use the terminal CLI"
+              f" (`agora inbox --as {agent_id}`) which needs no MCP config.")
 
 
 # -- agent-facing verbs (identity via --as; work from ANY folder, no MCP) -----
@@ -217,7 +298,11 @@ def _install_hook(cursor: Path, url: str, agent_id: str) -> None:
 # no restart. Output is nonce-fenced (injection-safe) like the MCP surface.
 
 def _hub_url(args: argparse.Namespace) -> str:
-    return (getattr(args, "url", None) or _config.load_config().get("url")
+    # Resolution order matches the MCP server: explicit flag, then $AGORA_URL,
+    # then the hub-machine config file, then the local default. The env step
+    # is what makes the CLI usable from a remote machine (no config.json).
+    return (getattr(args, "url", None) or os.environ.get("AGORA_URL")
+            or _config.load_config().get("url")
             or _default_url(DEFAULT_PORT)).rstrip("/")
 
 
@@ -519,6 +604,17 @@ def cmd_mirror(args):
     asyncio.run(_main())
 
 
+def cmd_chat(args):
+    """The human's live window: room directory with stats, realtime stream of
+    every channel you belong to, and posting with real obligation semantics
+    (/ask opens an obligation; /critical is the operator tier)."""
+    from .chat import run_chat
+
+    url = _hub_url(args)
+    key = _config.resolve_key(url, args.as_agent)
+    run_chat(url, key, args.as_agent, channel=args.channel)
+
+
 def cmd_watch(args):
     """Non-blocking trigger: stream new envelopes to stdout (+ optional
     --notify-file append, +optional --exec per message). Run it in the
@@ -556,7 +652,8 @@ def cmd_watch(args):
         # (field-requested, observer retro).
         preview = (e.body or "")[:200]
         line = json.dumps({"channel": e.channel, "seq": e.seq, "from": e.sender,
-                           "id": e.id, "status": e.status.value,
+                           "id": e.id, "kind": e.kind.value,
+                           "status": e.status.value,
                            "title": e.title, "flags": flags,
                            **({"preview": preview} if preview else {})})
         print(line, flush=True)
@@ -578,6 +675,11 @@ def cmd_watch(args):
         print(f"watch {args.as_agent}: {len(channels)} channel(s); "
               f"notify_file={notify_file or '-'} exec={'yes' if args.exec_cmd else 'no'}",
               flush=True)
+        # Liveness marker in the notify file itself (the counterpart of
+        # watch_ended): a tailing harness can tell "watcher armed" from
+        # "quiet channel" without checking the pidfile.
+        _note({"event": "watch_started", "as": args.as_agent,
+               "channels": len(channels)})
         # connect() now runs the cold-start catch-up sweep itself and delivers
         # missed messages into the inbox, so the loop below emits them on its
         # first pass — no separate sweep here (that would double-emit).
@@ -625,13 +727,41 @@ def cmd_status(args: argparse.Namespace) -> None:
     if not isinstance(rows, list):
         return
     print(f"\n{'agent':<16} {'state':<8} {'unread':>6} {'pending':>7}  oldest-pending")
+    # The hub can only see what CONTACTS it: an open-but-idle IDE tab makes no
+    # calls, so it honestly reads offline even though it will respond at its
+    # next prompt. Spell that out or every operator misreads the table.
+    legend = ("  states: idle/working = live push connection | active = made an "
+              "authenticated call <10m ago |\n  offline = no contact (an open but "
+              "idle IDE tab reads offline; it acts at its next prompt/turn)")
     for row in rows:
         oldest = row["oldest_pending_minutes"]
         oldest_s = f"{oldest:.0f}m" if oldest is not None else "-"
-        dark = " <- DARK: offline with work pending" \
-            if row["state"] == "offline" and row["pending_obligations"] else ""
+        # DARK = offline with work pending (the dead-agent alarm). NO-PUSH is
+        # the softer cousin the audit flagged: pending work and no live push
+        # connection — normal for an MCP-only tab (it drains at its next
+        # turn), but also exactly what a died watcher looks like, so the
+        # operator must be able to SEE it rather than assume reachability.
+        # Wake and send-refusal outcomes are first-class signals too: a broken
+        # wake command or a rate-limited sender must be visible, not inferred.
+        flag = ""
+        last_wake = row.get("last_wake")
+        if last_wake and not last_wake.get("ok"):
+            flag = f" <- WAKE-FAIL: {last_wake.get('note') or last_wake.get('exit_code')}"
+        elif row["pending_obligations"]:
+            if row["state"] == "offline":
+                if row.get("wake_configured") is False:
+                    flag = " <- DARK: work pending, no wake configured (wake.json)"
+                else:
+                    flag = " <- DARK: offline with work pending"
+            elif row["state"] == "active":
+                flag = " <- NO-PUSH: pending work, no live connection"
+        if row.get("refused_sends_1h"):
+            last = row.get("last_refusal") or {}
+            flag += (f" <- BLOCKED-SEND: {row['refused_sends_1h']}x last hour "
+                     f"(last: {last.get('code')} {str(last.get('detail'))[:60]})")
         print(f"{row['agent_id']:<16} {row['state']:<8} {row['unread']:>6} "
-              f"{row['pending_obligations']:>7}  {oldest_s}{dark}")
+              f"{row['pending_obligations']:>7}  {oldest_s}{flag}")
+    print(f"\n{legend}")
 
 
 def main() -> None:
@@ -646,6 +776,8 @@ def main() -> None:
     up.add_argument("--notify-dir", default=None,
                     help="dir for hub-written <agent>-inbox.log files "
                          "(default: ~/.agora; '' disables)")
+    up.add_argument("--no-wake", action="store_true",
+                    help="ignore ~/.agora/wake.json (hub-driven session wakes)")
     up.set_defaults(func=cmd_up)
 
     sc = sub.add_parser("setup-cursor", help="wire a workspace as an agora agent")
@@ -656,6 +788,25 @@ def main() -> None:
     sc.add_argument("--with-hook", action="store_true",
                     help="also install the stop-hook for hands-free triggering")
     sc.set_defaults(func=cmd_setup_cursor)
+
+    scl = sub.add_parser("setup-claude", help="wire a workspace as a Claude Code agent")
+    scl.add_argument("agent", help="agent id, e.g. castor")
+    scl.add_argument("--workspace", default=".", help="workspace folder (default: cwd)")
+    scl.add_argument("--about", default="", help="self-description for this agent")
+    scl.add_argument("--url", default=None)
+    scl.add_argument("--with-hook", action="store_true",
+                     help="also install the Stop hook for hands-free triggering")
+    scl.set_defaults(func=cmd_setup_claude)
+
+    scx = sub.add_parser("setup-codex", help="wire a workspace as a Codex CLI agent")
+    scx.add_argument("agent", help="agent id, e.g. janus")
+    scx.add_argument("--workspace", default=".", help="workspace folder (default: cwd)")
+    scx.add_argument("--about", default="", help="self-description for this agent")
+    scx.add_argument("--url", default=None)
+    scx.add_argument("--with-hook", action="store_true",
+                     help="also install the Stop hook (.codex/hooks.json) for "
+                          "hands-free triggering at turn ends")
+    scx.set_defaults(func=cmd_setup_codex)
 
     st = sub.add_parser("status", help="check hub + config")
     st.set_defaults(func=cmd_status)
@@ -725,6 +876,10 @@ def main() -> None:
     wh = _agent_parser("who", "presence of agents you share channels with")
     wh.set_defaults(func=cmd_who)
 
+    ct = _agent_parser("chat", "live chat/observation REPL (the human's window)")
+    ct.add_argument("--channel", default=None, help="enter this room immediately")
+    ct.set_defaults(func=cmd_chat)
+
     dg = _agent_parser("digest", "fold a channel into open/decided/decisions")
     dg.add_argument("--channel", required=True); dg.set_defaults(func=cmd_digest)
 
@@ -761,6 +916,8 @@ def main() -> None:
     args = p.parse_args()
     try:
         args.func(args)
+    except SystemExit:
+        raise
     except BrokenPipeError:
         # A downstream consumer (head, jq -e, a truncating harness) closed the
         # pipe early. Without this handler Python exits 120 (failed stdout
@@ -771,6 +928,17 @@ def main() -> None:
         devnull = os.open(os.devnull, os.O_WRONLY)
         os.dup2(devnull, sys.stdout.fileno())
         sys.exit(1 if args.cmd in ("up", "watch", "mirror") else 0)
+    except Exception as e:  # noqa: BLE001 — one clean line, not a stack trace
+        # Hub refusals (AgoraError) and connection problems reach humans and
+        # scripts as a single actionable line; exit 1 keeps it scriptable.
+        from .client import AgoraError
+        if isinstance(e, AgoraError):
+            sys.exit(f"agora {args.cmd} failed: {e}")
+        import httpx
+        if isinstance(e, httpx.HTTPError):
+            sys.exit(f"agora {args.cmd} failed: cannot reach the hub ({e}); "
+                     "is it running? (agora status)")
+        raise
 
 
 if __name__ == "__main__":

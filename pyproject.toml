@@ -28,6 +28,9 @@ dependencies = [
     "websockets>=13.0",
     "httpx>=0.27",
     "pydantic>=2.7",
+    # `agora chat`: keeps the input line intact under live message output.
+    # chat.py degrades to plain stdin if it is ever missing.
+    "prompt_toolkit>=3.0",
 ]
 
 [project.optional-dependencies]

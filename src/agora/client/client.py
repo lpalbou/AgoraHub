@@ -336,7 +336,15 @@ class AgoraClient:
     async def close(self) -> None:
         self._closing = True
         if self._listener:
+            # Await the cancellation: the reconnect loop may be inside
+            # _open_ws() right now — cancelling without awaiting could let it
+            # finish creating a socket nobody ever closes (a zombie connection
+            # the hub counts as presence until process death; audit bug).
             self._listener.cancel()
+            try:
+                await self._listener
+            except (asyncio.CancelledError, Exception):
+                pass
         if self._ws:
             await self._ws.close()
         await self._http.aclose()

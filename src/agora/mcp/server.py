@@ -88,7 +88,17 @@ def build_server():  # pragma: no cover - thin wiring, exercised manually
     def _call(method: str, path: str, **kwargs) -> Any:
         response = http.request(method, path, **kwargs)
         if response.status_code >= 400:
-            return {"error": response.status_code, "detail": response.text}
+            try:
+                detail = response.json().get("detail", response.text)
+            except ValueError:
+                detail = response.text
+            # Unmissable failure shape: an LLM pattern-matching a plain dict
+            # can mistake {"error": ...} for success and silently drop its
+            # reply (send-path audit). "ok": false + an explicit action line
+            # makes the failed state the loudest thing in the result.
+            return {"ok": False, "error": response.status_code, "detail": detail,
+                    "action": "REQUEST FAILED — nothing was posted or changed; "
+                              "fix the problem above and retry"}
         return response.json()
 
     @mcp.tool()

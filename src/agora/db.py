@@ -295,12 +295,21 @@ class Database:
         return [r["channel"] for r in rows]
 
     def list_channels(self, agent_id: str) -> list[dict[str, Any]]:
-        """Channels visible to the agent: memberships plus public channels."""
+        """Channels visible to the agent: memberships plus public channels.
+        Carries lightweight stats (member count, head seq, last activity) so a
+        human-facing surface can show a room directory without N round-trips."""
         with self._lock:
             rows = self._conn.execute(
                 """
                 SELECT c.name, c.private, c.created_by,
-                       (m.agent_id IS NOT NULL) AS member
+                       (m.agent_id IS NOT NULL) AS member,
+                       (SELECT COUNT(*) FROM members mm
+                        WHERE mm.channel = c.name) AS member_count,
+                       COALESCE((SELECT MAX(seq) FROM messages ms
+                                 WHERE ms.channel = c.name), 0) AS last_seq,
+                       (SELECT created_at FROM messages ms
+                        WHERE ms.channel = c.name
+                        ORDER BY seq DESC LIMIT 1) AS last_at
                 FROM channels c
                 LEFT JOIN members m ON m.channel = c.name AND m.agent_id = ?
                 WHERE c.private = 0 OR m.agent_id IS NOT NULL
@@ -310,7 +319,9 @@ class Database:
             ).fetchall()
         return [
             {"name": r["name"], "private": bool(r["private"]),
-             "created_by": r["created_by"], "member": bool(r["member"])}
+             "created_by": r["created_by"], "member": bool(r["member"]),
+             "member_count": r["member_count"], "last_seq": r["last_seq"],
+             "last_at": r["last_at"]}
             for r in rows
         ]
 

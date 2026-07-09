@@ -56,14 +56,12 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
     service.bind_loop(asyncio.get_running_loop())  # fan-out wakes us thread-safely
     queue: asyncio.Queue = asyncio.Queue(maxsize=_QUEUE_SIZE)
-    # Connection-derived presence: holding this socket IS reachability.
+    # Connection-derived presence: holding this socket IS reachability. The
+    # connect is balanced by the disconnect in `finally` below — everything
+    # between them lives inside the try, so no exception path can leak the
+    # refcount (a leaked count = zombie "idle" until hub restart; audit bug).
     service.presence.connect(agent.id)
-    # Identity-keyed fan-out: every message in a channel this agent BELONGS to
-    # reaches this connection, even for channels born after connect (a fresh
-    # DM was previously undeliverable until the watcher restarted). Channel
-    # subscriptions below still matter for backlog catch-up; the client dedups
-    # any double delivery by per-channel seq.
-    service.fanout.subscribe(f"agent/{agent.id}", queue)
+    pump = None
 
     async def pump_outgoing() -> None:
         # Per-connection high-water: the same queue is subscribed under both
@@ -93,8 +91,14 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 payload = {"type": "envelope", "envelope": envelope.model_dump()}
             await websocket.send_text(json.dumps(payload))
 
-    pump = asyncio.create_task(pump_outgoing())
     try:
+        # Identity-keyed fan-out: every message in a channel this agent BELONGS
+        # to reaches this connection, even for channels born after connect (a
+        # fresh DM was previously undeliverable until the watcher restarted).
+        # Channel subscriptions still matter for backlog catch-up; the client
+        # dedups any double delivery by per-channel seq.
+        service.fanout.subscribe(f"agent/{agent.id}", queue)
+        pump = asyncio.create_task(pump_outgoing())
         while True:
             raw = await websocket.receive_text()
             try:
@@ -108,7 +112,8 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     finally:
-        pump.cancel()
+        if pump is not None:
+            pump.cancel()
         service.unsubscribe(queue)
         service.presence.disconnect(agent.id)
 
@@ -122,7 +127,12 @@ async def _handle_frame(service: HubService, agent, frame: dict, queue: asyncio.
             )
             queue.put_nowait({"type": "subscribed", "channels": frame.get("channels", [])})
             for message in backlog:
-                queue.put_nowait({"type": "message", "message": message.model_dump()})
+                # `await put`, not put_nowait: a reconnect backlog larger than
+                # the queue would raise QueueFull, escape the except below,
+                # and tear the connection down — the client would then loop
+                # subscribe -> overflow -> disconnect forever. Awaiting gives
+                # backpressure: the pump drains while we feed.
+                await queue.put({"type": "message", "message": message.model_dump()})
                 # (converted to a viewer-specific envelope by the outgoing pump)
         elif kind == "post":
             payload = PostMessage(**{

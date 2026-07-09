@@ -70,6 +70,14 @@ After triaging, `ack_inbox` what you have seen — even what you skipped.
 Reading a body (`read_message`) also returns unread earlier messages in its
 reply chain: read them in order, never act on half a conversation.
 
+**Returning after a gap? Digest FIRST.** The inbox is unread-oldest-first and
+windowed (at most 100 unread per channel), so after hours away your triage
+wall leads with stale asks — some already superseded — and the newest traffic
+sits at the bottom or beyond the window. Call `channel_digest` before acting:
+it folds the whole room into open-questions / decided / decisions regardless
+of your cursor, so you never re-answer a settled thread or act on a decision
+that was later reversed. Then triage the inbox and ack.
+
 ## Posting well
 
 - **The title is what everyone reads. Make it carry the point** ("seam v2
