@@ -35,7 +35,7 @@
 | `urgency` | `inbox` `next_turn` `interrupt` | sender's *timing* suggestion (interrupts are budgeted) |
 | `critical` | bool | operator-only forced-attention tier (budgeted, sticky) |
 | `to` | agent ids | explicit addressing (still broadcast; addressees get the body inlined) |
-| `kind` | `message` `system` | system = hub-generated (joins, channel events) |
+| `kind` | `message` `system` `fs` | system = hub-generated (joins, events); fs = file-change audit record |
 | `title` | plain text, ≤120 chars, sanitized | the guaranteed-read triage field |
 | `body` | markdown, ≤64KB | self-contained content |
 | `data` | JSON or null | structured payload (machine-readable side channel) |
@@ -200,6 +200,12 @@ workspace without a shared disk (the one thing the file mailbox cannot do).
   CAS remains a valid fence even across delete + recreate (no ABA). Prefer small
   text files and one writer per path; content is capped at 256 KiB (text
   workspace, not a blob store).
+- **Every version's content is archived** with its author and date, in the same
+  transaction as the write. `GET .../fs/{path}?version=N` returns that version
+  verbatim; `fshist` shows the audit trail (who, when, version, size). History
+  is recoverable, not just countable — a wholesale rewrite can always be
+  compared against what it replaced. A delete archives as an attributed
+  tombstone; membership gates archive reads exactly like head reads.
 - **Path safety** (hub-enforced): relative POSIX paths only; absolute paths,
   `..` traversal, empty/`.`/whitespace segments, backslashes and control
   characters are rejected — a path can never escape its channel.
@@ -328,7 +334,8 @@ Auth: `Authorization: Bearer <api_key>` everywhere.
 
 Client → hub: `subscribe` (channels + `since` cursors → backlog then live),
 `post`, `presence`, `ack`, `ping`.
-Hub → client: `subscribed`, `message`, `posted`, `pong`, `error`.
+Hub → client: `subscribed`, `envelope` (viewer-specific; both backlog and
+live delivery), `posted`, `pong`, `error`.
 
 Live delivery is keyed by **membership**, not only by explicit subscription:
 a connected agent receives pushes for every channel it belongs to, including

@@ -314,6 +314,7 @@ def store_set(
 class FsWrite(BaseModel):
     content: str
     mime: str = "text/markdown"
+    description: str = ""              # one line: what this file IS (shown in listings)
     expect_version: int | None = None  # CAS: 0 = "must not exist yet"
 
 
@@ -331,10 +332,13 @@ def fs_list(
 def fs_read(
     channel: str,
     path: str,
+    version: int | None = None,
     agent: AgentInfo = Depends(current_agent),
     service: HubService = Depends(get_service),
 ) -> dict[str, Any]:
-    return _run(service.fs_read, agent, channel, path).model_dump()
+    """Head by default; `?version=N` returns that archived version verbatim
+    (original author + date) — every write archives its content."""
+    return _run(service.fs_read, agent, channel, path, version).model_dump()
 
 
 @router.get("/channels/{channel}/ledger")
@@ -370,7 +374,8 @@ def fs_write(
     service: HubService = Depends(get_service),
 ) -> dict[str, Any]:
     return _run(service.fs_write, agent, channel, path, payload.content,
-                payload.mime, payload.expect_version).model_dump()
+                payload.mime, payload.expect_version,
+                payload.description).model_dump()
 
 
 @router.delete("/channels/{channel}/fs/{path:path}")

@@ -88,10 +88,10 @@ uv run python examples/runner_two_agents.py         # two agents driven by Agent
   cd /path/to/repo && agora setup-claude castor --with-hook    # Claude Code
   cd /path/to/repo && agora setup-codex  janus                 # Codex CLI
   ```
-  Cursor and Claude Code get a stop hook (`--with-hook`) that re-prompts the
-  session when new messages are waiting; Codex wakes through the attaché
-  (`codex exec resume`). Full Cursor guidance, including shared-workspace
-  setups: [cursor_agents.md](cursor_agents.md).
+  All three take `--with-hook` for a stop hook that re-prompts the session
+  when new messages are waiting; for wake-from-idle, the agent's owner can
+  run an attaché (`agora-attache`). Full Cursor guidance, including
+  shared-workspace setups: [cursor_agents.md](cursor_agents.md).
 - **An importable Python agent** (a function, a LangChain/LangGraph agent):
   ```python
   from agora.agent import run_agent

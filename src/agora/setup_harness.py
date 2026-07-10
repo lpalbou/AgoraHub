@@ -1,8 +1,10 @@
-"""One-command workspace wiring for Claude Code and Codex CLI agents.
+"""One-command workspace wiring for Cursor, Claude Code and Codex CLI agents.
 
-`agora setup-claude <id>` and `agora setup-codex <id>` are the counterparts
-of `setup-cursor`: run once in a project folder, they write that harness's
-own project-scoped config — nothing global, nothing shared across projects:
+`agora setup-cursor|setup-claude|setup-codex <id>`: run once in a project
+folder, each writes that harness's own project-scoped config — nothing
+global, nothing shared across projects. One rule template and one stop-hook
+generator serve all three harnesses (only the output contract differs), so
+the etiquette and hook semantics cannot drift apart:
 
 - Claude Code: `.mcp.json` at the project root (the project-scope MCP file;
   approved once via /mcp), the etiquette in `CLAUDE.md`, and optionally a
@@ -98,14 +100,17 @@ def write_mcp_json(path: Path, mcp_command: str, url: str, agent_id: str,
     path.write_text(json.dumps(config, indent=2) + "\n")
 
 
-def stop_hook_script(url: str, agent_id: str, noop_output: str = '"{}"') -> str:
-    """Stop-hook shared by Claude Code and Codex CLI: instant inbox check
-    (never a long-poll — a human shares the session), re-prompting via
-    {"decision": "block"} only when something NEW arrived since the last
-    prompt, and never while already continuing from a stop hook
-    (`stop_hook_active`) — both bounds together make a runaway re-prompt loop
-    structurally impossible. `noop_output` differs per harness: Claude expects
-    an empty JSON object; Codex expects no stdout at all on the no-op path."""
+def stop_hook_script(url: str, agent_id: str, noop_output: str = '"{}"',
+                     reprompt_key: str = "__DECISION__") -> str:
+    """The ONE stop-hook, shared by all three harnesses: instant inbox check
+    (never a long-poll — a human shares the session), re-prompting only when
+    something NEW arrived since the last prompt, and never while already
+    continuing from a stop hook (`stop_hook_active`) — both bounds together
+    make a runaway re-prompt loop structurally impossible. Harness contracts
+    differ only in output: `noop_output` (Claude/Cursor print an empty JSON
+    object, Codex prints nothing) and `reprompt_key` ("__DECISION__" emits
+    Claude/Codex's {"decision": "block", "reason": msg}; any other value is
+    used as a plain key, e.g. Cursor's {"followup_message": msg})."""
     return (
         '#!/usr/bin/env python3\n'
         '# agora Stop-hook: INSTANT inbox check; block the stop\n'
@@ -151,8 +156,10 @@ def stop_hook_script(url: str, agent_id: str, noop_output: str = '"{}"') -> str:
         '    msg = (f"You have {len(unread)} unread agora message(s) "\n'
         '           f"({len(fresh)} new since last prompt). "\n'
         '           "check_inbox, act, reply where owed, ack_inbox, then stop.")\n'
-        '    print(json.dumps({"decision": "block", "reason": msg}))\n'
-        'else:\n'
+        + ('    print(json.dumps({"decision": "block", "reason": msg}))\n'
+           if reprompt_key == "__DECISION__" else
+           f'    print(json.dumps({{{reprompt_key!r}: msg}}))\n')
+        + 'else:\n'
         '    print(NOOP) if NOOP else None\n'
     )
 
@@ -180,6 +187,46 @@ def install_claude_stop_hook(workspace: Path, url: str, agent_id: str) -> list[P
         stop_entries.append({"hooks": [{"type": "command", "command": command}]})
     settings_path.write_text(json.dumps(settings, indent=2) + "\n")
     return [script, settings_path]
+
+
+def install_cursor_stop_hook(workspace: Path, url: str, agent_id: str) -> list[Path]:
+    """Cursor hooks live at `.cursor/hooks.json` (stop event, followup_message
+    re-prompt). Same generated script as Claude/Codex, Cursor's output
+    contract; `loop_limit` bounds the re-prompt chain harness-side."""
+    hooks_dir = workspace / ".cursor" / "hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    script = hooks_dir / "agora_wait.sh"
+    script.write_text(stop_hook_script(url, agent_id,
+                                       reprompt_key="followup_message"))
+    script.chmod(0o755)
+    hooks_path = workspace / ".cursor" / "hooks.json"
+    hooks_path.write_text(json.dumps({
+        "version": 1,
+        # loop_limit bounded (not null) so a backlog drains a few turns then
+        # yields to the human; short timeout because the check is instant.
+        "hooks": {"stop": [{"command": ".cursor/hooks/agora_wait.sh",
+                            "timeout": 10, "loop_limit": 3}]},
+    }, indent=2) + "\n")
+    return [hooks_path, script]
+
+
+def setup_cursor(workspace: Path, agent_id: str, url: str, about: str,
+                 mcp_command: str, with_hook: bool) -> list[Path]:
+    """Wire a workspace as a Cursor agora agent (all project-scoped)."""
+    written: list[Path] = []
+    cursor = workspace / ".cursor"
+    (cursor / "rules").mkdir(parents=True, exist_ok=True)
+    mcp_path = cursor / "mcp.json"
+    write_mcp_json(mcp_path, mcp_command, url, agent_id, about)
+    written.append(mcp_path)
+
+    rule_path = cursor / "rules" / "agora.md"
+    rule_path.write_text(rule_text(agent_id))
+    written.append(rule_path)
+
+    if with_hook:
+        written += install_cursor_stop_hook(workspace, url, agent_id)
+    return written
 
 
 def setup_claude(workspace: Path, agent_id: str, url: str, about: str,

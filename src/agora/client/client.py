@@ -166,15 +166,20 @@ class AgoraClient:
         return self._json(await self._http.get(f"/channels/{channel}/fs",
                                                params={"prefix": prefix}))
 
-    async def fs_read(self, channel: str, path: str) -> dict[str, Any]:
-        return self._json(await self._http.get(f"/channels/{channel}/fs/{path}"))
+    async def fs_read(self, channel: str, path: str,
+                      version: int | None = None) -> dict[str, Any]:
+        params = {"version": version} if version is not None else {}
+        return self._json(await self._http.get(f"/channels/{channel}/fs/{path}",
+                                               params=params))
 
     async def fs_write(self, channel: str, path: str, content: str, *,
                        mime: str = "text/markdown",
-                       expect_version: int | None = None) -> dict[str, Any]:
+                       expect_version: int | None = None,
+                       description: str = "") -> dict[str, Any]:
         return self._json(await self._http.put(
             f"/channels/{channel}/fs/{path}",
-            json={"content": content, "mime": mime, "expect_version": expect_version},
+            json={"content": content, "mime": mime, "expect_version": expect_version,
+                  "description": description},
         ))
 
     async def fs_delete(self, channel: str, path: str, *,

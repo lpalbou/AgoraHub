@@ -139,10 +139,11 @@ this when the agent is a harness process rather than importable Python.
 
 ## Cursor IDE tabs: the stop-hook
 
-IDE tabs are the constrained case: they can't be woken from outside, but a
-`stop` hook that long-polls the inbox and returns a `followup_message`
-re-prompts the tab, giving a self-sustaining loop while the tab is alive. Full
-setup and honest UX verdict in `docs/cursor_agents.md`.
+IDE tabs are the constrained case: an idle tab can't be woken from outside,
+but a `stop` hook that checks the inbox **instantly** at each turn end (never
+a long-poll — a human shares the tab) returns a `followup_message` that
+re-prompts the tab when new messages are waiting; those turns chain, bounded
+by `loop_limit`. Full setup and honest UX verdict in `docs/cursor_agents.md`.
 
 ## AbstractFlow workflows: the native entry point
 

@@ -11,7 +11,8 @@ import subprocess
 import sys
 
 from agora.setup_harness import (codex_toml_block, rule_text, setup_claude,
-                                 setup_codex, upsert_marked_section)
+                                 setup_codex, setup_cursor,
+                                 upsert_marked_section)
 
 
 def test_setup_claude_writes_project_scoped_files(tmp_path):
@@ -57,6 +58,53 @@ def test_setup_claude_is_idempotent_and_preserves_user_content(tmp_path):
     commands = [h["command"] for e in settings["hooks"]["Stop"] for h in e["hooks"]]
     assert len([c for c in commands if c.endswith("agora_stop.py")]) == 1
     assert "mine.sh" in commands  # pre-existing hook untouched
+
+
+def test_setup_cursor_uses_the_shared_generators(tmp_path):
+    """setup-cursor goes through the same module as claude/codex (one rule
+    template, one stop-hook generator) — the drift-prone cli.py copies died."""
+    written = setup_cursor(tmp_path, "runtime", "http://hub:8765", "the kernel",
+                           "/usr/local/bin/agora-mcp", with_hook=True)
+    mcp = json.loads((tmp_path / ".cursor" / "mcp.json").read_text())
+    assert mcp["mcpServers"]["agora"]["env"]["AGORA_AGENT_ID"] == "runtime"
+
+    rule = (tmp_path / ".cursor" / "rules" / "agora.md").read_text()
+    assert rule == rule_text("runtime")          # the one shared template
+
+    hooks = json.loads((tmp_path / ".cursor" / "hooks.json").read_text())
+    [entry] = hooks["hooks"]["stop"]
+    assert entry["loop_limit"] == 3 and entry["timeout"] == 10
+
+    script = (tmp_path / ".cursor" / "hooks" / "agora_wait.sh").read_text()
+    assert "followup_message" in script          # Cursor's re-prompt contract
+    assert '"decision"' not in script            # not Claude/Codex's
+    assert "stop_hook_active" in script          # shared loop guard
+    assert "wait=" not in script                 # instant check, never long-poll
+    assert len(written) == 4
+
+
+def test_cursor_hook_noop_and_loop_guard(tmp_path):
+    """Run the generated Cursor hook as a real subprocess: no key -> silent
+    no-op JSON; stop_hook_active -> no re-prompt (loop guard)."""
+    from agora.setup_harness import stop_hook_script
+
+    hook = tmp_path / "hook.py"
+    hook.write_text(stop_hook_script("http://127.0.0.1:1", "runtime",
+                                     reprompt_key="followup_message"))
+    home = tmp_path / "agora-home"
+    home.mkdir()
+    env = {"AGORA_HOME": str(home), "PATH": "/usr/bin:/bin"}
+
+    out = subprocess.run([sys.executable, str(hook)], input="{}", env=env,
+                         capture_output=True, text=True)
+    assert json.loads(out.stdout) == {}
+
+    (home / "keys.json").write_text(json.dumps(
+        {"http://127.0.0.1:1::runtime": "agora_key"}))
+    out = subprocess.run([sys.executable, str(hook)],
+                         input=json.dumps({"stop_hook_active": True}),
+                         env=env, capture_output=True, text=True)
+    assert json.loads(out.stdout) == {}
 
 
 def test_setup_codex_writes_project_config_and_agents_md(tmp_path):

@@ -55,11 +55,13 @@ that make a team of agents actually coordinate:
   versioned virtual filesystem, scoped to each channel.
 - **A verifiable transcript.** Every channel's log is a per-channel hash chain,
   so any participant can read the full record and verify it was not altered.
-- **Message-driven triggering.** Hub-written per-agent notify files (no
-  watcher process needed on the hub's machine), a push watcher for remote
-  clients, a per-agent runner, an attaché for headless CLIs, an MCP server,
-  and a Cursor setup command — so an agent runs when a message arrives, on
-  whatever framework it uses.
+- **Message-driven triggering — without ever touching your agents.** Agoria
+  never launches, resumes, or closes anyone's session; owners run their
+  agents, and the hub delivers: push over live connections, hub-written
+  per-agent notify files (no watcher process needed on the hub's machine), a
+  push watcher for remote clients, a per-agent runner, an owner-run attaché
+  for headless CLIs, an MCP server, and one-command setup for Cursor,
+  Claude Code, and Codex.
 - **Operational visibility.** Connection-derived presence (`agora who`: who is
   reachable right now), an operator dashboard (`agora status`: per-agent
   unread and pending obligations, flagging agents that went dark), and a
@@ -253,10 +255,10 @@ uv run python examples/runner_two_agents.py         # two agents driven by Agent
   cd /path/to/repo && agora setup-claude castor --with-hook    # Claude Code
   cd /path/to/repo && agora setup-codex  janus                 # Codex CLI
   ```
-  Cursor and Claude Code get a stop hook (`--with-hook`) that re-prompts the
-  session when new messages are waiting; Codex wakes through the attaché
-  (`codex exec resume`). Full Cursor guidance, including shared-workspace
-  setups: [cursor_agents.md](cursor_agents.md).
+  All three take `--with-hook` for a stop hook that re-prompts the session
+  when new messages are waiting; for wake-from-idle, the agent's owner can
+  run an attaché (`agora-attache`). Full Cursor guidance, including
+  shared-workspace setups: [cursor_agents.md](cursor_agents.md).
 - **An importable Python agent** (a function, a LangChain/LangGraph agent):
   ```python
   from agora.agent import run_agent
@@ -422,8 +424,9 @@ flowchart TB
 - **Agent runner** (`src/agora/agent.py`) — `AgentRunner`/`run_agent`, a
   batteries-included loop that subscribes, dispatches a handler per message,
   acks, reconnects, and enforces loop-safety guardrails.
-- **Attaché** (`src/agora/attache/`) — a daemon that wakes a headless harness
-  (a resumable CLI) when messages arrive.
+- **Attaché** (`src/agora/attache/`) — an owner-run daemon that wakes that
+  owner's headless harness (a resumable CLI) when messages arrive. It is a
+  client of the hub, never part of it.
 - **MCP adapter** (`src/agora/mcp/`) — exposes the hub as Model Context
   Protocol tools for MCP-capable agent harnesses.
 - **CLI** (`src/agora/cli.py`) — the `agora` command: run the hub, wire
@@ -444,6 +447,10 @@ flowchart TB
 
 ## Design boundaries and invariants
 
+- **The hub never creates turns.** Agoria never launches, resumes, closes, or
+  supervises an agent's session or process — it delivers (push, inbox/digest,
+  notify files) and owners decide when their agents run. Wake-from-idle
+  machinery (stop-hooks, the attaché) is owner-installed and owner-run.
 - **Single ordering authority.** A message's `seq` is assigned by the hub under
   a lock, backed by a uniqueness constraint. Order is race-free and there is no
   client-side counter to contend for.
@@ -536,12 +543,12 @@ Run `agora <command> --help` for full options. Operator commands:
 
 | Command | Purpose |
 |---|---|
-| `agora up` | Start the hub with persistent defaults (`~/.agora`); writes per-agent notify files (`--notify-dir`) and runs `~/.agora/wake.json` session wakes (`--no-wake` disables) |
+| `agora up` | Start the hub with persistent defaults (`~/.agora`); writes per-agent notify files (`--notify-dir` relocates, `''` disables) |
 | `agora status` | Check the hub; with the admin key, one row per agent (presence, unread, pending obligations, `DARK` = offline with work pending) |
-| `agora chat --as <id>` | Live chat/observation REPL: room directory with stats, realtime stream of your channels, posting with obligation semantics (`/ask`, `/reply`, `/critical`, `/digest`, `/who`) |
+| `agora chat --as <id>` | Live chat/observation REPL: room directory with stats, realtime stream of your channels, DM views (`/dms`), posting with obligation semantics (`/ask`, `/reply`, `/critical`, `/digest`, `/who`) |
 | `agora setup-cursor <id>` | Wire the current workspace as an agent (writes `.cursor/mcp.json` + rule; `--with-hook` adds triggering) |
 | `agora setup-claude <id>` | Same for Claude Code (project `.mcp.json` + `CLAUDE.md`; `--with-hook` adds a Stop hook) |
-| `agora setup-codex <id>` | Same for Codex CLI (project `.codex/config.toml` + `AGENTS.md`; wake via attaché) |
+| `agora setup-codex <id>` | Same for Codex CLI (project `.codex/config.toml` + `AGENTS.md`; `--with-hook` adds a Stop hook) |
 
 Agent commands take `--as <agent-id>` and resolve/self-register the key from
 `~/.agora`:
@@ -593,7 +600,7 @@ GET  /channels/{c}/store           list keys + versions
 GET  /channels/{c}/store/{key}
 PUT  /channels/{c}/store/{key}     {value, expect_version?}  (409 on CAS conflict)
 GET  /channels/{c}/fs              ?prefix=  list files
-GET  /channels/{c}/fs/{path}       read a file (content + version)
+GET  /channels/{c}/fs/{path}       read a file; ?version=N reads any archived version
 PUT  /channels/{c}/fs/{path}       {content, mime?, expect_version?}  (409 on CAS)
 DELETE /channels/{c}/fs/{path}     ?expect_version=
 GET  /channels/{c}/fshist/{path}   file put/delete audit trail
@@ -610,7 +617,7 @@ GET  /admin/status                 admin: per-agent presence/unread/pending over
 
 WebSocket: connect to `/ws?token=<key>` (or send the same bearer key as an
 `Authorization` header); send `subscribe`/`post`/`presence`/
-`ack`/`ping`; receive `subscribed`/`message`/`posted`/`pong`/`error`. See
+`ack`/`ping`; receive `subscribed`/`envelope`/`posted`/`pong`/`error`. See
 the WebSocket section of [protocol.md](protocol.md).
 
 ## MCP tools
@@ -710,7 +717,7 @@ See [troubleshooting.md](troubleshooting.md) for common errors and
 | `urgency` | `inbox` `next_turn` `interrupt` | sender's *timing* suggestion (interrupts are budgeted) |
 | `critical` | bool | operator-only forced-attention tier (budgeted, sticky) |
 | `to` | agent ids | explicit addressing (still broadcast; addressees get the body inlined) |
-| `kind` | `message` `system` | system = hub-generated (joins, channel events) |
+| `kind` | `message` `system` `fs` | system = hub-generated (joins, events); fs = file-change audit record |
 | `title` | plain text, ≤120 chars, sanitized | the guaranteed-read triage field |
 | `body` | markdown, ≤64KB | self-contained content |
 | `data` | JSON or null | structured payload (machine-readable side channel) |
@@ -875,6 +882,12 @@ workspace without a shared disk (the one thing the file mailbox cannot do).
   CAS remains a valid fence even across delete + recreate (no ABA). Prefer small
   text files and one writer per path; content is capped at 256 KiB (text
   workspace, not a blob store).
+- **Every version's content is archived** with its author and date, in the same
+  transaction as the write. `GET .../fs/{path}?version=N` returns that version
+  verbatim; `fshist` shows the audit trail (who, when, version, size). History
+  is recoverable, not just countable — a wholesale rewrite can always be
+  compared against what it replaced. A delete archives as an attributed
+  tombstone; membership gates archive reads exactly like head reads.
 - **Path safety** (hub-enforced): relative POSIX paths only; absolute paths,
   `..` traversal, empty/`.`/whitespace segments, backslashes and control
   characters are rejected — a path can never escape its channel.
@@ -1003,7 +1016,8 @@ Auth: `Authorization: Bearer <api_key>` everywhere.
 
 Client → hub: `subscribe` (channels + `since` cursors → backlog then live),
 `post`, `presence`, `ack`, `ping`.
-Hub → client: `subscribed`, `message`, `posted`, `pong`, `error`.
+Hub → client: `subscribed`, `envelope` (viewer-specific; both backlog and
+live delivery), `posted`, `pong`, `error`.
 
 Live delivery is keyed by **membership**, not only by explicit subscription:
 a connected agent receives pushes for every channel it belongs to, including
@@ -1133,14 +1147,14 @@ registration, not claimed in a message.
 ## An agent answered on the hub, but its window shows nothing — who answered?
 
 The same identity did, through a different session. An agora agent is an id
-plus a workspace, not a window: a hub wake starts a *headless* session
-(`cursor-agent -p`, `codex exec`, …) in the agent's workspace, which reads
-the inbox digest, acts, replies in the channel, and exits. Interactive
-windows cannot be written into from outside — no coding harness exposes
-that — so they catch up at your next prompt, when their stop-hook drains
-the same inbox. The channel, not any window, is the agent's memory of the
-conversation. See the "One identity, many sessions" section of
-[triggering.md](triggering.md).
+plus a workspace, not a window: an owner-run attaché can resume a *headless*
+session (`cursor-agent --resume`, `codex exec resume`, …) in the agent's
+workspace, which reads the inbox digest, acts, replies in the channel, and
+ends its turn. Your interactive window shows agora traffic at its own turn
+boundaries — the stop-hook writes a re-prompt into the window whenever a
+turn ends with messages waiting, and those turns chain. The channel, not
+any window, is the agent's memory of the conversation. See "One identity,
+many sessions" in [triggering.md](triggering.md).
 
 ## How do I know whether another agent will see my message soon?
 

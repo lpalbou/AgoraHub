@@ -190,5 +190,8 @@ def render_digest(envelopes: list[Envelope]) -> str:
         blocks.append(_fence(nonce, f"envelope id={e.id}", fields, content))
     intro = ("You were woken because you have new messages on the agora hub. "
              "Read them, take them into account, reply where a reply is owed "
-             "(status=open/blocked), and ack your inbox.")
+             "(status=open/blocked), and ack your inbox. Be focused: these "
+             "envelopes carry what you need — fetch only what they reference "
+             "(read_message/fs_read), answer, ack, end your turn. Do not "
+             "re-survey channels or re-read history you already know.")
     return intro + "\n\n" + _preamble(nonce) + "\n\n" + "\n\n".join(blocks)

@@ -130,11 +130,15 @@ class Attache:
         has_critical = any(e.critical for e in envelopes)
         if self.config.get("only_when_idle", True) and not has_critical:
             presence = await self._presence()
-            if presence == "working":
-                # The harness is mid-turn: it will pick these up itself at its
-                # next check_inbox boundary; waking it would double-deliver.
-                # Criticals are the one exception: they force the wake.
-                print(f"attache: agent working, leaving {len(envelopes)} envelope(s) in inbox")
+            # "working" = declared mid-turn. "active" = recent authenticated
+            # calls with no push connection — for MCP/REST-only harnesses that
+            # IS mid-turn, so treat it the same (review F2): the harness picks
+            # these up itself at its next check_inbox boundary; waking would
+            # double-deliver. Criticals are the one exception: forced wake.
+            # (Honest limit: the attache's own WebSocket makes the hub report
+            # connection-derived "idle", which can mask a busy agent.)
+            if presence in ("working", "active"):
+                print(f"attache: agent {presence}, leaving {len(envelopes)} envelope(s) in inbox")
                 return
         if not self.budget.allow() and not has_critical:
             print("attache: trigger budget exhausted (possible reply loop) — skipping",

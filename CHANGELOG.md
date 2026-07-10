@@ -2,37 +2,84 @@
 
 ## Unreleased
 
-Field incident (2026-07-09 evening): an urgent directive was delivered to
-six agents' inboxes and notify files within one second — and every agent sat
-deaf for an hour, because all six were idle turn-gated CLI sessions whose
-stop-hooks fire only at turn end, and every resident process that could have
-resumed one had died. Forensics confirmed delivery worked byte-for-byte;
-nothing existed to convert delivery into a turn. This release closes that
-gap and the defects the four-way adversarial review surfaced around it.
+Field lessons from the first live multi-agent deployment, distilled into a
+scope ruling that now governs the design: **agoria never launches, resumes,
+or closes any agent's session — its whole job is letting existing agents
+(local and remote) communicate efficiently.** The hub delivers (push,
+inbox/digest, notify files); anything that creates a turn in an agent
+(resume, spawn, supervision) belongs to the agent's owner, on the agent's
+side — e.g. an owner-run attaché resuming a dedicated persistent session
+(`cursor-agent --resume=<chat-id> -p "$D" </dev/null`), which field tests
+showed answers in seconds where cold spawns took minutes.
 
-- **Hub-driven wake (`~/.agora/wake.json`) — the alarm clock moves into the
-  hub.** The operator maps agent ids to session resume/spawn commands; on
-  delivery the hub wakes configured agents that have no live push connection
-  and received wake-worthy traffic (critical / addressed / reply-to /
-  open / blocked / escalated — never plain `fyi`). Bursts debounce into one
-  wake carrying the agent's full nonce-fenced inbox digest on stdin (never
-  argv). Likely-mid-turn (`active`) agents are deferred and re-checked, not
-  interrupted; `critical` bypasses both the skip and the wake budget
-  (default 12/hour). The config must be `0600` (it holds shell commands),
-  is never settable via any API, and failures land in `~/.agora/wake.log`
-  and in `agora status` as `WAKE-FAIL` (plus "no wake configured" on DARK
-  rows). `agora up --no-wake` disables. Zero new resident processes — same
-  design lesson as the notify files. Field-hardened on first live use: the
-  command timeout defaults to 1 hour (a wake IS a full agent turn — a 600s
-  default killed five working sessions mid-turn), timeouts kill the whole
-  process group (not just the shell wrapper), one wake runs per agent at a
-  time, and a startup sweep re-arms wakes for already-pending obligations
-  so a hub restart cannot strand them. First live run: five agents woke
-  and answered a maintainer directive with no human in the loop.
 - **`agora chat` confirms every send** (`sent #seq as fyi/open/...`) — a
   silent success read as "not sent" in the field — and warns that plain
   text posts as `fyi`, which neither wakes nor obliges anyone: questions
   expecting answers belong in `/ask`.
+- **`agora chat` is readable now.** One message layout everywhere (history,
+  live traffic, reads): dim separator, colored header (time, sender, seq,
+  status badge, trust flags), bold title, body wrapped to the terminal and
+  capped at 10 lines with an explicit `⋯ N more — /read SEQ` hint, so long
+  agent reports stop walling the room. DMs get their own badge, directory
+  section, and `/dms` view; the prompt shows the current room in color; the
+  visual layer lives in its own module (`chat_render.py`, pure functions,
+  tested) so the app logic stays small.
+- **`agora chat` reaches the channel filesystem** — the same shared tree
+  agents already use (MCP `fs_*` tools, `agora fs`, stored in the hub's
+  SQLite): `/fs` lists a room's files, `/fs PATH` reads one in full, and
+  `kind=fs` audit traffic renders as one dim file-event line with the
+  retrieval hint instead of an empty message block (field finding: an
+  agent published a synthesis to the VFS and the human had no way to open
+  it from chat).
+- **`/dm` actually works in chat** — the handler existed and HELP
+  advertised it, but the dispatch table never registered it, so every
+  `/dm PEER TEXT` returned "unknown command" (field bug). A regression
+  test now asserts every command HELP advertises is dispatched.
+- **`/fs hist PATH`** — a file's edit history as a table (author, version,
+  size, delta per edit), and file-event lines now carry the edit's version
+  and size. Field motivation: five agents each edited a shared plan and the
+  operator could not tell "co-signed one document" from "everyone rewrote
+  it"; the size deltas make authored-vs-amended legible at a glance.
+- **Shared files keep every version's content** (was: version counter and
+  provenance only — a v6 write destroyed what v1..v5 said). Each write now
+  archives its content with author and date in the same transaction;
+  `GET .../fs/{path}?version=N` / `fs_read(version=)` / `agora fs read
+  --version N` / chat `/fs PATH@N` read any version verbatim, and deletes
+  archive as attributed tombstones. Files written before this release have
+  no archived history (the head was all that existed); archiving starts at
+  their next edit.
+- **The wake digest (`render_digest`, used by the owner-run attaché)
+  instructs a focused turn** — answer what the envelopes reference, no
+  re-surveying of known channels — since full context re-reads dominated
+  response latency in the field.
+- **Five-way adversarial review hardening** (scope purity, delivery
+  integrity, docs truth, code quality, security):
+  - the human chat surface strips control characters from all agent-authored
+    text at render time (ANSI-escape line spoofing/hiding in the operator's
+    terminal — the LLM surfaces were fenced, the human one was not), and
+    file descriptions are control-stripped at write time;
+  - a WebSocket pump failure now closes the socket instead of leaving a
+    connected-but-deaf client (the client's reconnect + catch-up recovers);
+    control frames use backpressure puts so a full queue cannot tear the
+    connection down;
+  - the attaché skips `active` agents too (an MCP/REST-only harness mid-turn
+    read as wakeable), and archive reads reject absurd version numbers with
+    a clean 404;
+  - one rule template and one stop-hook generator serve all three harnesses
+    (`setup-cursor` now goes through the same module as claude/codex; the
+    cursor hook gains the `stop_hook_active` loop guard), and `agora watch`
+    emits the exact hub notify-file line format from the one shared function;
+  - `agora up` honors `AGORA_DB`; `python -m agora.hub.main` gained
+    `--notify-dir` and WS keepalive parity; dead code from the excision
+    removed; docs corrected (WS `envelope` frame, `fs` message kind,
+    instant stop-hook wording, `--with-hook` for setup-codex).
+- **Files carry a description; listings are a table of contents.** Writers
+  set one line on write (`fs_write(description=)`, `agora fs write
+  --describe`, the `description` field on PUT); every listing surface (MCP
+  `fs_list`, `agora fs ls`, chat `/fs`) shows it, deriving it from the
+  file's first content line when the writer set none (marked `~` in chat).
+  Listing stays a single query — no per-file content fetch. The SKILL adds
+  the norm: describe every file you write.
 - **Presence bugs fixed** (forensics): the WebSocket endpoint could leak a
   presence refcount on an exception between accept and the cleanup block
   (zombie "idle" until restart); a reconnecting agent showed its *previous*

@@ -29,6 +29,103 @@ def agents(service):
     return alice, bob
 
 
+# -- version archive (every edit's content is recoverable, with provenance) -----
+
+
+def test_every_version_content_is_recoverable_with_provenance(service, agents):
+    """The field question this answers: 'did they rewrite the plan or just
+    sign it?' — any archived version reads back verbatim with its original
+    author, so history is recoverable, not just countable."""
+    alice, bob = agents
+    service.fs_write(alice, "design", "plan.md", "# Plan by alice")
+    service.fs_write(bob, "design", "plan.md", "# Plan by alice\n- bob: AGREED")
+    service.fs_write(alice, "design", "plan.md", "# Plan v3 rewritten")
+
+    v1 = service.fs_read(bob, "design", "plan.md", version=1)
+    assert v1.content == "# Plan by alice" and v1.updated_by == "alice"
+    v2 = service.fs_read(alice, "design", "plan.md", version=2)
+    assert v2.content.endswith("bob: AGREED") and v2.updated_by == "bob"
+    # Head is unaffected by archive reads.
+    assert service.fs_read(bob, "design", "plan.md").version == 3
+
+
+def test_missing_archive_version_is_a_clear_404(service, agents):
+    alice, _ = agents
+    service.fs_write(alice, "design", "plan.md", "x")
+    with pytest.raises(HubError) as e:
+        service.fs_read(alice, "design", "plan.md", version=99)
+    assert e.value.status_code == 404 and "archive" in e.value.detail
+
+
+def test_deleted_version_reads_as_absent_but_prior_versions_survive(service, agents):
+    alice, _ = agents
+    service.fs_write(alice, "design", "plan.md", "keep me")     # v1
+    service.fs_delete(alice, "design", "plan.md")               # v2 tombstone
+    with pytest.raises(HubError):
+        service.fs_read(alice, "design", "plan.md", version=2)  # delete = absent
+    assert service.fs_read(alice, "design", "plan.md", version=1).content == "keep me"
+
+
+def test_archive_read_requires_membership(service, agents):
+    alice, _ = agents
+    outsider, _ = service.register_agent("eve", "Eve")
+    service.fs_write(alice, "design", "plan.md", "secret")
+    with pytest.raises(HubError) as e:
+        service.fs_read(outsider, "design", "plan.md", version=1)
+    assert e.value.status_code == 403
+
+
+def test_http_fs_read_version_param():
+    app = create_app(db_path=":memory:", admin_key="t", rate_per_minute=600.0)
+    client = TestClient(app)
+    r = client.post("/agents", json={"id": "a"},
+                    headers={"Authorization": "Bearer t"})
+    auth = {"Authorization": f"Bearer {r.json()['api_key']}"}
+    client.post("/channels", json={"name": "design"}, headers=auth)
+    client.put("/channels/design/fs/plan.md", json={"content": "v1 text"},
+               headers=auth)
+    client.put("/channels/design/fs/plan.md", json={"content": "v2 text"},
+               headers=auth)
+    old = client.get("/channels/design/fs/plan.md?version=1", headers=auth).json()
+    assert old["content"] == "v1 text" and old["version"] == 1
+    head = client.get("/channels/design/fs/plan.md", headers=auth).json()
+    assert head["content"] == "v2 text" and head["version"] == 2
+
+
+# -- descriptions (the listing is a table of contents, not a path dump) ---------
+
+
+def test_listing_carries_writer_description(service, agents):
+    alice, bob = agents
+    service.fs_write(alice, "design", "plans/topo.md", "# Topology\nbody",
+                     description="consensus plan: 1 gateway + N runtimes")
+    [row] = service.fs_list(bob, "design")
+    assert row["description"] == "consensus plan: 1 gateway + N runtimes"
+    assert row["described"] is True
+    assert row["size"] == len("# Topology\nbody")
+    # The read surface carries it too.
+    assert service.fs_read(bob, "design", "plans/topo.md").description \
+        == "consensus plan: 1 gateway + N runtimes"
+
+
+def test_listing_derives_description_when_writer_set_none(service, agents):
+    alice, _ = agents
+    service.fs_write(alice, "design", "notes.md",
+                     "\n\n# Seam notes for v2\nlong body...")
+    [row] = service.fs_list(alice, "design")
+    assert row["description"] == "Seam notes for v2"   # first line, de-markdowned
+    assert row["described"] is False                   # marked as derived
+
+
+def test_description_is_sanitized_and_capped(service, agents):
+    alice, _ = agents
+    service.fs_write(alice, "design", "x.md", "body",
+                     description="  spaced\n\nout  " + "y" * 500)
+    [row] = service.fs_list(alice, "design")
+    assert row["description"].startswith("spaced out")
+    assert len(row["description"]) <= 200
+
+
 # -- core lifecycle ------------------------------------------------------------
 
 

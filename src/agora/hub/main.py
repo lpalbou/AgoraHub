@@ -19,6 +19,8 @@ def main() -> None:
     parser.add_argument("--db", default=os.environ.get("AGORA_DB", "agora.db"))
     parser.add_argument("--rate-per-minute", type=float,
                         default=float(os.environ.get("AGORA_RATE_PER_MINUTE", "60")))
+    parser.add_argument("--notify-dir", default=os.environ.get("AGORA_NOTIFY_DIR"),
+                        help="dir for hub-written <agent>-inbox.log files ('' disables)")
     args = parser.parse_args()
 
     admin_key = os.environ.get("AGORA_ADMIN_KEY", "")
@@ -27,8 +29,11 @@ def main() -> None:
         admin_key = secrets.token_hex(16)
         print(f"AGORA_ADMIN_KEY not set — generated ephemeral admin key: {admin_key}")
 
-    app = create_app(db_path=args.db, admin_key=admin_key, rate_per_minute=args.rate_per_minute)
-    uvicorn.run(app, host=args.host, port=args.port)
+    app = create_app(db_path=args.db, admin_key=admin_key,
+                     rate_per_minute=args.rate_per_minute,
+                     notify_dir=args.notify_dir or None)
+    uvicorn.run(app, host=args.host, port=args.port,
+                ws_ping_interval=20.0, ws_ping_timeout=20.0)
 
 
 if __name__ == "__main__":

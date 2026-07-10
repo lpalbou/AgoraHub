@@ -57,6 +57,17 @@ _META_LANGUAGES = {"plain", "terse", "structured"}
 MAX_READ_ANCESTORS = 5
 
 
+def _derived_description(head: str) -> str:
+    """Fallback description for files whose writer set none: the first
+    non-empty content line, de-markdowned, control-stripped and capped — so a
+    listing is never a bare path dump, even for pre-description files."""
+    for line in (head or "").splitlines():
+        line = sanitize_text(" ".join(line.strip().lstrip("#*->|`").split()), 120)
+        if line:
+            return line
+    return ""
+
+
 class HubError(Exception):
     def __init__(self, status_code: int, detail: str) -> None:
         super().__init__(detail)
@@ -67,7 +78,7 @@ class HubError(Exception):
 class HubService:
     def __init__(self, db: Database, *, rate_per_minute: float = 60.0,
                  interrupts_per_hour: int = 6, criticals_per_hour: int = 5,
-                 notify_sink=None, wake_sink=None) -> None:
+                 notify_sink=None) -> None:
         self.db = db
         # One shared binder so fan-out and long-poll wakes marshal onto the
         # same serving loop from synchronous (threadpool) request handlers.
@@ -83,10 +94,6 @@ class HubService:
         # resident processes — the hub maintains each local agent's
         # <id>-inbox.log itself, the way the file mailbox's filesystem did.
         self.notify_sink = notify_sink
-        # Hub-driven wakes (see hub/wake_sink.py): the alarm clock in the one
-        # process that must exist anyway — resumes turn-gated harness sessions
-        # when wake-worthy traffic lands and no live push consumer exists.
-        self.wake_sink = wake_sink
         # Refused sends, per agent (ring buffer): makes "can this agent send?"
         # verifiable by the operator instead of assumed.
         self.refusals: dict[str, deque] = {}
@@ -412,22 +419,12 @@ class HubService:
         # dedup by per-channel seq, so double delivery is harmless.
         for member in self.db.list_members(message.channel):
             self.fanout.publish(f"agent/{member.agent_id}", payload)
-            if member.agent_id == message.sender:
-                continue
-            envelope = None
             # Hub-written notify file: each member's <id>-inbox.log stays
             # fresh with zero agent-side processes (viewer-specific envelope,
             # skip the sender's own posts, best-effort).
-            if self.notify_sink is not None:
-                envelope = self.envelope_for(member.agent_id, message)
-                self.notify_sink.deliver(member.agent_id, envelope)
-            # Hub-driven wake: delivery without a turn is a mailbox, not
-            # communication — resume the member's session if it is configured,
-            # wake-worthy, and nothing live is already listening for it.
-            if self.wake_sink is not None:
-                if envelope is None:
-                    envelope = self.envelope_for(member.agent_id, message)
-                self.wake_sink.consider(member.agent_id, envelope)
+            if self.notify_sink is not None and member.agent_id != message.sender:
+                self.notify_sink.deliver(
+                    member.agent_id, self.envelope_for(member.agent_id, message))
         self.notifier.notify()
 
     def get_messages(self, agent: AgentInfo, channel: str,
@@ -770,9 +767,12 @@ class HubService:
         self._wake(message)
 
     def fs_write(self, agent: AgentInfo, channel: str, path: str, content: str,
-                 mime: str = "text/markdown", expect_version: int | None = None) -> FsFile:
+                 mime: str = "text/markdown", expect_version: int | None = None,
+                 description: str = "") -> FsFile:
         """Create or edit a file (compare-and-swap via `expect_version`; 0 means
-        'must not exist yet'). Returns the new FsFile with its bumped version."""
+        'must not exist yet'). `description` is the writer's one-line statement
+        of what the file is, shown in listings; sanitized and capped like a
+        title. Returns the new FsFile with its bumped version."""
         self.require_membership(channel, agent.id)
         norm = self._normalize_fs_path(path)
         if not isinstance(content, str):
@@ -780,33 +780,57 @@ class HubService:
         size = len(content.encode())
         if size > MAX_STORE_VALUE_BYTES:
             raise HubError(413, f"fs file exceeds {MAX_STORE_VALUE_BYTES} bytes")
+        # sanitize_text also strips control chars (ESC/BEL survive str.split —
+        # they would otherwise reach the operator's terminal; security M1).
+        description = sanitize_text(str(description or ""), 200)
         value = {"content": content, "mime": mime}
+        if description:
+            value["description"] = description
         entry = self.db.fs_put(channel, FS_PREFIX + norm, value, agent.id, expect_version)
         self._post_fs_audit(channel, agent.id, "put", norm, entry.version, size)
-        return FsFile(path=norm, content=content, mime=mime, size_bytes=size,
-                      version=entry.version, updated_by=entry.updated_by,
-                      updated_at=entry.updated_at)
+        return FsFile(path=norm, content=content, mime=mime, description=description,
+                      size_bytes=size, version=entry.version,
+                      updated_by=entry.updated_by, updated_at=entry.updated_at)
 
-    def fs_read(self, agent: AgentInfo, channel: str, path: str) -> FsFile:
+    def fs_read(self, agent: AgentInfo, channel: str, path: str,
+                version: int | None = None) -> FsFile:
+        """Read the head, or — with `version` — any archived version verbatim,
+        with its original author and date. Every write archives its content
+        (fs_versions), so history is recoverable, not just countable."""
         self.require_membership(channel, agent.id)
         norm = self._normalize_fs_path(path)
-        row = self.db.fs_get(channel, FS_PREFIX + norm)
-        if row is None or row["deleted"]:  # a tombstoned file reads as absent
-            raise HubError(404, f"file '{norm}' not found in '{channel}'")
+        if version is not None:
+            if not 1 <= version <= 2**62:  # SQLite INTEGER bound -> clean 404, not a 500
+                raise HubError(404, f"version {version} of '{norm}' is not in the archive")
+            row = self.db.fs_version(channel, FS_PREFIX + norm, version)
+            if row is None:
+                raise HubError(404, f"version {version} of '{norm}' is not in the "
+                                    "archive (it may predate version archiving, "
+                                    "or be a delete)")
+        else:
+            row = self.db.fs_get(channel, FS_PREFIX + norm)
+            if row is None or row["deleted"]:  # a tombstoned file reads as absent
+                raise HubError(404, f"file '{norm}' not found in '{channel}'")
         value = row["value"] if isinstance(row["value"], dict) else {}
         content = value.get("content", "")
         return FsFile(path=norm, content=content, mime=value.get("mime", "text/markdown"),
+                      description=value.get("description", ""),
                       size_bytes=len(content.encode()), version=row["version"],
                       updated_by=row["updated_by"], updated_at=row["updated_at"])
 
     def fs_list(self, agent: AgentInfo, channel: str, prefix: str = "") -> list[dict[str, Any]]:
-        """List live files (metadata only, no content) under an optional prefix.
-        Tombstoned (deleted) files are excluded server-side."""
+        """List live files (metadata only, no content) under an optional prefix
+        — the channel's table of contents. Every row carries a `description`:
+        the writer's own when set, else derived from the file's first content
+        line, so old files are never blank. Tombstoned files excluded."""
         self.require_membership(channel, agent.id)
         rows = self.db.fs_keys_live(channel, FS_PREFIX + prefix)
         return [
             {"path": r["key"][len(FS_PREFIX):], "version": r["version"],
-             "updated_by": r["updated_by"], "updated_at": r["updated_at"]}
+             "updated_by": r["updated_by"], "updated_at": r["updated_at"],
+             "size": r["size"],
+             "description": r["description"] or _derived_description(r["head"]),
+             "described": bool(r["description"])}
             for r in rows
         ]
 
@@ -851,7 +875,7 @@ class HubService:
             presence = self.presence.get(agent_id)
             refusals = [r for r in self.refusals.get(agent_id, ())
                         if now - r["ts"] < 3600.0]
-            row = {
+            out.append({
                 "agent_id": agent_id,
                 "state": presence.state,
                 "unread": len(envelopes),
@@ -859,11 +883,7 @@ class HubService:
                 "oldest_pending_minutes": round((now - oldest) / 60, 1) if oldest else None,
                 "refused_sends_1h": len(refusals),
                 "last_refusal": refusals[-1] if refusals else None,
-            }
-            if self.wake_sink is not None:
-                row["wake_configured"] = self.wake_sink.configured(agent_id)
-                row["last_wake"] = self.wake_sink.last_result.get(agent_id)
-            out.append(row)
+            })
         return out
 
     def list_presence(self, agent: AgentInfo) -> list:

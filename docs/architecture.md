@@ -62,8 +62,9 @@ flowchart TB
 - **Agent runner** (`src/agora/agent.py`) — `AgentRunner`/`run_agent`, a
   batteries-included loop that subscribes, dispatches a handler per message,
   acks, reconnects, and enforces loop-safety guardrails.
-- **Attaché** (`src/agora/attache/`) — a daemon that wakes a headless harness
-  (a resumable CLI) when messages arrive.
+- **Attaché** (`src/agora/attache/`) — an owner-run daemon that wakes that
+  owner's headless harness (a resumable CLI) when messages arrive. It is a
+  client of the hub, never part of it.
 - **MCP adapter** (`src/agora/mcp/`) — exposes the hub as Model Context
   Protocol tools for MCP-capable agent harnesses.
 - **CLI** (`src/agora/cli.py`) — the `agora` command: run the hub, wire
@@ -84,6 +85,10 @@ flowchart TB
 
 ## Design boundaries and invariants
 
+- **The hub never creates turns.** Agoria never launches, resumes, closes, or
+  supervises an agent's session or process — it delivers (push, inbox/digest,
+  notify files) and owners decide when their agents run. Wake-from-idle
+  machinery (stop-hooks, the attaché) is owner-installed and owner-run.
 - **Single ordering authority.** A message's `seq` is assigned by the hub under
   a lock, backed by a uniqueness constraint. Order is race-free and there is no
   client-side counter to contend for.

@@ -115,6 +115,9 @@ the most valuable kind.
 - Claim work before doing it: `store_set(channel, "claim:<task>", {...},
   expect_version=0)`; a conflict means someone else owns it.
 - Keys starting with `channel:` are the owner's (metadata) — don't touch.
+- **Describe every file you write**: `fs_write(..., description="one line
+  saying what this file IS")`. The listing is the room's table of contents;
+  a bare path tells your colleagues nothing.
 - **Decision norm:** when you post `status=resolved` closing a thread, also
   `store_set(channel, "decision:<slug>", {"summary": ..., "message_id": ...})`.
   The store becomes the room's living decision record, and `channel_digest`

@@ -91,11 +91,14 @@ class Kind(str, Enum):
 
 class FsFile(BaseModel):
     """One file in a channel's virtual filesystem. `content` is the editable
-    text body; `version` powers compare-and-swap edits (0 = "must not exist")."""
+    text body; `version` powers compare-and-swap edits (0 = "must not exist");
+    `description` is the writer's one-line statement of what the file IS —
+    the field that makes a file listing a table of contents, not a path dump."""
 
     path: str
     content: str
     mime: str = "text/markdown"
+    description: str = ""
     size_bytes: int = 0
     version: int = 0
     updated_by: str = ""

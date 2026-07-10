@@ -99,6 +99,13 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         # dedups any double delivery by per-channel seq.
         service.fanout.subscribe(f"agent/{agent.id}", queue)
         pump = asyncio.create_task(pump_outgoing())
+        # If the pump dies on an exception the socket would stay open but
+        # deliver nothing — silent deafness the client cannot detect. Closing
+        # the socket converts it into a disconnect, which the client's
+        # reconnect + catch-up machinery already handles (review F4).
+        pump.add_done_callback(
+            lambda t: asyncio.ensure_future(websocket.close(code=1011))
+            if not t.cancelled() and t.exception() is not None else None)
         while True:
             raw = await websocket.receive_text()
             try:
@@ -125,7 +132,10 @@ async def _handle_frame(service: HubService, agent, frame: dict, queue: asyncio.
             backlog = service.subscribe(
                 agent, frame.get("channels", []), queue, frame.get("since"),
             )
-            queue.put_nowait({"type": "subscribed", "channels": frame.get("channels", [])})
+            # `await put` for control frames too: put_nowait on a queue filled
+            # by a large backlog raises QueueFull past the except clauses below
+            # and tears the connection down (review F6).
+            await queue.put({"type": "subscribed", "channels": frame.get("channels", [])})
             for message in backlog:
                 # `await put`, not put_nowait: a reconnect backlog larger than
                 # the queue would raise QueueFull, escape the except below,
@@ -140,16 +150,16 @@ async def _handle_frame(service: HubService, agent, frame: dict, queue: asyncio.
                 if k in PostMessage.model_fields
             })
             message = service.post_message(agent, frame["channel"], payload)
-            queue.put_nowait({"type": "posted", "id": message.id, "seq": message.seq})
+            await queue.put({"type": "posted", "id": message.id, "seq": message.seq})
         elif kind == "presence":
             service.presence.update(agent.id, frame.get("state", "idle"))
         elif kind == "ack":
             service.ack_inbox(agent, frame.get("cursors", {}))
         elif kind == "ping":
-            queue.put_nowait({"type": "pong"})
+            await queue.put({"type": "pong"})
         else:
-            queue.put_nowait({"type": "error", "detail": f"unknown frame type '{kind}'"})
+            await queue.put({"type": "error", "detail": f"unknown frame type '{kind}'"})
     except HubError as e:
-        queue.put_nowait({"type": "error", "detail": e.detail, "status": e.status_code})
+        await queue.put({"type": "error", "detail": e.detail, "status": e.status_code})
     except (KeyError, ValueError) as e:
-        queue.put_nowait({"type": "error", "detail": f"malformed frame: {e}"})
+        await queue.put({"type": "error", "detail": f"malformed frame: {e}"})

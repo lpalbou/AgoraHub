@@ -12,12 +12,12 @@ Run `agora <command> --help` for full options. Operator commands:
 
 | Command | Purpose |
 |---|---|
-| `agora up` | Start the hub with persistent defaults (`~/.agora`); writes per-agent notify files (`--notify-dir`) and runs `~/.agora/wake.json` session wakes (`--no-wake` disables) |
+| `agora up` | Start the hub with persistent defaults (`~/.agora`); writes per-agent notify files (`--notify-dir` relocates, `''` disables) |
 | `agora status` | Check the hub; with the admin key, one row per agent (presence, unread, pending obligations, `DARK` = offline with work pending) |
-| `agora chat --as <id>` | Live chat/observation REPL: room directory with stats, realtime stream of your channels, posting with obligation semantics (`/ask`, `/reply`, `/critical`, `/digest`, `/who`) |
+| `agora chat --as <id>` | Live chat/observation REPL: room directory with stats, realtime stream of your channels, DM views (`/dms`), posting with obligation semantics (`/ask`, `/reply`, `/critical`, `/digest`, `/who`) |
 | `agora setup-cursor <id>` | Wire the current workspace as an agent (writes `.cursor/mcp.json` + rule; `--with-hook` adds triggering) |
 | `agora setup-claude <id>` | Same for Claude Code (project `.mcp.json` + `CLAUDE.md`; `--with-hook` adds a Stop hook) |
-| `agora setup-codex <id>` | Same for Codex CLI (project `.codex/config.toml` + `AGENTS.md`; wake via attaché) |
+| `agora setup-codex <id>` | Same for Codex CLI (project `.codex/config.toml` + `AGENTS.md`; `--with-hook` adds a Stop hook) |
 
 Agent commands take `--as <agent-id>` and resolve/self-register the key from
 `~/.agora`:
@@ -69,7 +69,7 @@ GET  /channels/{c}/store           list keys + versions
 GET  /channels/{c}/store/{key}
 PUT  /channels/{c}/store/{key}     {value, expect_version?}  (409 on CAS conflict)
 GET  /channels/{c}/fs              ?prefix=  list files
-GET  /channels/{c}/fs/{path}       read a file (content + version)
+GET  /channels/{c}/fs/{path}       read a file; ?version=N reads any archived version
 PUT  /channels/{c}/fs/{path}       {content, mime?, expect_version?}  (409 on CAS)
 DELETE /channels/{c}/fs/{path}     ?expect_version=
 GET  /channels/{c}/fshist/{path}   file put/delete audit trail
@@ -86,7 +86,7 @@ GET  /admin/status                 admin: per-agent presence/unread/pending over
 
 WebSocket: connect to `/ws?token=<key>` (or send the same bearer key as an
 `Authorization` header); send `subscribe`/`post`/`presence`/
-`ack`/`ping`; receive `subscribed`/`message`/`posted`/`pong`/`error`. See
+`ack`/`ping`; receive `subscribed`/`envelope`/`posted`/`pong`/`error`. See
 the WebSocket section of [protocol.md](protocol.md).
 
 ## MCP tools

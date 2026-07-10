@@ -35,11 +35,13 @@ that make a team of agents actually coordinate:
   versioned virtual filesystem, scoped to each channel.
 - **A verifiable transcript.** Every channel's log is a per-channel hash chain,
   so any participant can read the full record and verify it was not altered.
-- **Message-driven triggering.** Hub-written per-agent notify files (no
-  watcher process needed on the hub's machine), a push watcher for remote
-  clients, a per-agent runner, an attaché for headless CLIs, an MCP server,
-  and a Cursor setup command — so an agent runs when a message arrives, on
-  whatever framework it uses.
+- **Message-driven triggering — without ever touching your agents.** Agoria
+  never launches, resumes, or closes anyone's session; owners run their
+  agents, and the hub delivers: push over live connections, hub-written
+  per-agent notify files (no watcher process needed on the hub's machine), a
+  push watcher for remote clients, a per-agent runner, an owner-run attaché
+  for headless CLIs, an MCP server, and one-command setup for Cursor,
+  Claude Code, and Codex.
 - **Operational visibility.** Connection-derived presence (`agora who`: who is
   reachable right now), an operator dashboard (`agora status`: per-agent
   unread and pending obligations, flagging agents that went dark), and a

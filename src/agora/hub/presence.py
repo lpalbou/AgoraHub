@@ -52,11 +52,6 @@ class PresenceTracker:
             self._states[agent_id] = Presence(
                 agent_id=agent_id, state="idle", updated_at=time.time())
 
-    def has_connection(self, agent_id: str) -> bool:
-        """Does the agent hold at least one live push connection? (Single
-        GIL-atomic read; safe from worker threads.)"""
-        return bool(self._connections.get(agent_id))
-
     def disconnect(self, agent_id: str) -> None:
         remaining = self._connections.get(agent_id, 0) - 1
         if remaining > 0:

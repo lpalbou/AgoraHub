@@ -1,38 +1,49 @@
-#!/bin/bash
-# agora `stop`-hook for a Cursor IDE tab.
-#
-# Fires when this tab finishes a turn. Checks the agora inbox INSTANTLY (no
-# long-poll). If messages are already waiting, it returns a `followup_message`
-# that re-prompts THIS tab to handle them; otherwise it returns empty in well
-# under a second and the tab is immediately free for the human.
-#
-# NEVER add a long-poll (?wait=) here: a human shares this tab, and a blocking
-# hook freezes it and queues their requests behind the agent. True always-on
-# wake belongs in a headless runner or the attache (docs/triggering.md).
-#
-# Requires: curl, jq. Set AGORA_URL / AGORA_API_KEY (same values as this
-# workspace's .cursor/mcp.json, e.g. sourced from .cursor/agora.env).
-set -euo pipefail
-
-: "${AGORA_URL:=http://127.0.0.1:8765}"
-: "${AGORA_API_KEY:?set AGORA_API_KEY for this agent}"
-
-# Instant check for unread envelopes (no wait parameter).
-unread=$(curl -s -m 5 \
-  -H "Authorization: Bearer ${AGORA_API_KEY}" \
-  "${AGORA_URL}/inbox" || echo '[]')
-
-count=$(echo "$unread" | jq 'length' 2>/dev/null || echo 0)
-
-if [ "$count" -gt 0 ]; then
-  # Re-prompt this tab. Keep it short: the agent will use its MCP tools
-  # (check_inbox / read_message) to actually read and act. This just wakes it.
-  jq -n --arg n "$count" '{
-    followup_message: ("You have \($n) unread agora message(s). Call check_inbox, "
-      + "triage them, read (read_message) what warrants it, act, reply where a "
-      + "reply is owed (status open/blocked), then ack_inbox. When done, stop.")
-  }'
-else
-  # Nothing waiting: no follow-up, let the tab rest.
-  echo '{}'
-fi
+#!/usr/bin/env python3
+# Example agora stop-hook for a Cursor workspace. The canonical way to
+# install this is `agora setup-cursor <agent-id> --with-hook`, which
+# generates it with your hub URL and agent id baked in. Kept here only
+# as a reference for the manual path — edit URL/AGENT below if copying.
+import json, os, sys, urllib.request
+URL = 'http://127.0.0.1:8765'
+AGENT = 'your-agent-id'
+try:
+    payload = json.load(sys.stdin)
+except Exception:
+    payload = {}
+home = os.environ.get("AGORA_HOME", os.path.expanduser("~/.agora"))
+try:
+    keys = json.load(open(os.path.join(home, "keys.json")))
+except Exception:
+    keys = {}
+key = keys.get(f"{URL}::{AGENT}", "")
+NOOP = "{}"
+if not key or payload.get("stop_hook_active"):
+    print(NOOP) if NOOP else None; sys.exit(0)
+try:
+    req = urllib.request.Request(f"{URL}/inbox",
+                                 headers={"Authorization": f"Bearer {key}"})
+    with urllib.request.urlopen(req, timeout=5) as r:
+        unread = json.load(r)
+except Exception:
+    unread = []
+state_path = os.path.join(home, f"hook-state-{AGENT}.json")
+try:
+    prompted = json.load(open(state_path))
+except Exception:
+    prompted = {}
+fresh = [e for e in unread
+         if e.get("seq", 0) > prompted.get(e.get("channel", ""), 0)]
+if fresh:
+    for e in fresh:
+        c = e.get("channel", "")
+        prompted[c] = max(prompted.get(c, 0), e.get("seq", 0))
+    try:
+        json.dump(prompted, open(state_path, "w"))
+    except Exception:
+        pass
+    msg = (f"You have {len(unread)} unread agora message(s) "
+           f"({len(fresh)} new since last prompt). "
+           "check_inbox, act, reply where owed, ack_inbox, then stop.")
+    print(json.dumps({'followup_message': msg}))
+else:
+    print(NOOP) if NOOP else None

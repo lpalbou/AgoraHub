@@ -103,6 +103,19 @@ CREATE TABLE IF NOT EXISTS cursors (
     last_seq    INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (agent_id, channel)
 );
+-- Append-only archive of every fs version's CONTENT with provenance: the
+-- store row holds only the head, so without this a v6 write destroys what
+-- v1..v5 said. Deletes archive a NULL value (the tombstone itself has
+-- provenance). Rows are never updated or removed.
+CREATE TABLE IF NOT EXISTS fs_versions (
+    channel     TEXT NOT NULL,
+    key         TEXT NOT NULL,
+    version     INTEGER NOT NULL,
+    value       TEXT,               -- NULL = this version is a delete
+    updated_by  TEXT NOT NULL,
+    updated_at  REAL NOT NULL,
+    PRIMARY KEY (channel, key, version)
+);
 """
 
 
@@ -707,6 +720,14 @@ class Database:
                 " updated_by=excluded.updated_by, updated_at=excluded.updated_at",
                 (channel, key, json.dumps(value), new_version, updated_by, now),
             )
+            # Same transaction: the head and its archived copy can never
+            # disagree (a v6 write no longer destroys what v1..v5 said).
+            self._conn.execute(
+                "INSERT OR REPLACE INTO fs_versions"
+                " (channel, key, version, value, updated_by, updated_at)"
+                " VALUES (?,?,?,?,?,?)",
+                (channel, key, new_version, json.dumps(value), updated_by, now),
+            )
             self._conn.commit()
         return StoreEntry(channel=channel, key=key, value=value, version=new_version,
                           updated_by=updated_by, updated_at=now)
@@ -733,16 +754,44 @@ class Database:
                 " WHERE channel = ? AND key = ?",
                 (json.dumps({"deleted": True}), new_version, updated_by, now, channel, key),
             )
+            # The delete itself is an archived, attributed version (value NULL).
+            self._conn.execute(
+                "INSERT OR REPLACE INTO fs_versions"
+                " (channel, key, version, value, updated_by, updated_at)"
+                " VALUES (?,?,?,NULL,?,?)",
+                (channel, key, new_version, updated_by, now),
+            )
             self._conn.commit()
         return new_version
 
+    def fs_version(self, channel: str, key: str, version: int) -> dict[str, Any] | None:
+        """One archived version's content + provenance, or None if that
+        version was never archived (pre-archive files) or was a delete."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value, version, updated_by, updated_at FROM fs_versions"
+                " WHERE channel = ? AND key = ? AND version = ?",
+                (channel, key, version),
+            ).fetchone()
+        if row is None or row["value"] is None:
+            return None
+        return {"value": json.loads(row["value"]), "version": row["version"],
+                "updated_by": row["updated_by"], "updated_at": row["updated_at"]}
+
     def fs_keys_live(self, channel: str, prefix: str) -> list[dict[str, Any]]:
         """List non-tombstoned file keys under a prefix (deleted files excluded
-        server-side via json_extract, so a lister never sees a removed file)."""
+        server-side via json_extract, so a lister never sees a removed file).
+        Carries the writer's description, a short content head (fallback
+        description material) and the content size — listing stays one query,
+        never a content fetch per file."""
         pattern = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
         with self._lock:
             rows = self._conn.execute(
-                "SELECT key, version, updated_by, updated_at FROM store"
+                "SELECT key, version, updated_by, updated_at,"
+                "       COALESCE(json_extract(value, '$.description'), '') AS description,"
+                "       substr(COALESCE(json_extract(value, '$.content'), ''), 1, 200) AS head,"
+                "       LENGTH(COALESCE(json_extract(value, '$.content'), '')) AS size"
+                " FROM store"
                 " WHERE channel = ? AND key LIKE ? ESCAPE '\\'"
                 " AND COALESCE(json_extract(value, '$.deleted'), 0) = 0 ORDER BY key",
                 (channel, pattern),

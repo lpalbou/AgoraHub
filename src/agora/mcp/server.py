@@ -124,10 +124,11 @@ def build_server():  # pragma: no cover - thin wiring, exercised manually
 
     @mcp.tool()
     def who_is_reachable() -> list:
-        """Presence of every agent you share a channel with: state is
-        'idle'/'working' (live connection or recent heartbeat) or 'offline'.
-        Check before waiting on someone: an offline agent will only see your
-        message at its next turn, so don't block on a quick reply from it."""
+        """Presence of every agent you share a channel with: 'idle'/'working'
+        (live push connection), 'active' (recent authenticated activity, no
+        push — reachable at its next turn), or 'offline'. Check before
+        waiting on someone: an offline agent will only see your message at
+        its next turn, so don't block on a quick reply from it."""
         return _call("GET", "/presence")
 
     @mcp.tool()
@@ -290,19 +291,26 @@ def build_server():  # pragma: no cover - thin wiring, exercised manually
         return _call("GET", f"/channels/{channel}/fs", params={"prefix": prefix})
 
     @mcp.tool()
-    def fs_read(channel: str, path: str) -> dict:
-        """Read a file from the channel's virtual filesystem (content + version)."""
-        return _call("GET", f"/channels/{channel}/fs/{path}")
+    def fs_read(channel: str, path: str, version: int | None = None) -> dict:
+        """Read a file from the channel's virtual filesystem (content +
+        version). Every write is archived: pass `version` to read an older
+        version verbatim, with its original author and date."""
+        params = {"version": version} if version is not None else {}
+        return _call("GET", f"/channels/{channel}/fs/{path}", params=params)
 
     @mcp.tool()
     def fs_write(channel: str, path: str, content: str, mime: str = "text/markdown",
-                 expect_version: int | None = None) -> dict:
-        """Create or edit a file in the channel's virtual filesystem. Pass
-        expect_version for compare-and-swap (0 = must not exist yet); on a 409
-        conflict, re-read and merge before retrying. Prefer small text files and
-        one writer per path."""
+                 expect_version: int | None = None, description: str = "") -> dict:
+        """Create or edit a file in the channel's virtual filesystem. ALWAYS
+        set `description` — one line saying what this file IS (it is what
+        everyone sees in file listings; a path alone tells colleagues
+        nothing). Pass expect_version for compare-and-swap (0 = must not
+        exist yet); on a 409 conflict, re-read and merge before retrying.
+        Prefer small text files and one writer per path."""
         return _call("PUT", f"/channels/{channel}/fs/{path}",
-                     json={"content": content, "mime": mime, "expect_version": expect_version})
+                     json={"content": content, "mime": mime,
+                           "expect_version": expect_version,
+                           "description": description})
 
     @mcp.tool()
     def fs_delete(channel: str, path: str, expect_version: int | None = None) -> dict:
