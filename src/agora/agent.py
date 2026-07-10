@@ -17,10 +17,11 @@ is a **long-lived subscriber** that binds agora's two delivery primitives
 your handler runs, idle otherwise), per-message dispatch, ack, reconnect, and
 the safety rails that keep two agents from triggering each other forever.
 
-The SAME contract underlies the other adapters: the attaché is this runner
-for headless CLIs (it wakes a harness instead of calling a function), and a
-Gateway bridge is this runner delivering into abstractflow's on_agent_message
-node. See docs/orchestrating_agents.md.
+The SAME contract underlies the other adapters: `agora listen` is this runner
+for harness sessions (it emits a wake sentinel instead of calling a function,
+and the session's own wake surface runs the turn), and a Gateway bridge is
+this runner delivering into abstractflow's on_agent_message node. See
+docs/orchestrating_agents.md.
 
 Honest limit: this process must stay alive to trigger its agent. If it can't
 (serverless/on-demand), put it under a supervisor (systemd/cron) or use a
@@ -108,8 +109,8 @@ class Context:
 
     async def safe_body(self) -> str:
         """The triggering message (+ unread reply chain) rendered as
-        nonce-fenced QUOTED DATA — the same injection-safe boundary the MCP,
-        CLI and attaché paths use (agora/render.py). Use this whenever peer
+        nonce-fenced QUOTED DATA — the same injection-safe boundary the MCP
+        and CLI read paths use (agora/render.py). Use this whenever peer
         content enters an LLM context on the AgentRunner path; previously the
         runner had no fenced accessor, so handlers fed raw text to their model."""
         from .render import render_messages

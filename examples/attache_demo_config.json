@@ -1,9 +1,0 @@
-{
-  "hub_url": "http://127.0.0.1:8821",
-  "api_key": "agora_REPLACE_WITH_AGENT_KEY",
-  "command": "sh examples/attache_fake_harness.sh",
-  "debounce_seconds": 1.0,
-  "max_triggers_per_hour": 12,
-  "only_when_idle": true,
-  "state_file": "/tmp/agora_c4_attache_state.json"
-}

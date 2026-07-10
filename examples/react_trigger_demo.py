@@ -63,7 +63,7 @@ async def worker(api_key: str, invite_handoff: asyncio.Future, dm_ready: asyncio
     await client.create_channel(CHANNEL)
     invite_handoff.set_result(await client.create_invite(CHANNEL, "sender"))
     await client.connect(channels=[CHANNEL])      # push -> client.inbox (WebSocket)
-    await client.set_presence("working")          # tells any attache: don't wake me
+    await client.set_presence("working")          # peers/status see: mid-turn, don't block on me
 
     algorithm = "A"          # the behavior a mid-run steer will change
     notes: list[str] = []    # steers folded in, consumed by the next Thought

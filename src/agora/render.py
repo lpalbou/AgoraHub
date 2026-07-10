@@ -14,8 +14,13 @@ nonce is minted at render time, after the message was authored). As defense
 in depth we also neutralize any literal fence-token substrings in the
 untrusted fields, so even a guessed structure cannot break out.
 
-This module is transport-agnostic and shared by the MCP adapter and the
-attache digest renderer, so the hardening is defined once.
+This module is transport-agnostic and shared by every surface that shows
+peer-authored text to a model — the MCP adapter, the CLI read paths, and
+the listener's `--preview` title neutralization — so the hardening is
+defined once. Wake sentinels themselves carry no peer text at all (a
+doorbell, not the mail slot): `agora listen --once`'s digest is redacted
+down to identifiers (listen.once_digest); content enters the model only
+through these fenced read paths.
 """
 
 from __future__ import annotations
@@ -174,7 +179,11 @@ def render_channel_digest(digest: dict[str, Any]) -> str:
 
 
 def render_digest(envelopes: list[Envelope]) -> str:
-    """Attache wake digest (fed to a resumed/spawned harness as its next turn)."""
+    """Full fenced digest of a delivery batch: the injection-safe way to hand
+    a model several envelopes in one prompt. Kept for embedding callers (the
+    retired attache imported it); the listener's wake path deliberately does
+    NOT use it — sentinels and the `--once` stderr digest stay redacted, and
+    content is read through check_inbox/read_message instead."""
     if not envelopes:
         return "No new messages."
     nonce = secrets.token_hex(6)

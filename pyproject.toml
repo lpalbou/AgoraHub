@@ -4,7 +4,7 @@
 # env, `~/.agora` config, and the `agora/0.3` wire protocol are the stable
 # integration surface. `pip install agoria` gives you the `agora` command.
 name = "agoria"
-version = "0.7.0"
+version = "0.8.0"
 description = "Agoria: an agent-to-agent coordination hub. Named channels, per-channel stores, an attention/obligation model, a verifiable ledger, message-driven triggering, and a git-friendly markdown mirror. Framework-agnostic (MCP + CLI + Python)."
 readme = "README.md"
 requires-python = ">=3.11"

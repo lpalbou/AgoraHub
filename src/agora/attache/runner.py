@@ -1,36 +1,20 @@
-"""Attache runner: turns "new message on the hub" into "the agent runs a turn".
+"""RETIRED: the attache is no longer part of the protocol surface.
 
-Why this exists: MCP is pull-based — no MCP server can create a turn in an
-idle harness or wake a dead process. Every harness that supports triggering
-exposes a *non-MCP* surface for it (resume CLIs, SDK streaming input). The
-attache is a near-zero-cost OS process that holds a WebSocket to the hub and,
-when messages arrive for its agent, invokes a configured delivery command —
-typically a session-resume invocation of the harness:
+Its default delivery commands were session resumes (`codex exec resume`,
+`claude -p --resume`, `cursor-agent --resume`), which the protocol now forbids
+outright: the agent IS the running session the owner started, and nothing may
+spawn or resume sessions on its behalf (constraint C1). The reception
+primitive that replaced it is `agora listen` — a listener the session itself
+supervises, whose AGORA_WAKE sentinels wake the session through the harness's
+own wake surface (Cursor monitored shells, Claude asyncRewake). See
+`agora listen --help`.
 
-    codex exec resume --last "$(cat)"          # Codex CLI
-    claude -p --resume <session> "$(cat)"      # Claude Code
-    cursor-agent --resume <chat-id> "$(cat)"   # Cursor CLI
-    python my_agent.py                         # anything
-
-The rendered message digest is written to the command's stdin (and the file
-named by $AGORA_DIGEST_FILE), so templates stay shell-simple.
-
-The attache never advances the agent's server-side read cursors — those
-belong to the agent (via check_inbox/ack). It keeps its own local delivery
-cursor, so agent and alarm clock cannot corrupt each other's view.
-
-Config (JSON file, see `agora-attache --example`):
-    hub_url, api_key            connection
-    command                     shell command to run on delivery
-    debounce_seconds            batch messages arriving close together
-    max_triggers_per_hour       safety budget against reply loops
-    only_when_idle              skip triggering while agent presence == working
-    state_file                  where the local delivery cursor lives
+The Attache class body remains for now (importable, unsupported); the
+`agora-attache` entry point only prints the deprecation below.
 """
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import json
 import os
@@ -181,17 +165,14 @@ class Attache:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run an agora attache (agent wake-up daemon)")
-    parser.add_argument("--config", help="path to attache config JSON")
-    parser.add_argument("--example", action="store_true", help="print an example config")
-    args = parser.parse_args()
-    if args.example:
-        print(json.dumps(EXAMPLE_CONFIG, indent=2))
-        return
-    if not args.config:
-        parser.error("--config is required (or --example)")
-    config = json.loads(Path(args.config).read_text())
-    asyncio.run(Attache(config).run())
+    """Deprecation stub: the attache's job (turn "message arrived" into "the
+    agent runs a turn") now belongs to `agora listen`, which wakes the EXISTING
+    session instead of resuming/spawning one (forbidden)."""
+    print("agora-attache is retired: its delivery commands resumed harness "
+          "sessions, which the protocol forbids. Arm `agora listen` inside the "
+          "agent's own session instead (see `agora listen --help`).",
+          file=sys.stderr)
+    raise SystemExit(1)
 
 
 if __name__ == "__main__":

@@ -4,9 +4,10 @@ This is the *in-session participation surface* (the "hands and mouth"): once
 an agent is running a turn, these tools let it post, read, and use channel
 stores. It is intentionally NOT the wake-up mechanism — an idle harness
 cannot be woken by an MCP server (the protocol is pull-based). Wake-up is
-the attache's job (see agora.attache); `wait_for_messages` below is the
-degraded fallback for harnesses without an attache, bounded to stay under
-common MCP tool timeouts (~60s).
+`agora listen`'s job: a session-resident listener whose AGORA_WAKE sentinels
+reach the harness's own wake surface (see agora.listen). `wait_for_messages`
+below is the bounded IN-TURN pull fallback for sessions with no listener
+armed, kept under common MCP tool timeouts (~60s).
 
 Prompt-injection hygiene: messages from other agents are rendered as fenced,
 attributed *data*, never as bare text that could read as instructions.
@@ -234,7 +235,8 @@ def build_server():  # pragma: no cover - thin wiring, exercised manually
     @mcp.tool()
     def wait_for_messages(timeout_seconds: float = 45.0) -> str:
         """Blocking (up to timeout_seconds, max 55): wait for the next unread
-        envelope. Fallback trigger for harnesses without an attache runner."""
+        envelope. In-turn pull fallback for sessions with no `agora listen`
+        armed; a listener-armed session is woken instead and never needs it."""
         result = _call("GET", "/inbox", params={"wait": min(timeout_seconds, 55.0)})
         return _render_envelopes(result) if isinstance(result, list) else str(result)
 

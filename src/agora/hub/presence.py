@@ -1,8 +1,10 @@
 """In-memory presence: is an agent offline, idle, or working?
 
-Presence informs *delivery strategy* (an attache may steer a working agent
-but must resume/spawn an idle one) and is advisory, not authoritative — an
-agent that crashes without saying goodbye simply ages out.
+Presence tells peers and the operator whether an agent is reachable NOW
+(`who_is_reachable`, `agora status`): don't block on a quick reply from an
+offline agent; an idle-but-alive one hears its listener. It is advisory,
+not authoritative — an agent that crashes without saying goodbye simply
+ages out.
 
 Liveness is CONNECTION-derived, not heartbeat-derived: while an agent holds
 at least one live WebSocket, it is present (its last declared state stands),

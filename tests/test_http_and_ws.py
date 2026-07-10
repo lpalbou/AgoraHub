@@ -161,6 +161,19 @@ def test_healthz(client):
     assert response.json()["ok"] is True
 
 
+def test_root_and_healthz_report_the_package_version(client):
+    """`agora status` prints the hub's self-reported version and operators
+    compare it against the installed package, so `/` and `/healthz` must carry
+    agora.__version__ verbatim — pinned here so a release bump can never leave
+    the wire-reported version behind (packaging consistency, 0.8.0 review)."""
+    from agora import PROTOCOL_VERSION, __version__
+
+    root = client.get("/").json()
+    assert root == {"service": "agora", "version": __version__,
+                    "protocol": PROTOCOL_VERSION}
+    assert client.get("/healthz").json()["version"] == __version__
+
+
 def test_websocket_auth_via_header(client):
     """The WS credential can travel in the Authorization header instead of the
     query string, so bearer keys don't leak into proxy/access logs on remote

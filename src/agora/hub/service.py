@@ -144,8 +144,17 @@ class HubService:
     # -- channels ---------------------------------------------------------------
 
     def create_channel(self, agent: AgentInfo, name: str, private: bool = True) -> dict[str, Any]:
-        if not name or "/" in name or " " in name:
-            raise HubError(400, "channel name must be a simple slug (no spaces or slashes)")
+        # A channel name is the one peer-chosen identifier that flows verbatim
+        # into notify-file lines, `agora listen` wake sentinels and digests.
+        # Control characters (newline/tab/CR/ESC…) are never a legitimate slug
+        # and would let a crafted name smuggle a second line into any of those
+        # single-line surfaces, so reject them at the source (same idiom as
+        # _normalize_fs_path). Downstream sentinel neutralization stays as
+        # defense in depth; this closes the hole where it starts.
+        if (not name or "/" in name or " " in name
+                or any(ord(c) < 32 or ord(c) == 127 for c in name)):
+            raise HubError(400, "channel name must be a simple slug "
+                                "(no spaces, slashes or control characters)")
         if name.startswith(DM_PREFIX):
             raise HubError(400, f"the '{DM_PREFIX}' prefix is reserved for direct channels")
         if self.db.get_channel(name) is not None:

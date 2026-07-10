@@ -68,7 +68,8 @@ def cmd_up(args: argparse.Namespace) -> None:
     print("  set up a Cursor agent:  agora setup-cursor <agent-id> --with-hook  (run in its workspace)")
     app = create_app(db_path=db_path, admin_key=admin_key,
                      rate_per_minute=args.rate_per_minute,
-                     notify_dir=notify_dir or None)
+                     notify_dir=notify_dir or None,
+                     notify_rotate_mb=args.notify_rotate_mb)
     # Pin WS keepalive explicitly: connection-derived presence relies on dead
     # sockets being detected within a bounded window (audit M4). Defaults can
     # differ per uvicorn/ws backend; make the bound deliberate.
@@ -133,8 +134,11 @@ def cmd_setup_codex(args: argparse.Namespace) -> None:
     if args.with_hook:
         print("Then review/approve the Stop hook once via /hooks (re-approve "
               "if the hook file ever changes).")
-    print("Wake-from-idle without a running turn is the OWNER's choice: run an "
-          "attaché (`codex exec resume --last \"$(cat)\"` — agora-attache --example).")
+    # The attaché is retired (its default commands were session resumes, which
+    # the protocol forbids); Codex has no idle-wake surface, so be honest here.
+    print("Note: Codex has no idle-wake surface; the Stop hook drains bursts at "
+          "turn ends, otherwise messages wait for the next turn (that is "
+          "expected). Harnesses with a wake surface use `agora listen`.")
     _warn_if_not_project_root(workspace, args.agent)
 
 
@@ -555,6 +559,38 @@ def cmd_watch(args):
     asyncio.run(_main())
 
 
+def _listener_state(home: Path, agent_id: str) -> str:
+    """`agora status` listener column from `listen-<id>.pid`: live pid + mtime
+    fresher than 2x the default heartbeat = "armed"; pidfile whose holder is
+    dead or stale = "STALE"; no pidfile = "-" (nothing armed)."""
+    import time as _time
+
+    from .listen import DEFAULT_HEARTBEAT, pid_alive
+    pid_path = Path(home) / f"listen-{agent_id}.pid"
+    try:
+        pid = int(pid_path.read_text().strip() or "0")
+        mtime = pid_path.stat().st_mtime
+    except (OSError, ValueError):
+        return "-"
+    if pid > 0 and pid_alive(pid) and (_time.time() - mtime) <= 2 * DEFAULT_HEARTBEAT:
+        return "armed"
+    return "STALE"
+
+
+def cmd_listen(args: argparse.Namespace) -> None:
+    """The session-resident listener (proposal_1): tail/subscribe, debounce,
+    emit AGORA_WAKE sentinels. The heavy lifting lives in listen.py; this is
+    only the argparse<->function seam."""
+    from .listen import run_listen
+
+    sys.exit(run_listen(
+        agent_id=args.as_agent, url=args.url, source=args.source, once=args.once,
+        max_wait=args.max_wait, debounce=args.debounce,
+        important_only=args.important_only, preview=args.preview,
+        notify_file=args.notify_file, lock=args.lock, heartbeat=args.heartbeat,
+        poll=args.poll))
+
+
 def cmd_status(args: argparse.Namespace) -> None:
     import httpx
 
@@ -582,13 +618,16 @@ def cmd_status(args: argparse.Namespace) -> None:
         return
     if not isinstance(rows, list):
         return
-    print(f"\n{'agent':<16} {'state':<8} {'unread':>6} {'pending':>7}  oldest-pending")
+    print(f"\n{'agent':<16} {'state':<8} {'listener':<9} {'unread':>6} "
+          f"{'pending':>7}  oldest-pending")
     # The hub can only see what CONTACTS it: an open-but-idle IDE tab makes no
     # calls, so it honestly reads offline even though it will respond at its
     # next prompt. Spell that out or every operator misreads the table.
     legend = ("  states: idle/working = live push connection | active = made an "
               "authenticated call <10m ago |\n  offline = no contact (an open but "
-              "idle IDE tab reads offline; it acts at its next prompt/turn)")
+              "idle IDE tab reads offline; it acts at its next prompt/turn)\n"
+              "  listener: armed = live `agora listen` pidfile | STALE = pidfile "
+              "but dead/old | - = none")
     for row in rows:
         oldest = row["oldest_pending_minutes"]
         oldest_s = f"{oldest:.0f}m" if oldest is not None else "-"
@@ -609,8 +648,9 @@ def cmd_status(args: argparse.Namespace) -> None:
             last = row.get("last_refusal") or {}
             flag += (f" <- BLOCKED-SEND: {row['refused_sends_1h']}x last hour "
                      f"(last: {last.get('code')} {str(last.get('detail'))[:60]})")
-        print(f"{row['agent_id']:<16} {row['state']:<8} {row['unread']:>6} "
-              f"{row['pending_obligations']:>7}  {oldest_s}{flag}")
+        listener = _listener_state(_config.home(), row["agent_id"])
+        print(f"{row['agent_id']:<16} {row['state']:<8} {listener:<9} "
+              f"{row['unread']:>6} {row['pending_obligations']:>7}  {oldest_s}{flag}")
     print(f"\n{legend}")
 
 
@@ -626,6 +666,10 @@ def main() -> None:
     up.add_argument("--notify-dir", default=None,
                     help="dir for hub-written <agent>-inbox.log files "
                          "(default: ~/.agora; '' disables)")
+    up.add_argument("--notify-rotate-mb", dest="notify_rotate_mb", type=float,
+                    default=8.0,
+                    help="rotate a notify file above N MB to <file>.1 "
+                         "(default 8; 0 disables rotation)")
     up.set_defaults(func=cmd_up)
 
     sc = sub.add_parser("setup-cursor", help="wire a workspace as an agora agent")
@@ -658,6 +702,41 @@ def main() -> None:
 
     st = sub.add_parser("status", help="check hub + config")
     st.set_defaults(func=cmd_status)
+
+    ln = sub.add_parser("listen", help="session-resident listener: emit AGORA_WAKE "
+                                       "sentinels when new messages arrive")
+    ln.add_argument("--as", dest="as_agent", default=None, metavar="AGENT_ID",
+                    help="agent id (default: $AGORA_AGENT_ID, else the nearest "
+                         ".cursor/mcp.json walking up from cwd)")
+    ln.add_argument("--source", choices=["auto", "file", "ws"], default="auto",
+                    help="auto = tail the hub-written notify file when local, "
+                         "else WebSocket push (default: auto)")
+    ln.add_argument("--once", action="store_true",
+                    help="single-shot: exit 2 on the first wake with a digest "
+                         "on stderr (the Claude asyncRewake contract)")
+    ln.add_argument("--max-wait", dest="max_wait", type=float, default=None,
+                    help="--once: exit 0 silently after S seconds without a wake "
+                         "(default: wait forever)")
+    ln.add_argument("--debounce", type=float, default=15.0,
+                    help="coalesce a burst into ONE wake sentinel (default 15s)")
+    ln.add_argument("--important-only", dest="important_only", action="store_true",
+                    help="wake only on to-me/reply-to-me/critical/escalated "
+                         "or open/blocked")
+    ln.add_argument("--preview", action="store_true",
+                    help="append a neutralized title preview to wake sentinels "
+                         "(default: identifiers only)")
+    ln.add_argument("--notify-file", dest="notify_file", default=None,
+                    help="ws mode: ALSO append raw notify lines here "
+                         "(byte-compatible with hub-written files)")
+    ln.add_argument("--lock", default=None,
+                    help="lockfile path (default <AGORA_HOME>/listen-<id>.lock); "
+                         "a second instance exits 0 immediately")
+    ln.add_argument("--heartbeat", type=float, default=300.0,
+                    help="touch the pidfile + emit a heartbeat sentinel every "
+                         "S seconds (default 300)")
+    ln.add_argument("--url", default=None)
+    ln.add_argument("--poll", type=float, default=0.5, help=argparse.SUPPRESS)
+    ln.set_defaults(func=cmd_listen)
 
     # --- agent-facing verbs (identity via --as) ---
     def _agent_parser(name, help_):
@@ -775,15 +854,17 @@ def main() -> None:
         # pipe early. Without this handler Python exits 120 (failed stdout
         # flush at shutdown), which scripts misread as a semantic signal.
         # For READER commands the work completed: exit 0. For long-runners
-        # (up/watch/mirror) a broken pipe means dying mid-stream: exit 1 so a
-        # restart-on-failure supervisor actually restarts them (audit M3).
+        # (up/watch/mirror/listen) a broken pipe means dying mid-stream: exit 1
+        # so a supervisor (or the arming ritual) sees the failure (audit M3).
         devnull = os.open(os.devnull, os.O_WRONLY)
         os.dup2(devnull, sys.stdout.fileno())
-        sys.exit(1 if args.cmd in ("up", "watch", "mirror") else 0)
+        sys.exit(1 if args.cmd in ("up", "watch", "mirror", "listen") else 0)
     except Exception as e:  # noqa: BLE001 — one clean line, not a stack trace
         # Hub refusals (AgoraError) and connection problems reach humans and
         # scripts as a single actionable line; exit 1 keeps it scriptable.
-        from .client import AgoraError
+        # (Import from the module: the package __init__ does not re-export it,
+        # which used to crash this very handler with an ImportError.)
+        from .client.client import AgoraError
         if isinstance(e, AgoraError):
             sys.exit(f"agora {args.cmd} failed: {e}")
         import httpx
