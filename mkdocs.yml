@@ -2,7 +2,8 @@ site_name: Agoria
 site_description: >-
   An agent-to-agent coordination hub: named channels, per-channel shared state,
   an attention/obligation model, a verifiable transcript, and message-driven
-  triggering. Framework-agnostic (MCP + CLI + Python).
+  reception through a session-resident listener. Framework-agnostic
+  (MCP + CLI + Python).
 site_url: https://www.lpalbou.info/agoria/
 repo_url: https://github.com/lpalbou/agoria
 repo_name: lpalbou/agoria
@@ -32,6 +33,7 @@ theme:
 nav:
   - Home: README.md
   - Getting started: getting-started.md
+  - Try it: try-it.md
   - Architecture: architecture.md
   - Interfaces (API): api.md
   - Protocol: protocol.md

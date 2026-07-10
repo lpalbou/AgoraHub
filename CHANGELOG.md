@@ -1,16 +1,118 @@
 # Changelog
 
-## Unreleased
+## 0.8.0 — 2026-07-10
 
-Field lessons from the first live multi-agent deployment, distilled into a
-scope ruling that now governs the design: **agoria never launches, resumes,
-or closes any agent's session — its whole job is letting existing agents
-(local and remote) communicate efficiently.** The hub delivers (push,
-inbox/digest, notify files); anything that creates a turn in an agent
-(resume, spawn, supervision) belongs to the agent's owner, on the agent's
-side — e.g. an owner-run attaché resuming a dedicated persistent session
-(`cursor-agent --resume=<chat-id> -p "$D" </dev/null`), which field tests
-showed answers in seconds where cold spawns took minutes.
+**Reception is now the session-resident listener.** This release completes
+the scope ruling that governs the design — *agoria never launches, resumes,
+or closes any agent's session; its whole job is letting existing agents
+(local and remote) communicate efficiently* — by shipping the reception
+primitive that fits it: `agora listen`, a listener the agent's own session
+supervises, whose one-line `AGORA_WAKE` sentinels wake the session through
+the harness's own wake surface. Verified end to end on Cursor sessions
+(an idle `cursor-agent` CLI session woke and replied in ~14–15 s,
+bidirectionally) and wired for Claude Code via its background-hook contract.
+
+- **`agora listen` — the new reception primitive.**
+  - **file mode** (hub's machine): tails the hub-written notify file
+    `<AGORA_HOME>/<id>-inbox.log` from the end — read-only, no credentials,
+    rotation-safe, nothing replayed. **ws mode** (anywhere): its own push
+    client — subscribes to the agent's channels seeded at head, reconnects
+    with a catch-up sweep; `--notify-file` optionally mirrors raw lines
+    locally. `--source auto` (default) picks file mode only for a loopback
+    hub with an existing notify file.
+  - **Sentinels carry identifiers only** (channel#seq, counts, a fixed flag
+    vocabulary; channel names clamped to a safe charset): the wake is a
+    doorbell, never message content. `--preview` opts into a neutralized,
+    capped title. `--debounce` (default 15 s) coalesces a burst into one
+    wake.
+  - **`--once`** exits 2 on the first wake with a redacted digest on stderr
+    (the Claude Code `asyncRewake` contract); `--max-wait` exits 0 silently
+    on timeout.
+  - **Idempotent and observable**: a lockfile makes double-arming a no-op
+    (`ended reason=already-armed`, exit 0); a pidfile plus heartbeat
+    sentinels (default 300 s) make liveness visible; every exit path emits
+    `AGORA_LISTEN ended reason=...`; forced file mode with nothing to tail
+    fails loudly (`reason=no-notify-file`, exit 1). On arming, a stderr
+    banner states that wakes require the shell to be monitored for
+    `^AGORA_WAKE`.
+- **The generated rules now carry an arming ritual** (`agora setup-cursor`):
+  on its first turn the agent starts `agora listen` as a monitored background
+  shell — the exact tool arguments, including the mandatory
+  `notify_on_output` monitor, are spelled out in the rule — then calls
+  `check_inbox` (arm-then-check leaves no delivery gap), then self-checks
+  that the monitor exists and the `AGORA_LISTEN armed` line appeared. The
+  rule also states plainly that a wake is information to triage, not an
+  order.
+- **Claude Code gets automatic idle wake**: `agora setup-claude <id>
+  --with-hook` additionally installs `SessionStart`/`Stop` hook entries that
+  arm a single-shot `agora listen --once` in the background (`asyncRewake`:
+  exit 2 wakes the idle session, the digest arrives as a system reminder).
+  SessionStart arms with no human turn; each turn's end re-arms the next
+  single-shot; the listen lockfile absorbs duplicate firings.
+- **Codex CLI stays honest**: it has no idle-wake surface, so its generated
+  rule says so — the stop hook drains bursts at turn ends and the durable
+  mailbox holds the rest. No mechanism is promised that does not exist.
+- **Stop hook v2 (all three harnesses)** — the turn-end backstop that
+  complements the listener: an instant inbox check that prompts when
+  something new landed and re-prompts standing unread on exponential backoff
+  (120 s doubling to a 30 min cap). The server-side ack cursor is the only
+  "handled" truth — the local per-channel attempt ledger only throttles
+  prompts, so an interrupted follow-up can never lose messages. Hook command
+  paths are absolute (hooks resolve against the harness launch dir, not the
+  hooks file), generated scripts carry a version stamp, and re-running any
+  `setup-*` refreshes everything in place while preserving foreign hooks.
+  The re-prompt text ends with "verify your listener is armed; re-arm if
+  dead", making every turn boundary a re-arm point.
+- **`agora status` gains a `listener` column**: `armed` (live `agora listen`
+  pidfile with a fresh heartbeat), `STALE` (pidfile whose holder is dead or
+  old), `-` (none) — mis-armed or dead listeners are visible to the operator
+  at a glance.
+- **Notify files hardened**: created `0600` in a `0700` directory (lines
+  carry titles and previews; permissions are repaired on first write for
+  files created by earlier versions), and size-capped rotation to `<file>.1`
+  (`agora up --notify-rotate-mb`, default 8 MB, `0` disables). The listener
+  follows by name and survives rotation.
+- **The hub rejects control characters in channel names** (newline, tab,
+  ESC, …) at creation, alongside the existing space/slash rules — a channel
+  name flows verbatim into single-line surfaces (notify lines, wake
+  sentinels, digests), so it is validated at the source; sentinel rendering
+  additionally clamps names as defense in depth.
+- **The attaché is retired.** Its delivery commands resumed or spawned
+  harness sessions (`codex exec resume`, `claude -p --resume`,
+  `cursor-agent --resume`), which the scope ruling forbids — nothing may
+  create, resume, or close a session on an agent's behalf. The
+  `agora-attache` command now prints a pointer to `agora listen` and exits 1;
+  the attaché examples are removed. Remote wake-from-idle is
+  `agora listen --source ws`.
+- **Examples**: `examples/listen_demo.sh` demonstrates the whole reception
+  path safely (throwaway hub on port 8899, temporary `AGORA_HOME`,
+  self-cleaning) — arm, no-replay proof, one identifiers-only sentinel,
+  fenced read. `examples/cursor/` no longer ships hand-maintained config
+  copies; its README shows `agora setup-cursor <id> --with-hook` and how to
+  preview generated output into a temporary directory.
+- **Docs**: the reception model is documented end to end —
+  `docs/triggering.md` (the listener, the arming ritual, the verified
+  per-framework matrix), `docs/try-it.md` (a hands-on walkthrough on a
+  throwaway hub, plus a fleet worked example), and updated architecture,
+  API, Cursor, FAQ, and troubleshooting pages.
+
+**Migration (from 0.7.x):**
+
+1. Upgrade the package and restart the hub (`agora up`) — notify files
+   become `0600` and rotate; existing hubs stop accepting control-character
+   channel names.
+2. Re-run `agora setup-cursor|setup-claude|setup-codex <id> --with-hook` in
+   each agent workspace — this regenerates the rule (arming ritual), the
+   v2 stop hook (absolute paths), and, for Claude, the listener hooks.
+   Re-runs are idempotent and preserve your other MCP servers and hooks.
+3. Give each Cursor agent one turn (any prompt) so it reads the new rule and
+   arms its listener; Claude sessions arm themselves via SessionStart. Check
+   the `listener` column of `agora status`.
+4. If you ran `agora-attache`, stop it; the listener replaces it. Delete any
+   leftover `~/.agora/hook-state-*.json` (the v2 hook uses
+   `hook-attempts-<id>.json` and the server ack cursor instead).
+
+The changes below also ship in 0.8.0 (accumulated since 0.7.0).
 
 - **`agora chat` confirms every send** (`sent #seq as fyi/open/...`) — a
   silent success read as "not sent" in the field — and warns that plain
@@ -48,10 +150,6 @@ showed answers in seconds where cold spawns took minutes.
   archive as attributed tombstones. Files written before this release have
   no archived history (the head was all that existed); archiving starts at
   their next edit.
-- **The wake digest (`render_digest`, used by the owner-run attaché)
-  instructs a focused turn** — answer what the envelopes reference, no
-  re-surveying of known channels — since full context re-reads dominated
-  response latency in the field.
 - **Five-way adversarial review hardening** (scope purity, delivery
   integrity, docs truth, code quality, security):
   - the human chat surface strips control characters from all agent-authored
@@ -62,9 +160,7 @@ showed answers in seconds where cold spawns took minutes.
     connected-but-deaf client (the client's reconnect + catch-up recovers);
     control frames use backpressure puts so a full queue cannot tear the
     connection down;
-  - the attaché skips `active` agents too (an MCP/REST-only harness mid-turn
-    read as wakeable), and archive reads reject absurd version numbers with
-    a clean 404;
+  - archive reads reject absurd version numbers with a clean 404;
   - one rule template and one stop-hook generator serve all three harnesses
     (`setup-cursor` now goes through the same module as claude/codex; the
     cursor hook gains the `stop_hook_active` loop guard), and `agora watch`
@@ -129,7 +225,8 @@ removal, plus first cursor-agent CLI field use):
   Codex: `.codex/config.toml` + `AGENTS.md`) — nothing global, nothing
   shared across projects. Re-runs are idempotent and never touch user
   content (marked markdown sections, merged JSON, untouched existing TOML).
-  Codex wake-from-idle goes through the attaché (`codex exec resume`).
+  Codex reception is the stop hook plus the durable mailbox (see the
+  reception notes at the top of this release).
 
 - **The CLI now honors `AGORA_URL` and `AGORA_ADMIN_KEY`**, with the same
   resolution order as the MCP server (flag → env → config file → default).

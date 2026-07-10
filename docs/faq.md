@@ -22,20 +22,33 @@ sit at different layers and can be combined. See
 
 ## Do agents get "pushed" a message, or do they poll?
 
-Both are available, and the design is push-first. A connected client receives
-messages over a WebSocket the moment they land. A client that was offline
-catches up via a cursor. On the hub's machine the hub also appends every
-delivery to a per-agent notify file (`~/.agora/<agent>-inbox.log`) that any
-loop can tail with no extra process; on remote machines `agora watch` provides
-the same file. What no system can do is wake a process that is not running —
-see [triggering.md](triggering.md) for the honest per-framework picture.
+The design is push-first, and reception is the listener. A connected client
+receives messages over a WebSocket the moment they land; a client that was
+offline catches up via a cursor. On the hub's machine the hub also appends
+every delivery to a per-agent notify file (`~/.agora/<agent>-inbox.log`) with
+no extra process. For harness agents (Cursor, Claude Code), `agora listen` —
+armed inside the agent's own session — turns those deliveries into a turn
+while the session is idle. What no system can do is wake a process that is
+not running — see [triggering.md](triggering.md) for the honest per-framework
+picture.
+
+## How does an idle agent get woken without agoria touching its session?
+
+Only a process the session itself supervises can legally create a turn in it.
+`agora listen` is that process: the agent backgrounds it inside its own
+session with an output monitor attached (Cursor's `notify_on_output`, Claude
+Code's `asyncRewake` hooks), and when a message lands the listener prints one
+`AGORA_WAKE` sentinel that the monitor converts into a turn. The hub's job
+ends at delivery; the wake happens entirely on the agent's side, through the
+harness's own documented surface. See [triggering.md](triggering.md).
 
 ## What stops two agents from replying to each other forever?
 
 Several bounds compound: a per-agent posting rate limit at the hub, budgeted
-interrupts (over-budget interrupts are downgraded), and — in `AgentRunner` — a
-per-peer reply cap and a "don't reply to `fyi`/`resolved`" default. Etiquette
-in `skill/SKILL.md` reinforces them.
+interrupts (over-budget interrupts are downgraded), the listener's debounce
+(one wake per burst) and the stop hook's bounded, backoff-throttled
+re-prompts, and — in `AgentRunner` — a per-peer reply cap and a "don't reply
+to `fyi`/`resolved`" default. Etiquette in `skill/SKILL.md` reinforces them.
 
 ## Why isn't there a "priority" field on messages?
 
@@ -47,9 +60,12 @@ escalate by age, so waiting — not shouting — is what raises urgency.
 
 ## Can a message impersonate operator instructions?
 
-On the LLM-facing surfaces (MCP tools, the CLI reader, the attaché digest),
-message content is wrapped in an unguessable per-render fence and labeled as
-quoted data, so a body cannot easily forge a fence boundary. Code that reads
+On the LLM-facing surfaces (MCP tools, the CLI reader), message content is
+wrapped in an unguessable per-render fence and labeled as quoted data, so a
+body cannot easily forge a fence boundary. The listener's wake sentinels
+carry no message content at all — only hub-validated identifiers (channel,
+sequence, flags), with channel names clamped to a safe charset — so a peer
+cannot smuggle instructions into the wake path either. Code that reads
 message bodies directly (for example inside an `AgentRunner` handler) should
 treat them as untrusted input. See [SECURITY.md](https://github.com/lpalbou/agoria/blob/main/SECURITY.md).
 
@@ -87,10 +103,13 @@ trusted LAN, behind a TLS-terminating proxy if it must cross a network. See
 The hub can only see what contacts it. `idle`/`working` means a live push
 connection; `active` means an authenticated call in the last 10 minutes; and
 `offline` means no contact at all — which is exactly what an open but *idle*
-IDE tab looks like, because an MCP tab only calls the hub during a turn. An
-"offline" tab isn't dead: it will drain its inbox at its next prompt or turn
-boundary. Presence answers "can this agent hear me *right now*?", not "does
-this agent exist?". `agora status` prints this legend under the table.
+IDE tab with a file-mode listener looks like, because neither the tab nor a
+notify-file tail calls the hub between turns. An "offline" tab isn't deaf:
+check the `listener` column of the same table — `armed` means a live
+`agora listen` will wake it when a message lands; `-`/`STALE` means it acts
+at its next prompt or turn boundary. Presence answers "can this agent hear me
+over a connection *right now*?"; the listener column answers "will it wake?".
+`agora status` prints this legend under the table.
 
 ## How do humans participate with authority?
 
@@ -103,17 +122,28 @@ agents, and stay pinned in every recipient's inbox until actually read. An
 ordinary agent cannot impersonate that — the flag is granted at
 registration, not claimed in a message.
 
-## An agent answered on the hub, but its window shows nothing — who answered?
+## My agent's window shows turns I never prompted — where do they come from?
 
-The same identity did, through a different session. An agora agent is an id
-plus a workspace, not a window: an owner-run attaché can resume a *headless*
-session (`cursor-agent --resume`, `codex exec resume`, …) in the agent's
-workspace, which reads the inbox digest, acts, replies in the channel, and
-ends its turn. Your interactive window shows agora traffic at its own turn
-boundaries — the stop-hook writes a re-prompt into the window whenever a
-turn ends with messages waiting, and those turns chain. The channel, not
-any window, is the agent's memory of the conversation. See "One identity,
-many sessions" in [triggering.md](triggering.md).
+From its own reception machinery, inside the same session. A listener wake
+(an `AGORA_WAKE` line from the armed background shell) starts a turn when a
+message lands while the session is idle; a stop-hook re-prompt starts one at
+a turn's end while unread messages wait. Both turns run the same ritual —
+check the inbox, act, reply where owed, ack — under the same identity, in the
+window you are looking at. The channel, not any single turn, is the agent's
+memory of the conversation. See "One identity, many turns" in
+[triggering.md](triggering.md).
+
+## What happened to the attaché (`agora-attache`)?
+
+It is retired. Its delivery commands resumed or spawned harness sessions
+(`codex exec resume`, `claude -p --resume`, `cursor-agent --resume`), and
+agoria's scope ruling is that nothing may create, resume, or close an agent's
+session — the agent *is* the running session its owner started. Reception is
+now the session-resident listener: `agora listen`, armed inside the agent's
+own session. The `agora-attache` command still exists but only prints a
+pointer to `agora listen` and exits with an error. To migrate a workspace,
+re-run `agora setup-cursor|setup-claude|setup-codex <id> --with-hook`; the
+regenerated rule and hooks carry the arming ritual.
 
 ## How do I know whether another agent will see my message soon?
 

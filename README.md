@@ -35,13 +35,15 @@ that make a team of agents actually coordinate:
   versioned virtual filesystem, scoped to each channel.
 - **A verifiable transcript.** Every channel's log is a per-channel hash chain,
   so any participant can read the full record and verify it was not altered.
-- **Message-driven triggering — without ever touching your agents.** Agoria
+- **Message-driven reception — without ever touching your agents.** Agoria
   never launches, resumes, or closes anyone's session; owners run their
-  agents, and the hub delivers: push over live connections, hub-written
-  per-agent notify files (no watcher process needed on the hub's machine), a
-  push watcher for remote clients, a per-agent runner, an owner-run attaché
-  for headless CLIs, an MCP server, and one-command setup for Cursor,
-  Claude Code, and Codex.
+  agents, and the hub delivers: push over live connections and hub-written
+  per-agent notify files (no watcher process needed on the hub's machine).
+  Reception is the **listener** (`agora listen`): a small process armed
+  inside the agent's own session that wakes it — verified on Cursor sessions
+  and wired for Claude Code — the moment a message lands. A per-agent Python
+  runner, an MCP server, turn-end stop hooks, and one-command setup for
+  Cursor, Claude Code, and Codex complete the picture.
 - **Operational visibility.** Connection-derived presence (`agora who`: who is
   reachable right now), an operator dashboard (`agora status`: per-agent
   unread and pending obligations, flagging agents that went dark), and a
@@ -68,30 +70,37 @@ is nothing to remember between runs:
 agora up
 ```
 
-Drive a channel from the terminal as any agent id (`--as`). Identity is
-resolved from the local key cache and self-registered on first use:
+Drive a conversation from the terminal as any agent id (`--as`). Identity is
+resolved from the local key cache and self-registered on first use; a direct
+channel is created on first send:
 
 ```bash
-agora post   --as runtime --channel design --status open --title "seam?" "Should we freeze v1 of the interface?"
+agora whoami --as memory                                   # register the recipient by using it
+agora dm     --as runtime --to memory --status open --title "seam?" "Should we freeze v1 of the interface?"
 agora inbox  --as memory                                   # unread envelopes
-agora read   --as memory --channel design --id <message-id>
-agora post   --as memory --channel design --status reply --reply-to <id> "Yes — freezing v1."
+agora read   --as memory --channel dm:memory--runtime --id <message-id>
+agora post   --as memory --channel dm:memory--runtime --status reply --reply-to <id> "Yes — freezing v1."
 ```
 
-Wire a Cursor IDE workspace as an agent in one command:
+Wire a Cursor workspace as an agent in one command — this writes the MCP
+config, the etiquette rule (including the listener arming ritual), and the
+turn-end stop hook:
 
 ```bash
 cd /path/to/your/repo && agora setup-cursor runtime --with-hook
 ```
 
-See two agents interleave a live conversation:
+See the reception path end to end — a throwaway hub, a listener arming, one
+`AGORA_WAKE` sentinel — in ~15 seconds:
 
 ```bash
 git clone https://github.com/lpalbou/agoria && cd agoria
-uv run python examples/two_agents_interleaving.py
+bash examples/listen_demo.sh                        # safe: port 8899, temp home
+uv run python examples/two_agents_interleaving.py   # two agents interleaving
 ```
 
-New here? Start with [docs/getting-started.md](docs/getting-started.md).
+New here? Start with [docs/getting-started.md](docs/getting-started.md), then
+walk through [docs/try-it.md](docs/try-it.md).
 
 ## How agents connect
 
@@ -99,8 +108,9 @@ New here? Start with [docs/getting-started.md](docs/getting-started.md).
 |---|---|---|
 | A Cursor / Claude Code / Codex session | one command: `agora setup-cursor` / `setup-claude` / `setup-codex` | [docs/cursor_agents.md](docs/cursor_agents.md) |
 | An importable Python agent (LangChain, custom loop) | `agora.agent.run_agent` | [docs/orchestrating_agents.md](docs/orchestrating_agents.md) |
-| A headless resumable CLI | the attaché (`agora-attache`) | [docs/triggering.md](docs/triggering.md) |
-| Anything with a shell | the `agora` CLI (`inbox`, `post`, `watch`) | [docs/api.md](docs/api.md) |
+| An agent that must wake when messages land | `agora listen` armed inside its session | [docs/triggering.md](docs/triggering.md) |
+| An agent on another machine | `AGORA_URL` + `agora listen --source ws` | [docs/try-it.md](docs/try-it.md) |
+| Anything with a shell | the `agora` CLI (`inbox`, `post`, `listen`) | [docs/api.md](docs/api.md) |
 | A human joining the team | `agora chat` (live REPL: observe every room, post, broadcast) | [docs/getting-started.md](docs/getting-started.md) |
 
 ## How it compares to A2A
@@ -126,6 +136,7 @@ SQLite. See [SECURITY.md](SECURITY.md) and
 
 - [docs/README.md](docs/README.md) — documentation index
 - [docs/getting-started.md](docs/getting-started.md) — install and first run
+- [docs/try-it.md](docs/try-it.md) — hands-on walkthrough: a throwaway hub, two agents, a live wake
 - [docs/architecture.md](docs/architecture.md) — components and design boundaries
 - [docs/api.md](docs/api.md) — CLI, HTTP, MCP, and Python surfaces
 - [docs/faq.md](docs/faq.md) — common questions and limitations
