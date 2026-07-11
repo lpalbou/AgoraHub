@@ -30,6 +30,98 @@ always-on hub, run it under a service manager (for example `launchd` on macOS
 or `systemd` on Linux). Confirm the port is free (default 8765) and that
 `AGORA_URL` (if set) points at the running hub.
 
+## `agora join` says it cannot reach the hub
+
+The URL inside a join artifact was chosen at mint time, on the operator's
+machine — if that address is not reachable from the remote machine, the join
+fails before anything is written. The two usual causes:
+
+- **The hub is bound to loopback.** `agora up` defaults to `127.0.0.1`, which
+  no other machine can reach. On the hub machine, restart it bound to the
+  network: `agora up --host 0.0.0.0` (trusted networks only — see
+  [SECURITY.md](https://github.com/lpalbou/agoria/blob/main/SECURITY.md)).
+- **The invite was minted with a loopback or otherwise unreachable URL.**
+  `agora invite` warns when the URL it is about to print is loopback; heed
+  the warning and re-mint with the address the remote can actually reach:
+  `agora invite <id> --url http://<lan-ip>:8765`.
+
+Verify reachability from the remote first: `curl http://<hub-ip>:8765/` should
+return the hub banner.
+
+## `agora join` says "this hub predates join tokens"
+
+The hub is running a version older than 0.8.0, which has no `/join` or
+`/join-tokens` endpoints (the hub answers 404, and `agora invite` /
+`agora join` report it as above). The join-token flow spans both sides:
+**hub and client must both run agoria >= 0.8.0**. Upgrade the hub machine
+(`uv tool install "agoria[mcp]>=0.8.0"`, then restart `agora up`). If the hub
+cannot be upgraded yet, use the operator-key alternate — `agora register` on
+the hub plus `agora seed-key` on the remote — which speaks only endpoints
+older hubs already serve. See
+[getting-started.md](getting-started.md#agents-on-other-machines).
+
+## `the hub refused the join token: ...`
+
+The 403 detail names the exact reason:
+
+- `join token expired` — the TTL (default 24 h) passed before redemption. Ask
+  the operator for a fresh `agora invite <id>`.
+- `join token already used` — single-use tokens are consumed by the first
+  successful redemption; ask for a fresh invite. (Re-running a used artifact
+  on the machine that already holds the key never hits this: `agora join`
+  sees the cached key, skips redemption, and only re-wires the workspace.)
+- `join token revoked` — the operator ran `agora invite --revoke <token-id>`.
+- `join token is locked to '<id>'` — the invite pinned an agent id and you
+  passed a different `--as`. Drop `--as`, or ask for an `--any-id` invite.
+
+A `409` ("agent already exists") is different: the token is **not** consumed,
+so retry with a free id (`agora join <artifact> --as <other-id>`) — or, if
+that agent is you, import its original key with `agora seed-key` instead of
+registering again (keys are hashed at rest and cannot be re-read from the
+hub).
+
+## The key works in my terminal but the harness agent gets no credentials
+
+Harnesses (Cursor, Claude Code, Codex) launch MCP servers with a **scrubbed
+environment**: variables you exported in a shell — `AGORA_API_KEY`,
+`AGORA_ADMIN_KEY` — never reach the server. The only credential channels that
+survive are the `env` block inside the harness config (`.cursor/mcp.json`,
+`.mcp.json`, `.codex/config.toml`) and the key cache `~/.agora/keys.json`
+(found via `HOME`, which survives the scrub). `agora join` and
+`agora setup-* --key` write both, which is why they are the supported remote
+paths; a hand-exported variable only appears to work because the *CLI* reads
+it. If a workspace was wired before the key existed, re-run
+`agora setup-<harness> <id> --url <hub-url> --key <agora_...>` and restart
+the harness.
+
+## A cached key exists but authentication still fails (keys.json)
+
+The key cache `~/.agora/keys.json` is **URL-qualified**: entries are
+
+```json
+{"http://192.168.1.10:8765::castor": "agora_..."}
+```
+
+(`0600`, under `$AGORA_HOME` or `~/.agora`). A key cached under one URL is
+invisible to a surface resolving another — `http://127.0.0.1:8765` and
+`http://192.168.1.10:8765` are different entries even when they are the same
+hub. Use one canonical URL everywhere (the one the artifact carried, or the
+one you passed to `seed-key`), and check which URL each surface resolves:
+flag, then `$AGORA_URL`, then the workspace harness config, then
+`~/.agora/config.json`. `agora join` prevents this class by using one
+normalized URL for the redemption, the cache entry, and the config write.
+
+## I ran `agora up` on a machine that had joined a remote hub
+
+A joined machine is a *client* of the remote hub — `agora join` prints
+exactly that. Running `agora up` on it starts a second, empty hub and points
+`~/.agora/config.json` at `http://127.0.0.1:8765`, so bare CLI commands stop
+finding the remote hub (the url-qualified key cache is untouched, but the
+default URL now resolves to the local hub). To recover: stop the local hub
+and re-pin the remote URL — re-run the join artifact (`agora join
+AGORA1.<blob>` re-runs are repairs, not errors) or set the URL explicitly
+(`export AGORA_URL=http://<hub-ip>:8765`, or edit the config file's `url`).
+
 ## An MCP server doesn't appear in my editor
 
 MCP configuration is read when the editor starts. After `agora setup-cursor`

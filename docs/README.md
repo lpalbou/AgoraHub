@@ -8,15 +8,16 @@ the overview and install.
 
 ## Core documentation
 
-- [getting-started.md](getting-started.md) — install, start the hub, and run a
-  first conversation between two agents.
+- [getting-started.md](getting-started.md) — install, start the hub, run a
+  first conversation between two agents, and onboard agents on other machines
+  (`agora invite` / `agora join`).
 - [try-it.md](try-it.md) — hands-on walkthrough: a throwaway test hub, two
   wired workspaces, and one agent waking the other; plus a worked example of
   wiring a real multi-workspace fleet, local and remote.
 - [architecture.md](architecture.md) — components, the core model, the
-  message and wake flows, and the invariants the hub maintains.
-- [api.md](api.md) — the CLI (including `agora listen`), HTTP, MCP, and
-  Python interfaces, and configuration.
+  message, wake, and join flows, and the invariants the hub maintains.
+- [api.md](api.md) — the CLI (including `agora listen` and the remote
+  onboarding commands), HTTP, MCP, and Python interfaces, and configuration.
 - [faq.md](faq.md) — common questions, design rationale, and current limits.
 - [troubleshooting.md](troubleshooting.md) — symptom-oriented fixes.
 

@@ -244,25 +244,46 @@ next prompt — the listener column is what tells those two apart.
 
 ### Remote agents (over the network)
 
-Agents on other machines use the same listener in WebSocket mode. On the hub
-machine, bind beyond localhost — only on a network you trust (see
+Agents on other machines join with one paste. Two hub-side preconditions
+first. Bind beyond localhost — `agora up`'s default `127.0.0.1` is
+unreachable from any other machine — and only on a network you trust (see
 [SECURITY.md](https://github.com/lpalbou/agoria/blob/main/SECURITY.md)):
 
 ```bash
 agora up --host 0.0.0.0
 ```
 
-On each remote machine, export the hub URL and a credential, then wire and
-arm exactly as above:
+And run agoria **0.8.0 or newer on both machines**: the join flow redeems
+tokens against `POST /join`, which a 0.7.0 hub does not serve (`agora join`
+then reports "this hub predates join tokens").
+
+On the hub machine, mint an invite per remote agent, with the address the
+remote can reach:
 
 ```bash
-export AGORA_URL=http://hub-machine:8765
-export AGORA_ADMIN_KEY=...        # trusted-team shortcut: agents self-register
-                                  # (or seed the agent's own key into ~/.agora/keys.json)
-
-agora whoami --as observer        # registers + caches the key locally
-cd /path/to/workspace && agora setup-cursor observer --with-hook --url "$AGORA_URL"
+agora invite observer --channels general --url http://<hub-lan-ip>:8765
 ```
+
+It prints a single line — `agora join AGORA1.<blob>` — carrying the URL and a
+single-use, expiring, revocable join token (never the admin key, which stays
+on the hub machine). For provisioning several machines from one invite, mint
+with `--any-id --uses N`; each remote then picks its id with
+`agora join <artifact> --as <id>`.
+
+On the remote machine, paste that line in the agent's workspace folder:
+
+```bash
+cd /path/to/workspace && agora join AGORA1.<blob> --with-hook
+```
+
+That one command registers the agent, caches its key in `~/.agora/keys.json`,
+pins the hub URL in `~/.agora/config.json`, verifies with `GET /whoami`, and
+wires the workspace exactly as `setup-cursor` does locally (pass
+`--harness claude|codex|none` for the other shapes). The key lands both in
+`keys.json` and in the harness config's env block as `AGORA_API_KEY`, so the
+scrubbed harness environment, the CLI, the listener, and the stop hook all
+authenticate — keep the harness config out of version control. Do not run
+`agora up` on the joined machine; it is a client of the hub.
 
 A remote listener runs over the WebSocket — its own push client, with
 reconnect and a catch-up sweep after outages:

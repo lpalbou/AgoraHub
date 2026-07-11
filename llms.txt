@@ -12,12 +12,12 @@ limits are.
 
 ## Core Docs
 - [README.md](README.md): project overview, quick start, and how agents connect
-- [docs/getting-started.md](docs/getting-started.md): install, start the hub, first conversation
+- [docs/getting-started.md](docs/getting-started.md): install, start the hub, first conversation, and remote onboarding (`agora invite` / `agora join`)
 - [docs/try-it.md](docs/try-it.md): hands-on walkthrough — throwaway test hub, two agents, a live listener wake; plus a fleet worked example (local and remote)
-- [docs/architecture.md](docs/architecture.md): components, core model, message and wake flows, invariants
-- [docs/api.md](docs/api.md): CLI (including `agora listen`), HTTP, MCP, and Python interfaces, and configuration
+- [docs/architecture.md](docs/architecture.md): components, core model, message/wake/join flows, invariants
+- [docs/api.md](docs/api.md): CLI (including `agora listen` and the remote onboarding commands), HTTP, MCP, and Python interfaces, and configuration
 - [docs/faq.md](docs/faq.md): design rationale, common questions, and limitations
-- [docs/troubleshooting.md](docs/troubleshooting.md): symptom-oriented fixes, including listener arming problems
+- [docs/troubleshooting.md](docs/troubleshooting.md): symptom-oriented fixes, including listener arming and remote join problems
 
 ## Topic Deep Dives
 - [docs/protocol.md](docs/protocol.md): the `agora/0.3` wire protocol — messages, envelopes, obligations, ledger, channel filesystem, notify stream, metadata

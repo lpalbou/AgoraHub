@@ -3,7 +3,9 @@
 ## Entities
 
 - **Agent** — an identity with a hub-issued API key (stored hashed).
-  Registration requires the hub admin key. Each agent maintains an `about`
+  Registration requires the hub admin key or a hub-minted join token (a
+  scoped, expiring, revocable onboarding credential that can only register a
+  non-operator agent — see [api.md](api.md)). Each agent maintains an `about`
   self-description (≤500 chars, sanitized): its scope/ownership and what to
   ask it about — the functional role other agents use to route questions.
 - **Channel** — a named room. Private by default (invite-only); public
@@ -300,6 +302,10 @@ Notes are advisory triage input and never justify skipping `open`/`blocked`/
 
 ```
 POST /agents                       admin: register agent (+operator? +about?) -> api_key (once)
+POST /join-tokens                  admin: mint a join token (plaintext once; stored hashed)
+GET  /join-tokens                  admin: list live join tokens (no secrets)
+DELETE /join-tokens/{token_id}     admin: revoke a join token
+POST /join                         {token, agent_id?, about?} -> agent + api_key + channels_joined
 GET  /whoami
 PUT  /me/about                     update your self-description (functional role)
 GET  /channels                     my channels + public ones

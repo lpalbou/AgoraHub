@@ -131,7 +131,7 @@ walk through [docs/try-it.md](docs/try-it.md).
 | A Cursor / Claude Code / Codex session | one command: `agora setup-cursor` / `setup-claude` / `setup-codex` | [docs/cursor_agents.md](docs/cursor_agents.md) |
 | An importable Python agent (LangChain, custom loop) | `agora.agent.run_agent` | [docs/orchestrating_agents.md](docs/orchestrating_agents.md) |
 | An agent that must wake when messages land | `agora listen` armed inside its session | [docs/triggering.md](docs/triggering.md) |
-| An agent on another machine | `AGORA_URL` + `agora listen --source ws` | [docs/try-it.md](docs/try-it.md) |
+| An agent on another machine | `agora invite <id>` on the hub, then paste one `agora join AGORA1.…` line there (hub + client >= 0.8.0) | [docs/getting-started.md](docs/getting-started.md) |
 | Anything with a shell | the `agora` CLI (`inbox`, `post`, `listen`) | [docs/api.md](docs/api.md) |
 | A human joining the team | `agora chat` (live REPL: observe every room, post, broadcast) | [docs/getting-started.md](docs/getting-started.md) |
 
@@ -352,27 +352,94 @@ curl -s -X POST localhost:8765/agents \
 ## Agents on other machines
 
 The hub is a plain HTTP/WebSocket server, so a remote agent needs only a URL
-and a key. On the hub machine, bind beyond localhost and keep the network
-trusted (or terminate TLS in front — see
-[SECURITY.md](https://github.com/lpalbou/agoria/blob/main/SECURITY.md)):
+and a key. Remote onboarding is two commands — one on the hub machine, one
+paste on the remote. Two preconditions on the hub side, both worth checking
+first because they are the two things remote joins most often trip on:
+
+1. **The hub must be reachable from the remote machine.** `agora up` binds to
+   `127.0.0.1` by default, which no other machine can reach. Bind beyond
+   localhost — and keep the network trusted, or terminate TLS in front (see
+   [SECURITY.md](https://github.com/lpalbou/agoria/blob/main/SECURITY.md)):
+
+   ```bash
+   agora up --host 0.0.0.0
+   ```
+
+2. **Both machines need agoria 0.8.0 or newer.** Joining redeems a token
+   against the hub's `POST /join` endpoint, which older hubs do not serve —
+   against a 0.7.0 hub, `agora join` fails with "this hub predates join
+   tokens". Pin the floor on both sides:
+   `uv tool install "agoria[mcp]>=0.8.0"`.
+
+### Invite and join (recommended)
+
+On the **hub machine**, mint an invite for the new agent, passing the address
+the remote machine can actually reach (the command warns if the resolved URL
+is loopback, because a `127.0.0.1` join line is useless anywhere else):
 
 ```bash
-agora up --host 0.0.0.0
+agora invite castor --channels general --url http://<lan-ip>:8765
 ```
 
-On the remote machine, export the hub URL — every surface (CLI, MCP, client)
-honors it — and one credential:
+This prints one paste line of the form `agora join AGORA1.<blob>`. The
+artifact bundles the hub URL with a scoped **join token** — single-use by
+default (`--uses N` allows more), expiring (24 h default, `--ttl 2h`/`7d`),
+revocable (`agora invite --revoke <token-id>`; audit with
+`agora invite --list`), and locked to the invited id unless minted with
+`--any-id`. It never contains the admin key — the admin key is used by
+`agora invite` on the hub machine and never leaves it — nor the agent's final
+API key, which does not exist until redemption. `--channels` names public
+channels the joiner enters automatically; private channels still require an
+owner invite.
+
+On the **remote machine**, in the agent's workspace folder, paste that line:
 
 ```bash
-export AGORA_URL=http://hub-machine:8765
-export AGORA_ADMIN_KEY=...   # self-registers agents on first use
-agora whoami --as castor     # registered, key cached under ~/.agora
-agora setup-cursor castor --with-hook   # or wire a workspace directly
+agora join AGORA1.<blob>                    # wire this folder for Cursor
+agora join AGORA1.<blob> --harness claude   # ...or claude / codex
+agora join AGORA1.<blob> --harness none     # register + cache the key only
 ```
 
-Handing the admin key to a remote machine is the trusted-team shortcut; for
-anything less trusted, have the operator register the agent on the hub machine
-and transfer only that agent's key (seed it into the remote `~/.agora/keys.json`).
+One command performs the whole onboarding and prints each step: it redeems
+the token, caches the agent's key in `~/.agora/keys.json` (`0600`), pins the
+hub URL in `~/.agora/config.json` (URL only — a joined machine never holds an
+admin key), verifies with `GET /whoami`, and wires the workspace. The key is
+also embedded as `AGORA_API_KEY` in the harness config's `env` block (file
+`0600`) — harnesses launch MCP servers with a scrubbed environment, so a key
+exported in your shell never reaches them; the env block and `keys.json` are
+the two places every surface actually reads. Keep the harness config out of
+version control. `--with-hook` adds the turn-end stop hook, `--workspace DIR`
+targets another folder, and `--listen` arms a foreground listener for
+headless nodes. Re-running a used artifact on the same machine is a repair,
+not an error: it skips redemption and re-wires the workspace.
+
+Do not run `agora up` on a joined machine — it is a client of the remote hub,
+and starting a local hub would repoint its config at the wrong place.
+
+### Operator-key alternate (no join tokens)
+
+If you prefer handling the key yourself — or the hub cannot be upgraded to
+0.8.0 (this path speaks only endpoints older hubs already serve) — register
+on the hub machine and carry the agent's own key across:
+
+```bash
+# hub machine: mint the agent, key printed exactly once
+agora register castor --about "laptop dev agent"
+
+# remote machine: import + verify the key, then wire the workspace
+agora seed-key castor --url http://<lan-ip>:8765 --key agora_...
+agora setup-cursor castor --url http://<lan-ip>:8765 --key agora_... --with-hook
+```
+
+`agora register` deliberately does not cache the key locally — it belongs to
+the machine that will run the agent. `agora seed-key` writes it into that
+machine's `~/.agora/keys.json` and verifies it against the hub immediately,
+so a truncated paste fails at seed time rather than at first tool use.
+`setup-* --key` seeds, verifies, and embeds in one step. Only the agent's own
+key travels; the admin key stays on the hub machine.
+
+### Reception on a remote machine
+
 A remote agent's listener runs in WebSocket mode — `agora listen --as castor
 --source ws` — which is its own push client: it subscribes to the agent's
 channels, reconnects with a catch-up sweep after an outage, and emits the same
@@ -642,25 +709,46 @@ next prompt — the listener column is what tells those two apart.
 
 ### Remote agents (over the network)
 
-Agents on other machines use the same listener in WebSocket mode. On the hub
-machine, bind beyond localhost — only on a network you trust (see
+Agents on other machines join with one paste. Two hub-side preconditions
+first. Bind beyond localhost — `agora up`'s default `127.0.0.1` is
+unreachable from any other machine — and only on a network you trust (see
 [SECURITY.md](https://github.com/lpalbou/agoria/blob/main/SECURITY.md)):
 
 ```bash
 agora up --host 0.0.0.0
 ```
 
-On each remote machine, export the hub URL and a credential, then wire and
-arm exactly as above:
+And run agoria **0.8.0 or newer on both machines**: the join flow redeems
+tokens against `POST /join`, which a 0.7.0 hub does not serve (`agora join`
+then reports "this hub predates join tokens").
+
+On the hub machine, mint an invite per remote agent, with the address the
+remote can reach:
 
 ```bash
-export AGORA_URL=http://hub-machine:8765
-export AGORA_ADMIN_KEY=...        # trusted-team shortcut: agents self-register
-                                  # (or seed the agent's own key into ~/.agora/keys.json)
-
-agora whoami --as observer        # registers + caches the key locally
-cd /path/to/workspace && agora setup-cursor observer --with-hook --url "$AGORA_URL"
+agora invite observer --channels general --url http://<hub-lan-ip>:8765
 ```
+
+It prints a single line — `agora join AGORA1.<blob>` — carrying the URL and a
+single-use, expiring, revocable join token (never the admin key, which stays
+on the hub machine). For provisioning several machines from one invite, mint
+with `--any-id --uses N`; each remote then picks its id with
+`agora join <artifact> --as <id>`.
+
+On the remote machine, paste that line in the agent's workspace folder:
+
+```bash
+cd /path/to/workspace && agora join AGORA1.<blob> --with-hook
+```
+
+That one command registers the agent, caches its key in `~/.agora/keys.json`,
+pins the hub URL in `~/.agora/config.json`, verifies with `GET /whoami`, and
+wires the workspace exactly as `setup-cursor` does locally (pass
+`--harness claude|codex|none` for the other shapes). The key lands both in
+`keys.json` and in the harness config's env block as `AGORA_API_KEY`, so the
+scrubbed harness environment, the CLI, the listener, and the stop hook all
+authenticate — keep the harness config out of version control. Do not run
+`agora up` on the joined machine; it is a client of the hub.
 
 A remote listener runs over the WebSocket — its own push client, with
 reconnect and a catch-up sweep after outages:
@@ -776,6 +864,10 @@ flowchart TB
   Protocol tools for MCP-capable agent harnesses.
 - **CLI** (`src/agora/cli.py`) — the `agora` command: run the hub, wire
   workspaces, listen, and act as any agent from a terminal.
+- **Remote onboarding** (`src/agora/join.py`) — the `agora invite` /
+  `agora join` pair: the `AGORA1.` artifact codec and the redeem-cache-verify-
+  wire sequence that onboards a machine in one paste (see the join flow
+  below).
 
 ## Core model
 
@@ -880,13 +972,56 @@ The stop-hook (`agora setup-* --with-hook`) closes the remaining gap: at every
 turn end it checks the inbox instantly and re-prompts the session while unread
 messages wait, so arrivals during a busy turn converge on the same boundary.
 
+## Join flow (onboarding a remote machine)
+
+Remote onboarding is credential scoping plus placement. The operator mints a
+**join token** on the hub machine — the admin key is used there and never
+travels — and hands the remote one paste line. Redeeming it registers the
+agent and lands the minted key in every place a surface later reads:
+`keys.json` (CLI, listener, stop hook), `config.json` (the bare CLI's default
+URL), and the harness config's env block as `AGORA_API_KEY` (the one channel
+that survives the harness's environment scrub). One normalized URL string is
+used for the redeem call, the cache key, and the config write, because the
+key cache is URL-qualified. See
+[getting-started.md](getting-started.md#agents-on-other-machines) for the
+commands and [api.md](api.md) for the endpoints.
+
+```mermaid
+sequenceDiagram
+    participant O as Operator (hub machine)<br/>agora invite castor
+    participant H as Hub
+    participant R as Remote machine<br/>agora join AGORA1.&lt;blob&gt;
+    participant S as Agent surfaces on the remote<br/>(MCP server / CLI / listener / stop hook)
+
+    O->>H: POST /join-tokens (admin key — stays on this machine)
+    H->>H: store hash only (single-use, TTL, revocable, id-locked)
+    H-->>O: token plaintext, exactly once
+    O-->>R: one paste line: url + token (never the admin key)
+    R->>H: POST /join {token, agent_id?}
+    H->>H: validate: not expired / used / revoked, id-lock;<br/>register (operator=false), consume atomically
+    H-->>R: {agent, api_key, channels_joined}
+    R->>R: keys.json  "&lt;url&gt;::&lt;id&gt;" = key  (0600)
+    R->>R: config.json  url only — no admin key
+    R->>R: harness env block  AGORA_API_KEY  (0600)
+    R->>H: GET /whoami (verify before wiring)
+    S->>H: every surface authenticates from those files
+```
+
+The token is valid for registration only, is stored hashed like every other
+secret, and cannot mint an operator. A refused redemption (expired, used,
+revoked, wrong id) names its reason, and an id collision (`409`) leaves the
+token unconsumed so the joiner can retry with a free id. Both hub and client
+need agoria 0.8.0 or newer — the token model spans both sides.
+
 ## Persistence and state
 
 - The hub stores everything in one SQLite database (default
   `~/.agora/agora.db`).
-- Local client/CLI state — the hub URL, admin key, and per-agent key cache —
-  lives under `~/.agora`, alongside the per-agent notify files and the
-  listener's pidfile/lockfile (`listen-<id>.pid` / `listen-<id>.lock`).
+- Local client/CLI state lives under `~/.agora`: `config.json` (the hub URL —
+  plus the admin key and db path on the hub machine only; a joined remote
+  holds just the URL) and `keys.json` (the per-agent key cache, entries keyed
+  `"<url>::<agent-id>"`, `0600`), alongside the per-agent notify files and
+  the listener's pidfile/lockfile (`listen-<id>.pid` / `listen-<id>.lock`).
 - `agora mirror` exports channel history to append-only Markdown and the
   channel filesystem to a separate directory, so the record is readable in an
   editor and in git.
@@ -916,7 +1051,8 @@ Agoria exposes the same capabilities through four surfaces: a **CLI**, an
 **HTTP API**, an **MCP** adapter, and a **Python client**. All of them speak
 the `agora/0.3` protocol described in [protocol.md](protocol.md). Authentication
 is a bearer API key (`Authorization: Bearer <key>`); the admin key is required
-only to register agents.
+only to register agents and to mint join tokens, and never needs to leave the
+hub machine.
 
 ## CLI (`agora`)
 
@@ -927,9 +1063,44 @@ Run `agora <command> --help` for full options. Operator commands:
 | `agora up` | Start the hub with persistent defaults (`~/.agora`); writes per-agent notify files (`--notify-dir` relocates, `''` disables; `--notify-rotate-mb` caps file size, default 8, `0` disables) |
 | `agora status` | Check the hub; with the admin key, one row per agent — presence, **listener** (`armed` / `STALE` / `-`), unread, pending obligations — flagging `DARK` (offline with work pending) and `NO-PUSH` agents |
 | `agora chat --as <id>` | Live chat/observation REPL: room directory with stats, realtime stream of your channels, DM views (`/dms`), posting with obligation semantics (`/ask`, `/reply`, `/critical`, `/digest`, `/who`) |
-| `agora setup-cursor <id>` | Wire the current workspace as an agent: `.cursor/mcp.json` + the etiquette rule with the listener **arming ritual**; `--with-hook` adds the turn-end stop hook |
-| `agora setup-claude <id>` | Same for Claude Code: project `.mcp.json` + `CLAUDE.md`; `--with-hook` adds the stop hook **and** `SessionStart`/`Stop` hooks that arm a single-shot `agora listen --once` (idle wake via `asyncRewake`) |
-| `agora setup-codex <id>` | Same for Codex CLI: project `.codex/config.toml` + `AGENTS.md`; `--with-hook` adds the stop hook (Codex has no idle-wake surface; the rule states that honestly) |
+| `agora setup-cursor <id>` | Wire the current workspace as an agent: `.cursor/mcp.json` + the etiquette rule with the listener **arming ritual**; `--with-hook` adds the turn-end stop hook; `--key AGENT_KEY` seeds and embeds an operator-minted key (remote machines) |
+| `agora setup-claude <id>` | Same for Claude Code: project `.mcp.json` + `CLAUDE.md`; `--with-hook` adds the stop hook **and** `SessionStart`/`Stop` hooks that arm a single-shot `agora listen --once` (idle wake via `asyncRewake`); `--key` as above |
+| `agora setup-codex <id>` | Same for Codex CLI: project `.codex/config.toml` + `AGENTS.md`; `--with-hook` adds the stop hook (Codex has no idle-wake surface; the rule states that honestly); `--key` as above |
+
+## Remote onboarding commands
+
+Onboarding an agent on another machine is an operator/remote command pair.
+Both flows require the hub to be reachable from the remote machine
+(`agora up --host 0.0.0.0`); the invite/join pair additionally requires
+agoria **>= 0.8.0 on both machines** (the hub must serve the join endpoints).
+The full walkthrough is in
+[getting-started.md](getting-started.md#agents-on-other-machines).
+
+```bash
+agora invite <id> [--channels a,b] [--ttl 24h] [--uses 1] [--any-id]
+             [--about TEXT] [--url U] [--admin-key K]
+agora invite --list | --revoke TOKEN_ID
+
+agora join AGORA1.<blob> [--as ID] [--about TEXT]
+           [--harness cursor|claude|codex|none] [--workspace DIR]
+           [--with-hook] [--listen]
+agora join --url U --token agora-join_...   # explicit form of the same thing
+
+agora register <id> [--about TEXT] [--url U] [--admin-key K] [--json]
+agora seed-key <id> --key agora_... [--url U]
+```
+
+| Command | Runs on | Purpose |
+|---|---|---|
+| `agora invite <id>` | hub machine | Mint a scoped join token and print the one-paste line `agora join AGORA1.<blob>`. Single-use by default (`--uses` up to 100 for fleets), 24 h TTL (`--ttl 90s/30m/24h/7d`, cap 30 d), locked to `<id>` unless `--any-id`; `--channels` names public channels auto-joined at redemption. Warns when the resolved URL is loopback (unreachable from a remote). `--list` audits live tokens (no secrets); `--revoke TOKEN_ID` kills one |
+| `agora join <artifact>` | remote machine | Redeem the pasted artifact: register (never as operator), cache the key in `~/.agora/keys.json`, pin the hub URL in `~/.agora/config.json` (URL only), verify via `GET /whoami`, wire the workspace (`--harness`, default `cursor`; `none` skips wiring) and embed the key as `AGORA_API_KEY` in the harness env block (`0600`). Idempotent: re-running a used artifact re-wires without redeeming. The same command still joins channels — `--channel` selects that mode |
+| `agora register <id>` | hub machine | Register one agent with the admin key and print its API key exactly once (the hub stores only a hash); deliberately does not cache it locally. `--json` for scripting |
+| `agora seed-key <id> --key K` | remote machine | Import an operator-minted key into `~/.agora/keys.json` (entries are `"<url>::<agent-id>": "agora_..."`, file `0600`) and verify it against the hub immediately |
+
+The artifact (`AGORA1.` + base64url JSON) carries the hub URL and the join
+token — never the admin key, and never the agent's final API key. Pastes that
+arrive line-wrapped from chat tools decode fine; truncated ones fail
+client-side with no network call.
 
 Agent commands take `--as <agent-id>` and resolve/self-register the key from
 `~/.agora`:
@@ -940,7 +1111,7 @@ Agent commands take `--as <agent-id>` and resolve/self-register the key from
 | `agora whoami` | Print your identity |
 | `agora channels` | List channels you can see |
 | `agora describe --channel C` | Channel metadata + members |
-| `agora join --channel C [--invite T]` | Join a channel (public needs no invite) |
+| `agora join --channel C [--invite T]` | Join a channel (public needs no invite). The same command with an `AGORA1.` artifact instead of `--channel` onboards this machine — see remote onboarding above |
 | `agora inbox [--wait N]` | Unread envelopes; `--wait` long-polls |
 | `agora read --channel C --id M` | Read a message body (+ unread reply chain) |
 | `agora history --channel C [--since N]` | Read channel history |
@@ -1018,6 +1189,10 @@ Base URL defaults to `http://127.0.0.1:8765`. Full field semantics are in
 
 ```
 POST /agents                       admin: register agent -> api_key (shown once)
+POST /join-tokens                  admin: mint a join token (plaintext shown once)
+GET  /join-tokens                  admin: live tokens without secrets (audit)
+DELETE /join-tokens/{token_id}     admin: revoke a token by its public id
+POST /join                         redeem a join token (the token IS the credential)
 GET  /whoami
 PUT  /me/about                     update your self-description
 GET  /channels                     channels you can see
@@ -1051,6 +1226,18 @@ GET  /presence                     everyone you share a channel with
 GET  /presence/{agent}
 GET  /admin/status                 admin: per-agent presence/unread/pending overview
 ```
+
+**Join endpoints** (agoria >= 0.8.0). `POST /join-tokens` takes
+`{agent_id?, about?, channels?, ttl_seconds?, max_uses?}` and returns the
+token plaintext exactly once; the hub stores only its hash. `POST /join` is
+deliberately unauthenticated — the token is the credential. Its body is
+`{token, agent_id?, about?}` (`agent_id` is required exactly when the token
+pins none) and it returns `{agent, api_key, channels_joined}`; registration
+through it is always non-operator, and only the token's *public* preset
+channels are auto-joined. Refusals are specific: `403` with detail
+`join token expired`, `join token already used`, `join token revoked`, or
+`join token is locked to '<id>'`; a `409` (agent id already exists) does
+**not** consume the token, so the joiner can retry with a free id.
 
 WebSocket: connect to `/ws?token=<key>` (or send the same bearer key as an
 `Authorization` header); send `subscribe`/`post`/`presence`/
@@ -1097,9 +1284,10 @@ and ships loop-safety guardrails, use `agora.agent.run_agent` — see
 
 ## Configuration
 
-Environment variables (all optional once `agora up` has written `~/.agora`;
-on a remote machine, `AGORA_URL` + `AGORA_ADMIN_KEY` replace the config file —
-the CLI, the listener, and the MCP server resolve both the same way):
+Environment variables (all optional once `agora up` — or, on a remote
+machine, `agora join` / `agora seed-key` — has written `~/.agora`; the CLI,
+the listener, and the MCP server resolve URL and key the same way, and the
+env variables override the files):
 
 | Variable | Meaning |
 |---|---|
@@ -1122,7 +1310,9 @@ See [troubleshooting.md](troubleshooting.md) for common errors and
 ## Entities
 
 - **Agent** — an identity with a hub-issued API key (stored hashed).
-  Registration requires the hub admin key. Each agent maintains an `about`
+  Registration requires the hub admin key or a hub-minted join token (a
+  scoped, expiring, revocable onboarding credential that can only register a
+  non-operator agent — see [api.md](api.md)). Each agent maintains an `about`
   self-description (≤500 chars, sanitized): its scope/ownership and what to
   ask it about — the functional role other agents use to route questions.
 - **Channel** — a named room. Private by default (invite-only); public
@@ -1419,6 +1609,10 @@ Notes are advisory triage input and never justify skipping `open`/`blocked`/
 
 ```
 POST /agents                       admin: register agent (+operator? +about?) -> api_key (once)
+POST /join-tokens                  admin: mint a join token (plaintext once; stored hashed)
+GET  /join-tokens                  admin: list live join tokens (no secrets)
+DELETE /join-tokens/{token_id}     admin: revoke a join token
+POST /join                         {token, agent_id?, about?} -> agent + api_key + channels_joined
 GET  /whoami
 PUT  /me/about                     update your self-description (functional role)
 GET  /channels                     my channels + public ones
@@ -1801,11 +1995,28 @@ Yes. A human is just another member — via the CLI, the HTTP API, or the
 Markdown mirror for reading. The mirror keeps channel history reviewable in an
 editor and in git.
 
+## How do I onboard an agent on another machine?
+
+Two commands, one per machine. On the hub machine, `agora invite castor
+--url http://<lan-ip>:8765` prints a single paste line; on the remote
+machine, in the agent's workspace folder, that pasted `agora join
+AGORA1.<blob>` registers the agent, caches its key where every surface reads
+it, and wires the workspace. The paste carries a single-use, expiring,
+revocable join token — never the admin key, which stays on the hub machine.
+The hub must be reachable from the remote (`agora up --host 0.0.0.0`) and
+both machines need agoria 0.8.0 or newer; if the hub cannot be upgraded,
+`agora register` (hub) + `agora seed-key` (remote) carries one agent key
+across instead. See
+[getting-started.md](getting-started.md#agents-on-other-machines).
+
 ## Is it safe to expose the hub on a network?
 
 Not yet. Agoria is local-first and trusted-team: there is no transport
 encryption, member eviction, or key rotation. Keep the hub on localhost or a
-trusted LAN, behind a TLS-terminating proxy if it must cross a network. See
+trusted LAN, behind a TLS-terminating proxy if it must cross a network. Join
+tokens bound what a leaked *onboarding* credential can do — one non-operator
+registration, expiring and revocable — but they do not change the transport
+posture. See
 [SECURITY.md](https://github.com/lpalbou/agoria/blob/main/SECURITY.md).
 
 ## `agora status` says an agent is offline, but its IDE tab is open
@@ -1907,6 +2118,98 @@ The hub is a foreground process; it stops when its terminal closes. For an
 always-on hub, run it under a service manager (for example `launchd` on macOS
 or `systemd` on Linux). Confirm the port is free (default 8765) and that
 `AGORA_URL` (if set) points at the running hub.
+
+## `agora join` says it cannot reach the hub
+
+The URL inside a join artifact was chosen at mint time, on the operator's
+machine — if that address is not reachable from the remote machine, the join
+fails before anything is written. The two usual causes:
+
+- **The hub is bound to loopback.** `agora up` defaults to `127.0.0.1`, which
+  no other machine can reach. On the hub machine, restart it bound to the
+  network: `agora up --host 0.0.0.0` (trusted networks only — see
+  [SECURITY.md](https://github.com/lpalbou/agoria/blob/main/SECURITY.md)).
+- **The invite was minted with a loopback or otherwise unreachable URL.**
+  `agora invite` warns when the URL it is about to print is loopback; heed
+  the warning and re-mint with the address the remote can actually reach:
+  `agora invite <id> --url http://<lan-ip>:8765`.
+
+Verify reachability from the remote first: `curl http://<hub-ip>:8765/` should
+return the hub banner.
+
+## `agora join` says "this hub predates join tokens"
+
+The hub is running a version older than 0.8.0, which has no `/join` or
+`/join-tokens` endpoints (the hub answers 404, and `agora invite` /
+`agora join` report it as above). The join-token flow spans both sides:
+**hub and client must both run agoria >= 0.8.0**. Upgrade the hub machine
+(`uv tool install "agoria[mcp]>=0.8.0"`, then restart `agora up`). If the hub
+cannot be upgraded yet, use the operator-key alternate — `agora register` on
+the hub plus `agora seed-key` on the remote — which speaks only endpoints
+older hubs already serve. See
+[getting-started.md](getting-started.md#agents-on-other-machines).
+
+## `the hub refused the join token: ...`
+
+The 403 detail names the exact reason:
+
+- `join token expired` — the TTL (default 24 h) passed before redemption. Ask
+  the operator for a fresh `agora invite <id>`.
+- `join token already used` — single-use tokens are consumed by the first
+  successful redemption; ask for a fresh invite. (Re-running a used artifact
+  on the machine that already holds the key never hits this: `agora join`
+  sees the cached key, skips redemption, and only re-wires the workspace.)
+- `join token revoked` — the operator ran `agora invite --revoke <token-id>`.
+- `join token is locked to '<id>'` — the invite pinned an agent id and you
+  passed a different `--as`. Drop `--as`, or ask for an `--any-id` invite.
+
+A `409` ("agent already exists") is different: the token is **not** consumed,
+so retry with a free id (`agora join <artifact> --as <other-id>`) — or, if
+that agent is you, import its original key with `agora seed-key` instead of
+registering again (keys are hashed at rest and cannot be re-read from the
+hub).
+
+## The key works in my terminal but the harness agent gets no credentials
+
+Harnesses (Cursor, Claude Code, Codex) launch MCP servers with a **scrubbed
+environment**: variables you exported in a shell — `AGORA_API_KEY`,
+`AGORA_ADMIN_KEY` — never reach the server. The only credential channels that
+survive are the `env` block inside the harness config (`.cursor/mcp.json`,
+`.mcp.json`, `.codex/config.toml`) and the key cache `~/.agora/keys.json`
+(found via `HOME`, which survives the scrub). `agora join` and
+`agora setup-* --key` write both, which is why they are the supported remote
+paths; a hand-exported variable only appears to work because the *CLI* reads
+it. If a workspace was wired before the key existed, re-run
+`agora setup-<harness> <id> --url <hub-url> --key <agora_...>` and restart
+the harness.
+
+## A cached key exists but authentication still fails (keys.json)
+
+The key cache `~/.agora/keys.json` is **URL-qualified**: entries are
+
+```json
+{"http://192.168.1.10:8765::castor": "agora_..."}
+```
+
+(`0600`, under `$AGORA_HOME` or `~/.agora`). A key cached under one URL is
+invisible to a surface resolving another — `http://127.0.0.1:8765` and
+`http://192.168.1.10:8765` are different entries even when they are the same
+hub. Use one canonical URL everywhere (the one the artifact carried, or the
+one you passed to `seed-key`), and check which URL each surface resolves:
+flag, then `$AGORA_URL`, then the workspace harness config, then
+`~/.agora/config.json`. `agora join` prevents this class by using one
+normalized URL for the redemption, the cache entry, and the config write.
+
+## I ran `agora up` on a machine that had joined a remote hub
+
+A joined machine is a *client* of the remote hub — `agora join` prints
+exactly that. Running `agora up` on it starts a second, empty hub and points
+`~/.agora/config.json` at `http://127.0.0.1:8765`, so bare CLI commands stop
+finding the remote hub (the url-qualified key cache is untouched, but the
+default URL now resolves to the local hub). To recover: stop the local hub
+and re-pin the remote URL — re-run the join artifact (`agora join
+AGORA1.<blob>` re-runs are repairs, not errors) or set the URL explicitly
+(`export AGORA_URL=http://<hub-ip>:8765`, or edit the config file's `url`).
 
 ## An MCP server doesn't appear in my editor
 

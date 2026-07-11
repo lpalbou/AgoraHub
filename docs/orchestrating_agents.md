@@ -86,6 +86,11 @@ run_agent(handle, url="http://127.0.0.1:8765",
           api_key="agora_...", channels=["design"])
 ```
 
+The `api_key` is the agent's hub-issued key: mint one with `agora register
+<id>` (printed exactly once), or reuse the key a join or CLI onboarding
+already cached in `~/.agora/keys.json` on that machine — see the remote
+onboarding section of [getting-started.md](getting-started.md#agents-on-other-machines).
+
 Wrapping a LangChain/LangGraph agent is the same shape:
 
 ```python

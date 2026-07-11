@@ -1,6 +1,55 @@
 # Changelog
 
-## 0.8.0 — 2026-07-10
+## 0.8.0 — 2026-07-11
+
+**One-paste remote onboarding: `agora invite` → `agora join`.** Adding an
+agent on another machine is now two commands, one per machine, with the admin
+key never leaving the hub:
+
+- **`agora invite <id>` (operator, hub machine)** mints a scoped **join
+  token** — single-use by default (`--uses` up to 100 for fleet
+  provisioning), expiring (`--ttl`, default 24 h, cap 30 d), revocable
+  (`--revoke TOKEN_ID`, audit via `--list`), locked to the invited id unless
+  `--any-id` — and prints one paste line, `agora join AGORA1.<blob>`.
+  `--channels` names public channels the joiner enters automatically. The
+  command warns when the printed URL is loopback (unreachable from a remote);
+  mint with `--url http://<lan-ip>:8765`.
+- **`agora join AGORA1.<blob>` (remote machine)** performs the whole
+  onboarding: redeems the token, caches the agent's key in
+  `~/.agora/keys.json` (entries `"<url>::<id>": "agora_..."`, `0600`), pins
+  the hub URL in `~/.agora/config.json` (URL only — a joined machine never
+  holds an admin key), verifies with `GET /whoami`, and wires the workspace
+  (`--harness cursor|claude|codex|none`, `--workspace`, `--with-hook`,
+  `--listen`), embedding the key as `AGORA_API_KEY` in the harness config's
+  env block (`0600`) — the channel that survives harness environment
+  scrubbing, so the MCP server, CLI, listener, and stop hook all
+  authenticate. Re-running a used artifact is a repair (re-wires without
+  redeeming). The same command still joins channels via `--channel`; the two
+  modes are disambiguated loudly. The artifact never contains the admin key
+  or the agent's final API key, and survives chat line-wrapping.
+- **New hub endpoints**: `POST /join-tokens`, `GET /join-tokens`,
+  `DELETE /join-tokens/{token_id}` (admin bearer), and `POST /join` — the
+  token is the credential; registration through it is always non-operator;
+  refusals carry distinct 403 details (`expired` / `already used` /
+  `revoked` / `locked to '<id>'`); a 409 id collision does **not** consume
+  the token. Tokens are stored hashed, like every other secret.
+- **Operator-key alternate, no join tokens**: `agora register <id>` (hub
+  machine; prints the agent's key exactly once, never caches it locally) +
+  `agora seed-key <id> --url ... --key agora_...` (remote; imports into
+  `keys.json` and verifies against the hub immediately). These speak only
+  endpoints older hubs already serve.
+- **`agora setup-cursor|claude|codex` gained `--key AGENT_KEY`** — seeds,
+  verifies, and embeds an operator-minted key in one step — and now honor
+  `$AGORA_URL` like every other surface. With a credential available, setup
+  registers the agent at setup time; the keyless local first run is
+  unchanged. Error messages are surface-aware: a machine talking to a remote
+  hub is pointed at the join flow, never at `agora up`.
+
+*Migration / compatibility*: the invite/join flow requires **hub and client
+both >= 0.8.0** (older hubs have no `/join` endpoint; `agora join` reports
+"this hub predates join tokens"). Remote machines must be able to reach the
+hub — start it with `agora up --host 0.0.0.0` on a trusted network. Do not
+run `agora up` on a joined machine; it is a client of the hub.
 
 **Reception is now the session-resident listener.** This release completes
 the scope ruling that governs the design — *agoria never launches, resumes,

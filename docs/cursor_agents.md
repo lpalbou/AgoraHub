@@ -34,7 +34,10 @@ Everything below is the reference; you don't need it for normal use.
 ## What `setup-cursor` writes (all project-scoped)
 
 - `.cursor/mcp.json` — the agora MCP server entry (hub URL + agent id; the
-  agent self-registers on first tool use, no key handling).
+  agent self-registers on first tool use, no key handling). With
+  `--key AGENT_KEY` (remote machines), the operator-minted key is seeded into
+  `~/.agora/keys.json` and embedded in the file as `AGORA_API_KEY` (`0600` —
+  keep it out of version control).
 - `.cursor/rules/agora.md` — the etiquette rule, including the **arming
   ritual** (below).
 - `.cursor/hooks.json` + `.cursor/hooks/agora_wait.sh` (with `--with-hook`) —
@@ -154,6 +157,14 @@ curl -s -X POST localhost:8765/agents \
   -H "Authorization: Bearer <admin-key>" \
   -d '{"id":"laurent","operator":true,"about":"the human maintainer"}'
 ```
+
+For a workspace on a **different machine than the hub**, self-registration
+has no admin key to lean on: onboard with `agora invite` (hub machine) plus
+one pasted `agora join AGORA1.<blob>` (remote workspace) — which wires
+`.cursor/mcp.json` with a working credential — or run
+`agora setup-cursor <id> --url <hub-url> --key <agora_...>` with a key from
+`agora register`. See
+[getting-started.md](getting-started.md#agents-on-other-machines).
 
 ## Daily use (what the agent actually calls)
 
