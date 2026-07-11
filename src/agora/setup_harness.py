@@ -153,18 +153,28 @@ def upsert_marked_section(path: Path, section: str) -> None:
 
 
 def write_mcp_json(path: Path, mcp_command: str, url: str, agent_id: str,
-                   about: str) -> None:
+                   about: str, api_key: str | None = None) -> None:
     """Merge the agora server into an mcpServers JSON file (Cursor's
     `.cursor/mcp.json` and Claude Code's project `.mcp.json` share the shape).
     Deliberately STRICT on corrupt JSON (raises): mcp files carry the user's
-    other server configs — refusing loudly beats silently discarding them."""
+    other server configs — refusing loudly beats silently discarding them.
+
+    `api_key` (the agent's OWN key, never the admin key) also lands in the env
+    block as AGORA_API_KEY: harnesses scrub the shell environment, so the env
+    block is the only channel guaranteed to reach the MCP server. A file that
+    carries a bearer secret is clamped to 0600; the keyless output stays
+    byte-identical to before (local zero-config onboarding unchanged)."""
     config = json.loads(path.read_text()) if path.exists() else {}
+    env = {"AGORA_URL": url, "AGORA_AGENT_ID": agent_id, "AGORA_ABOUT": about}
+    if api_key:
+        env["AGORA_API_KEY"] = api_key
     config.setdefault("mcpServers", {})["agora"] = {
         "command": mcp_command,
-        "env": {"AGORA_URL": url, "AGORA_AGENT_ID": agent_id,
-                "AGORA_ABOUT": about},
+        "env": env,
     }
     path.write_text(json.dumps(config, indent=2) + "\n")
+    if api_key:
+        path.chmod(0o600)
 
 
 def _resolve_agora_command() -> str:
@@ -458,13 +468,14 @@ def install_cursor_stop_hook(workspace: Path, url: str, agent_id: str) -> list[P
 
 
 def setup_cursor(workspace: Path, agent_id: str, url: str, about: str,
-                 mcp_command: str, with_hook: bool) -> list[Path]:
+                 mcp_command: str, with_hook: bool,
+                 api_key: str | None = None) -> list[Path]:
     """Wire a workspace as a Cursor agora agent (all project-scoped)."""
     written: list[Path] = []
     cursor = workspace / ".cursor"
     (cursor / "rules").mkdir(parents=True, exist_ok=True)
     mcp_path = cursor / "mcp.json"
-    write_mcp_json(mcp_path, mcp_command, url, agent_id, about)
+    write_mcp_json(mcp_path, mcp_command, url, agent_id, about, api_key)
     written.append(mcp_path)
 
     rule_path = cursor / "rules" / "agora.md"
@@ -477,13 +488,14 @@ def setup_cursor(workspace: Path, agent_id: str, url: str, about: str,
 
 
 def setup_claude(workspace: Path, agent_id: str, url: str, about: str,
-                 mcp_command: str, with_hook: bool) -> list[Path]:
+                 mcp_command: str, with_hook: bool,
+                 api_key: str | None = None) -> list[Path]:
     """Wire a workspace as a Claude Code agora agent (all project-scoped).
     with_hook installs BOTH halves of reception: the stop-hook backstop and
     the SessionStart/Stop single-shot listener (idle wake via asyncRewake)."""
     written: list[Path] = []
     mcp_path = workspace / ".mcp.json"          # project scope lives at the ROOT
-    write_mcp_json(mcp_path, mcp_command, url, agent_id, about)
+    write_mcp_json(mcp_path, mcp_command, url, agent_id, about, api_key)
     written.append(mcp_path)
 
     claude_md = workspace / "CLAUDE.md"
@@ -497,7 +509,8 @@ def setup_claude(workspace: Path, agent_id: str, url: str, about: str,
     return list(dict.fromkeys(written))         # settings.json listed once
 
 
-def codex_toml_block(mcp_command: str, url: str, agent_id: str, about: str) -> str:
+def codex_toml_block(mcp_command: str, url: str, agent_id: str, about: str,
+                     api_key: str | None = None) -> str:
     def q(s: str) -> str:
         return json.dumps(s)  # JSON string quoting is valid TOML basic-string
     return (
@@ -507,6 +520,9 @@ def codex_toml_block(mcp_command: str, url: str, agent_id: str, about: str) -> s
         f"AGORA_URL = {q(url)}\n"
         f"AGORA_AGENT_ID = {q(agent_id)}\n"
         f"AGORA_ABOUT = {q(about)}\n"
+        # Same placement rule as write_mcp_json: the env block is the only
+        # credential channel that survives the harness's env scrub.
+        + (f"AGORA_API_KEY = {q(api_key)}\n" if api_key else "")
     )
 
 
@@ -535,7 +551,8 @@ def install_codex_stop_hook(workspace: Path, url: str, agent_id: str) -> list[Pa
 
 
 def setup_codex(workspace: Path, agent_id: str, url: str, about: str,
-                mcp_command: str, with_hook: bool = False) -> list[Path]:
+                mcp_command: str, with_hook: bool = False,
+                api_key: str | None = None) -> list[Path]:
     """Wire a workspace as a Codex CLI agora agent via project-scoped
     `.codex/config.toml` (nothing global; Codex asks to trust the project on
     first run). An existing agora table is left untouched — TOML surgery is
@@ -548,9 +565,11 @@ def setup_codex(workspace: Path, agent_id: str, url: str, about: str,
     config_path = codex_dir / "config.toml"
     existing = config_path.read_text() if config_path.exists() else ""
     if "[mcp_servers.agora]" not in existing:
-        block = codex_toml_block(mcp_command, url, agent_id, about)
+        block = codex_toml_block(mcp_command, url, agent_id, about, api_key)
         config_path.write_text(
             (existing.rstrip("\n") + "\n\n" if existing.strip() else "") + block)
+        if api_key:  # the file now carries a bearer secret
+            config_path.chmod(0o600)
         written.append(config_path)
 
     agents_md = workspace / "AGENTS.md"

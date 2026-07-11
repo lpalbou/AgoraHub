@@ -23,7 +23,7 @@ import pytest
 from agora.setup_harness import (codex_toml_block, install_claude_listener,
                                  rule_text, setup_claude, setup_codex,
                                  setup_cursor, stop_hook_script,
-                                 upsert_marked_section)
+                                 upsert_marked_section, write_mcp_json)
 
 # ---------------------------------------------------------------------------
 # harness: a tiny stub hub serving GET /inbox (never the live hub — the
@@ -588,6 +588,67 @@ def test_setup_codex_with_hook_writes_stop_hook(tmp_path):
 def test_codex_toml_block_quotes_special_characters():
     block = codex_toml_block("agora-mcp", "http://h:1", "a", 'says "hi"\\path')
     assert '"says \\"hi\\"\\\\path"' in block  # JSON escaping is valid TOML
+
+
+# ---------------------------------------------------------------------------
+# credential placement: the env block is the only channel that survives the
+# harness env scrub, so an api_key must land there — and the keyless output
+# must stay byte-identical (local zero-config onboarding untouched)
+# ---------------------------------------------------------------------------
+
+
+def test_write_mcp_json_keyless_output_is_byte_identical(tmp_path):
+    """No key -> the EXACT file the previous version wrote: same env keys,
+    no AGORA_API_KEY, no permission clamp. Local onboarding must not change."""
+    path = tmp_path / "mcp.json"
+    write_mcp_json(path, "agora-mcp", "http://hub:8765", "runtime", "the kernel")
+    expected = json.dumps({"mcpServers": {"agora": {
+        "command": "agora-mcp",
+        "env": {"AGORA_URL": "http://hub:8765", "AGORA_AGENT_ID": "runtime",
+                "AGORA_ABOUT": "the kernel"},
+    }}}, indent=2) + "\n"
+    assert path.read_text() == expected
+    assert path.stat().st_mode & 0o077 != 0    # default perms, not clamped
+
+
+def test_write_mcp_json_embeds_api_key_and_clamps_0600(tmp_path):
+    path = tmp_path / "mcp.json"
+    (tmp_path / "mcp.json").write_text(json.dumps(
+        {"mcpServers": {"other": {"command": "other-mcp"}}}))
+    write_mcp_json(path, "agora-mcp", "http://hub:8765", "castor", "",
+                   api_key="agora_secret123")
+    config = json.loads(path.read_text())
+    env = config["mcpServers"]["agora"]["env"]
+    assert env["AGORA_API_KEY"] == "agora_secret123"
+    assert env["AGORA_URL"] == "http://hub:8765"
+    assert config["mcpServers"]["other"] == {"command": "other-mcp"}  # merged
+    assert path.stat().st_mode & 0o077 == 0    # a secret-bearing file is 0600
+
+
+def test_setup_cursor_and_claude_thread_api_key(tmp_path):
+    for name, fn, mcp_rel in [("cursor", setup_cursor, ".cursor/mcp.json"),
+                              ("claude", setup_claude, ".mcp.json")]:
+        ws = tmp_path / name
+        ws.mkdir()
+        fn(ws, "castor", "http://hub:8765", "", "agora-mcp", False,
+           api_key="agora_k1")
+        mcp_path = ws / mcp_rel
+        env = json.loads(mcp_path.read_text())["mcpServers"]["agora"]["env"]
+        assert env["AGORA_API_KEY"] == "agora_k1", name
+        assert mcp_path.stat().st_mode & 0o077 == 0, name
+
+
+def test_codex_toml_api_key_line_and_chmod(tmp_path):
+    block = codex_toml_block("agora-mcp", "http://h:1", "janus", "",
+                             api_key="agora_k2")
+    assert 'AGORA_API_KEY = "agora_k2"' in block
+    assert "AGORA_API_KEY" not in codex_toml_block("agora-mcp", "http://h:1",
+                                                   "janus", "")
+    setup_codex(tmp_path, "janus", "http://h:1", "", "agora-mcp",
+                api_key="agora_k2")
+    config_path = tmp_path / ".codex" / "config.toml"
+    assert 'AGORA_API_KEY = "agora_k2"' in config_path.read_text()
+    assert config_path.stat().st_mode & 0o077 == 0
 
 
 def test_upsert_marked_section_replaces_only_the_marked_block(tmp_path):

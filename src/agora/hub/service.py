@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import time
 from collections import deque
 from typing import Any
 
-from ..db import Database
+from ..db import Database, JoinTokenRefused
 from ..ids import new_token
 from ..models import (
     DM_PREFIX,
@@ -49,6 +50,9 @@ from .presence import PresenceTracker
 from .ratelimit import RateLimiter
 
 RESERVED_STORE_PREFIX = "channel:"   # channel-level keys: owner-writable only
+JOIN_TOKEN_PREFIX = "agora-join_"    # agora-join_<id:8hex>.<secret:48hex>
+MAX_JOIN_TOKEN_TTL = 30 * 86400.0    # hard cap (kubeadm defaults 24h; we cap 30d)
+MAX_JOIN_TOKEN_USES = 100            # fleet provisioning ceiling
 CHANNEL_META_KEY = "channel:meta"
 _META_FIELDS = {"purpose", "norms", "expected_traffic", "response_sla_minutes", "language",
                 "authorship_required", "state"}
@@ -105,11 +109,13 @@ class HubService:
 
     # -- auth -----------------------------------------------------------------
 
-    def register_agent(self, agent_id: str, name: str, operator: bool = False,
-                       about: str = "") -> tuple[AgentInfo, str]:
+    @staticmethod
+    def _validate_agent_id(agent_id: str) -> None:
         # ASCII-only, no double-dash (would collide with the dm:<a>--<b>
         # separator), reserved ids blocked, bounded length. Prevents Unicode
         # homoglyph impersonation of the one signal the model trusts: identity.
+        # Shared by plain registration AND the join-token paths (mint pins and
+        # redeem-time ids face the same rules; there is no laxer side door).
         if not re.fullmatch(r"[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?", agent_id):
             raise HubError(400, "agent id must be lowercase ascii [a-z0-9_-], 1-64 chars, "
                                 "no leading/trailing dash")
@@ -117,6 +123,10 @@ class HubService:
             raise HubError(400, "agent id may not contain '--' (reserved dm separator)")
         if agent_id in {"hub", "all"}:
             raise HubError(400, f"'{agent_id}' is a reserved id")
+
+    def register_agent(self, agent_id: str, name: str, operator: bool = False,
+                       about: str = "") -> tuple[AgentInfo, str]:
+        self._validate_agent_id(agent_id)
         if self.db.agent_exists(agent_id):
             raise HubError(409, f"agent '{agent_id}' already exists")
         api_key = new_token("agora")
@@ -140,6 +150,88 @@ class HubService:
         # visibly working.
         self.presence.touch(agent.id)
         return agent
+
+    # -- join tokens (scoped registration credentials; admin key stays home) ----
+
+    def create_join_token(self, agent_id: str | None = None, about: str = "",
+                          channels: list[str] | None = None,
+                          ttl_seconds: float = 86400.0, max_uses: int = 1,
+                          created_by: str = "admin") -> dict[str, Any]:
+        """Mint a join token: registers exactly ONE (or max_uses) non-operator
+        agent(s) and is valid on no other endpoint. Plaintext is returned once
+        here; the hub stores only the secret's hash. Format
+        `agora-join_<token_id:8hex>.<secret:48hex>` — the public token_id
+        supports list/revoke without ever re-handling the secret."""
+        if agent_id is not None:
+            self._validate_agent_id(agent_id)
+            if self.db.agent_exists(agent_id):
+                # A token pinned to a taken id could never be redeemed; fail
+                # the mint, not the (possibly remote, later) redemption.
+                raise HubError(409, f"agent '{agent_id}' already exists")
+        if not ttl_seconds > 0:
+            raise HubError(400, "ttl_seconds must be positive")
+        if ttl_seconds > MAX_JOIN_TOKEN_TTL:
+            raise HubError(400, f"ttl_seconds exceeds the cap "
+                                f"({int(MAX_JOIN_TOKEN_TTL)}s = 30 days)")
+        if not 1 <= max_uses <= MAX_JOIN_TOKEN_USES:
+            raise HubError(400, f"max_uses must be 1..{MAX_JOIN_TOKEN_USES}")
+        preset = [c.strip() for c in (channels or []) if isinstance(c, str) and c.strip()]
+        token_id = os.urandom(4).hex()
+        secret = os.urandom(24).hex()  # 192-bit secret, the api-key idiom
+        row = self.db.create_join_token(
+            token_id, secret, agent_id, sanitize_text(about, MAX_ABOUT_CHARS),
+            preset, created_by, ttl_seconds, max_uses)
+        return {**row, "token": f"{JOIN_TOKEN_PREFIX}{token_id}.{secret}"}
+
+    @staticmethod
+    def _parse_join_token(token: str) -> tuple[str, str] | None:
+        """`agora-join_<token_id>.<secret>` -> (token_id, secret), or None if
+        the shape is wrong (never raises: shape errors are a clean 403)."""
+        if not token.startswith(JOIN_TOKEN_PREFIX):
+            return None
+        token_id, sep, secret = token.removeprefix(JOIN_TOKEN_PREFIX).partition(".")
+        if not sep or not token_id or not secret:
+            return None
+        return token_id, secret
+
+    def redeem_join_token(self, token: str, agent_id: str | None = None,
+                          about: str = "") -> tuple[AgentInfo, str, list[str]]:
+        """Redeem a join token: register the agent (operator=False FORCED —
+        a join credential can never mint privilege) and auto-join the token's
+        PUBLIC preset channels. Private channels still require owner-minted
+        invites — a join token must not become a side door through the
+        confused-deputy guard. Consumption is atomic with registration (see
+        db.redeem_join_token): a 409 id collision does NOT burn the token."""
+        parsed = self._parse_join_token(token)
+        if parsed is None:
+            raise HubError(403, "invalid join token")
+        if agent_id is not None:
+            self._validate_agent_id(agent_id)
+        api_key = new_token("agora")
+        try:
+            info, preset = self.db.redeem_join_token(
+                *parsed, agent_id=agent_id, name="", api_key=api_key,
+                about=sanitize_text(about, MAX_ABOUT_CHARS))
+        except JoinTokenRefused as e:
+            raise HubError(e.status_code, e.detail) from e
+        joined: list[str] = []
+        for channel in preset:
+            try:
+                self.join_channel(info, channel, None)
+                joined.append(channel)
+            except HubError:
+                # Missing or private channel: skipped, never fatal — the
+                # registration already succeeded and the token is consumed.
+                continue
+        return info, api_key, joined
+
+    def list_join_tokens(self) -> list[dict[str, Any]]:
+        return self.db.list_join_tokens()
+
+    def revoke_join_token(self, token_id: str) -> None:
+        if not self.db.revoke_join_token(token_id):
+            raise HubError(404, f"join token '{token_id}' not found "
+                                "(expired tokens are purged)")
 
     # -- channels ---------------------------------------------------------------
 

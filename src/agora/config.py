@@ -48,6 +48,27 @@ def save_config(url: str, admin_key: str, db_path: str) -> None:
         {"url": url, "admin_key": admin_key, "db_path": db_path}, indent=2))
 
 
+def save_url(url: str) -> None:
+    """Pin the default hub url WITHOUT touching credentials: merge {"url": url}
+    into config.json, preserving whatever else is there (on the hub machine the
+    admin key written by `agora up` survives) but never ADDING an admin key or
+    db path. This is the writer remote onboarding uses — a remote machine's
+    config must hold a url and nothing secret beyond it (0600 regardless)."""
+    cfg = load_config()
+    cfg["url"] = url
+    _write_secret(_config_path(), json.dumps(cfg, indent=2))
+
+
+def is_loopback_url(url: str) -> bool:
+    """True when the hub url points at this machine (same check `agora listen`
+    uses to pick file mode): loopback hostnames and the 127/8 block. Error
+    messages branch on this — advice that is right locally ("run agora up")
+    is actively wrong for a hub on another machine."""
+    from urllib.parse import urlparse
+    host = urlparse(url).hostname or ""
+    return host in ("localhost", "::1") or host.startswith("127.")
+
+
 def _load_keys() -> dict[str, str]:
     p = _keys_path()
     return json.loads(p.read_text()) if p.exists() else {}
@@ -90,11 +111,20 @@ def resolve_key(url: str, agent_id: str, *, admin_key: str | None = None,
     admin_key = (admin_key or os.environ.get("AGORA_ADMIN_KEY")
                  or load_config().get("admin_key"))
     if not admin_key:
+        # Surface-aware remedy: `agora up` is only correct where the hub runs.
+        # Telling a REMOTE user to run it would start a wrong local hub.
+        if is_loopback_url(url):
+            raise SystemExit(
+                f"no cached key for '{agent_id}' and no admin key to "
+                "self-register. Run `agora up` first (writes "
+                "~/.agora/config.json); agents then self-register.")
         raise SystemExit(
-            f"no cached key for '{agent_id}' and no admin key to self-register. "
-            "On the hub machine run `agora up` first (writes ~/.agora/config.json); "
-            "on a remote machine export AGORA_ADMIN_KEY (or have the operator "
-            "register you and seed ~/.agora/keys.json).")
+            f"no cached key for '{agent_id}' at {url} (a hub on another "
+            "machine). Ask the hub operator for a join artifact and run "
+            f"`agora join AGORA1....`, or have them run `agora register "
+            f"{agent_id}` and import the key here with `agora seed-key "
+            f"{agent_id} --url {url} --key <agora_...>`. Exporting "
+            "AGORA_ADMIN_KEY also works but grants more than needed.")
     r = httpx.post(f"{url.rstrip('/')}/agents",
                    headers={"Authorization": f"Bearer {admin_key}"},
                    json={"id": agent_id, "about": about}, timeout=10.0)
@@ -103,6 +133,9 @@ def resolve_key(url: str, agent_id: str, *, admin_key: str | None = None,
         cache_key(url, agent_id, key)
         return key
     if r.status_code == 409:
-        raise SystemExit(f"agent '{agent_id}' exists but no cached key on this "
-                         "machine; recover its key into ~/.agora/keys.json.")
+        raise SystemExit(
+            f"agent '{agent_id}' exists but no cached key on this machine; "
+            "keys are unrecoverable (hashed at rest). Import the key saved at "
+            f"registration with `agora seed-key {agent_id} --url {url} "
+            "--key <agora_...>`, or pick a new id.")
     raise SystemExit(f"self-registration failed: {r.status_code} {r.text}")

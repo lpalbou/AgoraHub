@@ -14,6 +14,7 @@ database file never contains usable bearer secrets.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import sqlite3
 import threading
@@ -53,6 +54,24 @@ CREATE TABLE IF NOT EXISTS invites (
     expires_at  REAL NOT NULL,
     used_by     TEXT,
     used_at     REAL
+);
+-- Hub-membership join tokens (the invites discipline one level up): scoped,
+-- expiring, revocable registration credentials so the admin key never has to
+-- leave the hub machine. The public token_id enables list/revoke without ever
+-- handling the secret; only sha256(secret) is stored.
+CREATE TABLE IF NOT EXISTS join_tokens (
+    token_id    TEXT PRIMARY KEY,
+    secret_hash TEXT NOT NULL,
+    agent_id    TEXT,               -- NULL = redeemer chooses the id
+    about       TEXT NOT NULL DEFAULT '',
+    channels    TEXT NOT NULL DEFAULT '[]',   -- JSON list: public auto-joins
+    created_by  TEXT NOT NULL DEFAULT 'admin',
+    created_at  REAL NOT NULL,
+    expires_at  REAL NOT NULL,
+    max_uses    INTEGER NOT NULL DEFAULT 1,
+    uses        INTEGER NOT NULL DEFAULT 0,
+    revoked_at  REAL,
+    used_by     TEXT NOT NULL DEFAULT '[]'    -- JSON list: the audit trail
 );
 CREATE TABLE IF NOT EXISTS messages (
     id          TEXT PRIMARY KEY,
@@ -131,6 +150,19 @@ class StoreConflict(Exception):
         self.current_version = current_version
 
 
+class JoinTokenRefused(Exception):
+    """Join-token redemption refused. Mirrors HubError's (status, detail)
+    shape without importing the service layer: 403 for token-side problems
+    (each with a DISTINCT detail so the joiner knows what to ask the operator
+    for), 400 for a missing agent id, 409 for an id collision — which, by
+    contract, has NOT consumed the token."""
+
+    def __init__(self, status_code: int, detail: str) -> None:
+        super().__init__(detail)
+        self.status_code = status_code
+        self.detail = detail
+
+
 class Database:
     """All persistent state of a hub. Thread-safe via a single lock."""
 
@@ -152,16 +184,24 @@ class Database:
 
     # -- agents ------------------------------------------------------------
 
+    def _insert_agent_locked(self, agent_id: str, name: str, api_key: str,
+                             operator: bool, about: str) -> AgentInfo:
+        """The one agents INSERT, shared by plain registration and join-token
+        redemption (which must run it inside ITS transaction). Caller holds
+        self._lock and commits."""
+        self._conn.execute(
+            "INSERT INTO agents (id, name, about, operator, key_hash, created_at)"
+            " VALUES (?,?,?,?,?,?)",
+            (agent_id, name, about, int(operator), hash_secret(api_key), time.time()),
+        )
+        return AgentInfo(id=agent_id, name=name, about=about, operator=operator)
+
     def register_agent(self, agent_id: str, name: str, api_key: str,
                        operator: bool = False, about: str = "") -> AgentInfo:
         with self._lock:
-            self._conn.execute(
-                "INSERT INTO agents (id, name, about, operator, key_hash, created_at)"
-                " VALUES (?,?,?,?,?,?)",
-                (agent_id, name, about, int(operator), hash_secret(api_key), time.time()),
-            )
+            info = self._insert_agent_locked(agent_id, name, api_key, operator, about)
             self._conn.commit()
-        return AgentInfo(id=agent_id, name=name, about=about, operator=operator)
+        return info
 
     def agent_by_key(self, api_key: str) -> AgentInfo | None:
         with self._lock:
@@ -371,6 +411,130 @@ class Database:
             )
             self._conn.commit()
             return row["channel"]
+
+    # -- join tokens (hub-membership credentials; invites discipline) ---------
+
+    def create_join_token(self, token_id: str, secret: str, agent_id: str | None,
+                          about: str, channels: list[str], created_by: str,
+                          ttl_seconds: float, max_uses: int) -> dict[str, Any]:
+        """Store a new join token (secret hashed, plaintext never lands).
+        Expired rows are lazily purged on the way in. Returns the stored row's
+        public fields; raises JoinTokenRefused(409) on a token_id collision
+        (astronomically rare — the caller may simply re-mint)."""
+        now = time.time()
+        with self._lock:
+            self._purge_expired_join_tokens_locked(now)
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO join_tokens (token_id, secret_hash, agent_id,"
+                " about, channels, created_by, created_at, expires_at, max_uses)"
+                " VALUES (?,?,?,?,?,?,?,?,?)",
+                (token_id, hash_secret(secret), agent_id, about,
+                 json.dumps(channels), created_by, now, now + ttl_seconds, max_uses),
+            )
+            self._conn.commit()
+        if cur.rowcount == 0:
+            raise JoinTokenRefused(409, f"join token id '{token_id}' already exists")
+        return {"token_id": token_id, "agent_id": agent_id, "about": about,
+                "channels": channels, "created_by": created_by,
+                "created_at": now, "expires_at": now + ttl_seconds,
+                "max_uses": max_uses}
+
+    def redeem_join_token(self, token_id: str, secret: str, agent_id: str | None,
+                          name: str, api_key: str, about: str) -> tuple[AgentInfo, list[str]]:
+        """Validate + register + consume as ONE locked transaction, so a token
+        is consumed exactly when a registration succeeds:
+
+        - every raise happens BEFORE any write, so a refused redemption (403 on
+          expired/revoked/exhausted/id-lock, 409 on an existing agent id)
+          leaves the token untouched — the 409 loser retries with a free id;
+        - two racers on a single-use token serialize on the db lock: the loser
+          sees uses == max_uses and gets the clean 'already used' 403.
+
+        Returns (agent, channels) where channels are the token's preset
+        channel names (the service decides which are joinable)."""
+        now = time.time()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM join_tokens WHERE token_id = ?", (token_id,)
+            ).fetchone()
+            # Constant-time compare, same posture as the admin-key gate.
+            if row is None or not hmac.compare_digest(row["secret_hash"],
+                                                      hash_secret(secret)):
+                raise JoinTokenRefused(403, "invalid join token")
+            if row["revoked_at"] is not None:
+                raise JoinTokenRefused(403, "join token revoked")
+            if row["expires_at"] < now:
+                raise JoinTokenRefused(403, "join token expired")
+            if row["uses"] >= row["max_uses"]:
+                raise JoinTokenRefused(403, "join token already used")
+            pinned = row["agent_id"]
+            if pinned and agent_id and agent_id != pinned:
+                raise JoinTokenRefused(403, f"join token is locked to '{pinned}'")
+            effective = agent_id or pinned
+            if not effective:
+                raise JoinTokenRefused(
+                    400, "this join token pins no agent id; supply one")
+            if self._conn.execute("SELECT 1 FROM agents WHERE id = ?",
+                                  (effective,)).fetchone():
+                raise JoinTokenRefused(409, f"agent '{effective}' already exists")
+            info = self._insert_agent_locked(effective, name, api_key,
+                                             operator=False,  # forced server-side
+                                             about=about or row["about"])
+            used_by = json.loads(row["used_by"] or "[]") + [effective]
+            self._conn.execute(
+                "UPDATE join_tokens SET uses = uses + 1, used_by = ?"
+                " WHERE token_id = ?",
+                (json.dumps(used_by), token_id),
+            )
+            self._conn.commit()
+        return info, json.loads(row["channels"] or "[]")
+
+    def list_join_tokens(self) -> list[dict[str, Any]]:
+        """All live join tokens WITHOUT secrets — the operator's audit/revoke
+        surface. Expired rows are lazily purged first (kubeadm TokenCleaner
+        style); exhausted/revoked ones stay listed until expiry so the
+        used_by trail remains visible."""
+        now = time.time()
+        with self._lock:
+            self._purge_expired_join_tokens_locked(now)
+            rows = self._conn.execute(
+                "SELECT token_id, agent_id, about, channels, created_by,"
+                " created_at, expires_at, max_uses, uses, revoked_at, used_by"
+                " FROM join_tokens ORDER BY created_at"
+            ).fetchall()
+        return [
+            {"token_id": r["token_id"], "agent_id": r["agent_id"],
+             "about": r["about"], "channels": json.loads(r["channels"] or "[]"),
+             "created_by": r["created_by"], "created_at": r["created_at"],
+             "expires_at": r["expires_at"], "max_uses": r["max_uses"],
+             "uses": r["uses"], "revoked_at": r["revoked_at"],
+             "used_by": json.loads(r["used_by"] or "[]")}
+            for r in rows
+        ]
+
+    def revoke_join_token(self, token_id: str) -> bool:
+        """Mark a token unusable (idempotent). False = no such token."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT revoked_at FROM join_tokens WHERE token_id = ?", (token_id,)
+            ).fetchone()
+            if row is None:
+                return False
+            if row["revoked_at"] is None:
+                self._conn.execute(
+                    "UPDATE join_tokens SET revoked_at = ? WHERE token_id = ?",
+                    (time.time(), token_id),
+                )
+                self._conn.commit()
+        return True
+
+    def _purge_expired_join_tokens_locked(self, now: float) -> None:
+        """Lazy cleanup on access (caller holds the lock): expired tokens are
+        inert either way; dropping the rows keeps the table and the --list
+        output from accreting dead entries. Commits itself so a read-only
+        caller (list) never leaves the transaction open."""
+        self._conn.execute("DELETE FROM join_tokens WHERE expires_at < ?", (now,))
+        self._conn.commit()
 
     # -- messages ------------------------------------------------------------
 

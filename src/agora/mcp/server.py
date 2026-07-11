@@ -45,11 +45,20 @@ def _resolve_credentials() -> tuple[str, str]:
     if api_key:
         return base_url, api_key
 
+    # Error advice must match where the hub actually runs: `agora up` is only
+    # correct on the hub machine — on a remote it would start a WRONG local
+    # hub, which is exactly the trap the old one-size message set.
+    local = _config.is_loopback_url(base_url)
+
     agent_id = os.environ.get("AGORA_AGENT_ID")
     if not agent_id:
         raise SystemExit(
-            "set AGORA_AGENT_ID (recommended) or AGORA_API_KEY. Run `agora up` "
-            "first so the hub config is discoverable.")
+            "set AGORA_AGENT_ID (recommended) or AGORA_API_KEY."
+            + (" Run `agora up` first so the hub config is discoverable."
+               if local else
+               f" The hub {base_url} is on another machine: onboard with "
+               "`agora join <artifact>` (operator mints one with "
+               "`agora invite <id>`)."))
 
     # Cached from a prior run or a migration seed?
     cached = _config.get_cached_key(base_url, agent_id)
@@ -59,9 +68,19 @@ def _resolve_credentials() -> tuple[str, str]:
     # Self-register using the admin key from the local config.
     admin_key = os.environ.get("AGORA_ADMIN_KEY") or cfg.get("admin_key")
     if not admin_key:
+        if local:
+            raise SystemExit(
+                f"no cached key for '{agent_id}' and no admin key to "
+                "self-register. Run `agora up` (writes ~/.agora/config.json) "
+                "or set AGORA_API_KEY.")
         raise SystemExit(
-            f"no cached key for '{agent_id}' and no admin key to self-register. "
-            "Run `agora up` (writes ~/.agora/config.json) or set AGORA_API_KEY.")
+            f"no cached key for '{agent_id}' and the hub {base_url} is on "
+            "another machine (`agora up` here would start a NEW local hub). "
+            f"Run `agora join <artifact>` (operator: `agora invite "
+            f"{agent_id}`), or re-run `agora setup-<harness> {agent_id} "
+            f"--url {base_url} --key <agent-key>` (operator: `agora register "
+            f"{agent_id}`), or add AGORA_API_KEY to this server's env block "
+            "in mcp.json.")
     about = os.environ.get("AGORA_ABOUT", "")
     r = httpx.post(f"{base_url}/agents",
                    headers={"Authorization": f"Bearer {admin_key}"},
@@ -73,7 +92,9 @@ def _resolve_credentials() -> tuple[str, str]:
     if r.status_code == 409:
         raise SystemExit(
             f"agent '{agent_id}' already exists but no cached key is available "
-            f"on this machine. Recover its key or pass AGORA_API_KEY.")
+            f"on this machine. Import its saved key with `agora seed-key "
+            f"{agent_id} --url {base_url} --key <agora_...>` or pass "
+            "AGORA_API_KEY.")
     raise SystemExit(f"self-registration failed: {r.status_code} {r.text}")
 
 

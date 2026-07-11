@@ -79,6 +79,81 @@ def register_agent(
     return {"agent": info.model_dump(), "api_key": api_key}
 
 
+# -- join tokens (scoped onboarding; the admin key never leaves the hub) --------
+
+class CreateJoinToken(BaseModel):
+    agent_id: str | None = None   # None = the redeemer chooses (--any-id mints)
+    about: str = ""               # default self-description for the joiner
+    channels: list[str] = []      # PUBLIC channels to auto-join on redemption
+    ttl_seconds: float = 86400.0  # 24h default, 30d cap
+    max_uses: int = 1             # single-use default; up to 100 for fleets
+
+
+class JoinRequest(BaseModel):
+    token: str
+    agent_id: str | None = None   # required iff the token pins no id
+    about: str = ""
+
+
+@router.post("/join-tokens")
+def create_join_token(
+    payload: CreateJoinToken,
+    token: str = Depends(bearer_token),
+    service: HubService = Depends(get_service),
+    admin_key: str = Depends(get_admin_key),
+) -> dict[str, Any]:
+    """Mint a join token (operator surface — same gate as registration).
+    The plaintext token appears exactly once, in this response."""
+    if not hmac.compare_digest(token, admin_key):
+        raise HTTPException(403, "join-token minting requires the admin key")
+    return _run(service.create_join_token, agent_id=payload.agent_id,
+                about=payload.about, channels=payload.channels,
+                ttl_seconds=payload.ttl_seconds, max_uses=payload.max_uses)
+
+
+@router.get("/join-tokens")
+def list_join_tokens(
+    token: str = Depends(bearer_token),
+    service: HubService = Depends(get_service),
+    admin_key: str = Depends(get_admin_key),
+) -> list[dict[str, Any]]:
+    """The mint/redeem audit trail (no secrets): who was invited, by whom,
+    redeemed by whom, what remains live."""
+    if not hmac.compare_digest(token, admin_key):
+        raise HTTPException(403, "listing join tokens requires the admin key")
+    return service.list_join_tokens()
+
+
+@router.delete("/join-tokens/{token_id}")
+def revoke_join_token(
+    token_id: str,
+    token: str = Depends(bearer_token),
+    service: HubService = Depends(get_service),
+    admin_key: str = Depends(get_admin_key),
+) -> dict[str, Any]:
+    if not hmac.compare_digest(token, admin_key):
+        raise HTTPException(403, "revoking a join token requires the admin key")
+    _run(service.revoke_join_token, token_id)
+    return {"token_id": token_id, "revoked": True}
+
+
+@router.post("/join")
+def join(
+    payload: JoinRequest,
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    """Redeem a join token. Deliberately UNauthenticated: the token IS the
+    credential (k8s bootstrap-token / tailscale authkey model). Registration
+    is forced operator=False; distinct 403 details name what went wrong
+    (expired / already used / revoked / locked to '<id>'); a 409 id collision
+    does NOT consume the token, so the joiner can retry with a free id."""
+    info, api_key, joined = _run(service.redeem_join_token, payload.token,
+                                 payload.agent_id, payload.about)
+    # Same one-time-plaintext contract as /agents.
+    return {"agent": info.model_dump(), "api_key": api_key,
+            "channels_joined": joined}
+
+
 @router.get("/whoami")
 def whoami(agent: AgentInfo = Depends(current_agent)) -> dict[str, Any]:
     return agent.model_dump()

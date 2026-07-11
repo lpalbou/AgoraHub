@@ -77,6 +77,44 @@ def cmd_up(args: argparse.Namespace) -> None:
                 ws_ping_interval=20.0, ws_ping_timeout=20.0)
 
 
+def _setup_key(url: str, agent_id: str, about: str,
+               key_flag: str | None) -> str | None:
+    """The agent key a setup command should cache AND embed: seed an
+    operator-minted --key if one was passed (verifying it against the hub so a
+    paste truncation fails HERE, not at first tool use), then resolve — cache
+    hit, else admin-key self-registration. Returns None only when NO
+    credential exists at all: that is today's keyless config, where the MCP
+    server lazily self-registers on first use (local first-run unchanged)."""
+    if key_flag:
+        _config.seed_keys(url, {agent_id: key_flag})
+        _whoami_check(url, key_flag)
+    if not (key_flag or _config.get_cached_key(url, agent_id)
+            or os.environ.get("AGORA_ADMIN_KEY")
+            or _config.load_config().get("admin_key")):
+        return None
+    return _config.resolve_key(url, agent_id, about=about)
+
+
+def _whoami_check(url: str, api_key: str) -> dict:
+    """Verify a key against the hub; loud, actionable failure."""
+    import httpx
+
+    r = httpx.get(f"{url}/whoami",
+                  headers={"Authorization": f"Bearer {api_key}"}, timeout=10.0)
+    if r.status_code != 200:
+        raise SystemExit(f"the hub at {url} rejected this key "
+                         f"({r.status_code}): check for paste truncation, or "
+                         "ask the operator to re-mint (`agora register`).")
+    return r.json()
+
+
+def _print_key_placement(written_config: Path) -> None:
+    """One consistent ledger line wherever a per-agent key was embedded."""
+    print(f"  key: cached in {_config.home() / 'keys.json'} and embedded in "
+          f"{written_config} (0600)")
+    print("  keep that file out of version control (gitignore it).")
+
+
 def cmd_setup_cursor(args: argparse.Namespace) -> None:
     """Wire a workspace as a Cursor agent: project `.cursor/mcp.json`, the
     shared etiquette rule, and optionally the shared stop-hook (Cursor's
@@ -87,13 +125,19 @@ def cmd_setup_cursor(args: argparse.Namespace) -> None:
     workspace = Path(args.workspace).expanduser().resolve()
     if not workspace.is_dir():
         sys.exit(f"workspace not found: {workspace}")
-    url = args.url or _config.load_config().get("url") or _default_url(DEFAULT_PORT)
+    url = _hub_url(args)  # honors $AGORA_URL (the silent-127.0.0.1 trap fix)
+    api_key = _setup_key(url, args.agent, args.about or "", args.key)
     written = setup_cursor(workspace, args.agent, url, args.about or "",
-                           _resolve_mcp_command(), args.with_hook)
+                           _resolve_mcp_command(), args.with_hook,
+                           api_key=api_key)
     print(f"configured '{workspace.name}' as agora agent '{args.agent}' (Cursor):")
     for path in written:
         print(f"  wrote {path}")
-    print("Open this folder in Cursor. The agent self-registers on first tool use.")
+    if api_key:
+        _print_key_placement(written[0])
+        print("Open this folder in Cursor. The agent authenticates immediately.")
+    else:
+        print("Open this folder in Cursor. The agent self-registers on first tool use.")
     _warn_if_not_project_root(workspace, args.agent)
 
 
@@ -106,12 +150,16 @@ def cmd_setup_claude(args: argparse.Namespace) -> None:
     workspace = Path(args.workspace).expanduser().resolve()
     if not workspace.is_dir():
         sys.exit(f"workspace not found: {workspace}")
-    url = args.url or _config.load_config().get("url") or _default_url(DEFAULT_PORT)
+    url = _hub_url(args)
+    api_key = _setup_key(url, args.agent, args.about or "", args.key)
     written = setup_claude(workspace, args.agent, url, args.about or "",
-                           _resolve_mcp_command(), args.with_hook)
+                           _resolve_mcp_command(), args.with_hook,
+                           api_key=api_key)
     print(f"configured '{workspace.name}' as agora agent '{args.agent}' (Claude Code):")
     for path in written:
         print(f"  wrote {path}")
+    if api_key:
+        _print_key_placement(written[0])
     print("Run `claude` in this folder and approve the 'agora' MCP server (/mcp).")
     _warn_if_not_project_root(workspace, args.agent)
 
@@ -124,12 +172,24 @@ def cmd_setup_codex(args: argparse.Namespace) -> None:
     workspace = Path(args.workspace).expanduser().resolve()
     if not workspace.is_dir():
         sys.exit(f"workspace not found: {workspace}")
-    url = args.url or _config.load_config().get("url") or _default_url(DEFAULT_PORT)
+    url = _hub_url(args)
+    api_key = _setup_key(url, args.agent, args.about or "", args.key)
     written = setup_codex(workspace, args.agent, url, args.about or "",
-                          _resolve_mcp_command(), with_hook=args.with_hook)
+                          _resolve_mcp_command(), with_hook=args.with_hook,
+                          api_key=api_key)
     print(f"configured '{workspace.name}' as agora agent '{args.agent}' (Codex CLI):")
     for path in written:
         print(f"  wrote {path}")
+    config_path = workspace / ".codex" / "config.toml"
+    if api_key and config_path in written:
+        _print_key_placement(config_path)
+    elif api_key:
+        # Pre-existing agora table: setup leaves TOML untouched by design, so
+        # the fresh key landed only in keys.json. Say so instead of implying
+        # the embed happened.
+        print(f"  key: cached in {_config.home() / 'keys.json'} (existing "
+              f"[mcp_servers.agora] table in {config_path} left untouched — "
+              "delete it and re-run to embed the key)")
     print("Run `codex` in this folder and trust the project when prompted.")
     if args.with_hook:
         print("Then review/approve the Stop hook once via /hooks (re-approve "
@@ -153,6 +213,72 @@ def _warn_if_not_project_root(workspace: Path, agent_id: str) -> None:
               f" at '{git_root}' and ignore this folder's config. Prefer a"
               " folder that is its own repo, or use the terminal CLI"
               f" (`agora inbox --as {agent_id}`) which needs no MCP config.")
+
+
+# -- operator verbs for remote onboarding (register / seed-key) ---------------
+
+
+def _admin_key_or_exit(args: argparse.Namespace, url: str) -> str:
+    """Admin credential, resolved exactly like resolve_key: explicit flag,
+    then $AGORA_ADMIN_KEY, then the hub machine's config.json."""
+    admin = (getattr(args, "admin_key", None)
+             or os.environ.get("AGORA_ADMIN_KEY")
+             or _config.load_config().get("admin_key"))
+    if not admin:
+        sys.exit(f"no admin key for {url}: pass --admin-key, export "
+                 "AGORA_ADMIN_KEY, or run this on the hub machine "
+                 "(where `agora up` saved ~/.agora/config.json).")
+    return admin
+
+
+def cmd_register(args: argparse.Namespace) -> None:
+    """Operator verb: mint ONE agent's key on the hub, printing it exactly
+    once. Deliberately does NOT cache it locally — the key belongs to the
+    machine that will run the agent (import there with `agora seed-key` or
+    `agora setup-* --key`). For remote onboarding without any operator key
+    handling, prefer `agora invite` (a scoped, expiring join token)."""
+    import httpx
+
+    url = _hub_url(args)
+    admin = _admin_key_or_exit(args, url)
+    r = httpx.post(f"{url}/agents",
+                   headers={"Authorization": f"Bearer {admin}"},
+                   json={"id": args.agent, "about": args.about or ""},
+                   timeout=10.0)
+    if r.status_code == 409:
+        sys.exit(f"agent '{args.agent}' is already registered; keys are "
+                 "unrecoverable (hashed at rest). Use the key saved at its "
+                 "registration (`agora seed-key`) or pick a new id.")
+    if r.status_code != 200:
+        sys.exit(f"registration failed: {r.status_code} {r.text}")
+    payload = r.json()
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return
+    print(f"agent '{args.agent}' registered at {url} (operator=false)")
+    print(f"  api_key: {payload['api_key']}")
+    print("shown exactly ONCE (the hub stores only its hash). On the agent's "
+          "machine:")
+    print(f"  agora seed-key {args.agent} --url {url} --key <that key>")
+    print(f"  (or: agora setup-cursor {args.agent} --url {url} --key <that key>)")
+
+
+def cmd_seed_key(args: argparse.Namespace) -> None:
+    """Import an operator-minted agent key into this machine's key cache
+    (keys.json, 0600, entries keyed '<url>::<agent-id>'), then verify it
+    against the hub so a truncated paste fails now, not at first tool use."""
+    url = _hub_url(args)
+    _config.seed_keys(url, {args.agent: args.key})
+    identity = _whoami_check(url, args.key)
+    if identity.get("id") != args.agent:
+        sys.exit(f"key mismatch: the hub says this key belongs to "
+                 f"'{identity.get('id')}', not '{args.agent}'. Re-check the "
+                 "paste (keys.json entry was written; fix it with the right "
+                 "key or id).")
+    keys_path = _config.home() / "keys.json"
+    print(f"seeded '{url}::{args.agent}' -> {keys_path} (0600)")
+    print(f"verified: GET /whoami as '{args.agent}' OK")
+    print(f"try it:   agora whoami --as {args.agent}")
 
 
 # -- agent-facing verbs (identity via --as; work from ANY folder, no MCP) -----
@@ -350,7 +476,83 @@ def cmd_who(args):
     _run_agent_cmd(args, go)
 
 
+def cmd_invite(args):
+    """Operator verb: mint a scoped join token and print the one-paste line
+    (`agora join AGORA1....`) a remote machine onboards with. The admin key
+    resolves like resolve_key (flag -> $AGORA_ADMIN_KEY -> config.json) and
+    never leaves this machine."""
+    from .join import parse_ttl, run_invite, run_invite_list, run_invite_revoke
+
+    url = _hub_url(args)
+    admin = _admin_key_or_exit(args, url)
+    if args.list:
+        return run_invite_list(url, admin)
+    if args.revoke:
+        return run_invite_revoke(url, admin, args.revoke)
+    if args.any_id and args.agent:
+        sys.exit("agora invite: give an agent id OR --any-id, not both")
+    if not args.any_id and not args.agent:
+        sys.exit("agora invite: name the agent to invite (or pass --any-id to "
+                 "let the joiner choose)")
+    try:
+        ttl = parse_ttl(args.ttl)
+    except ValueError as e:
+        sys.exit(f"agora invite: {e}")
+    channels = [c.strip() for c in (args.channels or "").split(",") if c.strip()]
+    run_invite(url, admin, None if args.any_id else args.agent,
+               args.about or "", channels, ttl, args.uses)
+
+
 def cmd_join(args):
+    """ONE subparser, two verbs, disambiguated loudly:
+    - a positional `AGORA1....` artifact (or --token/--url) = machine
+      onboarding — redeem a join token, cache the key everywhere, wire the
+      workspace;
+    - --channel = the existing channel join, unchanged.
+    Both or neither is a usage error, never a guess."""
+    onboarding = bool(args.artifact or args.token)
+    if onboarding and args.channel:
+        sys.exit("agora join: choose ONE mode — an artifact/--token onboards "
+                 "this machine; --channel joins a channel. Not both.")
+
+    if onboarding:
+        from .join import decode_artifact, run_join
+        if args.artifact and args.token:
+            sys.exit("agora join: pass an artifact OR --token, not both")
+        if args.artifact:
+            try:
+                art = decode_artifact(args.artifact)
+            except ValueError as e:
+                sys.exit(f"agora join: {e}")
+            url, token = art["url"], art["token"]
+            pinned, expires = art["agent_id"], art["expires_at"]
+            if not pinned and not args.as_agent:
+                # Knowable client-side for artifacts (the mint wrote the pin
+                # into the blob): fail before any network call.
+                sys.exit("this artifact pins no agent id: choose one with "
+                         "`agora join <artifact> --as <id>`")
+        else:
+            if not args.url:
+                sys.exit("agora join: --token needs --url <hub-url> "
+                         "(the artifact form carries the url for you)")
+            url, token = args.url.rstrip("/"), args.token
+            pinned, expires = None, None
+        code = run_join(url=url, token=token, agent_id=args.as_agent,
+                        about=args.about or "", harness=args.harness,
+                        workspace=args.workspace, with_hook=args.with_hook,
+                        listen=args.listen, mcp_command=_resolve_mcp_command(),
+                        pinned_id=pinned, expires_hint=expires)
+        if code:
+            sys.exit(code)
+        return
+
+    if not args.channel:
+        sys.exit("agora join: nothing to do — paste an AGORA1.... artifact to "
+                 "onboard this machine, or --channel <name> to join a channel "
+                 "(see --help)")
+    if not args.as_agent:
+        sys.exit("agora join --channel requires --as <agent-id>")
+
     async def go(c, a):
         print(json.dumps(await c.join_channel(a.channel, a.invite), indent=2))
     _run_agent_cmd(args, go)
@@ -654,7 +856,9 @@ def cmd_status(args: argparse.Namespace) -> None:
     print(f"\n{legend}")
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
+    """The full argparse tree, separate from main() so tests can parse
+    argv lists without executing commands."""
     p = argparse.ArgumentParser(prog="agora", description="agora control")
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -672,11 +876,16 @@ def main() -> None:
                          "(default 8; 0 disables rotation)")
     up.set_defaults(func=cmd_up)
 
+    _KEY_HELP = ("operator-minted agent key (from `agora register`): seeds the "
+                 "local key cache and is embedded in the harness config — the "
+                 "admin key is then never needed on this machine")
+
     sc = sub.add_parser("setup-cursor", help="wire a workspace as an agora agent")
     sc.add_argument("agent", help="agent id, e.g. runtime")
     sc.add_argument("--workspace", default=".", help="workspace folder (default: cwd)")
     sc.add_argument("--about", default="", help="self-description for this agent")
     sc.add_argument("--url", default=None)
+    sc.add_argument("--key", default=None, metavar="AGENT_KEY", help=_KEY_HELP)
     sc.add_argument("--with-hook", action="store_true",
                     help="also install the stop-hook for hands-free triggering")
     sc.set_defaults(func=cmd_setup_cursor)
@@ -686,6 +895,7 @@ def main() -> None:
     scl.add_argument("--workspace", default=".", help="workspace folder (default: cwd)")
     scl.add_argument("--about", default="", help="self-description for this agent")
     scl.add_argument("--url", default=None)
+    scl.add_argument("--key", default=None, metavar="AGENT_KEY", help=_KEY_HELP)
     scl.add_argument("--with-hook", action="store_true",
                      help="also install the Stop hook for hands-free triggering")
     scl.set_defaults(func=cmd_setup_claude)
@@ -695,10 +905,34 @@ def main() -> None:
     scx.add_argument("--workspace", default=".", help="workspace folder (default: cwd)")
     scx.add_argument("--about", default="", help="self-description for this agent")
     scx.add_argument("--url", default=None)
+    scx.add_argument("--key", default=None, metavar="AGENT_KEY", help=_KEY_HELP)
     scx.add_argument("--with-hook", action="store_true",
                      help="also install the Stop hook (.codex/hooks.json) for "
                           "hands-free triggering at turn ends")
     scx.set_defaults(func=cmd_setup_codex)
+
+    rg = sub.add_parser("register",
+                        help="operator: register an agent on the hub and print "
+                             "its key ONCE (import it on the agent's machine "
+                             "with seed-key or setup-* --key)")
+    rg.add_argument("agent", help="agent id, e.g. castor")
+    rg.add_argument("--about", default="", help="self-description for this agent")
+    rg.add_argument("--url", default=None)
+    rg.add_argument("--admin-key", dest="admin_key", default=None,
+                    help="admin key (default: $AGORA_ADMIN_KEY, then config.json)")
+    rg.add_argument("--json", action="store_true",
+                    help="print the raw registration response (scripting)")
+    rg.set_defaults(func=cmd_register)
+
+    sk = sub.add_parser("seed-key",
+                        help="import an operator-minted agent key into this "
+                             "machine's key cache (~/.agora/keys.json, 0600) "
+                             "and verify it against the hub")
+    sk.add_argument("agent", help="agent id the key belongs to")
+    sk.add_argument("--key", required=True, metavar="AGENT_KEY",
+                    help="the agora_... key printed by `agora register`")
+    sk.add_argument("--url", default=None)
+    sk.set_defaults(func=cmd_seed_key)
 
     st = sub.add_parser("status", help="check hub + config")
     st.set_defaults(func=cmd_status)
@@ -817,9 +1051,79 @@ def main() -> None:
     lg = _agent_parser("ledger", "print a channel's verbatim ledger (transcript + verified head)")
     lg.add_argument("--channel", required=True); lg.set_defaults(func=cmd_ledger)
 
-    jn = _agent_parser("join", "join a channel (public = no invite)")
-    jn.add_argument("--channel", required=True); jn.add_argument("--invite", default=None)
+    # `join` carries TWO verbs (disambiguated in cmd_join, both/neither = loud
+    # error): machine onboarding via a pasted artifact, and the original
+    # channel join. Built by hand (not _agent_parser): --as is only mandatory
+    # for the channel mode.
+    jn = sub.add_parser("join",
+                        help="onboard this machine with a pasted invite "
+                             "(agora join AGORA1....) — or join a channel "
+                             "(--channel NAME)")
+    jn.add_argument("artifact", nargs="?", default=None,
+                    help="AGORA1.... one-paste artifact from `agora invite` "
+                         "(whitespace/line-wraps from chat are tolerated)")
+    jn.add_argument("--as", dest="as_agent", default=None, metavar="AGENT_ID",
+                    help="channel mode: act as this id (required); onboarding: "
+                         "the id to claim when the artifact pins none")
+    jn.add_argument("--channel", default=None,
+                    help="channel mode: channel to join (public = no invite)")
+    jn.add_argument("--invite", default=None,
+                    help="channel mode: invite token for a private channel")
+    jn.add_argument("--token", default=None, metavar="JOIN_TOKEN",
+                    help="onboarding: raw agora-join_... token (explicit "
+                         "alternative to the artifact; needs --url)")
+    jn.add_argument("--url", default=None,
+                    help="onboarding with --token: hub url (the artifact "
+                         "form carries it)")
+    jn.add_argument("--about", default="",
+                    help="onboarding: self-description for the new agent")
+    jn.add_argument("--harness", choices=["cursor", "claude", "codex", "none"],
+                    default="cursor",
+                    help="onboarding: workspace wiring to install "
+                         "(default cursor; none = register + cache key only)")
+    jn.add_argument("--workspace", default=".",
+                    help="onboarding: workspace folder (default: cwd)")
+    jn.add_argument("--with-hook", action="store_true",
+                    help="onboarding: also install the harness stop-hook")
+    jn.add_argument("--listen", action="store_true",
+                    help="onboarding: arm a FOREGROUND `agora listen "
+                         "--source ws` after wiring (headless nodes)")
     jn.set_defaults(func=cmd_join)
+
+    iv = sub.add_parser("invite",
+                        help="operator: mint a join token + one-paste line "
+                             "for a remote machine (hub membership; for "
+                             "CHANNEL invites use `agora join --channel` / "
+                             "the invite_agent tool)")
+    iv.add_argument("agent", nargs="?", default=None,
+                    help="agent id the token is locked to (omit only with "
+                         "--any-id)")
+    iv.add_argument("--channels", default="",
+                    help="comma-separated PUBLIC channels the joiner enters "
+                         "automatically")
+    iv.add_argument("--ttl", default="24h",
+                    help="token lifetime, e.g. 90s/30m/24h/7d "
+                         "(default 24h, cap 30d)")
+    iv.add_argument("--uses", type=int, default=1,
+                    help="redemptions allowed (default 1 = single-use, "
+                         "max 100 for fleet provisioning)")
+    iv.add_argument("--any-id", dest="any_id", action="store_true",
+                    help="do not lock the token to an id (joiner picks via "
+                         "`agora join ... --as <id>`)")
+    iv.add_argument("--about", default="",
+                    help="default self-description for the joiner")
+    iv.add_argument("--url", default=None,
+                    help="hub url AS REACHABLE FROM THE REMOTE "
+                         "(e.g. http://<lan-ip>:8765 — a loopback url is "
+                         "warned about)")
+    iv.add_argument("--admin-key", dest="admin_key", default=None,
+                    help="admin key (default: $AGORA_ADMIN_KEY, then "
+                         "config.json)")
+    iv.add_argument("--list", action="store_true",
+                    help="list live join tokens (audit; no secrets)")
+    iv.add_argument("--revoke", default=None, metavar="TOKEN_ID",
+                    help="revoke a token by the public id shown at mint/--list")
+    iv.set_defaults(func=cmd_invite)
 
     sa = _agent_parser("set-about", "set your self-description")
     sa.add_argument("text"); sa.set_defaults(func=cmd_set_about)
@@ -843,8 +1147,11 @@ def main() -> None:
                     help="write this watcher's PID here (removed on exit) so a "
                          "harness can tell a live watcher from a dead one")
     wt.set_defaults(func=cmd_watch)
+    return p
 
-    args = p.parse_args()
+
+def main() -> None:
+    args = build_parser().parse_args()
     try:
         args.func(args)
     except SystemExit:
