@@ -395,7 +395,7 @@ def test_invite_then_join_end_to_end(live_hub, isolated_home, tmp_path, capsys):
     assert env["AGORA_AGENT_ID"] == "castor"
     assert env["AGORA_API_KEY"] == api_key
     assert mcp_path.stat().st_mode & 0o077 == 0
-    assert (workspace / ".cursor" / "rules" / "agora.md").exists()
+    assert (workspace / ".cursor" / "rules" / "agora.mdc").exists()
     assert (workspace / ".cursor" / "hooks.json").exists()
 
     assert "verified    -> GET /whoami as 'castor' OK (channels: general)" in out

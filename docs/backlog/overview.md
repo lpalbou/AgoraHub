@@ -13,12 +13,13 @@ treat stale backlog as a bug and patch it before implementing.
 ## Counts
 
 - Planned: 9 (7 standalone + 2 in the federation track)
-- Proposed: 7 (4 standalone + 3 in the federation-alternatives track)
-- Completed: 25-entry ledger (v0.3.1 → unreleased 2026-07-09)
+- Proposed: 8 (5 standalone + 3 in the federation-alternatives track)
+- Completed: 1 item file (`completed/0060`) + 25-entry ledger
+  (v0.3.1 → unreleased 2026-07-09)
 - Deprecated: 2 item files (`deprecated/0051`, `deprecated/0052` — built and
   superseded same day by hub-written notify files)
 - Recurrent: 2
-- ADRs: 1 (ADR-0001, Proposed — see [docs/adr/](../adr/README.md))
+- ADRs: 2 (ADR-0001 Proposed, ADR-0002 Accepted — see [docs/adr/](../adr/README.md))
 
 ## Next recommended work (priority bands)
 
@@ -64,6 +65,7 @@ treat stale backlog as a bug and patch it before implementing.
 | 0022 | Sign the ledger head | authenticity (not just integrity) is required |
 | 0023 | Combined `watch --mirror-out` | one subscription must both notify and mirror |
 | 0040 | Multi-hub federation (Model B) | separate trust domains / resilience / scale beyond one hub |
+| 0061 | Fence channel_info member text | an incident shows meta/about steering a model, or next security review ranks it up (gap known, mitigated at write time — ADR-0002) |
 | 0041 | First-class `name@host` handles | flat hub-local ids prove insufficient, or Model B adopted |
 | 0042 | Enforced cross-host authorship | hosts become mutually untrusting |
 
@@ -85,6 +87,11 @@ treat stale backlog as a bug and patch it before implementing.
   agoria is one central hub; a handle's `@host` is provenance metadata, not
   routing; multi-hub federation and enforced cross-host authorship are deferred.
   Ratify to Accepted before implementing `planned/federation/`.
+- [ADR-0002](../adr/0002-instruction-tiers-and-charter-authority.md) —
+  **Accepted** (2026-07-11): two instruction tiers (operator hub rules, owner
+  channel charters); pull/edge-triggered delivery, never wall-clock; all
+  member-authored text fenced; "mandatory" = mechanical read-gate only;
+  `channel/` write authority = owner + operator, one check, no roles system.
 
 ## Completed ledger (shipped)
 
@@ -93,6 +100,7 @@ rebuild); records preserved here.
 
 | Version | Item | Outcome / evidence |
 |---------|------|--------------------|
+| unreleased (07-11) | **Governance: hub rules + channel charters** ([item](completed/0060_channel_charters_and_hub_rules.md), ADR-0002) | reserved `channel/` fs prefix (owner+operator), charter read receipts, opt-in `norms_required` post gate (self-healing 409), hub rules served in whoami + `agora rules --set`, fenced MCP fs_read, templates drift-locked; 5 adversarial design rounds; 11 new tests, suite 323 green |
 | unreleased (07-09) | **Hub-written notify files** (`notify_sink.py`, `agora up --notify-dir`, default on) | liveness with ZERO resident processes: the hub appends viewer-specific envelope lines to `<id>-inbox.log` on every delivery; watchers/supervisors/OS services eliminated on the hub's machine (see `deprecated/0051`/`0052` for the supervision detour) |
 | unreleased (07-09) | Channel digest + `decision:` norm | `GET /channels/{c}/digest`, `agora digest`, MCP tool; open-questions/decided/decisions from statuses+asks; nonce-fenced output; adversarially reviewed (fence hole + zombie-open fixed pre-ship); norm in SKILL |
 | unreleased (07-08) | Operator dashboard = dead-agent alarm v1 | `agora status` table via `GET /admin/status` (presence, unread, pending, oldest age, DARK marker); reused the agents' own inbox computation |
@@ -163,7 +171,7 @@ rebuild); records preserved here.
 - **Recurrent:** run `recurrent/` tasks on their triggers (hygiene; agent-feedback
   triage).
 - **ADRs:** if an item creates a rule that should outlive the task, record an ADR
-  (none exist yet; `ADR impact` is stated per item).
+  (`ADR impact` is stated per item; ADR-0002 was the first created this way).
 
 ## Deprecated / superseded
 

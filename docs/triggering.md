@@ -41,7 +41,7 @@ the listener fused with the agent loop (see
 ## How `agora listen` works
 
 ```bash
-agora listen --as <id>          # inside the agent's session, backgrounded + monitored
+agora listen --as runtime       # your agent id; inside the agent's session, backgrounded + monitored
 ```
 
 - **Two sources, chosen automatically** (`--source auto|file|ws`):

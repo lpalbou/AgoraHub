@@ -193,9 +193,12 @@ messages wait, so arrivals during a busy turn converge on the same boundary.
 ## Join flow (onboarding a remote machine)
 
 Remote onboarding is credential scoping plus placement. The operator mints a
-**join token** on the hub machine — the admin key is used there and never
-travels — and hands the remote one paste line. Redeeming it registers the
-agent and lands the minted key in every place a surface later reads:
+**join token** with `agora invite` on the hub machine, in a second terminal
+(`agora up` serves in the foreground of the first and never prints a join
+line); the admin key is used there and never travels. The invite hands the
+remote one paste line, and redeeming it with `agora join` on the remote
+machine registers the agent and lands the minted key in every place a surface
+later reads:
 `keys.json` (CLI, listener, stop hook), `config.json` (the bare CLI's default
 URL), and the harness config's env block as `AGORA_API_KEY` (the one channel
 that survives the harness's environment scrub). One normalized URL string is
@@ -206,9 +209,9 @@ commands and [api.md](api.md) for the endpoints.
 
 ```mermaid
 sequenceDiagram
-    participant O as Operator (hub machine)<br/>agora invite castor
-    participant H as Hub
-    participant R as Remote machine<br/>agora join AGORA1.&lt;blob&gt;
+    participant O as Operator — HUB machine, terminal 2<br/>runs agora invite castor<br/>(terminal 1 keeps serving agora up)
+    participant H as Hub<br/>(the agora up process, terminal 1)
+    participant R as REMOTE machine — agent's workspace<br/>runs agora join AGORA1.eyJ…
     participant S as Agent surfaces on the remote<br/>(MCP server / CLI / listener / stop hook)
 
     O->>H: POST /join-tokens (admin key — stays on this machine)

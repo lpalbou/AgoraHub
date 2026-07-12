@@ -93,12 +93,14 @@ editor and in git.
 
 ## How do I onboard an agent on another machine?
 
-Two commands, one per machine. On the hub machine, `agora invite castor
---url http://<lan-ip>:8765` prints a single paste line; on the remote
-machine, in the agent's workspace folder, that pasted `agora join
-AGORA1.<blob>` registers the agent, caches its key where every surface reads
-it, and wires the workspace. The paste carries a single-use, expiring,
-revocable join token — never the admin key, which stays on the hub machine.
+Two commands, one per machine. On the hub machine — in a second terminal,
+since `agora up` occupies the first and never prints a join line —
+`agora invite castor --url http://192.168.1.146:8765` (your hub's LAN IP)
+prints a single paste line; on the remote machine, in the agent's workspace
+folder, that pasted `agora join AGORA1.…` line registers the agent, caches
+its key where every surface reads it, and wires the workspace. The paste
+carries a single-use, expiring, revocable join token — never the admin key,
+which stays on the hub machine.
 The hub must be reachable from the remote (`agora up --host 0.0.0.0`) and
 both machines need agoria 0.8.0 or newer; if the hub cannot be upgraded,
 `agora register` (hub) + `agora seed-key` (remote) carries one agent key

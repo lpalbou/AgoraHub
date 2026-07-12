@@ -136,8 +136,11 @@ def test_setup_cursor_cmd_honors_agora_url_and_keeps_keyless_path(
         isolated_home, tmp_path, monkeypatch, capsys):
     """The URL trap, killed: with $AGORA_URL exported and NO flag, setup must
     write that url (not 127.0.0.1) into mcp.json. With no credential anywhere
-    the output stays the keyless config — byte-identical to the old writer —
-    and nothing is chmod-clamped."""
+    the output stays the keyless config and nothing is chmod-clamped. This
+    test runs under a CUSTOM AGORA_HOME (the isolated_home fixture), so the
+    env block must also carry it — the second-hub fix: harness-spawned
+    processes don't inherit the shell env, and without the embed the MCP
+    server would read the wrong keys.json at run time."""
     from agora.cli import cmd_setup_cursor
 
     monkeypatch.setenv("AGORA_URL", "http://192.168.1.146:8765")
@@ -153,10 +156,38 @@ def test_setup_cursor_cmd_honors_agora_url_and_keeps_keyless_path(
     expected_server = {
         "command": json.loads(mcp_path.read_text())["mcpServers"]["agora"]["command"],
         "env": {"AGORA_URL": "http://192.168.1.146:8765",
-                "AGORA_AGENT_ID": "remote-mbp", "AGORA_ABOUT": ""},
+                "AGORA_AGENT_ID": "remote-mbp", "AGORA_ABOUT": "",
+                "AGORA_HOME": str(isolated_home)},
     }
     assert json.loads(mcp_path.read_text())["mcpServers"]["agora"] == expected_server
     assert mcp_path.stat().st_mode & 0o077 != 0       # no secret, no clamp
     # keyless = no key cached, nothing registered, no config.json written
     assert not (isolated_home / "keys.json").exists()
     assert not (isolated_home / "config.json").exists()
+
+
+def test_config_admin_key_is_bound_to_its_hub_url(isolated_home):
+    """The wrong-hub regression guard (F1): a config.json admin key belongs to
+    the hub config.json NAMES. resolve_key must NOT use it to self-register
+    against a DIFFERENT url — that is exactly how a hub-2 agent that resolved
+    the default url silently registered on the production hub. With no matching
+    credential, resolve_key must refuse loudly rather than register on the
+    wrong hub."""
+    # Simulate a hub-1 config (the "production" hub on this machine).
+    _config.save_config(url="http://127.0.0.1:8765", admin_key="prod-admin",
+                        db_path=str(isolated_home / "hub.db"))
+
+    # Resolving a key for a DIFFERENT hub (hub 2) must NOT borrow prod's admin
+    # key: no cached key + no matching admin key => loud refusal, no HTTP call.
+    with pytest.raises(SystemExit) as exc:
+        _config.resolve_key("http://192.168.1.146:8770", "aga-2")
+    assert "aga-2" in str(exc.value)
+    # And it must not have cached anything for the wrong hub.
+    assert _config.get_cached_key("http://192.168.1.146:8770", "aga-2") is None
+
+    # Same-hub resolution still finds the config admin key (it would proceed to
+    # POST /agents — which fails here with no server, proving it got past the
+    # guard and tried to register, i.e. the key WAS accepted for its own hub).
+    with pytest.raises(SystemExit) as same:
+        _config.resolve_key("http://127.0.0.1:8765/", "aga-1")  # trailing slash tolerated
+    assert "self-registration failed" in str(same.value) or "aga-1" in str(same.value)

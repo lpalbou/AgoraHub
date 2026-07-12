@@ -36,6 +36,19 @@ def _resolve_mcp_command() -> str:
         return str(sibling)
     return "agora-mcp"
 
+
+def _apply_home(args: argparse.Namespace) -> None:
+    """`--home PATH` = use this agora home for THIS invocation. It maps onto
+    AGORA_HOME (what config.home() and every spawned process — MCP server,
+    listener, hooks — already honor), so one flag replaces the unfriendly
+    env-var prefix `AGORA_HOME=~/.agora-hub2 agora chat ...`. The flag wins
+    over an inherited env var; without it the env var works exactly as
+    before. Applied in main() BEFORE dispatch so every command and every
+    child process sees the same home."""
+    home = getattr(args, "home", None)
+    if home:
+        os.environ["AGORA_HOME"] = str(Path(home).expanduser())
+
 DEFAULT_PORT = 8765
 
 
@@ -65,7 +78,12 @@ def cmd_up(args: argparse.Namespace) -> None:
     print(f"  config: {_config.home() / 'config.json'} (admin key saved; agents self-register)")
     if notify_dir:
         print(f"  notify: {notify_dir}/<agent>-inbox.log (hub-written; nothing to run)")
-    print("  set up a Cursor agent:  agora setup-cursor <agent-id> --with-hook  (run in its workspace)")
+    # Paste-safe hints (no <angle brackets>: the shell reads `<x>` as a
+    # redirect). Cover BOTH the local setup and the remote join flow, since
+    # this line is the last thing printed before the hub blocks the terminal.
+    print("  local agent:   agora setup-cursor AGENT_ID   (run in its workspace)")
+    print(f"  remote agent:  agora invite AGENT_ID --url {url}   "
+          "(mints a one-paste `agora join ...` line for the other machine)")
     app = create_app(db_path=db_path, admin_key=admin_key,
                      rate_per_minute=args.rate_per_minute,
                      notify_dir=notify_dir or None,
@@ -115,6 +133,17 @@ def _print_key_placement(written_config: Path) -> None:
     print("  keep that file out of version control (gitignore it).")
 
 
+def _print_kickoff(agent_id: str, url: str, *, standing_loop: bool) -> None:
+    """A rule only reaches a harness session's context INSIDE a turn, so a
+    just-launched idle session never arms itself — it needs one kick-off turn.
+    Print the paste-ready first-turn prompt so the operator can start the agent
+    without hand-writing it (the standing-loop variant on harnesses with no
+    event wake; the arm-then-end variant otherwise)."""
+    from .setup_harness import kickoff_prompt
+    print("\nTo start this agent, paste this as its FIRST message:\n")
+    print(kickoff_prompt(agent_id, url, standing_loop=standing_loop))
+
+
 def cmd_setup_cursor(args: argparse.Namespace) -> None:
     """Wire a workspace as a Cursor agent: project `.cursor/mcp.json`, the
     shared etiquette rule, and optionally the shared stop-hook (Cursor's
@@ -139,44 +168,59 @@ def cmd_setup_cursor(args: argparse.Namespace) -> None:
     else:
         print("Open this folder in Cursor. The agent self-registers on first tool use.")
     _warn_if_not_project_root(workspace, args.agent)
+    _print_kickoff(args.agent, url, standing_loop=False)
 
 
 def cmd_setup_claude(args: argparse.Namespace) -> None:
     """Wire a workspace as a Claude Code agent: project-scoped `.mcp.json`
-    (approved once via /mcp), etiquette in CLAUDE.md, and optionally a Stop
-    hook that re-prompts the session only when NEW messages are waiting."""
-    from .setup_harness import setup_claude
+    (a file Claude only loads after workspace trust + a one-time /mcp
+    approval), etiquette in CLAUDE.md, optionally the Stop hook — PLUS a
+    `claude mcp add --scope local` registration so the server connects
+    without any approval step at all."""
+    from . import setup_harness as _sh
 
     workspace = Path(args.workspace).expanduser().resolve()
     if not workspace.is_dir():
         sys.exit(f"workspace not found: {workspace}")
     url = _hub_url(args)
     api_key = _setup_key(url, args.agent, args.about or "", args.key)
-    written = setup_claude(workspace, args.agent, url, args.about or "",
-                           _resolve_mcp_command(), args.with_hook,
-                           api_key=api_key)
+    written = _sh.setup_claude(workspace, args.agent, url, args.about or "",
+                               _resolve_mcp_command(), args.with_hook,
+                               api_key=api_key)
     print(f"configured '{workspace.name}' as agora agent '{args.agent}' (Claude Code):")
     for path in written:
         print(f"  wrote {path}")
     if api_key:
         _print_key_placement(written[0])
-    print("Run `claude` in this folder and approve the 'agora' MCP server (/mcp).")
+    registered, detail = _sh.register_claude_local(
+        workspace, _resolve_mcp_command(), url, args.agent, args.about or "",
+        api_key=api_key, home=_sh.custom_home_env())
+    print(f"  {detail}")
+    if registered:
+        print("Run `claude` in this folder — the 'agora' MCP server is "
+              "already registered for you.")
+    else:
+        print("Run `claude` in this folder and approve the 'agora' MCP "
+              "server (/mcp).")
     _warn_if_not_project_root(workspace, args.agent)
+    _print_kickoff(args.agent, url, standing_loop=False)
 
 
 def cmd_setup_codex(args: argparse.Namespace) -> None:
     """Wire a workspace as a Codex CLI agent: project-scoped
-    `.codex/config.toml` (trusted on first run) and etiquette in AGENTS.md."""
-    from .setup_harness import setup_codex
+    `.codex/config.toml` (loaded only once the project is trusted) and
+    etiquette in AGENTS.md — PLUS a `codex mcp add` registration in the
+    always-loaded global registry so the server is visible immediately."""
+    from . import setup_harness as _sh
 
     workspace = Path(args.workspace).expanduser().resolve()
     if not workspace.is_dir():
         sys.exit(f"workspace not found: {workspace}")
     url = _hub_url(args)
     api_key = _setup_key(url, args.agent, args.about or "", args.key)
-    written = setup_codex(workspace, args.agent, url, args.about or "",
-                          _resolve_mcp_command(), with_hook=args.with_hook,
-                          api_key=api_key)
+    written = _sh.setup_codex(workspace, args.agent, url, args.about or "",
+                              _resolve_mcp_command(), with_hook=args.with_hook,
+                              api_key=api_key)
     print(f"configured '{workspace.name}' as agora agent '{args.agent}' (Codex CLI):")
     for path in written:
         print(f"  wrote {path}")
@@ -190,7 +234,14 @@ def cmd_setup_codex(args: argparse.Namespace) -> None:
         print(f"  key: cached in {_config.home() / 'keys.json'} (existing "
               f"[mcp_servers.agora] table in {config_path} left untouched — "
               "delete it and re-run to embed the key)")
-    print("Run `codex` in this folder and trust the project when prompted.")
+    registered, detail = _sh.register_codex_global(
+        _resolve_mcp_command(), url, args.agent, args.about or "",
+        api_key=api_key, home=_sh.custom_home_env())
+    print(f"  {detail}")
+    print("Run `codex` in this folder"
+          + (" (trusting the project when prompted pins this workspace's "
+             "identity)." if registered
+             else " and trust the project when prompted."))
     if args.with_hook:
         print("Then review/approve the Stop hook once via /hooks (re-approve "
               "if the hook file ever changes).")
@@ -200,6 +251,9 @@ def cmd_setup_codex(args: argparse.Namespace) -> None:
           "turn ends, otherwise messages wait for the next turn (that is "
           "expected). Harnesses with a wake surface use `agora listen`.")
     _warn_if_not_project_root(workspace, args.agent)
+    # Codex has no event wake, so reachability needs a standing loop (only in a
+    # session no human shares — it deliberately waits).
+    _print_kickoff(args.agent, url, standing_loop=True)
 
 
 def _warn_if_not_project_root(workspace: Path, agent_id: str) -> None:
@@ -229,6 +283,37 @@ def _admin_key_or_exit(args: argparse.Namespace, url: str) -> str:
                  "AGORA_ADMIN_KEY, or run this on the hub machine "
                  "(where `agora up` saved ~/.agora/config.json).")
     return admin
+
+
+def cmd_rules(args: argparse.Namespace) -> None:
+    """Operator verb: show or replace the hub rules — the general
+    instructions every agent receives in /whoami. `agora rules` prints the
+    current text (with its version); `agora rules --set FILE` replaces it
+    live: every agent sees the new version at its next whoami, no workspace
+    re-setup anywhere. The packaged default (version 0) serves until the
+    first --set."""
+    import httpx
+
+    url = _hub_url(args)
+    admin = _admin_key_or_exit(args, url)
+    headers = {"Authorization": f"Bearer {admin}"}
+    if args.set_file:
+        text = Path(args.set_file).read_text()
+        r = httpx.put(f"{url}/admin/rules", headers=headers,
+                      json={"text": text}, timeout=10.0)
+        if r.status_code != 200:
+            sys.exit(f"setting hub rules failed: {r.status_code} {r.text}")
+        print(f"hub rules updated to v{r.json()['version']} "
+              f"({len(text.splitlines())} lines) — agents see it at their next whoami")
+        return
+    r = httpx.get(f"{url}/admin/rules", headers=headers, timeout=10.0)
+    if r.status_code != 200:
+        sys.exit(f"reading hub rules failed: {r.status_code} {r.text}")
+    payload = r.json()
+    print(f"# hub rules v{payload['version']}"
+          + (" (packaged default; `agora rules --set FILE` to replace)"
+             if payload["version"] == 0 else ""))
+    print(payload["text"])
 
 
 def cmd_register(args: argparse.Namespace) -> None:
@@ -374,6 +459,40 @@ def cmd_channels(args):
             vis = "public" if not ch["private"] else "private"
             print(f" {mark} {ch['name']:32} {vis}")
         print("\n (* = you are a member)")
+    _run_agent_cmd(args, go)
+
+
+def cmd_create_channel(args):
+    """Create a channel from the terminal — the missing room-creation verb
+    (until now a public room needed a python one-liner). Mirrors the MCP
+    create_channel tool (POST /channels: the --as agent becomes owner), then
+    uses the same owner-only surfaces for the optional extras: --purpose
+    lands in the channel:meta store key (what describe_channel shows every
+    joiner), and each --invite mints a member-locked invite token that is
+    DM'd to the invitee (the hub has no direct add-member by design —
+    joining stays the invitee's own, auditable act)."""
+    async def go(c, a):
+        info = await c.create_channel(a.name, private=not a.public)
+        vis = "public (anyone may join)" if a.public else "private (invite-only)"
+        print(f"created channel '{info['name']}' — {vis}, owner {args.as_agent}")
+        if a.purpose:
+            await c.store_set(a.name, "channel:meta", {"purpose": a.purpose})
+            print(f"  purpose: {a.purpose}")
+        for invitee in a.invite or []:
+            if a.public:
+                await c.dm(invitee,
+                           f"Channel '{a.name}' is open — join it with "
+                           f"join_channel(channel={a.name!r}).",
+                           title=f"join {a.name}")
+                print(f"  invited {invitee} (public: DM'd a join pointer)")
+            else:
+                token = await c.create_invite(a.name, agent_id=invitee)
+                await c.dm(invitee,
+                           f"You are invited to channel '{a.name}'. Join with "
+                           f"join_channel(channel={a.name!r}, "
+                           f"invite_token={token!r}).",
+                           title=f"invite to {a.name}")
+                print(f"  invited {invitee} (invite token DM'd)")
     _run_agent_cmd(args, go)
 
 
@@ -544,6 +663,11 @@ def cmd_join(args):
                         pinned_id=pinned, expires_hint=expires)
         if code:
             sys.exit(code)
+        agent_id = pinned or args.as_agent
+        if args.harness and args.harness != "none" and agent_id:
+            # Codex has no event wake → standing loop; others arm-then-end.
+            _print_kickoff(agent_id, url,
+                           standing_loop=(args.harness == "codex"))
         return
 
     if not args.channel:
@@ -886,8 +1010,9 @@ def build_parser() -> argparse.ArgumentParser:
     sc.add_argument("--about", default="", help="self-description for this agent")
     sc.add_argument("--url", default=None)
     sc.add_argument("--key", default=None, metavar="AGENT_KEY", help=_KEY_HELP)
-    sc.add_argument("--with-hook", action="store_true",
-                    help="also install the stop-hook for hands-free triggering")
+    sc.add_argument("--with-hook", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="install the wake stop-hook (default: on; --no-hook to skip)")
     sc.set_defaults(func=cmd_setup_cursor)
 
     scl = sub.add_parser("setup-claude", help="wire a workspace as a Claude Code agent")
@@ -896,8 +1021,9 @@ def build_parser() -> argparse.ArgumentParser:
     scl.add_argument("--about", default="", help="self-description for this agent")
     scl.add_argument("--url", default=None)
     scl.add_argument("--key", default=None, metavar="AGENT_KEY", help=_KEY_HELP)
-    scl.add_argument("--with-hook", action="store_true",
-                     help="also install the Stop hook for hands-free triggering")
+    scl.add_argument("--with-hook", action=argparse.BooleanOptionalAction,
+                     default=True,
+                     help="install the wake hooks (default: on; --no-hook to skip)")
     scl.set_defaults(func=cmd_setup_claude)
 
     scx = sub.add_parser("setup-codex", help="wire a workspace as a Codex CLI agent")
@@ -906,9 +1032,10 @@ def build_parser() -> argparse.ArgumentParser:
     scx.add_argument("--about", default="", help="self-description for this agent")
     scx.add_argument("--url", default=None)
     scx.add_argument("--key", default=None, metavar="AGENT_KEY", help=_KEY_HELP)
-    scx.add_argument("--with-hook", action="store_true",
-                     help="also install the Stop hook (.codex/hooks.json) for "
-                          "hands-free triggering at turn ends")
+    scx.add_argument("--with-hook", action=argparse.BooleanOptionalAction,
+                     default=True,
+                     help="install the Stop hook (.codex/hooks.json) at turn "
+                          "ends (default: on; --no-hook to skip)")
     scx.set_defaults(func=cmd_setup_codex)
 
     rg = sub.add_parser("register",
@@ -923,6 +1050,16 @@ def build_parser() -> argparse.ArgumentParser:
     rg.add_argument("--json", action="store_true",
                     help="print the raw registration response (scripting)")
     rg.set_defaults(func=cmd_register)
+
+    ru = sub.add_parser("rules",
+                        help="show or replace the hub rules served to every "
+                             "agent via whoami (operator; --set FILE)")
+    ru.add_argument("--set", dest="set_file", default=None, metavar="FILE",
+                    help="replace the hub rules with this file's text")
+    ru.add_argument("--url", default=None)
+    ru.add_argument("--admin-key", dest="admin_key", default=None,
+                    help="admin key (default: $AGORA_ADMIN_KEY, then config.json)")
+    ru.set_defaults(func=cmd_rules)
 
     sk = sub.add_parser("seed-key",
                         help="import an operator-minted agent key into this "
@@ -982,6 +1119,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     _agent_parser("whoami", "print your identity").set_defaults(func=cmd_whoami)
     _agent_parser("channels", "list channels").set_defaults(func=cmd_channels)
+
+    cc = _agent_parser("create-channel",
+                       "create a channel (the --as agent becomes owner)")
+    cc.add_argument("name", help="channel name (simple slug: no spaces/slashes)")
+    cc.add_argument("--public", action="store_true",
+                    help="anyone may join (default: private, invite-only)")
+    cc.add_argument("--purpose", "--about", dest="purpose", default=None,
+                    metavar="TEXT",
+                    help="one-line purpose stored in channel:meta "
+                         "(what describe_channel shows joiners)")
+    cc.add_argument("--invite", action="append", default=None,
+                    metavar="AGENT_ID",
+                    help="initial member to invite (repeatable): private = "
+                         "mint + DM an invite token; public = DM a join "
+                         "pointer")
+    cc.set_defaults(func=cmd_create_channel)
 
     ib = _agent_parser("inbox", "show unread envelopes (optionally long-poll)")
     ib.add_argument("--wait", type=float, default=0.0, help="block up to N seconds for a message")
@@ -1083,8 +1236,10 @@ def build_parser() -> argparse.ArgumentParser:
                          "(default cursor; none = register + cache key only)")
     jn.add_argument("--workspace", default=".",
                     help="onboarding: workspace folder (default: cwd)")
-    jn.add_argument("--with-hook", action="store_true",
-                    help="onboarding: also install the harness stop-hook")
+    jn.add_argument("--with-hook", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="onboarding: install the wake hooks (default: on; "
+                         "--no-hook to skip)")
     jn.add_argument("--listen", action="store_true",
                     help="onboarding: arm a FOREGROUND `agora listen "
                          "--source ws` after wiring (headless nodes)")
@@ -1147,11 +1302,22 @@ def build_parser() -> argparse.ArgumentParser:
                     help="write this watcher's PID here (removed on exit) so a "
                          "harness can tell a live watcher from a dead one")
     wt.set_defaults(func=cmd_watch)
+
+    # EVERY verb accepts --home: hub selection must not depend on remembering
+    # an env-var prefix, and partial coverage would be its own trap (the
+    # `--with-hooks` lesson: a flag that exists on one verb but not its
+    # sibling reads as a typo). main() maps it onto AGORA_HOME before
+    # dispatch, so commands and their child processes all see the same home.
+    for sp in set(sub.choices.values()):
+        sp.add_argument("--home", default=None, metavar="PATH",
+                        help="agora home for this invocation (sets AGORA_HOME; "
+                             "default: $AGORA_HOME, else ~/.agora)")
     return p
 
 
 def main() -> None:
     args = build_parser().parse_args()
+    _apply_home(args)                 # --home wins over $AGORA_HOME, if given
     try:
         args.func(args)
     except SystemExit:

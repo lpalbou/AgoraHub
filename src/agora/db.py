@@ -135,6 +135,25 @@ CREATE TABLE IF NOT EXISTS fs_versions (
     updated_at  REAL NOT NULL,
     PRIMARY KEY (channel, key, version)
 );
+-- Charter read receipts: "version N of this channel's charter was DELIVERED
+-- to agent A" (recorded when the head is read; writing your own edit counts).
+-- This is the honest, machine-attestable core of "accepted the rules" — it
+-- proves delivery, never understanding. The norms_required post gate keys on it.
+CREATE TABLE IF NOT EXISTS charter_receipts (
+    agent_id    TEXT NOT NULL,
+    channel     TEXT NOT NULL,
+    version     INTEGER NOT NULL,
+    read_at     REAL NOT NULL,
+    PRIMARY KEY (agent_id, channel)
+);
+-- The hub rules the operator serves to every agent via /whoami (single row).
+-- No row = the packaged default text (version 0) is served.
+CREATE TABLE IF NOT EXISTS hub_rules (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    text        TEXT NOT NULL,
+    version     INTEGER NOT NULL,
+    updated_at  REAL NOT NULL
+);
 """
 
 
@@ -982,6 +1001,58 @@ class Database:
                 (agent_id, channel, seq),
             )
             self._conn.commit()
+
+    # -- charter receipts + hub rules (governance surfaces) ----------------------
+
+    def charter_receipt_set(self, agent_id: str, channel: str, version: int) -> None:
+        """Record 'charter version N was delivered to this agent' — advance
+        only (a concurrent older read can never regress a fresher receipt)."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO charter_receipts (agent_id, channel, version, read_at)"
+                " VALUES (?,?,?,?)"
+                " ON CONFLICT (agent_id, channel) DO UPDATE SET"
+                " version = MAX(version, excluded.version), read_at = excluded.read_at",
+                (agent_id, channel, version, time.time()),
+            )
+            self._conn.commit()
+
+    def charter_receipt_get(self, agent_id: str, channel: str) -> int | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT version FROM charter_receipts"
+                " WHERE agent_id = ? AND channel = ?", (agent_id, channel),
+            ).fetchone()
+        return row["version"] if row else None
+
+    def hub_rules_get(self) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT text, version, updated_at FROM hub_rules WHERE id = 1"
+            ).fetchone()
+        if row is None:
+            return None
+        return {"text": row["text"], "version": row["version"],
+                "updated_at": row["updated_at"]}
+
+    def hub_rules_set(self, text: str) -> dict[str, Any]:
+        """Replace the operator-served hub rules; the version only ever grows
+        (agents cache by version, so a rewrite must always look new)."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO hub_rules (id, text, version, updated_at)"
+                " VALUES (1, ?, 1, ?)"
+                " ON CONFLICT (id) DO UPDATE SET"
+                " text = excluded.text, version = hub_rules.version + 1,"
+                " updated_at = excluded.updated_at",
+                (text, time.time()),
+            )
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT text, version, updated_at FROM hub_rules WHERE id = 1"
+            ).fetchone()
+        return {"text": row["text"], "version": row["version"],
+                "updated_at": row["updated_at"]}
 
     def checkpoint(self) -> None:
         """Fold the WAL back into the main database file. Called on graceful

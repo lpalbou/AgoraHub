@@ -59,6 +59,13 @@ def save_url(url: str) -> None:
     _write_secret(_config_path(), json.dumps(cfg, indent=2))
 
 
+def _same_hub(a: str | None, b: str | None) -> bool:
+    """Do two hub urls name the same hub? Compared trailing-slash-insensitively.
+    Used to bind a stored admin key to the hub it belongs to (a false negative
+    is safe — it just declines the key and asks for an explicit one)."""
+    return bool(a) and bool(b) and a.rstrip("/") == b.rstrip("/")
+
+
 def is_loopback_url(url: str) -> bool:
     """True when the hub url points at this machine (same check `agora listen`
     uses to pick file mode): loopback hostnames and the 127/8 block. Error
@@ -108,8 +115,14 @@ def resolve_key(url: str, agent_id: str, *, admin_key: str | None = None,
     cached = get_cached_key(url, agent_id)
     if cached:
         return cached
-    admin_key = (admin_key or os.environ.get("AGORA_ADMIN_KEY")
-                 or load_config().get("admin_key"))
+    # The config admin key is the credential OF THE HUB config.json names — it
+    # is NOT a universal key. Using it against a different url is exactly how a
+    # hub-2 agent that resolved the default url silently self-registered on the
+    # production hub (the wrong-hub incident). Only accept it when the config's
+    # url matches the target; otherwise fall through to the loud remedy.
+    cfg = load_config()
+    config_admin = cfg.get("admin_key") if _same_hub(cfg.get("url"), url) else None
+    admin_key = (admin_key or os.environ.get("AGORA_ADMIN_KEY") or config_admin)
     if not admin_key:
         # Surface-aware remedy: `agora up` is only correct where the hub runs.
         # Telling a REMOTE user to run it would start a wrong local hub.

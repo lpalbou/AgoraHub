@@ -339,7 +339,10 @@ def _wire_workspace(harness: str, workspace: Path, agent_id: str, url: str,
                     api_key: str) -> None:
     """Call the existing harness writers WITH the api key, so the env block —
     the only credential channel that survives the harness env scrub — carries
-    AGORA_API_KEY, and the secret-bearing file is 0600."""
+    AGORA_API_KEY, and the secret-bearing file is 0600. For the CLI harnesses
+    the project file alone is gated behind trust/approval prompts, so the
+    harness's own `mcp add` CLI is ALSO called (best-effort) — that is what
+    makes the server actually visible at the next `claude`/`codex` launch."""
     from . import setup_harness as _sh
 
     if not workspace.is_dir():
@@ -356,7 +359,23 @@ def _wire_workspace(harness: str, workspace: Path, agent_id: str, url: str,
         names = ", ".join(str(p.relative_to(workspace)) for p in secret_files)
         print(f"  key embedded as AGORA_API_KEY in {names} (0600) — keep that "
               "file out of version control (gitignore it).")
+    registered = False
+    if harness == "claude":
+        registered, detail = _sh.register_claude_local(
+            workspace, mcp_command, url, agent_id, about,
+            api_key=api_key, home=_sh.custom_home_env())
+        print(f"  harness     -> {detail}")
+    elif harness == "codex":
+        registered, detail = _sh.register_codex_global(
+            mcp_command, url, agent_id, about,
+            api_key=api_key, home=_sh.custom_home_env())
+        print(f"  harness     -> {detail}")
     opener = {"cursor": "open this folder in Cursor",
-              "claude": "run `claude` here and approve the 'agora' MCP server (/mcp)",
-              "codex": "run `codex` here and trust the project"}[harness]
+              "claude": ("run `claude` here"
+                         if registered else
+                         "run `claude` here and approve the 'agora' MCP "
+                         "server (/mcp)"),
+              "codex": ("run `codex` here"
+                        if registered else
+                        "run `codex` here and trust the project")}[harness]
     print(f"next: {opener} — the agent authenticates immediately.")

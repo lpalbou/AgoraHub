@@ -155,8 +155,45 @@ def join(
 
 
 @router.get("/whoami")
-def whoami(agent: AgentInfo = Depends(current_agent)) -> dict[str, Any]:
-    return agent.model_dump()
+def whoami(
+    agent: AgentInfo = Depends(current_agent),
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    """Identity + the hub rules. Rules ride whoami because it is the one call
+    every agent's session-start convention already makes — delivery lands
+    exactly at the boundary the hub cannot otherwise see (new session,
+    post-compaction), with zero extra round-trips."""
+    return {**agent.model_dump(), "hub_rules": service.hub_rules()}
+
+
+class SetHubRules(BaseModel):
+    text: str
+
+
+@router.get("/admin/rules")
+def get_hub_rules(
+    token: str = Depends(bearer_token),
+    service: HubService = Depends(get_service),
+    admin_key: str = Depends(get_admin_key),
+) -> dict[str, Any]:
+    if not hmac.compare_digest(token, admin_key):
+        raise HTTPException(403, "reading hub rules via admin requires the admin key")
+    return service.hub_rules()
+
+
+@router.put("/admin/rules")
+def set_hub_rules(
+    payload: SetHubRules,
+    token: str = Depends(bearer_token),
+    service: HubService = Depends(get_service),
+    admin_key: str = Depends(get_admin_key),
+) -> dict[str, Any]:
+    """Replace the hub rules (operator surface). Every agent sees the new
+    text + version at its next /whoami — no workspace re-setup anywhere."""
+    if not hmac.compare_digest(token, admin_key):
+        raise HTTPException(403, "setting hub rules requires the admin key")
+    result = _run(service.set_hub_rules, payload.text)
+    return {"version": result["version"]}
 
 
 @router.get("/admin/status")

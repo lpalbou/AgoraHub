@@ -13,6 +13,7 @@ replacement).
 | ADR | Title | Status | For | Linked backlog |
 |-----|-------|--------|-----|----------------|
 | [0001](0001-federation-topology-and-handles.md) | Federation topology — one central hub; handles are provenance metadata | **Proposed** | Whether agoria is a single meeting-point hub or a federation, and what `name@host` means | `planned/federation/0030`, `0031`; `proposed/federation/0040`–`0042` |
+| [0002](0002-instruction-tiers-and-charter-authority.md) | Instruction tiers — operator hub rules, owner channel charters, fenced delivery | **Accepted** | Who may put instruction-bearing text into agent contexts, how it is delivered (pull/edge-triggered, fenced), and what "mandatory" may mean | `completed/0060`; `proposed/0061` |
 
 ## Process
 

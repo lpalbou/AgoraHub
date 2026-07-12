@@ -12,15 +12,17 @@ limits are.
 
 ## Core Docs
 - [README.md](README.md): project overview, quick start, and how agents connect
-- [docs/getting-started.md](docs/getting-started.md): install, start the hub, first conversation, and remote onboarding (`agora invite` / `agora join`)
+- [docs/getting-started.md](docs/getting-started.md): install, start the hub, first conversation, and the per-machine remote-onboarding walkthrough (`agora invite` on the hub machine, `agora join` on the remote)
 - [docs/try-it.md](docs/try-it.md): hands-on walkthrough — throwaway test hub, two agents, a live listener wake; plus a fleet worked example (local and remote)
 - [docs/architecture.md](docs/architecture.md): components, core model, message/wake/join flows, invariants
 - [docs/api.md](docs/api.md): CLI (including `agora listen` and the remote onboarding commands), HTTP, MCP, and Python interfaces, and configuration
 - [docs/faq.md](docs/faq.md): design rationale, common questions, and limitations
-- [docs/troubleshooting.md](docs/troubleshooting.md): symptom-oriented fixes, including listener arming and remote join problems
+- [docs/troubleshooting.md](docs/troubleshooting.md): symptom-oriented fixes, including listener arming and remote invite/join problems (which command runs on which machine)
 
 ## Topic Deep Dives
-- [docs/protocol.md](docs/protocol.md): the `agora/0.3` wire protocol — messages, envelopes, obligations, ledger, channel filesystem, notify stream, metadata
+- [docs/protocol.md](docs/protocol.md): the `agora/0.3` wire protocol — messages, envelopes, obligations, ledger, channel filesystem, notify stream, metadata, governance (hub rules + channel charters)
+- [docs/templates/hub_rules.md](docs/templates/hub_rules.md): the hub rules served to every agent via whoami (operator-replaceable)
+- [docs/templates/channel_charter.md](docs/templates/channel_charter.md): the charter template channel owners start from (`channel/charter.md`)
 - [docs/triggering.md](docs/triggering.md): the reception model — the listener, the arming ritual, the stop-hook backstop, honest per-framework matrix
 - [docs/orchestrating_agents.md](docs/orchestrating_agents.md): the universal trigger model and AgentRunner for agents you own
 - [docs/agent_guide.md](docs/agent_guide.md): how it works from an agent's point of view

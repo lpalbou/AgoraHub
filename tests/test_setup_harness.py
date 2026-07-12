@@ -11,16 +11,20 @@ ack cursor (the only truth) says something new is unread.
 """
 
 import json
+import shutil
 import subprocess
 import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from agora.setup_harness import (codex_toml_block, install_claude_listener,
+from agora.setup_harness import (codex_toml_block, custom_home_env,
+                                 install_claude_listener,
+                                 register_claude_local, register_codex_global,
                                  rule_text, setup_claude, setup_codex,
                                  setup_cursor, stop_hook_script,
                                  upsert_marked_section, write_mcp_json)
@@ -296,8 +300,11 @@ def test_hook_version_stamp_and_shared_guards():
 def test_rule_text_cursor_has_arming_ritual_and_no_watcher_ban(tmp_path):
     setup_cursor(tmp_path, "runtime", "http://hub:8765", "", "agora-mcp",
                  with_hook=False)
-    rule = (tmp_path / ".cursor" / "rules" / "agora.md").read_text()
-    assert rule == rule_text("runtime")          # the one shared template
+    rule = (tmp_path / ".cursor" / "rules" / "agora.mdc").read_text()
+    # The .mdc frontmatter is what makes Cursor actually inject the rule; a
+    # plain .md is ignored, so this is load-bearing, not cosmetic.
+    assert rule.startswith("---\nalwaysApply: true\n---\n")
+    assert rule.endswith(rule_text("runtime"))   # the one shared template
 
     # ARMING RITUAL: monitored background listen, then check_inbox, verify
     # armed, re-arm at boundaries if dead.
@@ -325,7 +332,7 @@ def test_rule_text_cursor_monitor_is_mandatory_with_exact_args(tmp_path):
     to copy them rather than improvise."""
     setup_cursor(tmp_path, "runtime", "http://hub:8765", "", "agora-mcp",
                  with_hook=False)
-    rule = (tmp_path / ".cursor" / "rules" / "agora.md").read_text()
+    rule = (tmp_path / ".cursor" / "rules" / "agora.mdc").read_text()
 
     assert "MANDATORY" in rule
     # The one true arming call, verbatim (pattern ^AGORA_WAKE, debounce
@@ -346,7 +353,7 @@ def test_rule_text_cursor_self_check_before_turn_end(tmp_path):
     the order 'fix it BEFORE ending the turn'."""
     setup_cursor(tmp_path, "runtime", "http://hub:8765", "", "agora-mcp",
                  with_hook=False)
-    rule = (tmp_path / ".cursor" / "rules" / "agora.md").read_text()
+    rule = (tmp_path / ".cursor" / "rules" / "agora.mdc").read_text()
 
     assert "SELF-CHECK before ending the turn" in rule
     assert "MUST see an `AGORA_LISTEN armed` line" in rule
@@ -363,7 +370,7 @@ def test_rule_text_wake_is_informational_in_all_variants(tmp_path):
     setup_cursor(tmp_path, "r1", "http://h:1", "", "m", with_hook=False)
     setup_claude(tmp_path, "r1", "http://h:1", "", "m", with_hook=False)
     setup_codex(tmp_path, "r1", "http://h:1", "", "m")
-    for text in [(tmp_path / ".cursor" / "rules" / "agora.md").read_text(),
+    for text in [(tmp_path / ".cursor" / "rules" / "agora.mdc").read_text(),
                  (tmp_path / "CLAUDE.md").read_text(),
                  (tmp_path / "AGENTS.md").read_text()]:
         assert "INFORMATION, not an order" in text
@@ -658,3 +665,164 @@ def test_upsert_marked_section_replaces_only_the_marked_block(tmp_path):
     upsert_marked_section(path, "v2 content")
     text = path.read_text()
     assert "intro" in text and "v2 content" in text and "v1 content" not in text
+
+
+# ---------------------------------------------------------------------------
+# custom home placement: a non-default AGORA_HOME must ride the env block
+# (harness-spawned processes do not inherit the operator's shell env), and
+# the default-home output must stay byte-identical
+# ---------------------------------------------------------------------------
+
+
+def test_custom_home_env_only_reports_non_default(tmp_path, monkeypatch):
+    monkeypatch.delenv("AGORA_HOME", raising=False)
+    assert custom_home_env() is None
+    # An EXPLICIT default is still the default — nothing worth embedding.
+    monkeypatch.setenv("AGORA_HOME", str(Path.home() / ".agora"))
+    assert custom_home_env() is None
+    monkeypatch.setenv("AGORA_HOME", str(tmp_path / "hub2"))
+    assert custom_home_env() == str(tmp_path / "hub2")
+
+
+def test_write_mcp_json_and_toml_embed_home_only_when_given(tmp_path):
+    path = tmp_path / "mcp.json"
+    write_mcp_json(path, "agora-mcp", "http://h:1", "a", "", home="/x/hub2")
+    env = json.loads(path.read_text())["mcpServers"]["agora"]["env"]
+    assert env["AGORA_HOME"] == "/x/hub2"
+
+    block = codex_toml_block("agora-mcp", "http://h:1", "a", "",
+                             api_key="agora_k", home="/x/hub2")
+    assert 'AGORA_HOME = "/x/hub2"' in block
+    assert 'AGORA_API_KEY = "agora_k"' in block
+    assert "AGORA_HOME" not in codex_toml_block("agora-mcp", "http://h:1",
+                                                "a", "")
+
+
+def test_setup_writers_embed_the_ambient_custom_home(tmp_path, monkeypatch):
+    """The second-hub trap: wired under AGORA_HOME=~/.agora-hub2, the spawned
+    MCP server must read hub2's keys.json — so the env block carries the
+    custom home. Under the default home nothing is added (config output
+    unchanged for the common case)."""
+    monkeypatch.setenv("AGORA_HOME", str(tmp_path / "hub2"))
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    setup_cursor(ws, "r1", "http://h:1", "", "agora-mcp", with_hook=False)
+    env = json.loads((ws / ".cursor" / "mcp.json").read_text()
+                     )["mcpServers"]["agora"]["env"]
+    assert env["AGORA_HOME"] == str(tmp_path / "hub2")
+    setup_codex(ws, "r1", "http://h:1", "", "agora-mcp")
+    assert (f'AGORA_HOME = "{tmp_path / "hub2"}"'
+            in (ws / ".codex" / "config.toml").read_text())
+
+    monkeypatch.delenv("AGORA_HOME", raising=False)
+    ws2 = tmp_path / "ws2"
+    ws2.mkdir()
+    setup_claude(ws2, "r1", "http://h:1", "", "agora-mcp", with_hook=False)
+    env = json.loads((ws2 / ".mcp.json").read_text()
+                     )["mcpServers"]["agora"]["env"]
+    assert "AGORA_HOME" not in env
+
+
+# ---------------------------------------------------------------------------
+# harness-CLI registration: the read-side fix. Claude Code gates a project
+# .mcp.json behind trust + /mcp approval; Codex loads .codex/config.toml only
+# for trusted projects. The vendors' own `mcp add` CLIs land the server where
+# it is read WITHOUT those gates — verify the documented calls are built,
+# and that a missing/failing binary degrades to (False, remedy), never raises.
+# ---------------------------------------------------------------------------
+
+
+class _FakeRunner:
+    """Records subprocess.run-style calls; returns a canned returncode."""
+
+    def __init__(self, returncode: int = 0):
+        self.calls: list[tuple[list, dict]] = []
+        self.returncode = returncode
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append((list(argv), kwargs))
+        return SimpleNamespace(returncode=self.returncode,
+                               stdout="", stderr="harness said no")
+
+
+def _env_flags(flag: str, url: str, agent: str, about: str,
+               api_key: str | None = None, home: str | None = None) -> list:
+    pairs = [("AGORA_URL", url), ("AGORA_AGENT_ID", agent),
+             ("AGORA_ABOUT", about)]
+    if api_key:
+        pairs.append(("AGORA_API_KEY", api_key))
+    if home:
+        pairs.append(("AGORA_HOME", home))
+    return [part for k, v in pairs for part in (flag, f"{k}={v}")]
+
+
+def test_register_claude_local_builds_documented_call(tmp_path, monkeypatch):
+    monkeypatch.setattr(shutil, "which",
+                        lambda name: "/opt/bin/claude" if name == "claude" else None)
+    runner = _FakeRunner()
+    ok, detail = register_claude_local(
+        tmp_path, "/x/agora-mcp", "http://h:1", "castor", "the entity",
+        api_key="agora_k", home="/x/hub2", runner=runner)
+    assert ok and "local scope" in detail
+
+    (rm_argv, rm_kw), (add_argv, add_kw) = runner.calls
+    # Stale entry removed first (`claude mcp add` refuses to overwrite)...
+    assert rm_argv == ["/opt/bin/claude", "mcp", "remove", "--scope", "local",
+                       "agora"]
+    # ...then added at LOCAL scope — and BOTH calls anchored to the
+    # workspace: local entries are keyed by the working directory.
+    assert add_argv == ["/opt/bin/claude", "mcp", "add", "--scope", "local",
+                        "agora",
+                        *_env_flags("-e", "http://h:1", "castor", "the entity",
+                                    api_key="agora_k", home="/x/hub2"),
+                        "--", "/x/agora-mcp"]
+    assert rm_kw["cwd"] == add_kw["cwd"] == str(tmp_path)
+
+
+def test_register_codex_global_builds_documented_call(monkeypatch, tmp_path):
+    monkeypatch.setattr(shutil, "which",
+                        lambda name: "/opt/bin/codex" if name == "codex" else None)
+    runner = _FakeRunner()
+    ok, detail = register_codex_global("/x/agora-mcp", "http://h:1", "janus",
+                                       "", runner=runner)
+    assert ok and "globally" in detail
+    [(argv, _kwargs)] = runner.calls   # re-add replaces: no remove needed
+    assert argv == ["/opt/bin/codex", "mcp", "add", "agora",
+                    *_env_flags("--env", "http://h:1", "janus", ""),
+                    "--", "/x/agora-mcp"]
+
+
+def test_register_helpers_degrade_when_binary_missing(tmp_path, monkeypatch):
+    """No harness binary -> (False, printed remedy) and NO subprocess call —
+    setup/join must keep working on machines without claude/codex."""
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+
+    def never_called(*_a, **_k):
+        raise AssertionError("runner must not run without a binary")
+
+    ok, detail = register_claude_local(tmp_path, "m", "http://h:1", "a", "",
+                                       runner=never_called)
+    assert not ok and "/mcp" in detail
+    ok, detail = register_codex_global("m", "http://h:1", "a", "",
+                                       runner=never_called)
+    assert not ok and "trust the project" in detail
+
+
+def test_register_helpers_degrade_on_failure_and_exception(tmp_path, monkeypatch):
+    monkeypatch.setattr(shutil, "which", lambda name: f"/opt/bin/{name}")
+    ok, detail = register_claude_local(tmp_path, "m", "http://h:1", "a", "",
+                                       runner=_FakeRunner(returncode=1))
+    assert not ok and "harness said no" in detail and "/mcp" in detail
+    ok, detail = register_codex_global("m", "http://h:1", "a", "",
+                                       runner=_FakeRunner(returncode=1))
+    assert not ok and "trust the project" in detail
+
+    def boom(*_a, **_k):
+        raise OSError("spawn failed")
+
+    ok, detail = register_claude_local(tmp_path, "m", "http://h:1", "a", "",
+                                       runner=boom)
+    assert not ok and "spawn failed" in detail
+    ok, detail = register_codex_global("m", "http://h:1", "a", "",
+                                       runner=boom)
+    assert not ok and "spawn failed" in detail

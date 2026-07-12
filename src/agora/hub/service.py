@@ -16,6 +16,7 @@ from collections import deque
 from typing import Any
 
 from ..db import Database, JoinTokenRefused
+from ..governance import CHARTER_PATH, HUB_RULES_DEFAULT, RESERVED_FS_PREFIX
 from ..ids import new_token
 from ..models import (
     DM_PREFIX,
@@ -55,7 +56,7 @@ MAX_JOIN_TOKEN_TTL = 30 * 86400.0    # hard cap (kubeadm defaults 24h; we cap 30
 MAX_JOIN_TOKEN_USES = 100            # fleet provisioning ceiling
 CHANNEL_META_KEY = "channel:meta"
 _META_FIELDS = {"purpose", "norms", "expected_traffic", "response_sla_minutes", "language",
-                "authorship_required", "state"}
+                "authorship_required", "state", "norms_required"}
 _CHANNEL_STATES = {"open", "closed"}
 _META_LANGUAGES = {"plain", "terse", "structured"}
 MAX_READ_ANCESTORS = 5
@@ -453,6 +454,7 @@ class HubService:
             # A room whose session died accepts no more turns — the bridge and
             # any subscriber get a clean 409 instead of writing into a dead room.
             raise HubError(409, f"channel '{channel}' is closed to new posts")
+        self._require_charter_read(channel, agent)
         if len(payload.body.encode()) > MAX_BODY_BYTES:
             raise HubError(413, f"body exceeds {MAX_BODY_BYTES} bytes")
         data = self._prepare_structured(payload)
@@ -501,6 +503,29 @@ class HubService:
         )
         self._wake(message)
         return message
+
+    def _require_charter_read(self, channel: str, agent: AgentInfo) -> None:
+        """The opt-in charter gate (channel:meta.norms_required): posting
+        requires having READ the current channel/charter.md — the read IS the
+        receipt, so the refusal is always self-healing in one call. The hub
+        forces attention to the rules, never agreement with them ("understand
+        and abide" is not machine-checkable; delivery is). Applies uniformly —
+        owner and operator included: their writes/reads record receipts like
+        anyone's, and a uniform rule beats special cases. fs audit and system
+        messages insert directly into the db, so charter edits can never be
+        blocked by the gate they refresh."""
+        meta = self.db.store_get(channel, CHANNEL_META_KEY)
+        if not (meta and isinstance(meta.value, dict)
+                and meta.value.get("norms_required")):
+            return
+        row = self.db.fs_get(channel, FS_PREFIX + CHARTER_PATH)
+        if row is None or row["deleted"]:
+            return  # flag set but no charter written yet: nothing to require
+        receipt = self.db.charter_receipt_get(agent.id, channel)
+        if receipt is None or receipt < row["version"]:
+            raise HubError(409, f"this channel requires reading its charter "
+                                f"first: fs_read '{CHARTER_PATH}' in "
+                                f"'{channel}' (v{row['version']}), then retry")
 
     def _post_system(self, channel: str, body: str) -> None:
         message = self.db.insert_message(
@@ -787,6 +812,20 @@ class HubService:
         state = value.get("state")
         if state is not None and state not in _CHANNEL_STATES:
             raise HubError(400, f"channel:meta.state must be one of {sorted(_CHANNEL_STATES)}")
+        # Opt-in charter gate: posting requires having READ the current
+        # channel/charter.md (the receipt is recorded by the read itself).
+        norms_required = value.get("norms_required")
+        if norms_required is not None and not isinstance(norms_required, bool):
+            raise HubError(400, "channel:meta.norms_required must be a boolean")
+        # purpose/norms are free text delivered to every joiner: strip control
+        # characters and cap them at write time like every other member-authored
+        # headline (they were the one unvalidated path into join/describe).
+        # expected_traffic stays free-form (existing rooms use lists).
+        for field in ("purpose", "norms"):
+            if field in value and value[field] is not None:
+                if not isinstance(value[field], str):
+                    raise HubError(400, f"channel:meta.{field} must be a string")
+                value[field] = sanitize_text(value[field], 500)
 
     def channel_info(self, agent: AgentInfo, channel: str) -> dict[str, Any]:
         """Everything an agent needs before first post: channel, metadata, members."""
@@ -797,6 +836,16 @@ class HubService:
         language = "plain"
         if isinstance(meta_value, dict) and meta_value.get("language") in _META_LANGUAGES:
             language = meta_value["language"]
+        # The charter pointer makes discovery mechanical: joiners are told
+        # where the room's rules live and which version is current, without
+        # guessing paths (design ruling: pointer in the join packet, not a
+        # magic filename convention).
+        charter_row = self.db.fs_get(channel, FS_PREFIX + CHARTER_PATH)
+        charter = None
+        if charter_row and not charter_row["deleted"]:
+            charter = {"path": CHARTER_PATH, "version": charter_row["version"],
+                       "updated_by": charter_row["updated_by"],
+                       "updated_at": charter_row["updated_at"]}
         return {
             "channel": info.model_dump() if info else None,
             "meta": meta_value,
@@ -805,6 +854,7 @@ class HubService:
             "language": language,
             "state": self.channel_state(channel),
             "is_dm": channel.startswith(DM_PREFIX),
+            "charter": charter,
         }
 
     # -- colleague notes (private, subjective, advisory) ---------------------------
@@ -867,6 +917,18 @@ class HubService:
         )
         self._wake(message)
 
+    def _require_channel_authority(self, channel: str, agent: AgentInfo) -> None:
+        """The reserved `channel/` fs prefix mirrors the store's `channel:` keys:
+        channel-owned surfaces are writable by the owner alone — plus the
+        operator, which is the unfreeze path when an owner session is gone
+        (there is no ownership transfer). DMs have no owner, so the prefix is
+        structurally unwritable there. One check, deliberately not a roles
+        system (design ruling, backlog 0060)."""
+        if agent.operator or self.db.member_role(channel, agent.id) == "owner":
+            return
+        raise HubError(403, f"'{RESERVED_FS_PREFIX}...' files are channel-owned: "
+                            "writable by the channel owner and the operator only")
+
     def fs_write(self, agent: AgentInfo, channel: str, path: str, content: str,
                  mime: str = "text/markdown", expect_version: int | None = None,
                  description: str = "") -> FsFile:
@@ -876,6 +938,8 @@ class HubService:
         title. Returns the new FsFile with its bumped version."""
         self.require_membership(channel, agent.id)
         norm = self._normalize_fs_path(path)
+        if norm.startswith(RESERVED_FS_PREFIX):
+            self._require_channel_authority(channel, agent)
         if not isinstance(content, str):
             raise HubError(400, "fs content must be text")
         size = len(content.encode())
@@ -889,6 +953,11 @@ class HubService:
             value["description"] = description
         entry = self.db.fs_put(channel, FS_PREFIX + norm, value, agent.id, expect_version)
         self._post_fs_audit(channel, agent.id, "put", norm, entry.version, size)
+        if norm == CHARTER_PATH:
+            # Writing the charter is reading it: the author holds the freshest
+            # receipt by construction (otherwise the gate would block the owner
+            # right after their own edit).
+            self.db.charter_receipt_set(agent.id, channel, entry.version)
         return FsFile(path=norm, content=content, mime=mime, description=description,
                       size_bytes=size, version=entry.version,
                       updated_by=entry.updated_by, updated_at=entry.updated_at)
@@ -912,6 +981,11 @@ class HubService:
             row = self.db.fs_get(channel, FS_PREFIX + norm)
             if row is None or row["deleted"]:  # a tombstoned file reads as absent
                 raise HubError(404, f"file '{norm}' not found in '{channel}'")
+            if norm == CHARTER_PATH:
+                # Reading the charter HEAD is the acceptance receipt (delivery
+                # proof, nothing more). Archive reads are history-browsing and
+                # deliberately record nothing.
+                self.db.charter_receipt_set(agent.id, channel, row["version"])
         value = row["value"] if isinstance(row["value"], dict) else {}
         content = value.get("content", "")
         return FsFile(path=norm, content=content, mime=value.get("mime", "text/markdown"),
@@ -942,6 +1016,8 @@ class HubService:
         fence). Returns False if the file was absent or already deleted."""
         self.require_membership(channel, agent.id)
         norm = self._normalize_fs_path(path)
+        if norm.startswith(RESERVED_FS_PREFIX):
+            self._require_channel_authority(channel, agent)
         new_version = self.db.fs_remove(channel, FS_PREFIX + norm, agent.id, expect_version)
         if new_version is None:
             return False
@@ -961,6 +1037,25 @@ class HubService:
                 if len(out) >= limit:
                     break
         return out
+
+    # -- hub rules (operator-authored general instructions) -----------------------
+
+    def hub_rules(self) -> dict[str, Any]:
+        """The general instructions every agent receives in /whoami. Version 0
+        = the packaged default; the operator's live edits only grow the
+        version, so 'am I on the current rules?' is one integer compare."""
+        row = self.db.hub_rules_get()
+        if row is None:
+            return {"version": 0, "text": HUB_RULES_DEFAULT}
+        return {"version": row["version"], "text": row["text"]}
+
+    def set_hub_rules(self, text: str) -> dict[str, Any]:
+        if not isinstance(text, str) or not text.strip():
+            raise HubError(400, "hub rules text must be a non-empty string")
+        if len(text.encode()) > MAX_STORE_VALUE_BYTES:
+            raise HubError(413, f"hub rules exceed {MAX_STORE_VALUE_BYTES} bytes")
+        row = self.db.hub_rules_set(text)
+        return {"version": row["version"], "text": row["text"]}
 
     def agent_status_overview(self) -> list[dict[str, Any]]:
         """Operator overview: per agent, presence + unread count + the oldest
