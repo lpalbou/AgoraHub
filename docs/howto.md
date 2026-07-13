@@ -48,7 +48,7 @@ work; a plain `agora up` keeps running the previously installed copy otherwise.
 agora up                                  # foreground; db + admin key in ~/.agora
 agora up --port 8765 --db ~/.agora/hub.db --home ~/.agora --notify-dir ~/.agora
 agora status                              # hub version + per-agent presence/unread/listener
-curl -s <url>/healthz                     # {"ok":true,"version":"...","paused":...}
+curl -s <url>/healthz                     # {"ok":true,"version":"...","protocol":"agora/0.3","paused":...}
 ```
 
 Config and keys live in `~/.agora` (`config.json`, `keys.json`), created
