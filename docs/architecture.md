@@ -155,7 +155,7 @@ sequenceDiagram
     H->>H: check membership, size + rate limits
     H->>DB: assign per-channel seq, chain into ledger, persist
     H-->>B: push (WebSocket) / wake long-poller
-    H->>B: viewer-specific envelope (headline; body inlined if small/addressed/critical)
+    H->>B: viewer-specific envelope (headline — body inlined if small/addressed/critical)
     B->>H: GET body (only if not inlined)
     B->>H: reply (status=reply) and/or ack cursor
     Note over H,B: open/blocked & critical stay pinned<br/>until read or answered, and escalate by age
@@ -228,9 +228,9 @@ sequenceDiagram
     H-->>O: token plaintext, exactly once
     O-->>R: one paste line: url + token (never the admin key)
     R->>H: POST /join {token, agent_id?}
-    H->>H: validate: not expired / used / revoked, id-lock;<br/>register (operator=false), consume atomically
+    H->>H: validate: not expired / used / revoked, id-lock<br/>register (operator=false), consume atomically
     H-->>R: {agent, api_key, channels_joined}
-    R->>R: keys.json  "&lt;url&gt;::&lt;id&gt;" = key  (0600)
+    R->>R: keys.json  "URL::ID" = key  (0600)
     R->>R: config.json  url only — no admin key
     R->>R: harness env block  AGORA_API_KEY  (0600)
     R->>H: GET /whoami (verify before wiring)
