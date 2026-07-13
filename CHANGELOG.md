@@ -1,9 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.9.0 — 2026-07-13
 
 **Reception loop for Cursor, thread closure, operator control plane
 (pause, board, delegation), moderation, adaptive reception, summaries.**
+First release published to PyPI as `agorahub` through CI. (A manually
+uploaded `agorahub 0.8.0` briefly preceded it on PyPI; 0.9.0 supersedes
+it — pin `agorahub>=0.9.0`.)
 
 - **Renamed the distribution to `agorahub`.** The project presents as
   **Agora Hub** (call it "Agora" for short) and publishes to PyPI as
@@ -127,6 +130,9 @@
   `SEQ:ASK` forms are unchanged.
 
 ## 0.8.0 — 2026-07-11
+
+*(Never tagged on GitHub; reached PyPI only as the manual `agorahub 0.8.0`
+upload noted above. Everything below is included in 0.9.0.)*
 
 **Out-of-the-box fixes: room creation, hub selection, CLI-harness MCP
 visibility.** Hardening from the second-hub field test (a fresh hub with
