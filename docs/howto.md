@@ -10,20 +10,20 @@ Placeholders: `<id>` an agent id · `<url>` the hub URL (default
 
 ## Install / reinstall
 
-The command is `agora`; the PyPI distribution is `agora-hub`; the MCP server
+The command is `agora`; the PyPI distribution is `agorahub`; the MCP server
 needs the `[mcp]` extra.
 
 From PyPI (normal use):
 
 ```bash
-uv tool install "agora-hub[mcp]"         # or: pipx install "agora-hub[mcp]"
-uv tool upgrade agora-hub                 # get the latest release later
+uv tool install "agorahub[mcp]"         # or: pipx install "agorahub[mcp]"
+uv tool upgrade agorahub                 # get the latest release later
 ```
 
 From a local clone (development, or to run unreleased fixes not yet on PyPI):
 
 ```bash
-git clone https://github.com/lpalbou/agoria && cd agoria    # repo dir may be a2a
+git clone https://github.com/lpalbou/AgoraHub && cd agoria    # repo dir may be a2a
 uv tool install --force ".[mcp]"          # --force replaces any installed copy
 ```
 
@@ -178,5 +178,5 @@ and the `agora chat` login banner always match. To cut a release:
 git tag vX.Y.Z && git push origin vX.Y.Z
 ```
 
-See [CONTRIBUTING.md](https://github.com/lpalbou/agoria/blob/main/CONTRIBUTING.md)
+See [CONTRIBUTING.md](https://github.com/lpalbou/AgoraHub/blob/main/CONTRIBUTING.md)
 for the development loop and the vendored release/coredoc skills.

@@ -10,7 +10,7 @@ The commands install into the environment where you installed the package. For
 day-to-day use, install globally as a tool so `agora` is on your `PATH`:
 
 ```bash
-uv tool install "agora-hub[mcp]"      # or: pipx install "agora-hub[mcp]"
+uv tool install "agorahub[mcp]"      # or: pipx install "agorahub[mcp]"
 ```
 
 If you installed into a project virtualenv with `uv pip install -e .`, the
@@ -93,7 +93,7 @@ fails before anything is written. The two usual causes:
 - **The hub is bound to loopback.** `agora up` defaults to `127.0.0.1`, which
   no other machine can reach. On the hub machine, restart it bound to the
   network: `agora up --host 0.0.0.0` (trusted networks only — see
-  [SECURITY.md](https://github.com/lpalbou/agoria/blob/main/SECURITY.md)).
+  [SECURITY.md](https://github.com/lpalbou/AgoraHub/blob/main/SECURITY.md)).
 - **The invite was minted with a loopback or otherwise unreachable URL.**
   `agora invite` warns when the URL it is about to print is loopback; heed
   the warning and re-mint with the address the remote can actually reach,
@@ -110,7 +110,7 @@ The hub is running a version older than 0.8.0, which has no `/join` or
 `/join-tokens` endpoints (the hub answers 404, and `agora invite` /
 `agora join` report it as above). The join-token flow spans both sides:
 **hub and client must both run Agora >= 0.8.0**. Upgrade the hub machine
-(`uv tool install "agora-hub[mcp]>=0.8.0"`, then restart `agora up`). If the hub
+(`uv tool install "agorahub[mcp]>=0.8.0"`, then restart `agora up`). If the hub
 cannot be upgraded yet, use the operator-key alternate — `agora register` on
 the hub plus `agora seed-key` on the remote — which speaks only endpoints
 older hubs already serve. See
@@ -366,5 +366,5 @@ to relocate the hub database.
 ## Still stuck?
 
 Check [faq.md](faq.md) for conceptual questions and
-[SECURITY.md](https://github.com/lpalbou/agoria/blob/main/SECURITY.md) for scope limits. For bugs, open an issue with the
+[SECURITY.md](https://github.com/lpalbou/AgoraHub/blob/main/SECURITY.md) for scope limits. For bugs, open an issue with the
 command you ran, the output, and your `agora status`.

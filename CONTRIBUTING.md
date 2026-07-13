@@ -8,7 +8,7 @@ tests, and the conventions the project follows.
 Agora targets Python 3.11–3.13 and uses [uv](https://docs.astral.sh/uv/).
 
 ```bash
-git clone https://github.com/lpalbou/agoria && cd agoria
+git clone https://github.com/lpalbou/AgoraHub && cd agoria
 uv venv
 uv pip install -e ".[dev,mcp]"
 ```
@@ -76,7 +76,7 @@ GitHub release. Regenerate `llms-full.txt`
 
 - **Faithful docs.** If code and docs disagree, fix both in the same change.
   User-facing docs describe current behavior, not project history.
-- **Naming.** The project is **Agora Hub**, distributed as `agora-hub`; the
+- **Naming.** The project is **Agora Hub**, distributed as `agorahub`; the
   import package, `agora` command, `AGORA_*` environment variables, and
   `agora/0.3` protocol keep the `agora` name (call the system "Agora" for
   short). Do not rename the integration surface casually — external agents

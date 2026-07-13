@@ -1,10 +1,10 @@
 [project]
-# The project is "Agora Hub"; the PyPI distribution is `agora-hub`. The import
+# The project is "Agora Hub"; the PyPI distribution is `agorahub`. The import
 # package and CLI stay `agora` (like `pip install pillow` -> `import PIL`): the
 # `agora` command, `AGORA_*` env, `~/.agora` config, and the `agora/0.3` wire
-# protocol are the stable integration surface. `pip install agora-hub` gives
+# protocol are the stable integration surface. `pip install agorahub` gives
 # you the `agora` command; refer to the system as "Agora" for short.
-name = "agora-hub"
+name = "agorahub"
 # Single source of truth: agora.__version__ (src/agora/__init__.py). The build
 # reads it via [tool.setuptools.dynamic] below, so the package, the wheel/sdist
 # published to PyPI, the hub's /healthz + /whoami, and `agora chat` login can
@@ -44,10 +44,10 @@ mcp = ["mcp>=1.2"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
 
 [project.urls]
-Homepage = "https://github.com/lpalbou/agoria"
-Repository = "https://github.com/lpalbou/agoria"
-Changelog = "https://github.com/lpalbou/agoria/blob/main/CHANGELOG.md"
-Documentation = "https://github.com/lpalbou/agoria/tree/main/docs"
+Homepage = "https://github.com/lpalbou/AgoraHub"
+Repository = "https://github.com/lpalbou/AgoraHub"
+Changelog = "https://github.com/lpalbou/AgoraHub/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/lpalbou/AgoraHub/tree/main/docs"
 
 [project.scripts]
 agora = "agora.cli:main"

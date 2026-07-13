@@ -14,7 +14,7 @@ likely accepted" — the only 100% authoritative check is the upload itself
 (PyPI validates the name server-side first; see the note this script prints).
 
 Usage:
-    python scripts/check_pypi_name.py agora-hub agoria moot
+    python scripts/check_pypi_name.py agorahub agoria moot
 """
 
 from __future__ import annotations
@@ -61,7 +61,7 @@ def check(candidate: str) -> None:
 
 
 def main() -> None:
-    names = sys.argv[1:] or ["agora-hub", "agoria", "moot", "caucus", "convene", "pnyx"]
+    names = sys.argv[1:] or ["agorahub", "agora-hub", "agoria", "moot"]
     print("Screening PyPI names (best-effort; authoritative check = upload):\n")
     for n in names:
         check(n)

@@ -9,7 +9,7 @@ resolution-markers = [
 ]
 
 [[package]]
-name = "agora-hub"
+name = "agorahub"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },

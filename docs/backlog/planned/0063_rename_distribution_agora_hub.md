@@ -23,7 +23,7 @@ tag v0.7.0). The pyproject header comment already documents the
 distribution-vs-import split (`pip install agoria` -> `import agora`), so the
 rename is a value change plus every textual mention. `agoria` appears across
 README.md, docs/, llms*.txt, CHANGELOG (historical mentions stay), pyproject
-URLs (github repo slug lpalbou/agoria — decide whether the repo renames too),
+URLs (github repo slug lpalbou/AgoraHub — decide whether the repo renames too),
 and `scripts/check_pypi_name.py` exists for the availability check.
 Checked 2026-07-12: `agora-hub` reads as likely free on PyPI (pep503
 `agora-hub`; authoritative check = first upload). Plain `agora` is taken —
@@ -39,7 +39,7 @@ honest.
 3. Publish plan: first release under the new name; decide whether to ship a
    final `agoria` stub release pointing at `agora-hub` (metadata-only) or
    just deprecate the old project page. PyPI cannot transfer names.
-4. Decide the GitHub repo slug (rename lpalbou/agoria -> lpalbou/agora-hub?
+4. Decide the GitHub repo slug (rename lpalbou/AgoraHub -> lpalbou/agora-hub?
    GitHub redirects old URLs; pyproject URLs updated either way).
 
 ## Non-goals

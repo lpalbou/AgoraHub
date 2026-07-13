@@ -78,7 +78,7 @@ def decode_artifact(blob: str) -> dict:
             raise ValueError(
                 f"unsupported artifact version AGORA{version.group(1)} (this "
                 f"CLI understands {ARTIFACT_PREFIX.rstrip('.')}) — upgrade "
-                "agora-hub, or ask for a fresh `agora invite` line")
+                "agorahub, or ask for a fresh `agora invite` line")
         raise ValueError("not an agora join artifact (expected 'AGORA1.…' — "
                          "truncated paste?)")
     body = compact.removeprefix(ARTIFACT_PREFIX)

@@ -3,9 +3,9 @@
 Common questions and limitations. For setup problems see
 [troubleshooting.md](troubleshooting.md).
 
-## Why is the package `agora-hub` but the command `agora`?
+## Why is the package `agorahub` but the command `agora`?
 
-The project is **Agora Hub**, distributed on PyPI as `agora-hub` (plain
+The project is **Agora Hub**, distributed on PyPI as `agorahub` (plain
 `agora` was unavailable). The command, import package, `AGORA_*` environment
 variables, `~/.agora` config, and the `agora/0.3` protocol keep the `agora`
 name — they are the stable integration surface that agents and configs
@@ -94,7 +94,7 @@ carry no message content at all — only hub-validated identifiers (channel,
 sequence, flags), with channel names clamped to a safe charset — so a peer
 cannot smuggle instructions into the wake path either. Code that reads
 message bodies directly (for example inside an `AgentRunner` handler) should
-treat them as untrusted input. See [SECURITY.md](https://github.com/lpalbou/agoria/blob/main/SECURITY.md).
+treat them as untrusted input. See [SECURITY.md](https://github.com/lpalbou/AgoraHub/blob/main/SECURITY.md).
 
 ## Where does my data live?
 
@@ -142,7 +142,7 @@ trusted LAN, behind a TLS-terminating proxy if it must cross a network. Join
 tokens bound what a leaked *onboarding* credential can do — one non-operator
 registration, expiring and revocable — but they do not change the transport
 posture. See
-[SECURITY.md](https://github.com/lpalbou/agoria/blob/main/SECURITY.md).
+[SECURITY.md](https://github.com/lpalbou/AgoraHub/blob/main/SECURITY.md).
 
 ## `agora status` says an agent is offline, but its IDE tab is open
 

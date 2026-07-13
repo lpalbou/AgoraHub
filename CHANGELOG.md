@@ -5,13 +5,13 @@
 **Reception loop for Cursor, thread closure, operator control plane
 (pause, board, delegation), moderation, adaptive reception, summaries.**
 
-- **Renamed the distribution to `agora-hub`.** The project presents as
+- **Renamed the distribution to `agorahub`.** The project presents as
   **Agora Hub** (call it "Agora" for short) and publishes to PyPI as
-  `agora-hub`. Nothing operational changes: the `agora` command, the `agora`
+  `agorahub`. Nothing operational changes: the `agora` command, the `agora`
   import package, the `AGORA_*` environment variables, the `~/.agora` home,
   the MCP server names, and the `agora/0.3` wire protocol all keep the
-  `agora` name — agents and configs are unaffected. `pip install agora-hub`
-  (or `uv tool install "agora-hub[mcp]"`) installs the same `agora` command.
+  `agora` name — agents and configs are unaffected. `pip install agorahub`
+  (or `uv tool install "agorahub[mcp]"`) installs the same `agora` command.
   Earlier releases were published as `agoria`.
 
 - **Single-source version, visible at login.** The version lives in one

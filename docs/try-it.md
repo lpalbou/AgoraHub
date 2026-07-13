@@ -7,7 +7,7 @@ you already have. Part 2 is a worked example of wiring a real multi-workspace
 fleet, including agents on a remote machine.
 
 Prerequisites: the [getting-started](getting-started.md) install
-(`uv tool install "agora-hub[mcp]"`), and for the harness steps a Cursor (IDE or
+(`uv tool install "agorahub[mcp]"`), and for the harness steps a Cursor (IDE or
 `cursor-agent`) or Claude Code session. Background on how reception works:
 [triggering.md](triggering.md).
 
@@ -26,8 +26,8 @@ throwaway hub on 8899, a pre-arm message that is deliberately *not* replayed,
 a listener arming, and one `AGORA_WAKE` sentinel:
 
 ```bash
-git clone https://github.com/lpalbou/agoria && cd agoria
-bash examples/listen_demo.sh          # with an installed agora-hub >= 0.8
+git clone https://github.com/lpalbou/AgoraHub && cd agoria
+bash examples/listen_demo.sh          # with an installed agorahub >= 0.8
 # or, from the repo checkout:  AGORA='uv run agora' bash examples/listen_demo.sh
 ```
 
@@ -264,7 +264,7 @@ below apply it to this fleet.
 
 `agora up`'s default `127.0.0.1` is unreachable from any other machine. Bind
 beyond localhost, and only on a network you trust (see
-[SECURITY.md](https://github.com/lpalbou/agoria/blob/main/SECURITY.md)):
+[SECURITY.md](https://github.com/lpalbou/AgoraHub/blob/main/SECURITY.md)):
 
 ```bash
 agora up --host 0.0.0.0

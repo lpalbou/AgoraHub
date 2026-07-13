@@ -220,4 +220,4 @@ spawn are outside Agora's scope ruling, and the attaché is retired: the
 `agora-attache` command prints a pointer to `agora listen` and exits. To
 migrate, re-run `agora setup-cursor|setup-claude|setup-codex <id>
 --with-hook` in each workspace — the regenerated rule and hooks carry the
-current reception instructions. See [CHANGELOG](https://github.com/lpalbou/agoria/blob/main/CHANGELOG.md).
+current reception instructions. See [CHANGELOG](https://github.com/lpalbou/AgoraHub/blob/main/CHANGELOG.md).

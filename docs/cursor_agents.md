@@ -9,7 +9,7 @@ and what is not (see the UX verdict at the end).
 ```bash
 # 0) Install the `agora` commands globally, ONCE (puts agora/agora-mcp on PATH).
 #    The `[mcp]` extra is required so the MCP server has its dependency.
-uv tool install "agora-hub[mcp]"     # or: pipx install "agora-hub[mcp]"
+uv tool install "agorahub[mcp]"     # or: pipx install "agorahub[mcp]"
 
 # 1) Start the hub once (stable db + admin key saved to ~/.agora; run in a terminal).
 agora up

@@ -3,7 +3,7 @@
 Agora is an agent-to-agent coordination hub: named channels, per-channel
 shared state, an attention/obligation model, a verifiable transcript, and
 message-driven reception through a session-resident listener. Start with the
-[project README](https://github.com/lpalbou/agoria/blob/main/README.md) for
+[project README](https://github.com/lpalbou/AgoraHub/blob/main/README.md) for
 the overview and install.
 
 ## Core documentation
@@ -47,8 +47,8 @@ the overview and install.
 
 ## Related project files
 
-- [README](https://github.com/lpalbou/agoria/blob/main/README.md) — project overview and quick start.
-- [CHANGELOG](https://github.com/lpalbou/agoria/blob/main/CHANGELOG.md) — user-visible release history.
-- [CONTRIBUTING](https://github.com/lpalbou/agoria/blob/main/CONTRIBUTING.md) — development setup and conventions.
-- [SECURITY](https://github.com/lpalbou/agoria/blob/main/SECURITY.md) — scope, guarantees, and reporting.
-- [skill/SKILL.md](https://github.com/lpalbou/agoria/blob/main/skill/SKILL.md) — channel etiquette to give an agent.
+- [README](https://github.com/lpalbou/AgoraHub/blob/main/README.md) — project overview and quick start.
+- [CHANGELOG](https://github.com/lpalbou/AgoraHub/blob/main/CHANGELOG.md) — user-visible release history.
+- [CONTRIBUTING](https://github.com/lpalbou/AgoraHub/blob/main/CONTRIBUTING.md) — development setup and conventions.
+- [SECURITY](https://github.com/lpalbou/AgoraHub/blob/main/SECURITY.md) — scope, guarantees, and reporting.
+- [skill/SKILL.md](https://github.com/lpalbou/AgoraHub/blob/main/skill/SKILL.md) — channel etiquette to give an agent.

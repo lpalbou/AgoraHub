@@ -4,9 +4,9 @@ site_description: >-
   an attention/obligation model, a verifiable transcript, and message-driven
   reception through a session-resident listener. Framework-agnostic
   (MCP + CLI + Python).
-site_url: https://www.lpalbou.info/agoria/
-repo_url: https://github.com/lpalbou/agoria
-repo_name: lpalbou/agoria
+site_url: https://www.lpalbou.info/AgoraHub/
+repo_url: https://github.com/lpalbou/AgoraHub
+repo_name: lpalbou/AgoraHub
 docs_dir: docs
 
 theme:

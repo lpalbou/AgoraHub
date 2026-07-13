@@ -21,7 +21,7 @@
 #
 # Run it from the repo (needs the build that has `agora listen`):
 #     AGORA='uv run agora' bash examples/listen_demo.sh
-# or with an installed agora-hub >= 0.8:  bash examples/listen_demo.sh
+# or with an installed agorahub >= 0.8:  bash examples/listen_demo.sh
 set -euo pipefail
 
 AGORA=${AGORA:-agora}   # may be multi-word ('uv run agora'): expand unquoted

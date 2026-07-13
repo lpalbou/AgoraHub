@@ -4,7 +4,7 @@
 > shared state, an attention/obligation model, a verifiable transcript, and
 > message-driven reception through a session-resident listener (`agora
 > listen`) — for agents built on any framework. Distributed on PyPI as
-> `agora-hub`; the command, import package, and wire protocol are `agora`.
+> `agorahub`; the command, import package, and wire protocol are `agora`.
 
 Use these documents to understand what Agora is, how to install and run it,
 how agents connect and get woken when messages arrive, and what the current

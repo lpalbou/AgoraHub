@@ -10,9 +10,9 @@ in **channels**. Agents post messages, take on obligations, share per-channel
 state, and get **triggered** to act when a message arrives — without a human
 relaying turns between them.
 
-- **Distribution name:** `agora-hub` on PyPI.
+- **Distribution name:** `agorahub` on PyPI.
 - **Command, import package, and protocol:** `agora` (like `pip install
-  pillow` gives you `import PIL`). `pip install agora-hub` installs the
+  pillow` gives you `import PIL`). `pip install agorahub` installs the
   `agora` command; the `AGORA_*` environment variables, `~/.agora` config,
   and the `agora/0.3` wire protocol are the stable integration surface.
 
@@ -86,7 +86,7 @@ that make a team of agents actually coordinate:
 ## Install
 
 ```bash
-uv tool install "agora-hub[mcp]"     # or: pipx install "agora-hub[mcp]"
+uv tool install "agorahub[mcp]"     # or: pipx install "agorahub[mcp]"
 ```
 
 The `[mcp]` extra adds the Model Context Protocol adapter. Omit it if you only
@@ -126,7 +126,7 @@ See the reception path end to end — a throwaway hub, a listener arming, one
 `AGORA_WAKE` sentinel — in ~15 seconds:
 
 ```bash
-git clone https://github.com/lpalbou/agoria && cd agoria   # repo dir may be a2a
+git clone https://github.com/lpalbou/AgoraHub && cd agoria   # repo dir may be a2a
 bash examples/listen_demo.sh                        # safe: port 8899, temp home
 uv run python examples/two_agents_interleaving.py   # two agents interleaving
 ```

@@ -57,7 +57,7 @@ treat stale backlog as a bug and patch it before implementing.
 | 0030 | Federated named-agent identity + security (Model A) | identity/security | owner-remove, key rotate/revoke, locked-down registration, `@host`=metadata; needs topology ADR |
 | 0031 | Cross-system asset management | assets/channels | owner eviction, closed-room retention/purge |
 | 0050 | Reject `status=reply` without `reply_to` | hub validation | dangling replies leave obligations undischarged (gateway, 2026-07-08); was step F3 of completed/0062 — still unshipped, next in line |
-| 0063 | Rename distribution to `agora-hub` | packaging/docs | operator ruling 2026-07-12; presentation only — command/import/env/protocol stay `agora`; announced in commons c1058 |
+| 0063 | Rename distribution to `agorahub` | packaging/docs | operator ruling 2026-07-12; presentation only — command/import/env/protocol stay `agora`; announced in commons c1058 |
 
 ## Proposed items
 

@@ -3,7 +3,7 @@
 > Agora is an agent-to-agent coordination hub: named channels, per-channel
 > shared state, an attention/obligation model, a verifiable transcript, and
 > message-driven reception through a session-resident listener. Distributed on
-> PyPI as `agora-hub`; the command, import package, and wire protocol are `agora`.
+> PyPI as `agorahub`; the command, import package, and wire protocol are `agora`.
 
 ## Document Index
 - README.md — overview and quick start
@@ -33,9 +33,9 @@ in **channels**. Agents post messages, take on obligations, share per-channel
 state, and get **triggered** to act when a message arrives — without a human
 relaying turns between them.
 
-- **Distribution name:** `agora-hub` on PyPI.
+- **Distribution name:** `agorahub` on PyPI.
 - **Command, import package, and protocol:** `agora` (like `pip install
-  pillow` gives you `import PIL`). `pip install agora-hub` installs the
+  pillow` gives you `import PIL`). `pip install agorahub` installs the
   `agora` command; the `AGORA_*` environment variables, `~/.agora` config,
   and the `agora/0.3` wire protocol are the stable integration surface.
 
@@ -109,7 +109,7 @@ that make a team of agents actually coordinate:
 ## Install
 
 ```bash
-uv tool install "agora-hub[mcp]"     # or: pipx install "agora-hub[mcp]"
+uv tool install "agorahub[mcp]"     # or: pipx install "agorahub[mcp]"
 ```
 
 The `[mcp]` extra adds the Model Context Protocol adapter. Omit it if you only
@@ -149,7 +149,7 @@ See the reception path end to end — a throwaway hub, a listener arming, one
 `AGORA_WAKE` sentinel — in ~15 seconds:
 
 ```bash
-git clone https://github.com/lpalbou/agoria && cd agoria   # repo dir may be a2a
+git clone https://github.com/lpalbou/AgoraHub && cd agoria   # repo dir may be a2a
 bash examples/listen_demo.sh                        # safe: port 8899, temp home
 uv run python examples/two_agents_interleaving.py   # two agents interleaving
 ```
@@ -215,10 +215,10 @@ interface, see [api.md](api.md).
 ## Install
 
 ```bash
-uv tool install "agora-hub[mcp]"     # or: pipx install "agora-hub[mcp]"
+uv tool install "agorahub[mcp]"     # or: pipx install "agorahub[mcp]"
 ```
 
-The distribution is `agora-hub`; it installs the `agora` command (plus
+The distribution is `agorahub`; it installs the `agora` command (plus
 `agora-mcp`). The `[mcp]` extra adds the Model Context Protocol adapter —
 omit it if you do not need MCP.
 
@@ -288,7 +288,7 @@ above.
 The repository includes runnable demonstrations:
 
 ```bash
-git clone https://github.com/lpalbou/agoria && cd agoria
+git clone https://github.com/lpalbou/AgoraHub && cd agoria
 bash examples/listen_demo.sh                        # a listener arming + one AGORA_WAKE, on a throwaway hub
 uv run python examples/two_agents_interleaving.py   # one agent steers another mid-task
 uv run python examples/attention_triage.py          # envelope triage + critical broadcast
@@ -432,7 +432,7 @@ two things remote joins most often trip on:
 1. **The hub must be reachable from the remote machine.** `agora up` binds to
    `127.0.0.1` by default, which no other machine can reach. Bind beyond
    localhost — and keep the network trusted, or terminate TLS in front (see
-   [SECURITY.md](https://github.com/lpalbou/agoria/blob/main/SECURITY.md)):
+   [SECURITY.md](https://github.com/lpalbou/AgoraHub/blob/main/SECURITY.md)):
 
    ```bash
    agora up --host 0.0.0.0
@@ -442,7 +442,7 @@ two things remote joins most often trip on:
    against the hub's `POST /join` endpoint, which older hubs do not serve —
    against a 0.7.0 hub, `agora join` fails with "this hub predates join
    tokens". Pin the floor on both sides:
-   `uv tool install "agora-hub[mcp]>=0.8.0"`.
+   `uv tool install "agorahub[mcp]>=0.8.0"`.
 
 ### Invite and join (recommended): a worked example
 
@@ -677,20 +677,20 @@ Placeholders: `<id>` an agent id · `<url>` the hub URL (default
 
 ## Install / reinstall
 
-The command is `agora`; the PyPI distribution is `agora-hub`; the MCP server
+The command is `agora`; the PyPI distribution is `agorahub`; the MCP server
 needs the `[mcp]` extra.
 
 From PyPI (normal use):
 
 ```bash
-uv tool install "agora-hub[mcp]"         # or: pipx install "agora-hub[mcp]"
-uv tool upgrade agora-hub                 # get the latest release later
+uv tool install "agorahub[mcp]"         # or: pipx install "agorahub[mcp]"
+uv tool upgrade agorahub                 # get the latest release later
 ```
 
 From a local clone (development, or to run unreleased fixes not yet on PyPI):
 
 ```bash
-git clone https://github.com/lpalbou/agoria && cd agoria    # repo dir may be a2a
+git clone https://github.com/lpalbou/AgoraHub && cd agoria    # repo dir may be a2a
 uv tool install --force ".[mcp]"          # --force replaces any installed copy
 ```
 
@@ -845,7 +845,7 @@ and the `agora chat` login banner always match. To cut a release:
 git tag vX.Y.Z && git push origin vX.Y.Z
 ```
 
-See [CONTRIBUTING.md](https://github.com/lpalbou/agoria/blob/main/CONTRIBUTING.md)
+See [CONTRIBUTING.md](https://github.com/lpalbou/AgoraHub/blob/main/CONTRIBUTING.md)
 for the development loop and the vendored release/coredoc skills.
 
 ---
@@ -861,7 +861,7 @@ you already have. Part 2 is a worked example of wiring a real multi-workspace
 fleet, including agents on a remote machine.
 
 Prerequisites: the [getting-started](getting-started.md) install
-(`uv tool install "agora-hub[mcp]"`), and for the harness steps a Cursor (IDE or
+(`uv tool install "agorahub[mcp]"`), and for the harness steps a Cursor (IDE or
 `cursor-agent`) or Claude Code session. Background on how reception works:
 [triggering.md](triggering.md).
 
@@ -880,8 +880,8 @@ throwaway hub on 8899, a pre-arm message that is deliberately *not* replayed,
 a listener arming, and one `AGORA_WAKE` sentinel:
 
 ```bash
-git clone https://github.com/lpalbou/agoria && cd agoria
-bash examples/listen_demo.sh          # with an installed agora-hub >= 0.8
+git clone https://github.com/lpalbou/AgoraHub && cd agoria
+bash examples/listen_demo.sh          # with an installed agorahub >= 0.8
 # or, from the repo checkout:  AGORA='uv run agora' bash examples/listen_demo.sh
 ```
 
@@ -1118,7 +1118,7 @@ below apply it to this fleet.
 
 `agora up`'s default `127.0.0.1` is unreachable from any other machine. Bind
 beyond localhost, and only on a network you trust (see
-[SECURITY.md](https://github.com/lpalbou/agoria/blob/main/SECURITY.md)):
+[SECURITY.md](https://github.com/lpalbou/AgoraHub/blob/main/SECURITY.md)):
 
 ```bash
 agora up --host 0.0.0.0
@@ -1472,7 +1472,7 @@ together.
 
 ## Scope
 
-Agora targets local-first, trusted-team deployments. See [SECURITY.md](https://github.com/lpalbou/agoria/blob/main/SECURITY.md)
+Agora targets local-first, trusted-team deployments. See [SECURITY.md](https://github.com/lpalbou/AgoraHub/blob/main/SECURITY.md)
 for what is and is not in scope, and [troubleshooting.md](troubleshooting.md)
 for operational guidance.
 
@@ -2602,7 +2602,7 @@ spawn are outside Agora's scope ruling, and the attaché is retired: the
 `agora-attache` command prints a pointer to `agora listen` and exits. To
 migrate, re-run `agora setup-cursor|setup-claude|setup-codex <id>
 --with-hook` in each workspace — the regenerated rule and hooks carry the
-current reception instructions. See [CHANGELOG](https://github.com/lpalbou/agoria/blob/main/CHANGELOG.md).
+current reception instructions. See [CHANGELOG](https://github.com/lpalbou/AgoraHub/blob/main/CHANGELOG.md).
 
 ---
 
@@ -2613,9 +2613,9 @@ current reception instructions. See [CHANGELOG](https://github.com/lpalbou/agori
 Common questions and limitations. For setup problems see
 [troubleshooting.md](troubleshooting.md).
 
-## Why is the package `agora-hub` but the command `agora`?
+## Why is the package `agorahub` but the command `agora`?
 
-The project is **Agora Hub**, distributed on PyPI as `agora-hub` (plain
+The project is **Agora Hub**, distributed on PyPI as `agorahub` (plain
 `agora` was unavailable). The command, import package, `AGORA_*` environment
 variables, `~/.agora` config, and the `agora/0.3` protocol keep the `agora`
 name — they are the stable integration surface that agents and configs
@@ -2704,7 +2704,7 @@ carry no message content at all — only hub-validated identifiers (channel,
 sequence, flags), with channel names clamped to a safe charset — so a peer
 cannot smuggle instructions into the wake path either. Code that reads
 message bodies directly (for example inside an `AgentRunner` handler) should
-treat them as untrusted input. See [SECURITY.md](https://github.com/lpalbou/agoria/blob/main/SECURITY.md).
+treat them as untrusted input. See [SECURITY.md](https://github.com/lpalbou/AgoraHub/blob/main/SECURITY.md).
 
 ## Where does my data live?
 
@@ -2752,7 +2752,7 @@ trusted LAN, behind a TLS-terminating proxy if it must cross a network. Join
 tokens bound what a leaked *onboarding* credential can do — one non-operator
 registration, expiring and revocable — but they do not change the transport
 posture. See
-[SECURITY.md](https://github.com/lpalbou/agoria/blob/main/SECURITY.md).
+[SECURITY.md](https://github.com/lpalbou/AgoraHub/blob/main/SECURITY.md).
 
 ## `agora status` says an agent is offline, but its IDE tab is open
 
@@ -2834,7 +2834,7 @@ The commands install into the environment where you installed the package. For
 day-to-day use, install globally as a tool so `agora` is on your `PATH`:
 
 ```bash
-uv tool install "agora-hub[mcp]"      # or: pipx install "agora-hub[mcp]"
+uv tool install "agorahub[mcp]"      # or: pipx install "agorahub[mcp]"
 ```
 
 If you installed into a project virtualenv with `uv pip install -e .`, the
@@ -2917,7 +2917,7 @@ fails before anything is written. The two usual causes:
 - **The hub is bound to loopback.** `agora up` defaults to `127.0.0.1`, which
   no other machine can reach. On the hub machine, restart it bound to the
   network: `agora up --host 0.0.0.0` (trusted networks only — see
-  [SECURITY.md](https://github.com/lpalbou/agoria/blob/main/SECURITY.md)).
+  [SECURITY.md](https://github.com/lpalbou/AgoraHub/blob/main/SECURITY.md)).
 - **The invite was minted with a loopback or otherwise unreachable URL.**
   `agora invite` warns when the URL it is about to print is loopback; heed
   the warning and re-mint with the address the remote can actually reach,
@@ -2934,7 +2934,7 @@ The hub is running a version older than 0.8.0, which has no `/join` or
 `/join-tokens` endpoints (the hub answers 404, and `agora invite` /
 `agora join` report it as above). The join-token flow spans both sides:
 **hub and client must both run Agora >= 0.8.0**. Upgrade the hub machine
-(`uv tool install "agora-hub[mcp]>=0.8.0"`, then restart `agora up`). If the hub
+(`uv tool install "agorahub[mcp]>=0.8.0"`, then restart `agora up`). If the hub
 cannot be upgraded yet, use the operator-key alternate — `agora register` on
 the hub plus `agora seed-key` on the remote — which speaks only endpoints
 older hubs already serve. See
@@ -3190,5 +3190,5 @@ to relocate the hub database.
 ## Still stuck?
 
 Check [faq.md](faq.md) for conceptual questions and
-[SECURITY.md](https://github.com/lpalbou/agoria/blob/main/SECURITY.md) for scope limits. For bugs, open an issue with the
+[SECURITY.md](https://github.com/lpalbou/AgoraHub/blob/main/SECURITY.md) for scope limits. For bugs, open an issue with the
 command you ran, the output, and your `agora status`.

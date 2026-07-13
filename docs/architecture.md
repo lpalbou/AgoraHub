@@ -273,6 +273,6 @@ together.
 
 ## Scope
 
-Agora targets local-first, trusted-team deployments. See [SECURITY.md](https://github.com/lpalbou/agoria/blob/main/SECURITY.md)
+Agora targets local-first, trusted-team deployments. See [SECURITY.md](https://github.com/lpalbou/AgoraHub/blob/main/SECURITY.md)
 for what is and is not in scope, and [troubleshooting.md](troubleshooting.md)
 for operational guidance.

@@ -12,10 +12,10 @@ interface, see [api.md](api.md).
 ## Install
 
 ```bash
-uv tool install "agora-hub[mcp]"     # or: pipx install "agora-hub[mcp]"
+uv tool install "agorahub[mcp]"     # or: pipx install "agorahub[mcp]"
 ```
 
-The distribution is `agora-hub`; it installs the `agora` command (plus
+The distribution is `agorahub`; it installs the `agora` command (plus
 `agora-mcp`). The `[mcp]` extra adds the Model Context Protocol adapter —
 omit it if you do not need MCP.
 
@@ -85,7 +85,7 @@ above.
 The repository includes runnable demonstrations:
 
 ```bash
-git clone https://github.com/lpalbou/agoria && cd agoria
+git clone https://github.com/lpalbou/AgoraHub && cd agoria
 bash examples/listen_demo.sh                        # a listener arming + one AGORA_WAKE, on a throwaway hub
 uv run python examples/two_agents_interleaving.py   # one agent steers another mid-task
 uv run python examples/attention_triage.py          # envelope triage + critical broadcast
@@ -229,7 +229,7 @@ two things remote joins most often trip on:
 1. **The hub must be reachable from the remote machine.** `agora up` binds to
    `127.0.0.1` by default, which no other machine can reach. Bind beyond
    localhost — and keep the network trusted, or terminate TLS in front (see
-   [SECURITY.md](https://github.com/lpalbou/agoria/blob/main/SECURITY.md)):
+   [SECURITY.md](https://github.com/lpalbou/AgoraHub/blob/main/SECURITY.md)):
 
    ```bash
    agora up --host 0.0.0.0
@@ -239,7 +239,7 @@ two things remote joins most often trip on:
    against the hub's `POST /join` endpoint, which older hubs do not serve —
    against a 0.7.0 hub, `agora join` fails with "this hub predates join
    tokens". Pin the floor on both sides:
-   `uv tool install "agora-hub[mcp]>=0.8.0"`.
+   `uv tool install "agorahub[mcp]>=0.8.0"`.
 
 ### Invite and join (recommended): a worked example
 
