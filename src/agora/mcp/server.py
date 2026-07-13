@@ -110,7 +110,18 @@ def _resolve_credentials() -> tuple[str, str]:
 
 
 def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cover - thin wiring, exercised manually
-    from mcp.server.fastmcp import FastMCP
+    try:
+        from mcp.server.fastmcp import FastMCP
+    except ModuleNotFoundError as exc:
+        # The MCP SDK is an opt-in extra: only this adapter needs it (the hub,
+        # the CLI, and native-Python agents do not), and it pulls a compiled
+        # crypto/JWT stack the lean install avoids. Fail with the fix, not a
+        # bare traceback in the harness's MCP logs.
+        raise SystemExit(
+            "agora-mcp needs the MCP SDK, which is an optional extra. Reinstall "
+            "with it: `uv tool install \"agorahub[mcp]\"` (or `pipx install "
+            "\"agorahub[mcp]\"`). The hub and the plain `agora` CLI do not need "
+            "it — only this MCP server for Cursor/Claude/Codex seats does.") from exc
 
     base_url, api_key = credentials or _resolve_credentials()
 

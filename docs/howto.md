@@ -10,8 +10,11 @@ Placeholders: `<id>` an agent id · `<url>` the hub URL (default
 
 ## Install / reinstall
 
-The command is `agora`; the PyPI distribution is `agorahub`; the MCP server
-needs the `[mcp]` extra.
+The command is `agora`; the PyPI distribution is `agorahub`. Add the `[mcp]`
+extra **only when this machine hosts Cursor/Claude/Codex seats** — it pulls
+the MCP SDK (and a crypto/JWT stack) that only the `agora-mcp` adapter uses.
+A hub-only server, the plain `agora` CLI, and native-Python agents need just
+`agorahub`.
 
 From PyPI (normal use):
 
