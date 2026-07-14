@@ -224,6 +224,65 @@ def test_idle_nudge_is_an_accepted_noop(tmp_path, monkeypatch, capsys):
     assert out.err == ""
 
 
+def test_backlog_wake_fires_at_arm_for_missed_debt(tmp_path, monkeypatch,
+                                                   capsys, keep_signal_handlers):
+    """The blind-spot closer (live class: a message landing between two
+    --once windows is invisible to tail-from-END listeners forever): when
+    the seat OWES at arm time and the debt signature is new, arming wakes
+    IMMEDIATELY (exit 2, backlog sentinel) instead of waiting; the SAME
+    signature on the next arm stays quiet (no re-wake for debt already
+    delivered); cleared debt resets nothing loudly."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("AGORA_HOME", str(home))
+    (home / "bob-inbox.log").write_text("")            # file mode, empty tail
+
+    snapshots = iter([((1, 0), "id-a"),                # arm 1: new debt -> wake
+                      ((1, 0), "id-a"),                # arm 2: same -> quiet
+                      ((2, 0), "id-a,id-b")])          # arm 3: grew -> wake
+    monkeypatch.setattr("agora.listen._owed_snapshot",
+                        lambda hub, aid: next(snapshots, ((0, 0), None)))
+
+    common = dict(agent_id="bob", url="http://127.0.0.1:1", source="file",
+                  once=True, max_wait=0.1, debounce=0.01, heartbeat=0,
+                  poll=0.01, cwd=tmp_path)
+    assert run_listen(**common) == 2                   # backlog wake
+    out = capsys.readouterr()
+    assert "AGORA_WAKE agent=bob n=0 backlog owed=1" in out.out
+    assert "no listener was watching" in out.err
+    assert (home / "listen-bob.owedsig").read_text() == "id-a"
+
+    assert run_listen(**common) == 0                   # unchanged debt: quiet pass
+    assert "AGORA_WAKE" not in capsys.readouterr().out
+
+    assert run_listen(**common) == 2                   # new obligation: wake again
+    assert "backlog owed=2" in capsys.readouterr().out
+
+
+def test_event_wake_records_signature_so_arm_check_stays_quiet(tmp_path):
+    """A live event wake delivers the current debt too (its digest names
+    it), so _deliver_wake must persist the signature — otherwise the loop's
+    re-arm ~5s later would double-wake for debt the seat is already
+    settling."""
+    import agora.listen as listen_mod
+
+    home = tmp_path / "home"
+    home.mkdir()
+    orig = listen_mod._owed_snapshot
+    listen_mod._owed_snapshot = lambda hub, aid: ((1, 0), "sig-x")
+    orig_home = listen_mod._config.home
+    listen_mod._config.home = lambda: home
+    try:
+        rc = listen_mod._deliver_wake([_event(flags="to-me", status="open")],
+                                      "bob", preview=False, once=True,
+                                      hub="http://127.0.0.1:1")
+    finally:
+        listen_mod._owed_snapshot = orig
+        listen_mod._config.home = orig_home
+    assert rc == 2
+    assert (home / "listen-bob.owedsig").read_text() == "sig-x"
+
+
 def test_debounce_batcher_coalesces_bursts_with_fake_clock():
     now = {"t": 0.0}
     batcher = DebounceBatcher(10.0, clock=lambda: now["t"])

@@ -108,11 +108,10 @@ def test_crashed_resume_drops_session_and_boots_next(home):
     assert d.session_id == "s2"
 
 
-def test_idle_timeout_sweeps_missed_debt_once(home, monkeypatch):
-    """The tail-from-END blind spot (live finding: an ask that landed between
-    two listen windows never woke the seat): an idle timeout with OWED debt
-    drives one sweep turn — and the SAME unchanged debt does not burn a
-    second turn on the next window; new debt (signature change) does."""
+def test_backlog_wake_from_listen_drives_a_turn(home, monkeypatch):
+    """Missed-wake recovery lives in run_listen now (arm-time backlog check,
+    exit 2): the driver treats a backlog wake exactly like a live one —
+    one bounded turn per rc=2, idle rc=0 drives nothing."""
     spawns = []
 
     def spawn(prompt, sid):
@@ -120,13 +119,11 @@ def test_idle_timeout_sweeps_missed_debt_once(home, monkeypatch):
         return "s", True
 
     d = _driver(home, spawn)
-    # listen: three idle timeouts (rc 0), then stop via max_turns
-    monkeypatch.setattr("agora.drive.run_listen", lambda **kw: 0)
-    sigs = iter(["a1", "a1", "a1,b2"])                # debt appears, persists, grows
-    monkeypatch.setattr(Driver, "_owed_signature",
-                        lambda self: next(sigs, "a1,b2"))
-    d.run(max_turns=2)                                # ends after 2 driven turns
-    assert len(spawns) == 2                           # swept once per CHANGE, not per window
+    codes = iter([2, 0, 2])                           # backlog, idle, live wake
+    monkeypatch.setattr("agora.drive.run_listen",
+                        lambda **kw: next(codes, 0))
+    d.run(max_turns=2)
+    assert len(spawns) == 2                           # one turn per wake, none for idle
 
 
 def test_loop_listens_with_signal_passthrough(home, monkeypatch):
@@ -150,8 +147,8 @@ def test_loop_listens_with_signal_passthrough(home, monkeypatch):
 
 
 def test_idle_timeout_without_debt_never_spawns(home, monkeypatch):
-    """A quiet hub costs zero LLM turns: idle timeouts with no debt drive
-    nothing (the loop is exited via the max_turns=0 bound)."""
+    """A quiet hub costs zero LLM turns: idle timeouts (rc 0 — run_listen's
+    arm-time backlog check found no debt) drive nothing."""
     spawns = []
 
     def spawn(prompt, sid):
@@ -168,7 +165,6 @@ def test_idle_timeout_without_debt_never_spawns(home, monkeypatch):
         return 0
 
     monkeypatch.setattr("agora.drive.run_listen", listen)
-    monkeypatch.setattr(Driver, "_owed_signature", lambda self: None)
     with pytest.raises(KeyboardInterrupt):
         d.run()
     assert spawns == []

@@ -109,8 +109,6 @@ class Driver:
         self._turns_on_session = 0
         self._turn_times: list[float] = []       # spawn timestamps in the last hour
         self._quarantined: set[str] = set()       # wake keys that keep crashing
-        self._swept_signature: str | None = None  # last debt sweep's signature
-        self._hub_down = False                    # edge-triggered unreachable log
 
     # -- persistence ---------------------------------------------------------
 
@@ -158,49 +156,6 @@ class Driver:
         now = time.time()
         self._turn_times = [t for t in self._turn_times if now - t < 3600.0]
         return len(self._turn_times) < self.turn_budget
-
-    # -- missed-wake sweep -----------------------------------------------------
-
-    def _owed_signature(self) -> str | None:
-        """The seat's current debt, as a comparable signature (None = no debt
-        or unknowable). The listener tails the notify file from END, so an
-        obligation that lands BETWEEN two listen windows never produces a
-        wake (live finding: seq 4 sat unanswered until an unrelated seq 5
-        woke the seat). Each idle timeout ends with this cheap debt poll —
-        plain HTTP, no LLM. The SIGNATURE (not a bool) is what gates the
-        sweep: a turn that ran and failed to discharge leaves it unchanged,
-        so stuck debt sweeps once and then waits for the hub's escalation
-        instead of burning a turn every window."""
-        try:
-            key = _config.get_cached_key(self.hub, self.agent_id)
-            if not key:
-                return None
-            import httpx
-            try:
-                r = httpx.get(f"{self.hub.rstrip('/')}/owed",
-                              headers={"Authorization": f"Bearer {key}"},
-                              timeout=5.0)
-            except httpx.TransportError:
-                # Edge-triggered so a down hub logs once, not once per window.
-                if not self._hub_down:
-                    self._hub_down = True
-                    _emit(f"AGORA_DRIVE hub=unreachable agent={self.agent_id} "
-                          f"url={self.hub} — waiting for it to return")
-                return None
-            if self._hub_down:
-                self._hub_down = False
-                _emit(f"AGORA_DRIVE hub=back agent={self.agent_id}")
-            if r.status_code != 200:
-                return None
-            owed = r.json()
-            counts = owed.get("counts", {})
-            if not (counts.get("to_answer") or counts.get("to_consume")):
-                return None
-            ids = sorted([row.get("id", "") for row in owed.get("to_answer", [])]
-                         + [row.get("answer_id", "") for row in owed.get("to_consume", [])])
-            return ",".join(ids)
-        except Exception:
-            return None
 
     # -- the spawn (real) ----------------------------------------------------
 
@@ -317,24 +272,20 @@ class Driver:
             # swallowed by the listener's own handlers (live finding: pkill'd
             # drivers survived because the embedded listen converted the
             # signal into a clean return and the loop re-armed).
+            # Missed-wake recovery is INSIDE run_listen now: arming starts
+            # with a debt poll (listen._backlog_wake_at_arm), so an
+            # obligation that landed in a blind spot (between windows,
+            # mid-turn) returns exit 2 immediately — one mechanism for
+            # driven and interactive seats alike, signature-gated against
+            # re-waking unchanged debt.
             rc = run_listen(agent_id=self.agent_id, url=self.hub, once=True,
                             important_only=True, max_wait=self.max_wait,
                             source="auto", signal_passthrough=True)
-            if rc == 2:                       # obligation wake
+            if rc == 2:                       # obligation wake (live or backlog)
                 if self.run_turn():
                     driven += 1
                 backoff = 1.0
             elif rc == 0:                     # idle timeout OR hub-unreachable
-                # Missed-wake sweep: obligations that landed between windows
-                # (tail-from-END blind spot) or rotted unanswered still get a
-                # turn. Gated on the debt CHANGING, so a quiet hub costs zero
-                # LLM turns and stuck debt cannot burn a turn per window.
-                sig = self._owed_signature()
-                if sig is not None and sig != self._swept_signature:
-                    _emit(f"AGORA_DRIVE sweep=owed agent={self.agent_id}")
-                    if self.run_turn():
-                        driven += 1
-                    self._swept_signature = sig
                 continue
             else:                             # unexpected: bounded backoff
                 time.sleep(backoff)

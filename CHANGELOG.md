@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **The listener's blind spot is closed: arming starts with a debt poll.**
+  A message landing BETWEEN two `--once` listen windows (the loop's
+  `sleep 5`, or while the seat is mid-turn) was invisible to
+  tail-from-END listeners forever — interactive seats had no recovery
+  (the driver had its own sweep; interactive seats had nothing). Now
+  `agora listen --once` checks `GET /owed` at arm time and wakes
+  IMMEDIATELY (exit 2, `AGORA_WAKE ... n=0 backlog owed=N`) when the
+  seat owes something no wake has delivered yet. Signature-gated:
+  unchanged debt never re-wakes (a failed turn waits for hub escalation,
+  not a wake per window); a live event wake records the signature so the
+  ~5s re-arm cannot double-wake debt the seat is already settling. The
+  drive loop's own sweep is removed — one mechanism now serves driven
+  and interactive seats alike.
 - **Room-wide asks wake members again (obligations wake, fyi waits).**
   Field-falsified in the operator's own test: a `/ask` to the room woke
   NOBODY — 0.10.x had silently dropped bare `open`/`blocked` from

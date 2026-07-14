@@ -240,25 +240,94 @@ def wake_line(events: list[dict[str, Any]], agent_id: str, *, preview: bool = Fa
     return " ".join(parts)
 
 
-def _owed_counts(hub: str, agent_id: str) -> tuple[int, int] | None:
-    """Best-effort owed counts for the wake surfaces (0079): a wake should
-    carry the debt, so the woken turn starts knowing what it OWES instead of
-    just that something arrived (the lurker incident: wakes announced
-    arrival, agents acked arrival, nobody surfaced the debt). Never blocks a
-    wake: cached key only, short timeout, any failure -> None."""
+def _owed_snapshot(hub: str, agent_id: str) -> tuple[tuple[int, int] | None, str | None]:
+    """One GET /owed -> (counts, signature). counts feed the wake surfaces
+    (0079: the woken turn must start knowing what it OWES); the signature is
+    the debt as a comparable string (sorted message ids — None when nothing
+    is owed or the hub is unknowable). Never raises, never blocks a wake:
+    cached key only, short timeout, any failure -> (None, None)."""
     try:
         key = _config.get_cached_key(hub, agent_id)
         if not key:
-            return None
+            return None, None
         import httpx
         r = httpx.get(f"{hub.rstrip('/')}/owed",
                       headers={"Authorization": f"Bearer {key}"}, timeout=5.0)
         if r.status_code != 200:
-            return None
-        counts = r.json().get("counts", {})
-        return int(counts.get("to_answer", 0)), int(counts.get("to_consume", 0))
+            return None, None
+        owed = r.json()
+        counts_raw = owed.get("counts", {})
+        counts = (int(counts_raw.get("to_answer", 0)),
+                  int(counts_raw.get("to_consume", 0)))
+        if not (counts[0] or counts[1]):
+            return counts, None
+        ids = sorted([row.get("id", "") for row in owed.get("to_answer", [])]
+                     + [row.get("answer_id", "") for row in owed.get("to_consume", [])])
+        return counts, ",".join(ids)
     except Exception:
+        return None, None
+
+
+def _owed_counts(hub: str, agent_id: str) -> tuple[int, int] | None:
+    """Back-compat shim over _owed_snapshot (tests and older callers)."""
+    return _owed_snapshot(hub, agent_id)[0]
+
+
+def _sig_path(agent_id: str) -> Path:
+    return _config.home() / f"listen-{agent_id}.owedsig"
+
+
+def _record_owed_signature(hub: str, agent_id: str,
+                           sig: str | None = None) -> None:
+    """Persist the debt signature we last WOKE for, so the arm-time backlog
+    check never re-fires for debt a wake already delivered (the seat may
+    still be mid-turn settling it when the loop re-arms 5s later)."""
+    if sig is None:
+        _, sig = _owed_snapshot(hub, agent_id)
+    try:
+        path = _sig_path(agent_id)
+        if sig:
+            path.write_text(sig)
+        elif path.exists():
+            path.unlink()
+    except OSError:
+        pass
+
+
+def _backlog_wake_at_arm(hub: str, agent_id: str, *, once: bool) -> int | None:
+    """The blind-spot closer: a message that lands BETWEEN two --once listen
+    windows (the loop's `sleep 5`, or while the seat is mid-turn) is invisible
+    to tail-from-END listeners — no instance ever reads it, and an interactive
+    seat has no drive-style sweep to recover it. So arming starts with a debt
+    poll: if the seat OWES something and the debt SIGNATURE differs from the
+    last one a wake delivered, wake NOW instead of waiting for a fresh event.
+
+    Signature gating (same doctrine as agora drive's sweep): unchanged debt
+    never re-wakes — a turn that ran and failed to settle waits for the hub's
+    escalation instead of burning a wake per window; settled debt clears the
+    signature; any new obligation changes it and wakes. Costs one local HTTP
+    GET per arm; any failure means 'no backlog wake', never a blocked arm."""
+    if not once:
+        return None                      # streaming mode delivers live events
+    counts, sig = _owed_snapshot(hub, agent_id)
+    if sig is None:
         return None
+    last = None
+    try:
+        last = _sig_path(agent_id).read_text().strip() or None
+    except OSError:
+        pass
+    if sig == last:
+        return None
+    _record_owed_signature(hub, agent_id, sig)
+    counts = counts or (0, 0)
+    _emit(f"AGORA_WAKE agent={agent_id} n=0 backlog owed={counts[0] + counts[1]}")
+    print(f"AGORA: you OWE {counts[0]} answer(s) and {counts[1]} unconsumed "
+          "answer(s) that arrived while no listener was watching. "
+          "check_inbox lists them; settle before new work — DO or claim "
+          "what is yours, reply where owed, then ack.",
+          file=sys.stderr, flush=True)
+    return 2
 
 
 def once_digest(events: list[dict[str, Any]],
@@ -286,13 +355,19 @@ def once_digest(events: list[dict[str, Any]],
 def _deliver_wake(batch, agent_id, *, preview: bool, once: bool,
                   hub: str = "") -> int | None:
     """Emit the wake sentinel (+ stderr digest and exit-2 in --once mode)."""
-    owed = _owed_counts(hub, agent_id) if hub else None
+    owed, sig = _owed_snapshot(hub, agent_id) if hub else (None, None)
     line = wake_line(batch, agent_id, preview=preview)
     if owed and (owed[0] or owed[1]):
         # Identifiers-only guarantee holds: a bare integer, no agent text.
         line += f" owed={owed[0] + owed[1]}"
     _emit(line)
     if once:
+        # This wake delivers the current debt too (its digest names it), so
+        # record the signature: the loop re-arms ~5s later, usually before
+        # the woken turn settles anything, and the arm-time backlog check
+        # must not re-fire for debt this wake already announced.
+        if hub:
+            _record_owed_signature(hub, agent_id, sig)
         print(once_digest(batch, owed), file=sys.stderr, flush=True)
         return 2
     return None
@@ -595,6 +670,11 @@ def run_listen(*, agent_id: str | None = None, url: str | None = None,
         if not signal_passthrough:
             arm_signals()
         pid_path.write_text(str(os.getpid()))
+        # Backlog check BEFORE waiting: debt that landed in a listener blind
+        # spot (between --once windows) wakes at arm time or never.
+        backlog_rc = _backlog_wake_at_arm(hub, aid, once=once)
+        if backlog_rc is not None:
+            return backlog_rc
         if src == "file":
             rc = run_file_mode(home / f"{aid}-inbox.log", aid, hub, pid_path,
                                poll=poll, **shared)
