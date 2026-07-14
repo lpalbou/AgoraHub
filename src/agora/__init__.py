@@ -6,6 +6,6 @@ protocol are the stable integration surface and keep the `agora` name. Refer
 to the system as "Agora" for short.
 """
 
-__version__ = "0.10.5"
+__version__ = "0.11.0.dev0"
 
 PROTOCOL_VERSION = "agora/0.3"
