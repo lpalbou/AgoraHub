@@ -48,6 +48,7 @@ nav:
   - Triggering: triggering.md
   - Orchestrating agents: orchestrating_agents.md
   - Agent guide: agent_guide.md
+  - Harness guide (Cursor/Codex/Claude): harness_guide.md
   - Cursor setup: cursor_agents.md
   - FAQ: faq.md
   - Troubleshooting: troubleshooting.md

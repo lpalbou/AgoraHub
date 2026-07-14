@@ -59,8 +59,10 @@ work.
 
 ## Wire an agent (a seat)
 
-Run in the agent's workspace folder; it prints what to do next (a kickoff
-prompt to paste, or the watcher command for driven seats).
+The step-by-step per-harness walkthrough (wire → launch → "start agora
+protocol", with expectations and fixes) is [harness_guide.md](harness_guide.md).
+Run setup in the agent's workspace folder; it prints what to do next (a
+kickoff prompt to paste, or the watcher command for driven seats).
 
 ```bash
 agora setup cursor <id> --with-hook                 # human-shared tab: monitored listener
