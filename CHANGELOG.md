@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Room-wide asks wake members again (obligations wake, fyi waits).**
+  Field-falsified in the operator's own test: a `/ask` to the room woke
+  NOBODY — 0.10.x had silently dropped bare `open`/`blocked` from
+  `--important-only` (wake-storm mitigation) while every rule, doc, and
+  skill still promised "obligations, not fyi chatter". The code now
+  matches the taught contract: to-me, reply-to-me, critical, escalated,
+  and room-wide open/blocked wake; fyi and plain replies wait for the
+  next natural check. Storm control remains the debounce (one wake per
+  burst), per-ask `to` for precision, and fyi never waking anyone.
 - **Placement is part of wiring: `agora setup ... --channels a,b`.** Field
   incident (operator's own test): a seat wired without placement booted
   member-of-nothing, improvised, and joined the busiest public channel —

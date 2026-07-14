@@ -92,12 +92,14 @@ def test_minimal_legacy_event_flows_through_pipeline():
     ("reply-to-me", "fyi", True),
     ("critical", "fyi", True),
     ("escalated", "fyi", True),
-    # Bare open/blocked no longer qualifies (nine-seat debrief, 2026-07-14):
-    # broadcast obligations in a busy channel woke every seat and serialized
-    # fleets behind other seats' traffic. YOUR debt still wakes you — a
-    # pending ask naming you sets the to-me flag hub-side.
-    ("", "open", False),
-    ("", "blocked", False),
+    # OBLIGATIONS WAKE, FYI WAITS — room-wide open/blocked qualifies again.
+    # The 0.10.x narrowing (bare open dropped after a nine-seat wake-storm
+    # debrief) was falsified in the operator's own test (2026-07-14): a
+    # room-wide /ask woke NOBODY, contradicting every taught surface
+    # ("obligations, not fyi chatter"). Storm control is the debounce,
+    # per-ask `to` precision, and fyi never waking — not dead-air asks.
+    ("", "open", True),
+    ("", "blocked", True),
     ("to-me", "open", True),          # addressed (to= or a pending ask): wake
     ("", "fyi", False),               # plain broadcast: not important
     ("", "reply", False),

@@ -185,17 +185,24 @@ def parse_line(raw: str) -> dict[str, Any] | None:
 
 def qualifies(event: dict[str, Any], agent_id: str, important_only: bool = False) -> bool:
     """Own messages never wake (hub filters; legacy files may not);
-    --important-only narrows to YOUR debt: to-me (message `to` or a pending
-    ask naming you — the hub folds both into the flag), reply-to-me,
-    critical, escalated. Bare open/blocked no longer qualifies — the
-    nine-seat debrief showed broadcast obligations in a busy channel waking
-    every seat, serializing whole fleets behind other seats' traffic. A
-    broadcast ask still reaches you at your next check_inbox and the stop
-    hook's turn-end sweep, and the dark watchdog still alerts the operator
-    when one rots on an offline seat."""
+    --important-only means OBLIGATIONS wake, fyi waits: to-me (message `to`
+    or a pending ask naming you — the hub folds both into the flag),
+    reply-to-me, critical, escalated, AND room-wide open/blocked.
+
+    History, because this flipped twice: 0.10.x dropped bare open/blocked
+    (a nine-seat debrief showed broadcast asks in a busy channel waking
+    every seat). That narrowing was FALSIFIED in the operator's own test
+    (2026-07-14): a room-wide `/ask` woke NOBODY — dead air in the exact
+    surface every rule, doc, and skill promised would wake ("obligations,
+    not fyi chatter"). An ask that reaches no one is worse than a burst of
+    wakes the debounce already coalesces; the code now matches the taught
+    contract. Storm control stays where it belongs: debounce (one wake per
+    burst), per-ask `to` for precision, and fyi never waking anyone."""
     if event["from"] == agent_id:
         return False
     if not important_only:
+        return True
+    if str(event.get("status", "")) in ("open", "blocked"):
         return True
     tokens = {t for t in str(event.get("flags", "")).split(",") if t}
     return bool(tokens & _IMPORTANT_FLAGS)
