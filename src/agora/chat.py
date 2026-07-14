@@ -115,8 +115,14 @@ plain text          post to the current channel (status=fyi, no obligation)
 /reply REF:N TEXT   formally answer ask N of that message (727:1 or 727:1,2
                     — the asks a block lists and the 'asks N/M' badge counts)
 /critical TEXT      operator broadcast: pins in every inbox until read
-/dm PEER TEXT       private 1:1 message
+/dm PEER TEXT       private 1:1 message (fyi — for an OWED answer, open the
+                    dm and /ask). /dm PEER opens the conversation;
+                    /dm PEER:N reads message N (same as /read PEER:N)
 /dms                your direct conversations (unread, recency)
+/owed               your debts: asks awaiting YOUR answer, answers to your
+                    asks awaiting consumption, and who you are waiting on
+/board              follow the work: pending on you / queue / proposals /
+                    in progress / review / decisions — hub-derived table
 /fs [PATH]          this room's shared files: list, or read one in full
 /fs PATH@N          read archived version N (every edit is kept, with author)
 /fs hist PATH       a file's edit history (who wrote, who amended, size deltas)
@@ -859,15 +865,115 @@ class ChatApp:
                              else "no active block") + f" in {res.get('scope')})"))
 
     async def cmd_dm(self, arg: str) -> None:
+        """The one DM verb, kept simple (operator request, 2026-07-14):
+        `/dm PEER TEXT` sends; `/dm PEER` switches into the conversation;
+        `/dm PEER:N` reads that DM message in full. A question sent as a
+        plain DM carries NO obligation (fyi) — the hint teaches the owed
+        path, because 'my delegate never answered' turned out to be an
+        unowed fyi nobody's debt surface ever showed."""
         peer, _, text = arg.partition(" ")
-        if not (peer and text.strip()):
-            self._print("usage: /dm PEER TEXT")
+        text = text.strip()
+        if peer and not text:
+            head, _, seq = peer.partition(":")
+            if seq.isdigit():
+                await self.cmd_read(peer)          # /dm agency:5 == /read agency:5
+                return
+            await self.cmd_switch(f"dm:{min(head, self.me)}--{max(head, self.me)}")
+            return
+        if not (peer and text):
+            self._print("usage: /dm PEER TEXT | /dm PEER (open the "
+                        "conversation) | /dm PEER:N (read message N)")
             return
         try:
-            await self.client.dm(peer, text.strip(), title=derive_title(text))
+            await self.client.dm(peer, text, title=derive_title(text))
             self._print(self.style.dim(f"(dm sent to {peer})"))
+            if "?" in text:
+                self._print(self.style.dim(
+                    "  a plain dm is fyi — no reply is owed and it never "
+                    "shows in their debts. Need an answer? open the dm "
+                    f"(/dm {peer}) and /ask TEXT — that pins and escalates."))
         except Exception as exc:
             self._print(self.style.red(f"dm failed: {exc}"))
+
+    async def cmd_owed(self) -> None:
+        """YOUR debts and dues, straight from GET /owed: what awaits your
+        answer, what answers to your own asks await consumption, and per
+        addressee, whether the seats you are waiting on were served."""
+        s = self.style
+        try:
+            owed = await self.client.owed()
+        except Exception as exc:
+            self._print(s.red(f"owed failed (hub too old?): {exc}"))
+            return
+        ta, tc, wo = owed["to_answer"], owed["to_consume"], owed.get("waiting_on", [])
+        if not (ta or tc or wo):
+            self._print(s.dim("nothing owed, nothing waiting — clean slate"))
+            return
+        if ta:
+            self._print(s.bold("TO ANSWER (yours until you reply):"))
+            for r in ta:
+                esc = s.red(" ESCALATED") if r.get("escalated") else ""
+                naming = (f" naming you: {','.join(r['asks_naming_you'])}"
+                          if r.get("asks_naming_you") else "")
+                self._print(f"  {safe(r['channel'])}#{r['seq']} from "
+                            f"{s.sender(safe(r['from']))} — pending "
+                            f"{r['pending_asks']}{naming} · {fmt_age(r['age_minutes'])}"
+                            f"{esc} · /read {r['seq']}@{safe(r['channel'])}")
+        if tc:
+            self._print(s.bold("TO CONSUME (answers to YOUR asks — read and use):"))
+            for r in tc:
+                self._print(f"  {safe(r['channel'])}#{r['answer_seq']} "
+                            f"{s.sender(safe(r['answered_by']))} answered your ask "
+                            f"{r['your_asks']} · {fmt_age(r['age_minutes'])} · "
+                            f"/read {r['answer_seq']}@{safe(r['channel'])}")
+        if wo:
+            self._print(s.bold("WAITING ON (your open asks, per seat):"))
+            for r in wo:
+                state = ("served, silent — nudge?" if r["state"] == "acked-past-no-reply"
+                         else "not served yet (offline/behind)")
+                self._print(f"  {safe(r['channel'])}#{r['seq']} ask {r['ask']} -> "
+                            f"{s.sender(safe(r['seat']))}: {state}")
+
+    async def cmd_board(self) -> None:
+        """The operator's follow-the-work table (done / pending / ongoing /
+        next), derived hub-side from the same settlement truth the inbox
+        uses — the followability surface, no LLM required."""
+        s = self.style
+        try:
+            b = await self.client.board()
+        except Exception as exc:
+            self._print(s.red(f"board failed: {exc}"))
+            return
+        def rows(name, items, fmt):
+            if items:
+                self._print(s.bold(name))
+                for r in items[:12]:
+                    self._print("  " + fmt(r))
+                if len(items) > 12:
+                    self._print(s.dim(f"  … {len(items) - 12} more"))
+        rows("PENDING ON YOU:", b.get("pending_on_me", []),
+             lambda r: (f"{safe(r['channel'])}#{r['seq']} {s.sender(safe(r['from']))}: "
+                        f"{safe(r['q'])[:70]} · {fmt_age(r['age_minutes'])}"
+                        + (s.red(" ESCALATED") if r.get("escalated") else "")))
+        rows("QUEUE (operator-curated):", b.get("queue", []),
+             lambda r: f"{safe(r.get('channel',''))} {safe(str(r.get('q') or r.get('key',''))[:70])}")
+        rows("PROPOSALS (unowned open questions):", b.get("proposals", []),
+             lambda r: (f"{safe(r['channel'])}#{r['seq']} {s.sender(safe(r['from']))}: "
+                        f"{safe(r['q'])[:70]} · {fmt_age(r['age_minutes'])}"))
+        rows("IN PROGRESS (claims):", b.get("in_progress", []),
+             lambda r: f"{safe(r.get('channel',''))} {safe(str(r.get('key',''))[:70])}")
+        rows("PENDING REVIEW:", b.get("pending_review", []),
+             lambda r: f"{safe(r.get('channel',''))} {safe(str(r.get('key',''))[:70])}")
+        done = b.get("done", [])
+        if done:
+            self._print(s.bold(f"DONE (decisions, latest {min(len(done), 8)}):"))
+            for r in done[:8]:
+                self._print(s.dim(f"  {safe(r.get('channel',''))} "
+                                  f"{safe(str(r.get('key',''))[:70])} by "
+                                  f"{safe(str(r.get('updated_by','')))}"))
+        if not any(b.get(k) for k in ("pending_on_me", "queue", "proposals",
+                                      "in_progress", "pending_review", "done")):
+            self._print(s.dim("board is empty"))
 
     async def cmd_fs(self, arg: str) -> None:
         """The channel's shared files — the same tree agents use via the
@@ -954,6 +1060,8 @@ class ChatApp:
             "unban": lambda: self.cmd_unban(arg),
             "ack": lambda: self.client.ack(),
             "quiet": self.cmd_quiet,
+            "owed": self.cmd_owed,
+            "board": self.cmd_board,
             "help": lambda: self._print(HELP),
         }
         handler = handlers.get(cmd)
