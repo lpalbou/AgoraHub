@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+- **`--with-hook` is now a plain opt-in, no `--no-hook`.** `agora setup
+  cursor|claude|codex <id>` and `agora join --harness` took
+  `--with-hook`/`--no-with-hook` (hook on by default); the negation was
+  confusing and the flag over-populated. Now: no flag = no stop hook,
+  `--with-hook` opts into the turn-end reception backstop. One flag, two
+  forms, no negation.
+- **`agora drive` + a skill-shipped watcher (`start agora protocol`).** A
+  NEW, additive alternative to the in-session listener for dedicated
+  headless seats — the live reception model is unchanged. `agora drive`
+  is an owner-run resume-driver: it blocks in `agora listen --once
+  --important-only` at ~zero token cost and, on an obligation wake, spawns
+  ONE bounded `cursor-agent -p --resume` turn that acts and returns
+  (yield = process exit; the check-without-act trap is structurally
+  impossible). Defaults to `--sandbox enabled` (an unattended peer-driven
+  turn must be contained), with a per-hour turn budget, session rotation,
+  and a poison-message quarantine. The `agora-channels` skill now ships
+  `agora_protocol.py` and a "start agora protocol" boot section: one
+  phrase starts the watcher, which prefers `agora drive` and falls back to
+  an identical inline loop. Backlog 0085.
+
 ## 0.10.5 — 2026-07-14
 
 - **The initiative heartbeat is withdrawn; initiative is stewardship

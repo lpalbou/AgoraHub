@@ -1129,6 +1129,22 @@ def _listener_state(home: Path, agent_id: str) -> str:
     return "STALE"
 
 
+def cmd_drive(args: argparse.Namespace) -> None:
+    """The external resume-driver for a HEADLESS seat: block cheaply in
+    `agora listen --once --important-only`, and on an obligation wake spawn
+    ONE bounded `cursor-agent -p --resume` turn that acts and yields by
+    returning. Reception becomes structural (yield = process exit; the
+    check->ack->re-arm trap is impossible). Owner-run, session-bound, never
+    hub machinery. See drive.py."""
+    from .drive import run_drive
+
+    sys.exit(run_drive(
+        agent_id=args.as_agent, url=args.url, model=args.model,
+        max_wait=args.max_wait, sandbox=args.sandbox,
+        turn_budget=args.turn_budget, session_rotate=args.session_rotate,
+        once=args.once, max_turns=args.max_turns))
+
+
 def cmd_listen(args: argparse.Namespace) -> None:
     """The session-resident listener (proposal_1): tail/subscribe, debounce,
     emit AGORA_WAKE sentinels. The heavy lifting lives in listen.py; this is
@@ -1253,10 +1269,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="self-description for this agent")
         sp.add_argument("--url", default=None)
         sp.add_argument("--key", default=None, metavar="AGENT_KEY", help=_KEY_HELP)
-        sp.add_argument("--with-hook", action=argparse.BooleanOptionalAction,
-                        default=True,
-                        help="install the wake/stop hooks (default: on; "
-                             "--no-hook to skip)")
+        sp.add_argument("--with-hook", action="store_true",
+                        help="also install the turn-end stop hook (a backstop "
+                             "that re-prompts if reception breaks). Default: "
+                             "no hook.")
         if headless:
             sp.add_argument("--headless", action="store_true",
                             help="dedicated Cursor seat (no human sharing the "
@@ -1411,6 +1427,42 @@ def build_parser() -> argparse.ArgumentParser:
     ln.add_argument("--poll", type=float, default=0.5, help=argparse.SUPPRESS)
     ln.set_defaults(func=cmd_listen)
 
+    dr = sub.add_parser("drive",
+                        help="external resume-driver for a HEADLESS seat: "
+                             "wait on obligations, spawn one bounded "
+                             "cursor-agent turn per wake (owner-run, "
+                             "session-bound)")
+    dr.add_argument("--as", dest="as_agent", default=None, metavar="AGENT_ID",
+                    help="agent id (default: $AGORA_AGENT_ID, else the nearest "
+                         ".cursor/mcp.json)")
+    dr.add_argument("--url", default=None)
+    dr.add_argument("--model", default="composer-2.5-fast",
+                    help="cursor-agent model for driven turns "
+                         "(default: composer-2.5-fast)")
+    dr.add_argument("--max-wait", dest="max_wait", type=float, default=1200.0,
+                    help="idle ceiling for each listen window (a wake returns "
+                         "instantly regardless; default 1200)")
+    dr.add_argument("--sandbox", choices=["enabled", "disabled", "none"],
+                    default="enabled",
+                    help="spawn sandbox: enabled (DEFAULT — contained shell/"
+                         "write, safe for unattended peer-driven turns), "
+                         "disabled (cursor-agent's own default), or none "
+                         "(--force, all tools, NO container — only in a "
+                         "throwaway VM)")
+    dr.add_argument("--turn-budget", dest="turn_budget", type=int, default=40,
+                    help="max spawned turns per rolling hour before parking "
+                         "(runaway-loop bound; default 40)")
+    dr.add_argument("--session-rotate", dest="session_rotate", type=int,
+                    default=25,
+                    help="turns on one cursor-agent session before rotating "
+                         "to a fresh one (context-bloat + injection-residue "
+                         "flush; default 25)")
+    dr.add_argument("--once", action="store_true",
+                    help="drive a single turn now (boot) and exit")
+    dr.add_argument("--max-turns", dest="max_turns", type=int, default=None,
+                    help=argparse.SUPPRESS)   # harness/testing bound
+    dr.set_defaults(func=cmd_drive)
+
     # --- agent-facing verbs (identity via --as) ---
     def _agent_parser(name, help_):
         sp = sub.add_parser(name, help=help_)
@@ -1548,10 +1600,9 @@ def build_parser() -> argparse.ArgumentParser:
                          "(default cursor; none = register + cache key only)")
     jn.add_argument("--workspace", default=".",
                     help="onboarding: workspace folder (default: cwd)")
-    jn.add_argument("--with-hook", action=argparse.BooleanOptionalAction,
-                    default=True,
-                    help="onboarding: install the wake hooks (default: on; "
-                         "--no-hook to skip)")
+    jn.add_argument("--with-hook", action="store_true",
+                    help="onboarding: also install the turn-end stop hook "
+                         "(reception backstop). Default: no hook.")
     jn.add_argument("--listen", action="store_true",
                     help="onboarding: arm a FOREGROUND `agora listen "
                          "--source ws` after wiring (headless nodes)")

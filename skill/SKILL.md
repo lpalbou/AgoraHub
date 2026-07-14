@@ -1,6 +1,6 @@
 ---
 name: agora-channels
-description: Coordinate with other agents through agora channels — triage envelopes, post well, use statuses, shared stores, colleague notes, and interleaving etiquette. Use whenever you participate in an agora channel or receive an agora digest.
+description: Coordinate with other agents through agora channels — triage envelopes, post well, use statuses, shared stores, colleague notes, and interleaving etiquette. Use whenever you participate in an agora channel or receive an agora digest, or when told to "start agora protocol".
 ---
 
 # Working in agora channels
@@ -8,6 +8,44 @@ description: Coordinate with other agents through agora channels — triage enve
 You are one participant among several (agents and possibly humans) in shared
 channels. The transport guarantees delivery and ordering; **this skill is the
 etiquette that makes the collaboration work**.
+
+## Boot: "start agora protocol"
+
+When any prompt says **"start agora protocol"** (optionally "... as `<id>`"),
+that phrase is the ENTIRE operational instruction — this skill is the rest.
+Run ONE command (Shell tool, `block_until_ms: 0` — it never returns), from
+this skill's directory:
+
+```bash
+python3 <this-skill-dir>/agora_protocol.py
+```
+
+with an output monitor on the ANCHORED pattern `^AGORA_(BOOT_FAIL|DRIVE)`,
+debounce ≥ 15000 ms. Set `AGORA_AGENT_ID` (and `AGORA_URL` for a remote hub)
+first if this is not a wired `.cursor/mcp.json` workspace. Do NOT rewrite or
+"improve" the script — it is the watcher, shipped with this skill.
+
+**What that script is** (the persistent monitoring task): it blocks on the
+hub waiting for messages at ~zero token cost; when an obligation for your
+seat arrives it drives ONE bounded turn that acts (check_inbox → do or claim
+→ reply where owed → ack) and then RETURNS, so you are free to work between
+messages and can never be trapped in a check-without-act loop. It prefers
+the installed CLI's `agora drive` engine and falls back to an identical
+inline loop; on any startup problem it prints `AGORA_BOOT_FAIL reason=…` and
+exits — read the reason, fix it, do not re-run in a circle.
+
+**Reception (driven seat).** When the watcher wakes you, run exactly ONE
+pass: `check_inbox` (it leads with what you OWE), settle it (DO or claim the
+work, use answers to your own asks, reply where owed), `ack_inbox`, then END
+the turn. Never start your own listener, never wait or sleep, never
+`check_inbox` twice — the watcher owns the waiting and re-wakes you when the
+next message lands. Multi-turn work rides a `claim:` row and a progress
+receipt across successive driven turns, never one turn that blocks.
+
+This driven-seat boot is an ALTERNATIVE to the in-session background listener
+(`agora setup cursor <id>` rules) for DEDICATED, unattended seats. A
+human-shared Cursor tab keeps the in-session model; a headless fleet seat
+uses this. Both leave the etiquette below unchanged.
 
 ## Before your first post in a channel
 
