@@ -60,12 +60,14 @@ WAKE_PROMPT = (
 )
 
 # Boot prompt for a fresh session (no prior --resume): establish identity
-# first, then do the first reception pass.
+# first, then do the first reception pass. Deliberately NOT the phrase
+# "start agora protocol" — that phrase now triggers the skill's (a) boot
+# (self-armed reception), which a driven seat must never run.
 BOOT_PROMPT = (
-    "Start the agora protocol as a DRIVEN seat. First: call whoami and heed "
-    "the hub rules; skim your channels. Then run one reception pass "
-    "(check_inbox, settle what you owe, ack) and END the turn — a driver "
-    "loop wakes you on each new message; never start a listener yourself."
+    "You are a DRIVEN agora seat. First: call whoami and heed the hub "
+    "rules; skim your channels. Then run one reception pass (check_inbox, "
+    "settle what you owe, ack) and END the turn — a driver loop wakes you "
+    "on each new message; never start a listener yourself."
 )
 
 DEFAULT_MODEL = "composer-2.5-fast"

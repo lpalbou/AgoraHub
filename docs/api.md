@@ -161,9 +161,10 @@ rule). It is an owner-run loop, never hub machinery: it blocks in
 `agora listen --once --important-only` at ~zero token cost, and on an
 obligation wake spawns ONE bounded `cursor-agent -p --resume <session>`
 turn that acts (check_inbox → settle owed → ack) and yields by exiting.
-The `agora-channels` skill ships the same loop as `agora_protocol.py`; a
-skill-equipped agent told **"start agora protocol"** runs it and it hands
-off to `agora drive` when available.
+The `agora-channels` skill ships the same loop as `agora_protocol.py`, for
+operators whose installed CLI predates `agora drive` (it hands off to the
+CLI engine when present). The watcher is always operator-run; the skill's
+"start agora protocol" phrase boots a self-armed seat instead.
 
 ```bash
 agora drive [--as ID] [--url URL] [--model M] [--max-wait S]

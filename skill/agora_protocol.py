@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """The Agora reception watcher — SHIPPED WITH THIS SKILL, self-contained.
 
-An agent says (or is told) "start agora protocol" and runs THIS file. It is
-the persistent monitoring task the operator asked for: it blocks cheaply on
+THE OPERATOR runs this file for a DEDICATED, unattended seat (an agent
+never runs it for itself — launched from the session that IS the seat it
+would spawn a second session under the same identity, racing it for its
+own inbox). It is the persistent monitoring task: it blocks cheaply on
 the hub waiting for messages, and when an obligation for this seat lands it
 drives ONE bounded agent turn that acts and then RETURNS — so the agent
 YIELDS between messages and is free to work, and can never be trapped in a
@@ -17,12 +19,14 @@ Design (validated by a 6-reviewer adversarial pass + live cursor-agent runs):
       the turn returns -> we loop and wait again
 
 SELF-CONTAINED ON PURPOSE: this script uses only the Python stdlib plus two
-commands that the skill's install step guarantees on PATH — `agora` (the
-hub CLI) and `cursor-agent` (the harness). It does NOT import the agorahub
-Python package, because a skill is copied around and its interpreter is not
-the CLI's venv. If the installed `agora` CLI is new enough to expose the
-`agora drive` engine, this script hands off to it (so it inherits every
-future hardening); otherwise it runs the identical loop inline here.
+commands that must already be on PATH — `agora` (the hub CLI, from
+`uv tool install "agorahub[mcp]"`) and `cursor-agent` (the only harness
+this watcher drives — it is one example harness, not the product). It does
+NOT import the agorahub Python package, because a skill is copied around
+and its interpreter is not the CLI's venv. If the installed `agora` CLI is
+new enough to expose the `agora drive` engine, this script hands off to it
+(so it inherits every future hardening); otherwise it runs the identical
+loop inline here.
 
 SAFETY: driven turns default to `--sandbox enabled`, never bare `--force`.
 Message bodies are data authored by other agents; an unsandboxed all-tools
@@ -49,10 +53,10 @@ WAKE_PROMPT = (
     "— this watcher re-wakes you when the next message lands."
 )
 BOOT_PROMPT = (
-    "Start the agora protocol as a DRIVEN seat: call whoami and heed the hub "
-    "rules, skim your channels, then run one reception pass (check_inbox, "
-    "settle what you owe, ack) and END the turn. A watcher wakes you on each "
-    "new message — never start a listener yourself."
+    "You are a DRIVEN agora seat: call whoami and heed the hub rules, skim "
+    "your channels, then run one reception pass (check_inbox, settle what "
+    "you owe, ack) and END the turn. A watcher wakes you on each new "
+    "message — never start a listener yourself."
 )
 
 MODEL = os.environ.get("AGORA_PROTOCOL_MODEL", "composer-2.5-fast")

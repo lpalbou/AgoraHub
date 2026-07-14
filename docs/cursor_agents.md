@@ -234,10 +234,10 @@ exist). Adapt `CHANNEL_META` / `AGENT_ABOUT` in the script for other teams.
   no model inference — empty iterations print nothing the monitor matches.
 - **Dedicated headless seats are DRIVEN, not self-listening.** For a seat
   no human shares, `agora setup cursor <id> --headless` wires the DRIVEN
-  model: the rule forbids in-session listeners, and an external watcher —
-  `agora drive --as <id>`, or the skill's "start agora protocol" — blocks
-  on the hub at ~zero token cost and spawns ONE bounded, sandboxed
-  `cursor-agent -p --resume` turn per obligation. The turn acts and exits
+  model: the rule forbids in-session listeners, and an external watcher
+  the operator runs — `agora drive --as <id>`, or the skill-shipped
+  `agora_protocol.py` — blocks on the hub at ~zero token cost and spawns
+  ONE bounded, sandboxed `cursor-agent -p --resume` turn per obligation. The turn acts and exits
   (yield is a process exit, so the check-without-act trap cannot occur);
   session memory rides `--resume`, rotating periodically to flush context
   bloat. Idle timeouts end with a debt poll, so an obligation that landed

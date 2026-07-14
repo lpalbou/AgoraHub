@@ -147,15 +147,17 @@ _ARMING_CURSOR = """\
 """
 
 # DRIVEN variant (dedicated headless seat, no human sharing the session):
-# reception is owned by an EXTERNAL watcher (`agora drive`, or the skill's
-# "start agora protocol"), which blocks on the hub and gives the seat one
-# bounded turn per obligation. The seat itself never arms anything — the
-# yield is a process exit, so the check-without-act trap is structurally
-# impossible. This replaced the in-session adaptive listener the fleet
-# falsified (seats armed loops and then lurked, or died with their tabs).
+# reception is owned by an EXTERNAL, OPERATOR-RUN watcher (`agora drive`,
+# or the skill-shipped agora_protocol.py), which blocks on the hub and
+# gives the seat one bounded turn per obligation. The seat itself never
+# arms anything — the yield is a process exit, so the check-without-act
+# trap is structurally impossible. This replaced the in-session adaptive
+# listener the fleet falsified (seats armed loops and then lurked, or died
+# with their tabs). NOTE: "start agora protocol" is NOT the watcher's
+# trigger — that phrase is the skill's (a) boot for self-armed seats.
 _ARMING_CURSOR_DRIVEN = """\
-- DRIVEN RECEPTION — an external watcher (`agora drive`, or the agora
-  skill's "start agora protocol") wakes this seat with ONE turn per
+- DRIVEN RECEPTION — an external watcher the OPERATOR runs (`agora drive`,
+  or the skill-shipped agora_protocol.py) wakes this seat with ONE turn per
   obligation. Reception is NOT your job: NEVER run `agora listen`, never
   start a background shell for reception, never wait, poll, sleep, or
   re-check for new messages — your turn ENDING is what hands control back
@@ -261,16 +263,18 @@ def kickoff_prompt(agent_id: str, url: str, *, standing_loop: bool,
     must never exit; it deliberately waits, so it must only ever be used in
     a session no human shares."""
     if not standing_loop:
+        # The cursor branch RENDERS LISTEN_CMD instead of paraphrasing it
+        # (c2095: hand-spelled copies of this command drifted within one
+        # release; the kickoff itself once omitted a flag the rule taught).
         reception = {
             "cursor": (
                 "START YOUR RECEPTION with the EXACT command your agora rule "
-                "gives (copy it verbatim — it includes --important-only, "
-                "which is load-bearing: without it every broadcast wakes "
-                "you): ONE background shell looping `agora listen --once "
-                "--as <you> --important-only --max-wait 240; sleep 5`, "
-                "monitored on the anchored pattern ^AGORA_WAKE (debounce >= "
-                "15000 ms) — then keep your foreground on real work; never "
-                "park your turn in a wait"),
+                "gives (copy it verbatim — every flag is load-bearing): ONE "
+                "background shell running `"
+                + LISTEN_CMD.format(agent_id=agent_id)
+                + "`, monitored on the anchored pattern ^AGORA_WAKE "
+                "(debounce >= 15000 ms) — then keep your foreground on real "
+                "work; never park your turn in a wait"),
             "claude": (
                 "your SessionStart hook already armed the wake — just end "
                 "your turn"),
@@ -729,11 +733,12 @@ def setup_cursor(workspace: Path, agent_id: str, url: str, about: str,
                  api_key: str | None = None, headless: bool = False) -> list[Path]:
     """Wire a workspace as a Cursor agora agent (all project-scoped).
 
-    `headless=True` wires a DRIVEN seat: an external watcher (`agora drive`,
-    or the skill's "start agora protocol") owns reception and spawns one
-    bounded turn per obligation, so the rule forbids in-session listeners
-    outright. Correct ONLY for a dedicated seat no human shares. The default
-    (interactive) keeps the monitored background listener loop."""
+    `headless=True` wires a DRIVEN seat: an external, operator-run watcher
+    (`agora drive`, or the skill-shipped agora_protocol.py) owns reception
+    and spawns one bounded turn per obligation, so the rule forbids
+    in-session listeners outright. Correct ONLY for a dedicated seat no
+    human shares. The default (interactive) keeps the monitored background
+    listener loop."""
     written: list[Path] = []
     cursor = workspace / ".cursor"
     (cursor / "rules").mkdir(parents=True, exist_ok=True)

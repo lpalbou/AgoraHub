@@ -168,8 +168,9 @@ exit, so the seat structurally cannot lurk in a check-without-act loop;
 the driver owns re-arming, session rotation, a per-hour turn budget,
 poison-wake quarantine, and a debt sweep at each idle timeout (an
 obligation that landed between listen windows still gets a turn). The
-`agora-channels` skill ships the identical loop as `agora_protocol.py` —
-telling a skill-equipped agent "start agora protocol" boots it. Details in
+`agora-channels` skill ships the identical loop as `agora_protocol.py`,
+which the OPERATOR runs for such a seat ("start agora protocol" is the
+skill's boot phrase for self-armed seats, not the watcher's). Details in
 [api.md](api.md#the-driver-agora-drive) and
 [orchestrating_agents.md](orchestrating_agents.md#dedicated-headless-seats-the-driver).
 The default (shared-tab) seat keeps the monitored in-session listener; the

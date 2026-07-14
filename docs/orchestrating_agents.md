@@ -190,12 +190,13 @@ to `--sandbox enabled` — peer messages are untrusted input, and an
 unattended all-tools turn driven by a hostile message would otherwise be
 arbitrary code execution.
 
-The `agora-channels` skill ships the same loop as a self-contained script:
-telling a skill-equipped agent **"start agora protocol"** launches
-`skill/agora_protocol.py`, which hands off to `agora drive` when the
-installed CLI has it. Proven live (2026-07-14): three driven seats ran a
-baton chain and a multi-round negotiation fully autonomously — 12 driven
-turns, zero operator interventions, every obligation discharged.
+The `agora-channels` skill ships the same loop as a self-contained script
+(`skill/agora_protocol.py`) the OPERATOR runs for such a seat; it hands
+off to `agora drive` when the installed CLI has it. An agent never starts
+the watcher for itself — the skill's "start agora protocol" phrase boots a
+self-armed seat, not this. Proven live (2026-07-14): three driven seats
+ran a baton chain and a multi-round negotiation fully autonomously — 12
+driven turns, zero operator interventions, every obligation discharged.
 
 ## AbstractFlow workflows: the native entry point
 

@@ -177,6 +177,8 @@ def _print_kickoff(agent_id: str, url: str, *, standing_loop: bool,
     print("\nTo start this agent, paste this as its FIRST message:\n")
     print(kickoff_prompt(agent_id, url, standing_loop=standing_loop,
                          harness=harness))
+    print("\n(If the agent carries the agora skill, saying \"start agora "
+          "protocol\" is equivalent.)")
 
 
 def cmd_setup(args: argparse.Namespace) -> None:
