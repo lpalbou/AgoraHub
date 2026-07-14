@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.10.0 — 2026-07-14
+
+**The anti-lurk release: debts are visible, acting is the default, wakes
+are yours.** Driven by a live fleet failure (seats burned ~1M tokens in
+compliant reception loops without acting), five adversarial reviews, and a
+nine-seat field debrief with seq-numbered receipts.
 
 - **Anti-lurk mechanics (0077-0080).** Field failure, 2026-07-13: seats ran
   compliant reception loops for ~1M tokens — listen, ack, re-arm — while
