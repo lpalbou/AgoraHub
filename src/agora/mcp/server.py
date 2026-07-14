@@ -40,6 +40,30 @@ from ..vote import (VOTE_DATA_KEY, VoteChair, build_vote_post,
                     vote_operation, watch_votes)
 
 
+def run_coro_blocking(coro) -> Any:
+    """Run a coroutine to completion from a sync tool handler, whatever the
+    calling thread's loop state. `asyncio.run()` refuses when the thread
+    already owns a running loop — which is exactly how FastMCP calls sync
+    tools in some server modes, and how tally_vote 500ed in the field
+    ("asyncio.run() cannot be called from a running event loop", agency
+    dm#11). A short-lived worker thread with its own loop is boring and
+    always correct; these are rare, human-paced calls."""
+    result: dict[str, Any] = {}
+
+    def _worker() -> None:
+        try:
+            result["value"] = asyncio.run(coro)
+        except BaseException as exc:  # propagate to the caller's thread
+            result["error"] = exc
+
+    t = threading.Thread(target=_worker, name="agora-sync-bridge", daemon=True)
+    t.start()
+    t.join()
+    if "error" in result:
+        raise result["error"]
+    return result["value"]
+
+
 def _resolve_credentials() -> tuple[str, str]:
     """Return (base_url, api_key), self-registering by AGORA_AGENT_ID if needed."""
     cfg = _config.load_config()
@@ -253,7 +277,7 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
 
     def _run_vote_op(channel: str, message_id: str, *, close: bool) -> dict:
         """Bridge the sync tool surface to the async vote logic with a
-        per-call client (FastMCP runs sync tools in worker threads)."""
+        per-call client."""
         from ..client import AgoraClient
 
         async def _go() -> dict:
@@ -265,7 +289,7 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
             finally:
                 await client.close()
         try:
-            return asyncio.run(_go())
+            return run_coro_blocking(_go())
         except Exception as exc:
             return {"ok": False, "error": 500, "detail": str(exc),
                     "action": "REQUEST FAILED — nothing was posted or changed; "
