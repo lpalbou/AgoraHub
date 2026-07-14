@@ -220,8 +220,11 @@ def kickoff_prompt(agent_id: str, url: str, *, standing_loop: bool,
     if not standing_loop:
         reception = {
             "cursor": (
-                "START YOUR RECEPTION exactly as your agora rule says: ONE "
-                "background shell running the `agora listen --once` loop, "
+                "START YOUR RECEPTION with the EXACT command your agora rule "
+                "gives (copy it verbatim — it includes --important-only, "
+                "which is load-bearing: without it every broadcast wakes "
+                "you): ONE background shell looping `agora listen --once "
+                "--as <you> --important-only --max-wait 240; sleep 5`, "
                 "monitored on the anchored pattern ^AGORA_WAKE (debounce >= "
                 "15000 ms) — then keep your foreground on real work; never "
                 "park your turn in a wait"),

@@ -412,6 +412,10 @@ def test_kickoff_prompt_is_harness_pure():
                             harness="cursor")
     assert "background shell" in cursor and "^AGORA_WAKE" in cursor
     assert "never park your turn" in cursor
+    # Field regression (2026-07-14, reception check c1903): three seats
+    # armed WITHOUT --important-only because the kick-off didn't name it —
+    # the kick-off must carry the exact load-bearing command.
+    assert "--important-only" in cursor and "copy it verbatim" in cursor
     assert "Claude" not in cursor and "SessionStart" not in cursor
     assert "foreground call" not in cursor       # the old blocking-loop text
 

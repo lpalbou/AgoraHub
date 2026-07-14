@@ -144,6 +144,9 @@ plain text          post to the current channel (status=fyi, no obligation)
                     lockout, operator only; trailing words = the reason)
 /ban AGENT          same but forever (--time makes it a timed ban);
                     /unban AGENT [--target hub] lifts either early
+/quiet              toggle quiet mode (default ON: resolved closes and
+                    replies not addressed to you collapse to a counter —
+                    they stay in /read, /history, /digest)
 /quit (/q)          leave the chat (membership persists)
 Ctrl-C              clear the input line (twice within 2s to quit)"""
 
@@ -157,6 +160,12 @@ class ChatApp:
         self.style = Style(enabled=sys.stdout.isatty())
         self._closing = False
         self._last_interrupt = float("-inf")  # monotonic time of the last Ctrl-C
+        # Quiet mode (default ON): collapse bookkeeping traffic that carries
+        # no debt for this seat — the operator-flood fix (2026-07-14: a
+        # post-restart debt-clearing wave scrolled the room away faster than
+        # a human could read).
+        self.quiet = True
+        self._quiet_hidden = 0
         # The chair side of blind votes opened from this client — the
         # watcher publishes them when the deadline hits or everyone voted.
         self.votes = VoteChair(self.client, self.me,
@@ -170,9 +179,24 @@ class ChatApp:
     def show_envelope(self, env: Envelope) -> None:
         """Live traffic. The current room and DMs render as full blocks;
         other rooms as a one-line notice; file events and joins as one dim
-        line; criticals always in full, loudly."""
+        line; criticals always in full, loudly.
+
+        QUIET MODE (default on — the operator-flood fix): bookkeeping
+        traffic that carries no debt for YOU — resolved closes and replies
+        not addressed to you — collapses to a counter instead of scrolling
+        the room away. `/quiet` toggles; everything hidden stays readable
+        (`/read`, history, digest — hiding is a render choice, never state)."""
         s = self.style
         is_dm = dm_peer(env.channel, self.me) is not None
+        if (self.quiet and not env.critical and not is_dm
+                and env.status.value in ("resolved", "reply")
+                and not env.to_me and not env.reply_to_me):
+            self._quiet_hidden += 1
+            if self._quiet_hidden % 10 == 1:  # first, 11th, 21st... never per-line
+                self._print(s.dim(f"  … {self._quiet_hidden} bookkeeping message(s)"
+                                  " hidden (resolved/reply not for you) —"
+                                  " /quiet to toggle"))
+            return
         if env.kind.value == "fs":
             self._print(file_event_line(s, sender=env.sender, title=env.title,
                                         channel=env.channel, current=self.current,
@@ -612,6 +636,20 @@ class ChatApp:
                 return [str(a["id"]) for a in q.get("pending_asks", [])]
         return []
 
+    def cmd_quiet(self) -> None:
+        """Toggle quiet mode: collapse resolved/replies not addressed to you
+        into a counter (hidden traffic stays in /read, /history, /digest)."""
+        self.quiet = not self.quiet
+        if self.quiet:
+            self._quiet_hidden = 0
+            self._print(self.style.dim(
+                "quiet ON — bookkeeping traffic (resolved / replies not for "
+                "you) collapses to a counter; /quiet to show everything"))
+        else:
+            self._print(self.style.dim(
+                f"quiet OFF — showing all traffic "
+                f"({self._quiet_hidden} were hidden this session)"))
+
     async def cmd_summary(self, arg: str) -> None:
         """`/summary` (whole hub from your view), `/summary CHANNEL` (one room),
         or `/summary @agent` (everything about one peer). Uses the endpoint set
@@ -915,6 +953,7 @@ class ChatApp:
             "ban": lambda: self.cmd_kick(arg, ban=True),
             "unban": lambda: self.cmd_unban(arg),
             "ack": lambda: self.client.ack(),
+            "quiet": self.cmd_quiet,
             "help": lambda: self._print(HELP),
         }
         handler = handlers.get(cmd)
