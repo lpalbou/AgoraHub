@@ -10,7 +10,7 @@ Typical interleaving loop for a Python agent (v0.2 envelope model):
             if env.body is not None or worth_reading(env):
                 msgs = [env] if env.body else await client.read(env.channel, env.id)
                 consider(msgs)
-        await client.ack()                             # advance triage cursors
+            await client.ack({env.channel: env.seq})   # ack what you HANDLED
     news = await client.inbox.wait(timeout=60)         # idle: block until poked
 """
 
@@ -129,10 +129,12 @@ class AgoraClient:
                    data: dict[str, Any] | None = None, reply_to: str | None = None,
                    asks: list[dict[str, Any]] | None = None,
                    answers: list[str] | None = None,
+                   attachments: list[dict[str, Any]] | None = None,
                    signature: str | None = None) -> Message:
         payload = PostMessage(body=body, title=title, status=status, urgency=urgency,
                               to=to or [], critical=critical, data=data, reply_to=reply_to,
-                              asks=asks, answers=answers, signature=signature)
+                              asks=asks, answers=answers, attachments=attachments,
+                              signature=signature)
         row = self._json(await self._http.post(
             f"/channels/{channel}/messages", json=payload.model_dump(mode="json"),
         ))
@@ -188,15 +190,39 @@ class AgoraClient:
         params = {"subject": subject} if subject else {}
         return self._json(await self._http.get("/colleagues", params=params))
 
-    async def ack(self, cursors: dict[str, int] | None = None) -> None:
-        """Advance read cursors (default: everything delivered so far)."""
-        cursors = cursors or dict(self._pending_acks)
+    async def ack(self, cursors: dict[str, int]) -> None:
+        """Advance read cursors for exactly what you HANDLED.
+
+        Cursors are required (backlog 0011): the old zero-arg form acked
+        everything *delivered*, not everything *handled* — a loop that
+        crashed after `ack()` but before acting silently buried messages.
+        Ack per message (`{env.channel: env.seq}`) after handling it; the
+        blanket form survives, by its honest name, as
+        `ack_all_delivered()`.
+        """
+        if cursors is None:  # keep the old misuse loud, not silently broken
+            raise TypeError(
+                "ack() now requires explicit cursors ({channel: seq}) — ack "
+                "what you HANDLED, after handling it. To deliberately ack "
+                "everything delivered (human surfaces, end-of-session "
+                "drains), call ack_all_delivered().")
         if not cursors:
             return
         self._json(await self._http.post("/inbox/ack", json={"cursors": cursors}))
         for channel, seq in cursors.items():
             if self._pending_acks.get(channel, 0) <= seq:
                 self._pending_acks.pop(channel, None)
+
+    async def ack_all_delivered(self) -> None:
+        """Blanket ack: advance cursors past everything DELIVERED so far.
+
+        Deliberately not the default (backlog 0011): delivered is not
+        handled, so a crash between delivery and handling loses whatever
+        this call acked past. Legitimate where a human saw everything
+        rendered (the chat surface) or a drain is genuinely complete;
+        agent loops should `ack({channel: seq})` per handled message.
+        """
+        await self.ack(dict(self._pending_acks))
 
     async def store_get(self, channel: str, key: str) -> dict[str, Any]:
         return self._json(await self._http.get(f"/channels/{channel}/store/{key}"))
@@ -212,6 +238,27 @@ class AgoraClient:
         return self._json(await self._http.get(f"/channels/{channel}/store"))
 
     # -- per-channel virtual filesystem (shared editable "book", any machine) ------
+
+    async def attachment_put(self, channel: str, data: bytes, *,
+                             filename: str = "",
+                             content_type: str = "application/octet-stream",
+                             ) -> dict[str, Any]:
+        """Upload one attachment blob (0091); returns {id, size, ...} with
+        id = sha256(bytes). Reference it from post(attachments=[{'id': ...}])."""
+        return self._json(await self._http.post(
+            f"/channels/{channel}/attachments", params={"filename": filename},
+            content=data, headers={"Content-Type": content_type}))
+
+    async def attachment_get(self, channel: str,
+                             blob_id: str) -> tuple[dict[str, str], bytes]:
+        """Fetch an attachment: (response headers of interest, bytes). The
+        declared content type is metadata — sniff before trusting it."""
+        r = await self._http.get(f"/channels/{channel}/attachments/{blob_id}")
+        if r.status_code >= 400:
+            self._json(r)  # raises with the hub's teaching detail
+        headers = {k: r.headers.get(k, "") for k in
+                   ("content-type", "x-declared-content-type", "x-attachment-id")}
+        return headers, r.content
 
     async def fs_list(self, channel: str, prefix: str = "") -> list[dict[str, Any]]:
         return self._json(await self._http.get(f"/channels/{channel}/fs",

@@ -77,7 +77,7 @@ async def runtime_agent(api_key: str, invite_handoff: asyncio.Future) -> None:
                     "without restarting the task.",
                     status=Status.reply, reply_to=message.id,
                 )
-        await client.ack()
+        await client.ack_all_delivered()
 
     await client.post("seam-design", f"Task complete on API {api_version}.",
                       title="done", status=Status.resolved)
@@ -102,7 +102,7 @@ async def memory_agent(api_key: str, invite_handoff: asyncio.Future) -> None:
     for message in await client.inbox.wait(timeout=10.0):
         if message.reply_to:
             print(f"  memory  | runtime replied: {message.body!r}")
-    await client.ack()
+    await client.ack_all_delivered()
     await client.close()
 
 

@@ -1165,7 +1165,11 @@ class ChatApp:
             "kick": lambda: self.cmd_kick(arg, ban=False),
             "ban": lambda: self.cmd_kick(arg, ban=True),
             "unban": lambda: self.cmd_unban(arg),
-            "ack": lambda: self.client.ack(),
+            # Blanket by design: the human explicitly asked to mark
+            # everything displayed as seen (0011: agents ack per handled
+            # message; a human surface acking what it rendered is the
+            # legitimate blanket case).
+            "ack": lambda: self.client.ack_all_delivered(),
             "quiet": self.cmd_quiet,
             "owed": self.cmd_owed,
             "board": self.cmd_board,
@@ -1195,8 +1199,11 @@ class ChatApp:
             for env in envelopes:
                 self.show_envelope(env)
             if envelopes:
+                # Blanket ack is correct HERE: every envelope was just
+                # rendered to the human's terminal — displayed IS handled
+                # for a chat surface (0011).
                 with contextlib.suppress(Exception):
-                    await self.client.ack()
+                    await self.client.ack_all_delivered()
 
     async def _vote_watch(self) -> None:
         """Auto-publish chaired votes the moment their blindness protects

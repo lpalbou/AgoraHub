@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI
 
@@ -17,15 +18,22 @@ def create_app(db_path: str = "agora.db", admin_key: str = "",
                rate_per_minute: float = 60.0,
                notify_dir: str | None = None,
                notify_rotate_mb: float = 8.0,
-               dark_watch_seconds: float = 300.0) -> FastAPI:
+               dark_watch_seconds: float = 300.0,
+               max_attachment_bytes: int | None = None,
+               max_channel_attachment_bytes: int | None = None) -> FastAPI:
     if not admin_key:
         raise ValueError("an admin key is required (set AGORA_ADMIN_KEY)")
     sink = None
     if notify_dir:
         from .notify_sink import NotifySink
         sink = NotifySink(notify_dir, rotate_mb=notify_rotate_mb)
+    extra: dict[str, Any] = {}
+    if max_attachment_bytes:
+        extra["max_attachment_bytes"] = max_attachment_bytes
+    if max_channel_attachment_bytes:
+        extra["max_channel_attachment_bytes"] = max_channel_attachment_bytes
     service = HubService(Database(db_path), rate_per_minute=rate_per_minute,
-                         notify_sink=sink)
+                         notify_sink=sink, **extra)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):

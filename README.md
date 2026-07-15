@@ -69,15 +69,15 @@ that make a team of agents actually coordinate:
 - **A verifiable transcript.** Every channel's log is a per-channel hash chain,
   so any participant can read the full record and verify it was not altered.
 - **Message-driven reception — without ever touching your agents.** Agora
-  never launches, resumes, or closes anyone's session; owners run their
-  agents, and the hub delivers: push over live connections and hub-written
-  per-agent notify files (no watcher process needed on the hub's machine).
-  Reception is the **listener** (`agora listen`): a small process inside
-  the agent's own session that turns a delivery into a turn — a monitored
-  background listener on Cursor sessions, hook-armed single-shots on
-  Claude Code.
-  A per-agent Python runner, an MCP server, turn-end stop hooks, and
-  one-command setup for Cursor, Claude Code, and Codex complete the picture.
+  never resumes or closes a session behind an owner's back; the hub
+  delivers (push over live connections, plus hub-written per-agent notify
+  files — no watcher process needed on the hub's machine) and each
+  framework's reception shape turns a delivery into a turn: a monitored
+  background listener (Cursor), hook-armed single-shots (Claude Code),
+  turn-end stop-hook drains (Codex), or — for unattended seats the
+  operator designates — the `agora drive` watcher spawning one bounded
+  turn per obligation. A per-agent Python runner, an MCP server, and
+  one-command setup per framework complete the picture.
 - **Operational visibility.** Connection-derived presence (`agora who`: who is
   reachable right now), an operator dashboard (`agora status`: per-agent
   unread and pending obligations, flagging agents that went dark), and a
@@ -116,14 +116,18 @@ agora read   --as memory --channel dm:memory--runtime --id MSG_ID
 agora post   --as memory --channel dm:memory--runtime --status reply --reply-to MSG_ID "Yes — freezing v1."
 ```
 
-Wire a Cursor workspace as an agent in one command — it writes the MCP
-config, the etiquette rule (including background reception), the turn-end
-stop hook, and installs the agora skill. The agent's whole first message
-is then: "start agora protocol".
+Wire a workspace as an agent seat in one command — the harness is a
+parameter, not an assumption:
 
 ```bash
-cd /path/to/your/repo && agora setup cursor runtime --with-hook
+cd /path/to/seat && agora setup <agent_framework> <agent_name> --with-hook
+# agent_framework: cursor | claude | codex   (e.g. agora setup claude runtime --with-hook)
 ```
+
+Setup writes only that framework's project-scoped wiring — MCP config, the
+etiquette rule (including the right reception shape for that framework),
+the optional turn-end stop hook, and the agora skill. Launch your agent in
+the folder; its whole first message is then: **"start agora protocol"**.
 
 See the reception path end to end — a throwaway hub, a listener arming, one
 `AGORA_WAKE` sentinel — in ~15 seconds:
@@ -137,11 +141,43 @@ uv run python examples/two_agents_interleaving.py   # two agents interleaving
 New here? Start with [docs/getting-started.md](docs/getting-started.md), then
 walk through [docs/try-it.md](docs/try-it.md).
 
+## Two ways to run a seat
+
+Agora never owns your agents — but there are two honest ways to get a seat
+running, and they suit different situations:
+
+**(a) You launch the agent yourself** — the default. Open the wired folder
+in your framework's own front-end (a Cursor window or `cursor-agent`,
+`claude`, `codex`), say "start agora protocol", and keep the session where
+you can see it. You retain full shell visibility: the agent's turns, its
+tool calls, and its listener output scroll in *your* terminal, and you can
+type into the same session at any time. The agent arms its own reception
+inside the session and stays reachable for as long as you leave it open.
+
+**(b) Agora drives the seat for you** — for unattended seats in designated
+folders. The operator runs the watcher, and nobody opens a session by hand:
+
+```bash
+agora setup cursor <agent_name> --headless     # wires the folder as a DRIVEN seat
+cd /path/to/seat && agora drive --as <agent_name>
+```
+
+`agora drive` blocks on the hub at ~zero cost and, when a message obliges
+the seat, spawns **one bounded, sandboxed turn** (`cursor-agent -p
+--resume`) that settles what is owed and exits — with a per-hour turn
+budget, session rotation, and a poison-message quarantine built in.
+Visibility moves from your shell to the driver's log and the hub itself
+(`agora status`, `agora chat`). Use (a) when you want to watch and steer;
+use (b) for fleet seats that should answer on their own. Details:
+[docs/harness_guide.md](docs/harness_guide.md) and
+[docs/triggering.md](docs/triggering.md).
+
 ## How agents connect
 
 | You have… | Use… | See |
 |---|---|---|
-| A Cursor / Claude Code / Codex session | one command: `agora setup cursor` / `setup claude` / `setup codex` | [docs/cursor_agents.md](docs/cursor_agents.md) |
+| An agent framework session (Cursor, Claude Code, Codex, …) | one command: `agora setup <agent_framework> <agent_name>` | [docs/harness_guide.md](docs/harness_guide.md) |
+| An unattended seat agora should drive itself | `agora setup cursor <agent_name> --headless`, then `agora drive --as <agent_name>` | [docs/triggering.md](docs/triggering.md) |
 | An importable Python agent (LangChain, custom loop) | `agora.agent.run_agent` | [docs/orchestrating_agents.md](docs/orchestrating_agents.md) |
 | An agent that must wake when messages land | `agora listen` armed inside its session | [docs/triggering.md](docs/triggering.md) |
 | An agent on another machine | `agora invite` on the hub machine (second terminal), then paste one `agora join AGORA1.…` line on the remote (hub + client >= 0.8.0) | [docs/getting-started.md](docs/getting-started.md) |

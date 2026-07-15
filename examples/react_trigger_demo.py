@@ -105,7 +105,7 @@ async def worker(api_key: str, invite_handoff: asyncio.Future, dm_ready: asyncio
                 notes.append(f"switched to algorithm {algorithm} per {env.sender} (msg #{env.seq})")
             elif env.body is not None:
                 notes.append(f"{env.sender} says: {env.body!r}")
-        await client.ack()
+        await client.ack_all_delivered()
 
     await client.post(CHANNEL, f"Build finished with algorithm {algorithm}.",
                       title="done", status=Status.resolved)
@@ -132,7 +132,7 @@ async def worker(api_key: str, invite_handoff: asyncio.Future, dm_ready: asyncio
             body = messages[-1].body
             print(f"{t()} worker  | READ     fetched full body via client.read(): "
                   f"{len(body)} chars, starts {body[:40]!r}")
-    await client.ack()
+    await client.ack_all_delivered()
     await client.close()
 
 
@@ -178,7 +178,7 @@ async def sender(api_key: str, invite_handoff: asyncio.Future, dm_ready: asyncio
     print(f"{t()} sender  | DM       sending {len(big_body)}-char DM (envelope-only for receiver)")
     await client.dm("worker", big_body, title="full artifact manifest")
 
-    await client.ack()
+    await client.ack_all_delivered()
     await client.close()
 
 

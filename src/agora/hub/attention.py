@@ -98,6 +98,10 @@ class AttentionPolicy:
             data=message.data if inline else None,
             reply_to=message.reply_to,
             pending_asks=pending,
+            # Attachment REFS always ride the envelope, inlined body or not —
+            # a recipient must learn files exist from the headline (0091);
+            # the bytes stay behind the membership-gated fetch.
+            attachments=list((message.data or {}).get("attachments") or []),
             your_pending_asks=sorted(
                 str(a["id"]) for a in asks_of(message)
                 if viewer_id in (a.get("to") or []) and str(a["id"]) in set(pending)),

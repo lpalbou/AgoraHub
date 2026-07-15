@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import hmac
 from typing import Any
+from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 from ..db import StoreConflict
 from ..models import AgentInfo, PostMessage
-from .service import HubError, HubService
+from .service import HubError, HubService, safe_serve_content_type
 
 
 def get_service(request: Request) -> HubService:
@@ -77,6 +79,46 @@ def register_agent(
                          payload.operator, payload.about)
     # The plaintext key is returned exactly once; only its hash is stored.
     return {"agent": info.model_dump(), "api_key": api_key}
+
+
+@router.get("/agents/retired")
+def list_retired_agents(
+    agent: AgentInfo = Depends(current_agent),
+    service: HubService = Depends(get_service),
+) -> list[dict[str, Any]]:
+    """Operator-only: enumerate retired identities so an un-retire UI can
+    offer candidates (they are off every other roster by design, 0089)."""
+    if not agent.operator:
+        raise HTTPException(403, "listing retired agents is an operator view")
+    return service.db.list_retired_agents()
+
+
+class RetireAgent(BaseModel):
+    reason: str = ""   # neutral, optional; stored and echoed (never "banned")
+
+
+@router.post("/agents/{agent_id}/retire")
+def retire_agent(
+    agent_id: str,
+    payload: RetireAgent | None = None,
+    agent: AgentInfo = Depends(current_agent),
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    """Retire an identity (0089): neutral decommission — auth refused
+    neutrally, evicted from rosters, id reserved forever. Operator only;
+    NOT a block (never appears in /blocks). Reversible via DELETE."""
+    return _run(service.retire_agent, agent, agent_id,
+                payload.reason if payload else "")
+
+
+@router.delete("/agents/{agent_id}/retire")
+def unretire_agent(
+    agent_id: str,
+    agent: AgentInfo = Depends(current_agent),
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    """Restore a retired identity (operator only); it rejoins rooms explicitly."""
+    return _run(service.unretire_agent, agent, agent_id)
 
 
 # -- join tokens (scoped onboarding; the admin key never leaves the hub) --------
@@ -415,10 +457,14 @@ class JoinChannel(BaseModel):
 
 @router.get("/channels")
 def list_channels(
+    include_archived: bool = Query(default=False),
     agent: AgentInfo = Depends(current_agent),
     service: HubService = Depends(get_service),
 ) -> list[dict[str, Any]]:
-    return service.db.list_channels(agent.id)
+    # Only an operator may see archived rooms in the listing (their inspect
+    # view); a non-operator's flag is ignored so archived stays delisted.
+    include = include_archived and agent.operator
+    return service.db.list_channels(agent.id, include_archived=include)
 
 
 @router.post("/channels")
@@ -428,6 +474,27 @@ def create_channel(
     service: HubService = Depends(get_service),
 ) -> dict[str, Any]:
     return _run(service.create_channel, agent, payload.name, payload.private)
+
+
+@router.post("/channels/{channel}/archive")
+def archive_channel(
+    channel: str,
+    agent: AgentInfo = Depends(current_agent),
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    """End a channel (0090): evict all members, delist it, refuse further
+    posts/joins — history preserved. Owner or operator."""
+    return _run(service.archive_channel, agent, channel)
+
+
+@router.delete("/channels/{channel}/archive")
+def unarchive_channel(
+    channel: str,
+    agent: AgentInfo = Depends(current_agent),
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    """Reopen an archived channel (operator only); members rejoin explicitly."""
+    return _run(service.unarchive_channel, agent, channel)
 
 
 @router.post("/channels/{channel}/invites")
@@ -709,6 +776,79 @@ def fs_delete(
     service: HubService = Depends(get_service),
 ) -> dict[str, bool]:
     return {"deleted": _run(service.fs_delete, agent, channel, path, expect_version)}
+
+
+# -- message attachments (0091): content-addressed channel blobs -----------------
+
+@router.post("/channels/{channel}/attachments")
+async def attachment_upload(
+    channel: str,
+    request: Request,
+    filename: str = Query(default=""),
+    agent: AgentInfo = Depends(current_agent),
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    """Upload one attachment: the request BODY is the raw file bytes (no
+    multipart parsing — one file per request, streaming-friendly, zero extra
+    dependencies); the declared type is the Content-Type header, the display
+    name the `filename` query param. Returns {id, size, content_type,
+    filename, ...} with id = sha256(bytes) — idempotent for identical bytes.
+    Reference it from a message via attachments=[{"id": ...}]."""
+    # Bound memory to cap + one chunk: reject on a declared Content-Length
+    # first, then STREAM with a running total so a lying/absent length (or a
+    # chunked drip) can never buffer an unbounded body into the single hub
+    # process (adversarial review P1). `Request.body()` had no such bound.
+    cap = service.max_attachment_bytes
+    declared_len = request.headers.get("content-length", "")
+    if declared_len.isdigit() and int(declared_len) > cap:
+        raise HTTPException(413, f"attachment exceeds {cap} bytes "
+                                 "(operator-configurable cap)")
+    buf = bytearray()
+    async for chunk in request.stream():
+        buf += chunk
+        if len(buf) > cap:
+            raise HTTPException(413, f"attachment exceeds {cap} bytes "
+                                     "(operator-configurable cap)")
+    declared = request.headers.get("content-type", "")
+    # The hash + locked SQLite BLOB write is CPU/IO work: run it off the event
+    # loop, matching every sync write endpoint (review P2 — an inline call
+    # would serialize all traffic behind each upload).
+    return await run_in_threadpool(
+        _run, service.attachment_put, agent, channel, bytes(buf),
+        filename=filename, content_type=declared)
+
+
+@router.get("/channels/{channel}/attachments/{blob_id}")
+def attachment_fetch(
+    channel: str,
+    blob_id: str,
+    agent: AgentInfo = Depends(current_agent),
+    service: HubService = Depends(get_service),
+) -> Response:
+    """Serve an attachment's bytes, membership-gated and hardened: forced
+    `attachment` disposition + nosniff always, and active content types
+    (html/svg/xml/js — anything a browser could execute) go out as
+    octet-stream, so the hub can never become a script origin. The declared
+    type is metadata; consumers sniff before inline-rendering (0091)."""
+    meta, data = _run(service.attachment_get, agent, channel, blob_id)
+    # RFC 6266 filename: ASCII-safe fallback + RFC 5987 UTF-8 form. The
+    # stored name is already control-stripped; quotes/backslashes/semicolons
+    # are dropped from the quoted form so the header cannot be split.
+    safe_name = "".join(c for c in meta["filename"]
+                        if c.isascii() and c not in '\\";') or "attachment"
+    utf8_name = quote(meta["filename"], safe="")
+    return Response(
+        content=data,
+        media_type=safe_serve_content_type(meta["content_type"]),
+        headers={
+            "Content-Disposition": (f'attachment; filename="{safe_name}"; '
+                                    f"filename*=UTF-8''{utf8_name}"),
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "private, max-age=31536000, immutable",
+            "X-Attachment-Id": meta["id"],
+            "X-Declared-Content-Type": meta["content_type"],
+        },
+    )
 
 
 # -- direct (1:1) channels -------------------------------------------------------------

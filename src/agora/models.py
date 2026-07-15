@@ -47,6 +47,19 @@ MAX_FS_PATH_CHARS = 512        # path length cap
 # File content reuses MAX_STORE_VALUE_BYTES (256 KiB): text/markdown workspace
 # artifacts (plans, contracts, AGENTS-style registries), not a blob store.
 
+# Message attachments (0091): channel-scoped, content-addressed blobs
+# referenced from messages. Bytes never ride envelopes — refs do.
+MAX_ATTACHMENT_BYTES = 16 * 1024 * 1024   # per-file default cap (operator-configurable)
+# Per-channel aggregate blob budget (operator-configurable): append-only
+# storage needs a ceiling so one member cannot fill the disk one distinct
+# blob at a time (the class that took the whole volume to 100% on
+# 2026-07-15). Dedup means identical uploads share one row, so this counts
+# distinct bytes. 1 GiB is generous for a text/doc/image workspace.
+MAX_CHANNEL_ATTACHMENT_BYTES = 1024 * 1024 * 1024
+MAX_ATTACHMENTS_PER_MESSAGE = 8
+MAX_FILENAME_CHARS = 200
+MAX_CONTENT_TYPE_CHARS = 100
+
 _TEXT_CLEAN = re.compile(r"[\x00-\x1f\x7f]+")
 
 
@@ -145,6 +158,17 @@ class Ask(BaseModel):
     to: list[str] = Field(default_factory=list)
 
 
+class AttachmentRef(BaseModel):
+    """A poster's reference to an already-uploaded channel blob (0091). Only
+    `id` (the blob's sha256) is trusted as-declared; filename may override
+    the upload-time name for display, and size/content_type are always
+    filled by the hub from the blob row — a message can never lie about
+    what its attachment IS."""
+
+    id: str
+    filename: str | None = None
+
+
 class PostMessage(BaseModel):
     """Client -> hub payload to post a message."""
 
@@ -158,6 +182,7 @@ class PostMessage(BaseModel):
     reply_to: str | None = None
     asks: list[Ask] | None = None       # numbered questions (open/blocked only)
     answers: list[str] | None = None    # ask ids this reply discharges (reply only)
+    attachments: list[AttachmentRef] | None = None  # refs to uploaded channel blobs (0091)
     signature: str | None = None        # RESERVED: opaque authorship token (enforcement later)
 
 
@@ -211,6 +236,10 @@ class Envelope(BaseModel):
     redelivery: bool = False             # you already READ this pinned obligation:
                                          # body withheld, headline-only re-surface
                                          # (the 3.6KB x35 re-send cost, debrief F1)
+    attachments: list[dict[str, Any]] = Field(default_factory=list)
+    # ^ attachment REFS ({id, filename, content_type, size}) ride every
+    #   delivery — bytes never do (inbox economy); fetch them via
+    #   GET /channels/{c}/attachments/{id}, membership-gated (0091).
     # Authorship (RESERVED for a future gateway-issued identity proof — see
     # thread 0006 P4). Present on every envelope NOW so consumers can hard-code
     # the shape before entities join; `verified_by` is always None until the

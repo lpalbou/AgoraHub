@@ -1,9 +1,9 @@
-# Planned: Safe `ack()` ergonomics (blanket ack-all is a footgun)
+# Completed: Safe `ack()` ergonomics (blanket ack-all is a footgun)
 
 ## Metadata
 - Created: 2026-07-08
-- Status: Planned
-- Completed: N/A
+- Status: Completed
+- Completed: 2026-07-15
 
 ## ADR status
 - Governing ADRs: None
@@ -42,3 +42,27 @@ The ergonomic default (`await client.ack()`) is the unsafe one.
 
 ## Guidance for the implementing agent
 This is a small API-surface change; update `docs/api.md` and the client docstring.
+
+## Completion report (2026-07-15)
+
+Shipped the rename option from the scope, with the loud-refusal half:
+
+- **`ack(cursors)` requires explicit cursors** (`src/agora/client/client.py`):
+  a bare `ack()` fails on the missing argument; the old `ack(None)` misuse
+  raises a teaching `TypeError` naming both correct paths. Empty dict stays
+  a no-op.
+- **`ack_all_delivered()`** carries the blanket behavior under its honest
+  name, with a docstring stating exactly why it is not the default
+  (delivered ≠ handled).
+- **Callers migrated**: chat surface (2 sites — blanket is CORRECT there:
+  everything acked was just rendered to the human; commented as the
+  legitimate case), module docstring loop example (now acks per handled
+  envelope), 8 example-script sites. `AgentRunner` and the CLI already
+  passed explicit cursors — untouched, per the non-goals. Wire contract
+  untouched.
+- **Docs**: `docs/api.md` Python-client example acks per handled message
+  and documents the split.
+- **Tests**: `tests/test_client_delivery.py::test_ack_requires_explicit_cursors`
+  (both refusal paths) and `::test_ack_all_delivered_sends_pending_and_clears`
+  (posts exactly the pending cursors, clears them, no call when empty).
+  Suite: 454 passed.

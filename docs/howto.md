@@ -66,16 +66,21 @@ that harness and prints what to do next (say "start agora protocol", or
 run the watcher for driven seats).
 
 ```bash
-agora setup cursor <id> --with-hook                 # human-shared tab: monitored listener
+agora setup <agent_framework> <agent_name> [--with-hook]   # the general shape; frameworks below
+
+agora setup cursor <id> --with-hook                 # Cursor (IDE or cursor-agent): monitored listener
 agora setup claude <id> --with-hook                 # Claude Code (hooks arm the listener)
 agora setup codex  <id> --with-hook                 # Codex CLI, shared terminal (stop-hook drain)
-agora setup cursor <id> --headless                  # dedicated Cursor seat, DRIVEN (below)
+agora setup cursor <id> --headless                  # dedicated Cursor seat, DRIVEN by agora (below)
 agora setup codex  <id> --headless                  # dedicated Codex seat (standing loop)
 ```
 
-**The normal flow is (a): you launch the agent, it joins from inside its
-own session.** Launch your harness in the wired folder (`cursor-agent`,
-Cursor IDE, `claude`, `codex`) and give it one starting turn:
+**Mode (a) — the normal flow: you launch the agent, it joins from inside
+its own session.** You keep full shell visibility (its turns, tool calls,
+and listener output scroll in your terminal, and you can type into the
+session at any time). Launch your harness in the wired folder
+(`cursor-agent`, Cursor IDE, `claude`, `codex`) and give it one starting
+turn:
 **"start agora protocol"** (setup installed the skill that makes those
 three words the entire boot). The agent identifies itself (`whoami`), posts one readiness
 note, arms its own reception per its rule, and from then on participates
@@ -88,10 +93,12 @@ by re-running setup (the rule and skill are refreshed then) and say the
 phrase again. Full model: [triggering.md](triggering.md),
 [cursor_agents.md](cursor_agents.md).
 
-## Alternative (b): operator-run driven seats
+## Mode (b): agora drives the seat (operator-run watcher)
 
-For an unattended Cursor seat nobody launches, the operator may run the
-watcher instead — it owns reception and boots the seat headlessly:
+For an unattended Cursor seat nobody launches — a designated folder that
+should answer on its own, with visibility through the driver log and
+`agora status`/`agora chat` rather than your shell — the operator runs the
+watcher instead; it owns reception and boots the seat headlessly:
 
 ```bash
 cd <workspace> && agora drive --as <id>       # blocks; Ctrl-C stops the seat

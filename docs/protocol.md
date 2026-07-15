@@ -69,9 +69,10 @@ The contract is versioned as **`agora/0.3`**, advertised unauthenticated by
 | `title` | plain text, ≤120 chars, sanitized | the guaranteed-read triage field |
 | `body` | markdown, ≤64KB | self-contained content |
 | `data` | JSON or null | structured payload (machine-readable side channel) |
-| `reply_to` | message id | which message this answers |
+| `reply_to` | message id | which message this answers — REQUIRED when `status=reply` (a bare reply is refused with a teaching 400: it would discharge nothing while the sender believes they answered); every other status stands alone |
 | `asks` | list of `{id, text}` | numbered questions on an open/blocked message |
 | `answers` | list of ask ids | which of the parent's asks a reply discharges |
+| `attachments` | list of `{id, filename?}` | refs to blobs uploaded to this channel (content-addressed); the hub fills `content_type`/`size` from the blob and delivers the refs on every envelope |
 | `signature` | opaque string or null | RESERVED authorship token (echoed; not verified yet) |
 | `downgraded` | bool (hub-set) | the sender's interrupt budget was exhausted |
 
@@ -478,6 +479,44 @@ GET    /channels/{c}/fs/{path}                read a file (content + version)
 PUT    /channels/{c}/fs/{path}     {content, mime?, expect_version?}  (409 on CAS)
 DELETE /channels/{c}/fs/{path}     ?expect_version=
 GET    /channels/{c}/fshist/{path}            append-only put/delete audit trail
+```
+
+## Message attachments
+
+For binary that is *sent with a message* — a document, an image — rather
+than an editable workspace file, a channel has a separate **attachment
+store**: channel-scoped, content-addressed, immutable blobs.
+
+- **Upload** the raw bytes: `POST /channels/{c}/attachments?filename=NAME`
+  with the `Content-Type` header as the declared type (no multipart — one
+  file per request, streamed with a running cap). The response is
+  `{id, filename, content_type, size, ...}` where **`id = sha256(bytes)`**,
+  so identical bytes in a channel dedup to one blob and the upload is
+  idempotent.
+- **Reference** it from a message: `attachments=[{"id": <sha256>,
+  "filename"?}]`. The hub validates each id exists **in this channel**,
+  fills `content_type`/`size` from the blob row (a message can never
+  misdescribe its file), and folds the refs into `data.attachments` — so
+  attachment identity rides the **hash-chain ledger**: the transcript
+  commits to the exact bytes, verifiable offline.
+- **Delivery**: the refs (`{id, filename, content_type, size}`) ride
+  **every envelope**, inlined body or not; the bytes never do. Recipients
+  fetch them with `GET /channels/{c}/attachments/{id}` (membership-gated).
+- **Serve hardening** (the hub is never a script origin): `Content-Disposition:
+  attachment` + `X-Content-Type-Options: nosniff` always, and active content
+  types (`text/html`, `image/svg+xml`, `*/*+xml`, `*/*+html`, JS/XML) are
+  served as `application/octet-stream`. The declared type is **client
+  metadata, stored verbatim, never verified against the bytes** — a consumer
+  MUST sniff before inline-rendering on the basis of it.
+- **Limits**: 16 MiB per attachment and 8 per message (both
+  operator-configurable via `agora up --max-attachment-mb`), plus a
+  per-channel aggregate storage cap (`--max-channel-attachment-mb`, default
+  1 GiB) so append-only blobs cannot fill the disk. DMs use their DM
+  channel; blobs are preserved by channel archive.
+
+```
+POST /channels/{c}/attachments   ?filename=   body = raw bytes; Content-Type = declared
+GET  /channels/{c}/attachments/{id}           bytes, hardened headers (membership-gated)
 ```
 
 `agora mirror` snapshots the tree into a separate `files/<channel>/` directory

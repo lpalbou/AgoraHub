@@ -64,3 +64,39 @@ def test_catch_up_is_best_effort_on_malformed_rows():
     client = _client_with_inbox([{"garbage": True}])
     asyncio.run(client._catch_up())  # must not raise
     assert client.inbox.drain() == []
+
+
+def test_ack_requires_explicit_cursors():
+    """0011: the zero-arg blanket ack acked everything DELIVERED, not
+    everything HANDLED — a crash between delivery and handling silently
+    buried messages. Bare ack() must now refuse loudly; ack(None) too."""
+    import pytest
+
+    client = AgoraClient("http://test", "key")
+    with pytest.raises(TypeError):
+        asyncio.run(client.ack())  # missing required argument
+    with pytest.raises(TypeError, match="ack_all_delivered"):
+        asyncio.run(client.ack(None))  # old misuse: teaching error
+
+
+def test_ack_all_delivered_sends_pending_and_clears():
+    """The blanket form survives under its honest name: it posts exactly the
+    pending high-water cursors and clears them; empty pending = no call."""
+    posted: list[dict] = []
+
+    class _HTTP:
+        async def post(self, path, json=None, **kw):
+            posted.append({"path": path, "json": json})
+            class _Resp:
+                status_code = 200
+                def json(self): return {}
+            return _Resp()
+
+    client = AgoraClient("http://test", "key")
+    client._http = _HTTP()  # type: ignore[assignment]
+    asyncio.run(client.ack_all_delivered())  # nothing pending: no HTTP call
+    assert posted == []
+    client._pending_acks = {"design": 7}
+    asyncio.run(client.ack_all_delivered())
+    assert posted == [{"path": "/inbox/ack", "json": {"cursors": {"design": 7}}}]
+    assert client._pending_acks == {}

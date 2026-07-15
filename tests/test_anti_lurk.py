@@ -278,6 +278,48 @@ def test_stewardship_stale_claim_alerts_address_the_delegate(client, room):
     assert service._stale_claim_alerted == {}
 
 
+def test_terminal_claims_never_go_stale(client, room):
+    """Field finding (c2409): the sweep keyed on updated_at alone, so a
+    finished claim re-escalated forever and canvass rounds bumped
+    timestamps on rows nobody would touch again. Terminal rows — the
+    taught {"done": true} AND the observed status="done"/"shipped"
+    spellings — never alert, however old; the board agrees (one shared
+    predicate)."""
+    service = client.app.state.service
+    key = room["named"]
+    client.put("/admin/delegation", headers={"Authorization": f"Bearer {ADMIN_KEY}"},
+               json={"agent_id": "bystander", "powers": ["reporting"]})
+
+    for slug, value in (("done-x", {"owner": "named", "done": True}),
+                        ("shipped-y", {"owner": "named", "status": "shipped"}),
+                        ("status-done-z", {"owner": "named", "status": "Done"})):
+        client.put(f"/channels/canvass/store/claim:{slug}", headers=_auth(key),
+                   json={"value": value, "expect_version": 0})
+    # A free-text status is NOT terminal — it must still alert when stale.
+    client.put("/channels/canvass/store/claim:live-w", headers=_auth(key),
+               json={"value": {"owner": "named",
+                               "status": "designed; build next session"},
+                     "expect_version": 0})
+    service.db._conn.execute(
+        "UPDATE store SET updated_at = updated_at - 7200 "
+        "WHERE channel='canvass' AND key LIKE 'claim:%'")
+    service.db._conn.commit()
+
+    out = service._steward_sweep()
+    assert out == ["stale-claims:1"]
+    alerts = service.db.get_messages("hub-alerts", 0, 50)
+    alert = next(m for m in reversed(alerts) if "STALE CLAIMS" in m.body)
+    assert "claim:live-w" in alert.body
+    for terminal in ("done-x", "shipped-y", "status-done-z"):
+        assert terminal not in alert.body
+
+    # The board draws the same line: terminal rows are out of in_progress.
+    board = client.get("/board", headers=_auth(key)).json()
+    tasks = {row["task"] for row in board["in_progress"]}
+    assert "live-w" in tasks
+    assert tasks.isdisjoint({"done-x", "shipped-y", "status-done-z"})
+
+
 def test_fleet_status_gated_to_operators_and_reporting_delegates(client, room):
     """0084: GET /status serves the operator overview to reporting delegates
     (the steward could not see lurk metrics behind the admin key), with

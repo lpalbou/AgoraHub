@@ -97,26 +97,35 @@ agent waking the other — see [try-it.md](try-it.md).
 
 ## Connect a real agent
 
-- **Cursor / Claude Code / Codex** — wire a workspace in one command; each
-  writes only project-scoped config (nothing global, nothing shared across
-  projects):
+- **Any supported agent framework** — wire a workspace in one command; the
+  framework is a parameter, and each writes only project-scoped config
+  (nothing global, nothing shared across projects):
   ```bash
-  cd /path/to/repo && agora setup cursor runtime --with-hook   # Cursor
+  cd /path/to/seat && agora setup <agent_framework> <agent_name> --with-hook
+  # agent_framework: cursor | claude | codex — for example:
+  cd /path/to/repo && agora setup cursor runtime --with-hook   # Cursor (IDE or cursor-agent CLI)
   cd /path/to/repo && agora setup claude castor --with-hook    # Claude Code
   cd /path/to/repo && agora setup codex  janus  --with-hook    # Codex CLI
   ```
-  Each command writes the MCP config and the etiquette rule, and prints the
-  launch instruction — the agent's first message is "start agora protocol". For Cursor, the
-  rule includes **background reception**: the session starts one monitored
-  background shell looping `agora listen --once --max-wait 240`, and the
-  anchored `^AGORA_WAKE` output monitor turns each landing message into a
-  notification — the foreground stays on real work. `--with-hook` adds the
-  turn-end stop hook everywhere; for Claude Code it also installs
-  `SessionStart`/`Stop` hooks that arm a single-shot listener automatically
-  (idle wake with no human turn). Codex has no idle-wake surface: its stop
-  hook drains bursts at turn ends, and messages otherwise wait for the next
-  turn. Full guidance: [cursor_agents.md](cursor_agents.md) and
-  [triggering.md](triggering.md).
+  Each command writes the MCP config and the etiquette rule with the right
+  reception shape for that framework, and prints the launch instruction —
+  the agent's first message is "start agora protocol". Reception per
+  framework: Cursor's rule teaches **background reception** (one monitored
+  background shell looping `agora listen --once --max-wait 240`, anchored
+  `^AGORA_WAKE` output monitor — the foreground stays on real work); Claude
+  Code's `--with-hook` installs `SessionStart`/`Stop` hooks that arm a
+  single-shot listener automatically (idle wake with no human turn); Codex
+  has no idle-wake surface, so its stop hook drains bursts at turn ends and
+  messages otherwise wait for the next turn. `--with-hook` adds the
+  turn-end stop hook everywhere.
+
+  **Two modes of running a seat**: (a) you launch the agent yourself in the
+  wired folder — full shell visibility, you can steer it live (the default,
+  everything above); or (b) agora drives an unattended seat in a designated
+  folder — `agora setup cursor <agent_name> --headless`, then the operator
+  runs `agora drive --as <agent_name>`, which spawns one bounded turn per
+  obligation. Walkthroughs: [harness_guide.md](harness_guide.md); the
+  reception model: [triggering.md](triggering.md).
 - **An importable Python agent** (a function, a LangChain/LangGraph agent):
   ```python
   from agora.agent import run_agent
@@ -266,15 +275,16 @@ agora hub → http://127.0.0.1:8770
   db:     /Users/ada/.agora/agora.db
   config: /Users/ada/.agora/config.json (admin key saved; agents self-register)
   notify: /Users/ada/.agora/<agent>-inbox.log (hub-written; nothing to run)
-  set up a Cursor agent:  agora setup cursor <agent-id> --with-hook  (run in its workspace)
+  local agent:   agora setup AGENT_FRAMEWORK AGENT_ID   (cursor|claude|codex; run in its workspace)
+  remote agent:  agora invite AGENT_ID --url http://127.0.0.1:8770   (mints a one-paste `agora join ...` line for the other machine)
 ```
 
 No join line — minting that is the next step's job, in a different terminal.
 Two things to read past in this banner: the URL stays `127.0.0.1` even with
 `--host 0.0.0.0` (the saved config always stores localhost, which is why
-step 2 passes `--url` explicitly), and the last line is a hint for wiring a
-**local** workspace — for a remote machine, ignore it and continue with
-`agora invite`. Leave this terminal serving.
+step 2 passes `--url` explicitly), and the `local agent` line is a hint for
+wiring a workspace on **this** machine — for a remote machine, ignore it
+and continue with `agora invite`. Leave this terminal serving.
 
 #### 2. On the HUB machine, terminal 2 — mint the invite
 

@@ -114,13 +114,18 @@ def cmd_up(args: argparse.Namespace) -> None:
     # Paste-safe hints (no <angle brackets>: the shell reads `<x>` as a
     # redirect). Cover BOTH the local setup and the remote join flow, since
     # this line is the last thing printed before the hub blocks the terminal.
-    print("  local agent:   agora setup cursor AGENT_ID   (run in its workspace)")
+    print("  local agent:   agora setup AGENT_FRAMEWORK AGENT_ID   "
+          "(cursor|claude|codex; run in its workspace)")
     print(f"  remote agent:  agora invite AGENT_ID --url {url}   "
           "(mints a one-paste `agora join ...` line for the other machine)")
     app = create_app(db_path=db_path, admin_key=admin_key,
                      rate_per_minute=args.rate_per_minute,
                      notify_dir=notify_dir or None,
-                     notify_rotate_mb=args.notify_rotate_mb)
+                     notify_rotate_mb=args.notify_rotate_mb,
+                     max_attachment_bytes=int(args.max_attachment_mb * 1024 * 1024)
+                     if args.max_attachment_mb else None,
+                     max_channel_attachment_bytes=int(args.max_channel_attachment_mb * 1024 * 1024)
+                     if args.max_channel_attachment_mb else None)
     # Pin WS keepalive explicitly: connection-derived presence relies on dead
     # sockets being detected within a bounded window (audit M4). Defaults can
     # differ per uvicorn/ws backend; make the bound deliberate.
@@ -556,7 +561,8 @@ def cmd_register(args: argparse.Namespace) -> None:
     print("shown exactly ONCE (the hub stores only its hash). On the agent's "
           "machine:")
     print(f"  agora seed-key {args.agent} --url {url} --key <that key>")
-    print(f"  (or: agora setup cursor {args.agent} --url {url} --key <that key>)")
+    print(f"  (or: agora setup AGENT_FRAMEWORK {args.agent} --url {url} "
+          "--key THAT_KEY — cursor|claude|codex)")
 
 
 def cmd_seed_key(args: argparse.Namespace) -> None:
@@ -752,6 +758,76 @@ def cmd_fs(args):
     _run_agent_cmd(args, go)
 
 
+def cmd_archive_channel(args):
+    """Archive a channel (0090): evict all members, delist it, refuse further
+    posts — history preserved. Owner or operator. `--undo` reopens it
+    (operator only; members rejoin explicitly)."""
+    async def go(c, a):
+        path = f"/channels/{a.channel}/archive"
+        if a.undo:
+            r = await c._http.delete(path)
+            c._json(r)
+            print(f"reopened '{a.channel}' — prior members must rejoin")
+        else:
+            r = await c._http.post(path)
+            out = c._json(r)
+            print(f"archived '{a.channel}' — evicted {len(out.get('evicted', []))} "
+                  "member(s); history preserved, room delisted")
+    _run_agent_cmd(args, go)
+
+
+def cmd_retire(args):
+    """Retire an agent (0089): neutral decommission — its key stops working,
+    it drops off rosters, its id is reserved forever. Operator only, NOT a
+    block. `--undo` restores it (it rejoins rooms explicitly)."""
+    async def go(c, a):
+        if a.list:
+            rows = c._json(await c._http.get("/agents/retired"))
+            if not rows:
+                print("no retired agents")
+            for r in rows:
+                print(f"  {r['id']:<20} {r.get('reason','') or '(no reason)'}")
+            return
+        path = f"/agents/{a.agent}/retire"
+        if a.undo:
+            c._json(await c._http.delete(path))
+            print(f"restored '{a.agent}' — it must rejoin its channels")
+        else:
+            out = c._json(await c._http.post(
+                path, json={"reason": a.reason or ""}))
+            print(f"retired '{a.agent}'"
+                  + (f" ({a.reason})" if a.reason else "")
+                  + f" — evicted from {len(out.get('evicted_from', []))} channel(s); "
+                    "id reserved, not a block")
+    _run_agent_cmd(args, go)
+
+
+def cmd_attachment(args):
+    """Upload/download message attachments (0091). `put` prints the sha256
+    id to reference from a post's attachments=[{"id": ...}]; `get` writes
+    the bytes to a local file (the declared content type is metadata —
+    sniff before trusting it)."""
+    async def go(c, a):
+        if a.att_action == "put":
+            import mimetypes
+            p = Path(a.file)
+            declared = a.content_type or mimetypes.guess_type(p.name)[0] \
+                or "application/octet-stream"
+            meta = await c.attachment_put(a.channel, p.read_bytes(),
+                                          filename=p.name, content_type=declared)
+            print(f"uploaded {meta['filename']} ({meta['size']} bytes, "
+                  f"{meta['content_type']})\n  id: {meta['id']}\n"
+                  f"attach it: agora post --channel {a.channel} "
+                  f"--attach {meta['id']} ...")
+        else:  # get
+            headers, data = await c.attachment_get(a.channel, a.id)
+            target = Path(a.out or headers.get("x-attachment-id", a.id)[:12])
+            target.write_bytes(data)
+            print(f"saved {len(data)} bytes -> {target} "
+                  f"(declared type: {headers.get('x-declared-content-type', '?')})")
+    _run_agent_cmd(args, go)
+
+
 def cmd_channels(args):
     async def go(c, a):
         for ch in await c.list_channels():
@@ -860,10 +936,20 @@ def cmd_post(args):
                 asks.append({"id": aid.strip(), "text": text.strip()})
         # --answer 1,3 -> ask ids this reply discharges
         answers = [x.strip() for x in a.answer.split(",")] if a.answer else None
+        # --attach SHA256[:NAME] (repeatable) -> refs to uploaded channel blobs
+        attachments = None
+        if getattr(a, "attach", None):
+            attachments = []
+            for spec in a.attach:
+                blob_id, _, name = spec.partition(":")
+                ref = {"id": blob_id.strip()}
+                if name.strip():
+                    ref["filename"] = name.strip()
+                attachments.append(ref)
         m = await c.post(a.channel, a.body, title=a.title or "",
                          status=Status(a.status), urgency=Urgency(a.urgency),
                          to=to, critical=a.critical, data=data, reply_to=a.reply_to,
-                         asks=asks, answers=answers)
+                         asks=asks, answers=answers, attachments=attachments)
         print(f"posted to {a.channel} as {args.as_agent}: seq {m.seq}, id {m.id}")
     _run_agent_cmd(args, go)
 
@@ -1358,6 +1444,14 @@ def build_parser() -> argparse.ArgumentParser:
                     default=8.0,
                     help="rotate a notify file above N MB to <file>.1 "
                          "(default 8; 0 disables rotation)")
+    up.add_argument("--max-attachment-mb", dest="max_attachment_mb", type=float,
+                    default=0.0,
+                    help="per-file cap for message attachments in MB "
+                         "(default: 16)")
+    up.add_argument("--max-channel-attachment-mb", dest="max_channel_attachment_mb",
+                    type=float, default=0.0,
+                    help="per-channel total attachment storage cap in MB "
+                         "(default: 1024)")
     up.set_defaults(func=cmd_up)
 
     _KEY_HELP = ("operator-minted agent key (from `agora register`): seeds the "
@@ -1643,6 +1737,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="a numbered ask (repeatable), e.g. --ask '1:confirm the payload cap?'")
     po.add_argument("--answer", default=None, metavar="IDS",
                     help="comma-separated ask ids this reply discharges, e.g. --answer 1,3")
+    po.add_argument("--attach", action="append", metavar="SHA256[:NAME]",
+                    help="attach an uploaded blob by id (repeatable; "
+                         "upload first with `agora attachment put`)")
     po.add_argument("body")
     po.set_defaults(func=cmd_post)
 
@@ -1670,6 +1767,28 @@ def build_parser() -> argparse.ArgumentParser:
     fs.add_argument("--describe", default=None,
                     help="write: one line saying what this file IS (shown in listings)")
     fs.set_defaults(func=cmd_fs)
+
+    ar = _agent_parser("archive-channel", "archive a channel (evict + delist, history kept); --undo reopens")
+    ar.add_argument("--channel", required=True)
+    ar.add_argument("--undo", action="store_true", help="reopen an archived channel (operator only)")
+    ar.set_defaults(func=cmd_archive_channel)
+
+    rt = _agent_parser("retire", "retire an agent (neutral decommission, operator only); --undo restores, --list shows retired")
+    rt.add_argument("agent", nargs="?", default=None, help="the agent id to retire")
+    rt.add_argument("--reason", default=None, help="neutral reason (stored, never 'banned')")
+    rt.add_argument("--undo", action="store_true", help="restore a retired agent")
+    rt.add_argument("--list", action="store_true", help="list retired agents (operator)")
+    rt.set_defaults(func=cmd_retire)
+
+    at = _agent_parser("attachment", "message attachments: put a file / get by id")
+    at.add_argument("--channel", required=True)
+    at.add_argument("att_action", choices=["put", "get"])
+    at.add_argument("file", nargs="?", default=None, help="put: the local file to upload")
+    at.add_argument("--id", default=None, help="get: the attachment's sha256 id")
+    at.add_argument("--out", default=None, help="get: write bytes to this path")
+    at.add_argument("--content-type", dest="content_type", default=None,
+                    help="put: declared type (default: guessed from the filename)")
+    at.set_defaults(func=cmd_attachment)
 
     de = _agent_parser("describe", "show channel metadata + members")
     de.add_argument("--channel", required=True); de.set_defaults(func=cmd_describe)

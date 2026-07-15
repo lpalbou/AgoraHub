@@ -100,9 +100,10 @@ def test_websocket_fanout_and_backlog(client):
         assert frame["envelope"]["body"] == "live one"
         assert frame["envelope"]["urgency"] == "next_turn"
 
-        # Posting over WS works and returns confirmation.
-        ws.send_json({"type": "post", "channel": "design", "body": "roger",
-                      "status": "reply"})
+        # Posting over WS works and returns confirmation. (A bare status=reply
+        # is refused since 0050 — this frame is about the transport, not the
+        # status, so post a plain fyi.)
+        ws.send_json({"type": "post", "channel": "design", "body": "roger"})
         frame = ws.receive_json()
         while frame["type"] == "envelope":
             frame = ws.receive_json()

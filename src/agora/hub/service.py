@@ -8,6 +8,7 @@ is defined exactly once and is directly unit-testable without a server.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -25,7 +26,12 @@ from ..models import (
     MAX_ASK_CHARS,
     MAX_ASKS,
     MAX_ASSIGNEE_CHARS,
+    MAX_ATTACHMENT_BYTES,
+    MAX_ATTACHMENTS_PER_MESSAGE,
     MAX_BODY_BYTES,
+    MAX_CHANNEL_ATTACHMENT_BYTES,
+    MAX_CONTENT_TYPE_CHARS,
+    MAX_FILENAME_CHARS,
     MAX_SIGNATURE_CHARS,
     MAX_DATA_BYTES,
     MAX_FS_PATH_CHARS,
@@ -68,6 +74,37 @@ _META_LANGUAGES = {"plain", "terse", "structured"}
 MAX_READ_ANCESTORS = 5
 DARK_REALERT_SECONDS = 6 * 3600.0   # flap guard: max one alert per agent per window
 
+# Attachment serve hardening (0091): content types a browser could execute
+# as active content are stored verbatim but SERVED as octet-stream, so the
+# hub can never become a script origin. Matched on the lowercased media
+# type with parameters stripped; +xml/+html structured suffixes count too.
+ACTIVE_CONTENT_TYPES = frozenset({
+    "text/html", "application/xhtml+xml", "image/svg+xml",
+    "text/xml", "application/xml",
+    "application/javascript", "text/javascript", "application/ecmascript",
+})
+_CONTENT_TYPE_OK = re.compile(r"^[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+$")
+_SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
+
+
+def safe_serve_content_type(declared: str) -> str:
+    """The content type the hub SERVES for a stored blob. The declared type
+    is client metadata and never verified against the bytes (settled with
+    the consumer, dm continuum#10-11): serving must stay safe even when it
+    lies, so anything active — or malformed — goes out as octet-stream.
+
+    INVARIANT (review hardening nit): this is the ONLY function whose output
+    may feed a real Content-Type header. The stored declared type is
+    CR/LF-stripped but not charset-restricted, so routing it straight into a
+    response Content-Type would reintroduce the risk this closes — keep it
+    behind this gate."""
+    media = declared.split(";", 1)[0].strip().lower()
+    if not _CONTENT_TYPE_OK.fullmatch(media):
+        return "application/octet-stream"
+    if media in ACTIVE_CONTENT_TYPES or media.endswith(("+xml", "+html")):
+        return "application/octet-stream"
+    return media
+
 
 def _derived_description(head: str) -> str:
     """Fallback description for files whose writer set none: the first
@@ -90,8 +127,12 @@ class HubError(Exception):
 class HubService:
     def __init__(self, db: Database, *, rate_per_minute: float = 60.0,
                  interrupts_per_hour: int = 6, criticals_per_hour: int = 5,
-                 notify_sink=None) -> None:
+                 notify_sink=None,
+                 max_attachment_bytes: int = MAX_ATTACHMENT_BYTES,
+                 max_channel_attachment_bytes: int = MAX_CHANNEL_ATTACHMENT_BYTES) -> None:
         self.db = db
+        self.max_attachment_bytes = max_attachment_bytes
+        self.max_channel_attachment_bytes = max_channel_attachment_bytes
         # One shared binder so fan-out and long-poll wakes marshal onto the
         # same serving loop from synchronous (threadpool) request handlers.
         self._binder = LoopBinder()
@@ -157,6 +198,13 @@ class HubService:
                        about: str = "") -> tuple[AgentInfo, str]:
         self._validate_agent_id(agent_id)
         self._require_not_hub_blocked_id(agent_id)
+        if self.db.agent_retirement(agent_id) is not None:
+            # A retired id stays RESERVED forever: re-registering it would let
+            # a new principal inherit an old id's message attribution (0089).
+            raise HubError(409, f"agent id '{agent_id}' is retired and cannot "
+                                "be reused — ids are never recycled so history "
+                                "attribution holds. An operator can restore the "
+                                "original identity with unretire.")
         if self.db.agent_exists(agent_id):
             raise HubError(409, f"agent '{agent_id}' already exists")
         api_key = new_token("agora")
@@ -203,6 +251,15 @@ class HubService:
                                 + (f" — {block['reason']}" if block["reason"] else "")
                                 + ". Access resumes when the block expires "
                                   "or an operator lifts it.")
+        # Retirement is a NEUTRAL end-of-life, distinct from a block: the key
+        # stops working with wording that never implies wrongdoing (0089).
+        # An operator un-retires; the id itself stays reserved forever.
+        retirement = self.db.agent_retirement(agent.id)
+        if retirement is not None:
+            raise HubError(403, "this identity has been retired"
+                                + (f" ({retirement['reason']})" if retirement["reason"] else "")
+                                + " — a decommissioned seat, not a block. An "
+                                  "operator can restore it; the id is never reused.")
         # Every authenticated call is a liveness signal: MCP/REST-only tabs
         # have no push connection, and without this they read "offline" while
         # visibly working.
@@ -345,6 +402,9 @@ class HubService:
             raise HubError(400, "cannot open a direct channel with yourself")
         if not self.db.agent_exists(peer):
             raise HubError(404, f"agent '{peer}' is not registered")
+        if self.db.agent_retirement(peer) is not None:
+            raise HubError(404, f"agent '{peer}' has been retired "
+                                "(decommissioned) — no new direct channel")
         name = dm_channel_name(agent.id, peer)
         # Idempotent get-or-create: concurrent first-contact from both peers must
         # not race into a 500, and membership is (re)asserted every call so a
@@ -377,6 +437,9 @@ class HubService:
         # Only owners may extend the trust boundary of a private channel.
         # This blunts the confused-deputy risk of an LLM member being talked
         # into inviting an attacker (red-team finding).
+        if self.db.channel_archived(channel):
+            raise HubError(409, f"channel '{channel}' is archived (ended) — "
+                                "no new invites")
         role = self.db.member_role(channel, agent.id)
         if role != "owner":
             raise HubError(403, "only the channel owner can create invites")
@@ -391,6 +454,9 @@ class HubService:
         info = self.db.get_channel(channel)
         if info is None:
             raise HubError(404, f"channel '{channel}' not found")
+        if self.db.channel_archived(channel):
+            raise HubError(409, f"channel '{channel}' is archived (ended) — "
+                                "an operator must reopen it before anyone joins")
         if channel.startswith(DM_PREFIX) and not self.db.is_member(channel, agent.id):
             raise HubError(403, "direct channels cannot be joined")
         # A kick/ban must hold against BOTH join paths (public join and
@@ -555,12 +621,21 @@ class HubService:
             data["asks"] = [a.model_dump(exclude_none=True) for a in payload.asks]
         if payload.answers is not None:
             data["answers"] = [str(x) for x in payload.answers]
+        if payload.attachments is not None:
+            data["attachments"] = [a.model_dump(exclude_none=True)
+                                   for a in payload.attachments]
         if "asks" in data:
             data["asks"] = self._validate_asks(data["asks"], payload.status,
                                                sender=sender, channel=channel)
         if "answers" in data:
             data["answers"] = self._validate_answers(data["answers"], payload.status,
                                                      payload.reply_to, sender)
+        if "attachments" in data:
+            # Refs are validated against THIS channel's blob store and
+            # normalized from server truth (0091) — whether they arrived via
+            # the typed param or a hand-built data payload.
+            data["attachments"] = self._validate_attachments(data["attachments"],
+                                                             channel)
         if "settled_by" in data:
             if payload.status != Status.resolved or not payload.reply_to:
                 raise HubError(400, "settled_by is only allowed on a resolved "
@@ -602,12 +677,116 @@ class HubService:
         return result
 
     def channel_state(self, channel: str) -> str:
-        """A channel is `open` (default) or `closed`. Closed = its session/room
-        ended; new member posts are refused. Owner-controlled via channel:meta."""
+        """A channel is `open` (default), `closed`, or `archived`. Closed =
+        session ended, posts refused but the room stays on members' rails.
+        Archived (0090) is the stronger end: members evicted, delisted,
+        history kept. Archived (first-class column) outranks closed (meta)."""
+        if self.db.channel_archived(channel):
+            return "archived"
         meta = self.db.store_get(channel, CHANNEL_META_KEY)
         if meta and isinstance(meta.value, dict) and meta.value.get("state") == "closed":
             return "closed"
         return "open"
+
+    def _require_not_archived(self, channel: str) -> None:
+        """Defense in depth for every WRITE path (review P2): archive evicts
+        members so membership normally blocks first, but a join/archive TOCTOU
+        or a re-added operator (hub-alerts) can leave a live member on an
+        archived channel — no write should mutate an ended room regardless."""
+        if self.db.channel_archived(channel):
+            raise HubError(409, f"channel '{channel}' is archived (ended); "
+                                "history is preserved but it accepts no writes")
+
+    def archive_channel(self, agent: AgentInfo, channel: str) -> dict[str, Any]:
+        """End a channel (0090): evict every member (channel-scoped — hub
+        membership and identities untouched), delist it for everyone, refuse
+        further posts/joins/invites. Messages, store, fs and blobs are
+        PRESERVED (append-only; operator-readable). Owner or operator only;
+        idempotent. DMs are out of scope (ownerless; `leave` covers them, and
+        a peer must never vaporize the other's view of the record)."""
+        self._require_unpaused(agent, channel)
+        info = self.db.get_channel(channel)
+        if info is None:
+            raise HubError(404, f"channel '{channel}' not found")
+        if channel.startswith(DM_PREFIX):
+            raise HubError(400, "direct channels cannot be archived — use "
+                                "`leave` (a DM is ownerless; neither peer may "
+                                "erase the other's record)")
+        # Authority keys on the DURABLE creator id (channels.created_by), not
+        # the members table: archive evicts everyone including the owner, so a
+        # role lookup would make even a second archive fail. There is no
+        # ownership transfer in this hub, so created_by IS the owner.
+        if not agent.operator and info.created_by != agent.id:
+            raise HubError(403, "only the channel owner or an operator can "
+                                "archive a channel")
+        already = self.db.channel_archived(channel)
+        evicted = self.db.archive_channel(channel)
+        if not already:
+            # System note lands BEFORE eviction-as-seen: the record shows who
+            # ended the room and when (the ledger keeps it forever).
+            self._post_system(channel, f"channel archived by {agent.id} — "
+                                       f"{len(evicted)} member(s) evicted; "
+                                       "history preserved, room delisted")
+        return {"channel": channel, "archived": True, "evicted": sorted(evicted),
+                "already_archived": already}
+
+    def unarchive_channel(self, agent: AgentInfo, channel: str) -> dict[str, Any]:
+        """Reopen an archived channel (OPERATOR only — not the owner: an owner
+        could otherwise flap a room on and off everyone's rails). Restores
+        visibility and posting; members are NOT restored (rejoin/re-invite is
+        explicit, same rule as unretire)."""
+        self._require_unpaused(agent, channel)
+        if not agent.operator:
+            raise HubError(403, "only an operator can unarchive a channel "
+                                "(reopening a room is not the owner's call)")
+        info = self.db.get_channel(channel)
+        if info is None:
+            raise HubError(404, f"channel '{channel}' not found")
+        if not self.db.channel_archived(channel):
+            return {"channel": channel, "archived": False, "already_open": True}
+        self.db.unarchive_channel(channel)
+        # Restore the ORIGINAL owner's role, not a plain operator membership
+        # (review P1): archive evicted everyone including the owner, and the
+        # only owner-grant path is create_channel, so without this the room
+        # reopens ownerless — invite minting and channel:meta writes (both
+        # owner-gated) strand forever, sealing a private room shut. created_by
+        # is immutable and never reused, so it is the durable owner id. This
+        # mirrors the moderation rule that refuses to kick a channel owner
+        # for exactly this strand.
+        self.db.add_member(channel, info.created_by, role="owner")
+        self._post_system(channel, f"channel reopened by {agent.id} — owner "
+                                   f"{info.created_by} restored; prior members "
+                                   "must rejoin")
+        return {"channel": channel, "archived": False, "owner": info.created_by}
+
+    def retire_agent(self, agent: AgentInfo, target_id: str,
+                     reason: str = "") -> dict[str, Any]:
+        """Retire an agent (0089): a NEUTRAL decommission, not a block. Its
+        key stops authenticating (neutral 403), it is evicted from every
+        channel and drops off rosters/presence, and its id stays reserved
+        forever so message attribution can never be hijacked. Operator only
+        (lifecycle is the operator's; an agent cannot retire a colleague or
+        itself). Idempotent."""
+        if not agent.operator:
+            raise HubError(403, "retiring an identity is an operator act")
+        if not self.db.agent_exists(target_id):
+            raise HubError(404, f"agent '{target_id}' is not registered")
+        if target_id in self.operator_ids():
+            raise HubError(403, "operators cannot be retired (lifecycle safety)")
+        reason = sanitize_text(str(reason or ""), 200)
+        evicted = self.db.retire_agent(target_id, reason)
+        return {"agent": target_id, "retired": True, "reason": reason,
+                "evicted_from": sorted(evicted)}
+
+    def unretire_agent(self, agent: AgentInfo, target_id: str) -> dict[str, Any]:
+        """Restore a retired agent's auth (operator only). Memberships are NOT
+        restored — the agent rejoins its rooms explicitly."""
+        if not agent.operator:
+            raise HubError(403, "restoring an identity is an operator act")
+        if self.db.agent_retirement(target_id) is None:
+            return {"agent": target_id, "retired": False, "already_active": True}
+        self.db.unretire_agent(target_id)
+        return {"agent": target_id, "retired": False}
 
     def post_message(self, agent: AgentInfo, channel: str, payload: PostMessage) -> Message:
         """Post with a refusal audit: a refused send previously left no trace
@@ -629,13 +808,44 @@ class HubService:
     def _post_message(self, agent: AgentInfo, channel: str, payload: PostMessage) -> Message:
         self.require_membership(channel, agent.id)
         self._require_unpaused(agent, channel)
-        if self.channel_state(channel) == "closed":
+        state = self.channel_state(channel)
+        if state == "archived":
+            # Archived rooms evict everyone, so membership normally blocks
+            # first; this is the explicit, clear refusal (0090) in case a
+            # member row ever survives, and names the stronger end-state.
+            raise HubError(409, f"channel '{channel}' is archived (ended); "
+                                "history is preserved but it accepts no posts")
+        if state == "closed":
             # A room whose session died accepts no more turns — the bridge and
             # any subscriber get a clean 409 instead of writing into a dead room.
             raise HubError(409, f"channel '{channel}' is closed to new posts")
+        # DM to a RETIRED peer: refuse uniformly here too, not just in the
+        # open_dm/post_dm path (review P2 — retirement evicts only the retired
+        # agent's own rows, so the surviving peer keeps DM membership and could
+        # otherwise append to a decommissioned peer's DM via raw post_message).
+        if channel.startswith(DM_PREFIX):
+            peers = [i for i in channel[len(DM_PREFIX):].split("--") if i != agent.id]
+            retired = [p for p in peers if self.db.agent_retirement(p) is not None]
+            if retired:
+                raise HubError(409, f"'{retired[0]}' has been retired "
+                                    "(decommissioned) — this direct channel is "
+                                    "closed to new messages")
         self._require_charter_read(channel, agent)
         if len(payload.body.encode()) > MAX_BODY_BYTES:
             raise HubError(413, f"body exceeds {MAX_BODY_BYTES} bytes")
+        # A reply's whole meaning is "this answers something": a bare
+        # status=reply pointing at nothing discharges nothing, so the sender
+        # believes they answered while the asker's obligation rots and
+        # escalates — a silent failure both sides misread (live incident
+        # 2026-07-08; backlog 0050). Refuse with the fix in hand. Other
+        # statuses legitimately stand alone (`resolved` without reply_to is
+        # a valid free-standing close), and no parent is ever auto-inferred
+        # (guessing would misattribute answers).
+        if payload.status == Status.reply and payload.reply_to is None:
+            raise HubError(400, "status=reply requires reply_to=<the message "
+                                "id you are answering> — a bare reply "
+                                "discharges nothing and the obligation you "
+                                "answered stays open")
         # `reply_to` must reference a message in THIS channel. Without this a
         # sender could point reply_to at a message in a channel it cannot read
         # and later harvest it via read_message's ancestor walk (the v0.3 IDOR).
@@ -1163,6 +1373,7 @@ class HubService:
                   expect_version: int | None = None) -> StoreEntry:
         self.require_membership(channel, agent.id)
         self._require_unpaused(agent, channel)
+        self._require_not_archived(channel)
         if len(json.dumps(value).encode()) > MAX_STORE_VALUE_BYTES:
             raise HubError(413, f"store value exceeds {MAX_STORE_VALUE_BYTES} bytes")
         if key.startswith(FS_PREFIX):
@@ -1341,6 +1552,100 @@ class HubService:
         )
         self._wake(message)
 
+    # -- message attachments (0091): content-addressed channel blobs ------------
+
+    def attachment_put(self, agent: AgentInfo, channel: str, data: bytes, *,
+                       filename: str = "", content_type: str = "") -> dict[str, Any]:
+        """Store an attachment blob in this channel; returns its metadata
+        ({id, filename, content_type, size, ...}) where id = sha256(bytes).
+        Idempotent for identical bytes. The declared content_type is stored
+        VERBATIM as metadata and never verified against the bytes — serving
+        is hardened independently (safe_serve_content_type), and consumers
+        sniff before inline-rendering (contract, dm continuum#10-11).
+        Upload is a post-class act: membership, pause, closed-state, and the
+        sender rate limit all apply; the charter gate does not (the POST
+        that references the blob is where the room's rules bind)."""
+        self.require_membership(channel, agent.id)
+        self._require_unpaused(agent, channel)
+        self._require_not_archived(channel)
+        if self.channel_state(channel) == "closed":
+            raise HubError(409, f"channel '{channel}' is closed to new posts")
+        if not isinstance(data, (bytes, bytearray)) or len(data) == 0:
+            raise HubError(400, "attachment is empty — upload the file bytes "
+                                "as the request body")
+        if len(data) > self.max_attachment_bytes:
+            raise HubError(413, f"attachment exceeds {self.max_attachment_bytes} "
+                                "bytes (operator-configurable cap)")
+        # Per-channel aggregate quota (review P2): append-only blobs cannot be
+        # deleted, so without a ceiling one member fills the disk one distinct
+        # file at a time — the class that took the volume to 100% today.
+        # Skip the walk when the new bytes already exist (dedup = no growth).
+        if self.db.blob_meta(channel, hashlib.sha256(data).hexdigest()) is None:
+            used = self.db.blob_channel_bytes(channel)
+            if used + len(data) > self.max_channel_attachment_bytes:
+                raise HubError(413,
+                    f"channel attachment storage full: {used} + {len(data)} "
+                    f"bytes exceeds the {self.max_channel_attachment_bytes}-byte "
+                    "per-channel cap — an operator must raise the cap or archive "
+                    "the channel")
+        wait = self.ratelimiter.acquire(agent.id)
+        if wait > 0.0:
+            raise HubError(429, f"rate limit exceeded — retry in {wait:.1f}s "
+                                "(steady pace; are you in an upload loop?)")
+        filename = sanitize_text(str(filename or ""), MAX_FILENAME_CHARS) or "attachment"
+        declared = sanitize_text(str(content_type or ""), MAX_CONTENT_TYPE_CHARS) \
+            or "application/octet-stream"
+        return self.db.blob_put(channel, bytes(data), filename=filename,
+                                content_type=declared, created_by=agent.id)
+
+    def attachment_get(self, agent: AgentInfo, channel: str,
+                       blob_id: str) -> tuple[dict[str, Any], bytes]:
+        """Fetch an attachment's metadata + bytes. Membership-gated like any
+        read; the id is validated as a sha256 hex before touching the DB so
+        the 404 cannot act as a shape oracle."""
+        self.require_membership(channel, agent.id)
+        if not _SHA256_HEX.fullmatch(str(blob_id or "")):
+            raise HubError(400, "attachment id must be the blob's sha256 hex")
+        found = self.db.blob_get(channel, blob_id)
+        if found is None:
+            raise HubError(404, f"no attachment {blob_id[:12]}… in '{channel}'")
+        return found
+
+    def _validate_attachments(self, raw: Any, channel: str) -> list[dict[str, Any]]:
+        """Normalize a message's attachment refs against the channel's blob
+        store. Runs on the EFFECTIVE field (typed param or raw `data`), like
+        asks/answers — no bypass path. Size/content_type always come from
+        the blob row (server truth): a message cannot misdescribe its file."""
+        if not isinstance(raw, list):
+            raise HubError(400, "attachments must be a list of {id, filename?} refs")
+        if len(raw) > MAX_ATTACHMENTS_PER_MESSAGE:
+            raise HubError(400, f"a message carries at most "
+                                f"{MAX_ATTACHMENTS_PER_MESSAGE} attachments")
+        normalized: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in raw:
+            if not isinstance(item, dict) or "id" not in item:
+                raise HubError(400, "each attachment ref needs an id "
+                                    "(the blob's sha256 from the upload)")
+            blob_id = str(item["id"]).strip().lower()
+            if not _SHA256_HEX.fullmatch(blob_id):
+                raise HubError(400, "attachment id must be the sha256 hex the "
+                                    "upload returned")
+            if blob_id in seen:
+                raise HubError(400, f"duplicate attachment ref {blob_id[:12]}…")
+            seen.add(blob_id)
+            meta = self.db.blob_meta(channel, blob_id)
+            if meta is None:
+                raise HubError(400, f"attachment {blob_id[:12]}… is not uploaded "
+                                    f"to '{channel}' — POST the bytes to "
+                                    "/channels/{channel}/attachments first")
+            filename = sanitize_text(str(item.get("filename") or ""),
+                                     MAX_FILENAME_CHARS) or meta["filename"]
+            normalized.append({"id": blob_id, "filename": filename,
+                               "content_type": meta["content_type"],
+                               "size": meta["size"]})
+        return normalized
+
     def _require_channel_authority(self, channel: str, agent: AgentInfo) -> None:
         """The reserved `channel/` fs prefix mirrors the store's `channel:` keys:
         channel-owned surfaces are writable by the owner alone — plus the
@@ -1362,6 +1667,7 @@ class HubService:
         title. Returns the new FsFile with its bumped version."""
         self.require_membership(channel, agent.id)
         self._require_unpaused(agent, channel)
+        self._require_not_archived(channel)
         norm = self._normalize_fs_path(path)
         if norm.startswith(RESERVED_FS_PREFIX):
             self._require_channel_authority(channel, agent)
@@ -1441,6 +1747,7 @@ class HubService:
         fence). Returns False if the file was absent or already deleted."""
         self.require_membership(channel, agent.id)
         self._require_unpaused(agent, channel)
+        self._require_not_archived(channel)
         norm = self._normalize_fs_path(path)
         if norm.startswith(RESERVED_FS_PREFIX):
             self._require_channel_authority(channel, agent)
@@ -1733,6 +2040,26 @@ class HubService:
                                     "that settled it)")
             value["decided"] = sanitize_text(decided, 200)
 
+    # Terminal claim-status spellings observed in the field beside the taught
+    # {"done": true} (hub rule 2 / the skill): seats write status="done" or
+    # "shipped" and mean the same thing. Exact match on the whole lowered
+    # string — a free-text status like "designed ...; build next session"
+    # stays live.
+    _TERMINAL_CLAIM_STATUSES = frozenset(
+        {"done", "shipped", "complete", "completed", "delivered"})
+
+    @classmethod
+    def _claim_done(cls, value: dict[str, Any]) -> bool:
+        """ONE predicate for "this claim row is terminal", shared by the
+        board and the steward sweep so the two surfaces can never disagree
+        about what is in progress (field finding c2409: the sweep keyed on
+        updated_at alone, so done rows re-escalated forever and every
+        canvass round bumped timestamps nobody would ever touch again)."""
+        if value.get("done"):
+            return True
+        status = str(value.get("status", "")).strip().lower()
+        return status in cls._TERMINAL_CLAIM_STATUSES
+
     def board(self, agent: AgentInfo) -> dict[str, Any]:
         """The viewer's decision board, derived from structure the messages
         and stores already carry (design 0070): pending-on-me (the inbox
@@ -1814,7 +2141,7 @@ class HubService:
                         "owner": v.get("owner", stored.updated_by),
                         "updated_by": stored.updated_by,
                         "updated_at": stored.updated_at}
-                if not v.get("done"):
+                if not self._claim_done(v):
                     in_progress.append(item)
                 elif v.get("review", "none") in ("operator", "delegate") \
                         and slug not in decision_slugs:
@@ -2088,6 +2415,11 @@ class HubService:
                 stored = self.db.store_get(ch, key)
                 if stored is None or not isinstance(stored.value, dict):
                     continue
+                if self._claim_done(stored.value):
+                    # Finished work is never stale work: a done/shipped row
+                    # must not re-escalate on age (c2409) — the episode ends
+                    # below exactly as if the row were touched.
+                    continue
                 if stored.value.get("done"):
                     continue
                 age = now - stored.updated_at
@@ -2117,7 +2449,8 @@ class HubService:
                 + (f" (+{len(fresh) - 8} more)" if len(fresh) > 8 else "")
                 + ". Canvass the owners per your charter: one bundled ask "
                   "per seat, or reassign via the queue. Touching the claim "
-                  "row is the progress receipt that clears this.",
+                  "row is the progress receipt that clears this; a row "
+                  "marked done/shipped never alerts.",
                 to=stewards)
             return [f"stale-claims:{len(fresh)}"]
         return []

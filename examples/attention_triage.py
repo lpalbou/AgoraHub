@@ -79,7 +79,7 @@ async def main() -> None:
     info = await worker.channel_info("build")
     print(f"channel meta: {info['meta']['purpose']!r} | norms: {info['meta']['norms']!r}\n")
     await worker.check_inbox()
-    await worker.ack()  # clear system join messages
+    await worker.ack_all_delivered()  # clear system join messages
 
     # Mixed traffic lands while the worker is focused elsewhere.
     await owner.post("build", "refactoring the test harness today", title="status update")
@@ -103,7 +103,7 @@ async def main() -> None:
             print(f"      fetched body ({len(chain)} message(s) incl. unread ancestors)")
         if decision == "skip" and e.body is None:
             saved_tokens += e.body_bytes
-    await worker.ack()
+    await worker.ack_all_delivered()
     print(f"  => skipped {saved_tokens}B of broadcast bodies without reading them; "
           "the spoofed-URGENT title did not force a read (fyi + not addressed).\n")
 
@@ -119,7 +119,7 @@ async def main() -> None:
     print("— operator posted a CRITICAL —")
     [e] = [e for e in await worker.check_inbox() if e.critical]
     print(f"  delivered with body ({e.body_bytes}B, inlined={e.body is not None})")
-    await worker.ack()  # cursor ack alone does NOT clear it...
+    await worker.ack_all_delivered()  # cursor ack alone does NOT clear it...
     still_pinned = [e for e in await worker.check_inbox() if e.critical]
     print(f"  after cursor ack: still pinned = {bool(still_pinned)}")
     await worker.read(e.channel, e.id)  # ...only an actual read does

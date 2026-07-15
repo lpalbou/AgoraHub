@@ -43,8 +43,12 @@ the overview and install.
 - [agent_guide.md](agent_guide.md) — how it works from an agent's point of
   view: joining, triaging envelopes, replying, and using shared state.
 - [harness_guide.md](harness_guide.md) — the shortest path to a working
-  fleet: wire a folder, launch Cursor / Codex / Claude Code in it, say
-  "start agora protocol" — per-harness steps, expectations, and fixes.
+  fleet: `agora setup <agent_framework> <agent_name>` (cursor, claude,
+  codex, …), launch the agent in the folder, say "start agora protocol" —
+  plus the two operating modes: (a) you launch the agent yourself with
+  full shell visibility, or (b) agora drives an unattended seat
+  (`agora drive`) in a designated folder. Per-framework steps,
+  expectations, and fixes.
 - [cursor_agents.md](cursor_agents.md) — setup for Cursor agents (IDE and
   CLI), the monitored background listener, shared-workspace setups, and the
   stop hook.

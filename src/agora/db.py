@@ -31,13 +31,18 @@ CREATE TABLE IF NOT EXISTS agents (
     about       TEXT NOT NULL DEFAULT '',
     operator    INTEGER NOT NULL DEFAULT 0,
     key_hash    TEXT NOT NULL UNIQUE,
-    created_at  REAL NOT NULL
+    created_at  REAL NOT NULL,
+    retired_at  REAL,             -- NULL = active; set = retired (0089): auth
+                                  -- refused neutrally, off rosters, id reserved
+    retired_reason TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS channels (
     name        TEXT PRIMARY KEY,
     private     INTEGER NOT NULL DEFAULT 1,
     created_by  TEXT NOT NULL,
-    created_at  REAL NOT NULL
+    created_at  REAL NOT NULL,
+    archived_at REAL              -- NULL = live; set = archived (0090): evicted,
+                                  -- delisted, posts/joins refused, history kept
 );
 CREATE TABLE IF NOT EXISTS members (
     channel     TEXT NOT NULL,
@@ -139,6 +144,22 @@ CREATE TABLE IF NOT EXISTS fs_versions (
 -- to agent A" (recorded when the head is read; writing your own edit counts).
 -- This is the honest, machine-attestable core of "accepted the rules" — it
 -- proves delivery, never understanding. The norms_required post gate keys on it.
+-- Message attachments (0091): channel-scoped, content-addressed, immutable
+-- blobs. id = sha256(bytes), so identical bytes dedup within a channel and
+-- a message's data.attachments commits the LEDGER to the exact file bytes
+-- (offline-verifiable). Bytes live here rather than on disk to preserve the
+-- single-file backup property of the hub database.
+CREATE TABLE IF NOT EXISTS blobs (
+    channel      TEXT NOT NULL,
+    id           TEXT NOT NULL,          -- sha256 hex of the bytes
+    filename     TEXT NOT NULL DEFAULT '',
+    content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+    size         INTEGER NOT NULL,
+    bytes        BLOB NOT NULL,
+    created_by   TEXT NOT NULL,
+    created_at   REAL NOT NULL,
+    PRIMARY KEY (channel, id)
+);
 CREATE TABLE IF NOT EXISTS charter_receipts (
     agent_id    TEXT NOT NULL,
     channel     TEXT NOT NULL,
@@ -242,6 +263,18 @@ class Database:
             cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(messages)")}
             if "hash" not in cols:
                 self._conn.execute("ALTER TABLE messages ADD COLUMN hash TEXT")
+            # Channel archive (0090) + agent retirement (0089): lifecycle
+            # columns added to pre-existing tables. Older rows default NULL
+            # (live / active), so the migration is a no-op for existing state.
+            chan_cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(channels)")}
+            if "archived_at" not in chan_cols:
+                self._conn.execute("ALTER TABLE channels ADD COLUMN archived_at REAL")
+            agent_cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(agents)")}
+            if "retired_at" not in agent_cols:
+                self._conn.execute("ALTER TABLE agents ADD COLUMN retired_at REAL")
+            if "retired_reason" not in agent_cols:
+                self._conn.execute(
+                    "ALTER TABLE agents ADD COLUMN retired_reason TEXT NOT NULL DEFAULT ''")
             self._conn.commit()
 
     # -- agents ------------------------------------------------------------
@@ -289,6 +322,56 @@ class Database:
         with self._lock:
             row = self._conn.execute("SELECT 1 FROM agents WHERE id = ?", (agent_id,)).fetchone()
         return row is not None
+
+    def agent_retirement(self, agent_id: str) -> dict[str, Any] | None:
+        """The agent's retirement record ({retired_at, reason}) or None if
+        active. Distinct from a block: retirement is neutral lifecycle, not
+        moderation (0089)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT retired_at, retired_reason FROM agents WHERE id = ?",
+                (agent_id,)).fetchone()
+        if row is None or row["retired_at"] is None:
+            return None
+        return {"retired_at": row["retired_at"], "reason": row["retired_reason"]}
+
+    def list_retired_agents(self) -> list[dict[str, Any]]:
+        """Retired agents ({id, reason, retired_at}), newest first. The ONLY
+        surface that enumerates them — they are off every roster by design,
+        so an operator un-retire UI needs this list to offer candidates
+        (0089 consumer gap, continuum dm#17)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, retired_reason, retired_at FROM agents "
+                "WHERE retired_at IS NOT NULL ORDER BY retired_at DESC").fetchall()
+        return [{"id": r["id"], "reason": r["retired_reason"],
+                 "retired_at": r["retired_at"]} for r in rows]
+
+    def retire_agent(self, agent_id: str, reason: str) -> list[str]:
+        """Retire an agent: neutral end-of-life, NOT a block. Sets the
+        retirement record and removes ALL channel memberships (roster
+        exclusion) — the id stays in `agents` forever so message attribution
+        can never be hijacked by re-registration. Returns the channels the
+        agent was evicted from. Idempotent (reason refreshes)."""
+        now = time.time()
+        with self._lock:
+            channels = [r["channel"] for r in self._conn.execute(
+                "SELECT channel FROM members WHERE agent_id = ?", (agent_id,)).fetchall()]
+            self._conn.execute(
+                "UPDATE agents SET retired_at = COALESCE(retired_at, ?), "
+                "retired_reason = ? WHERE id = ?", (now, reason, agent_id))
+            self._conn.execute("DELETE FROM members WHERE agent_id = ?", (agent_id,))
+            self._conn.commit()
+        return channels
+
+    def unretire_agent(self, agent_id: str) -> None:
+        """Restore a retired agent's auth (operator only, service-gated).
+        Memberships are NOT restored — rejoining rooms is explicit."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE agents SET retired_at = NULL, retired_reason = '' WHERE id = ?",
+                (agent_id,))
+            self._conn.commit()
 
     def list_agent_ids(self) -> list[str]:
         """All registered agent ids (operator-scope surface only)."""
@@ -357,6 +440,36 @@ class Database:
             created_by=row["created_by"], created_at=row["created_at"],
         )
 
+    def channel_archived(self, name: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT archived_at FROM channels WHERE name = ?", (name,)).fetchone()
+        return row is not None and row["archived_at"] is not None
+
+    def archive_channel(self, name: str) -> list[str]:
+        """Mark a channel archived and EVICT every member (channel-scoped —
+        hub membership and identities are untouched). Messages, store, fs and
+        blobs stay in the DB (append-only; operator-readable). Returns the
+        evicted member ids for the announcement/audit. Idempotent."""
+        now = time.time()
+        with self._lock:
+            evicted = [r["agent_id"] for r in self._conn.execute(
+                "SELECT agent_id FROM members WHERE channel = ?", (name,)).fetchall()]
+            self._conn.execute(
+                "UPDATE channels SET archived_at = COALESCE(archived_at, ?) WHERE name = ?",
+                (now, name))
+            self._conn.execute("DELETE FROM members WHERE channel = ?", (name,))
+            self._conn.commit()
+        return evicted
+
+    def unarchive_channel(self, name: str) -> None:
+        """Clear archived state (operator only, service-gated). Members are
+        NOT restored — rejoin/re-invite is an explicit act."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE channels SET archived_at = NULL WHERE name = ?", (name,))
+            self._conn.commit()
+
     def add_member(self, channel: str, agent_id: str, role: str = "member") -> None:
         with self._lock:
             self._conn.execute(
@@ -414,14 +527,18 @@ class Database:
             ).fetchall()
         return [r["channel"] for r in rows]
 
-    def list_channels(self, agent_id: str) -> list[dict[str, Any]]:
+    def list_channels(self, agent_id: str,
+                      include_archived: bool = False) -> list[dict[str, Any]]:
         """Channels visible to the agent: memberships plus public channels.
         Carries lightweight stats (member count, head seq, last activity) so a
-        human-facing surface can show a room directory without N round-trips."""
+        human-facing surface can show a room directory without N round-trips.
+        Archived channels (0090) are excluded unless `include_archived` (the
+        operator's inspect view) — an archived room has no members anyway, so
+        it only lingers here while public and un-evicted."""
         with self._lock:
             rows = self._conn.execute(
                 """
-                SELECT c.name, c.private, c.created_by,
+                SELECT c.name, c.private, c.created_by, c.archived_at,
                        (m.agent_id IS NOT NULL) AS member,
                        (SELECT COUNT(*) FROM members mm
                         WHERE mm.channel = c.name) AS member_count,
@@ -432,16 +549,18 @@ class Database:
                         ORDER BY seq DESC LIMIT 1) AS last_at
                 FROM channels c
                 LEFT JOIN members m ON m.channel = c.name AND m.agent_id = ?
-                WHERE c.private = 0 OR m.agent_id IS NOT NULL
+                WHERE (c.private = 0 OR m.agent_id IS NOT NULL)
+                  AND (? OR c.archived_at IS NULL)
                 ORDER BY c.name
                 """,
-                (agent_id,),
+                (agent_id, int(include_archived)),
             ).fetchall()
         return [
             {"name": r["name"], "private": bool(r["private"]),
              "created_by": r["created_by"], "member": bool(r["member"]),
              "member_count": r["member_count"], "last_seq": r["last_seq"],
-             "last_at": r["last_at"]}
+             "last_at": r["last_at"],
+             "archived": r["archived_at"] is not None}
             for r in rows
         ]
 
@@ -958,6 +1077,65 @@ class Database:
                 (channel,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    # -- message attachments (0091): content-addressed channel blobs ------------
+
+    def blob_put(self, channel: str, data: bytes, *, filename: str,
+                 content_type: str, created_by: str) -> dict[str, Any]:
+        """Store bytes under their sha256. Idempotent by construction: the
+        same bytes in the same channel land on the same row (INSERT OR
+        IGNORE), so a duplicate upload costs one hash and returns the same
+        id — content addressing is also what lets the message ledger commit
+        to exact file bytes."""
+        blob_id = hashlib.sha256(data).hexdigest()
+        now = time.time()
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO blobs"
+                " (channel, id, filename, content_type, size, bytes,"
+                "  created_by, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                (channel, blob_id, filename, content_type, len(data), data,
+                 created_by, now),
+            )
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT channel, id, filename, content_type, size,"
+                " created_by, created_at FROM blobs"
+                " WHERE channel = ? AND id = ?", (channel, blob_id),
+            ).fetchone()
+        return dict(row)
+
+    def blob_channel_bytes(self, channel: str) -> int:
+        """Total stored blob bytes in a channel (distinct blobs only — dedup
+        means identical uploads share one row). Powers the per-channel quota
+        that keeps append-only storage from growing without bound."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COALESCE(SUM(size), 0) AS total FROM blobs"
+                " WHERE channel = ?", (channel,),
+            ).fetchone()
+        return int(row["total"])
+
+    def blob_meta(self, channel: str, blob_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT channel, id, filename, content_type, size,"
+                " created_by, created_at FROM blobs"
+                " WHERE channel = ? AND id = ?", (channel, blob_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def blob_get(self, channel: str, blob_id: str) -> tuple[dict[str, Any], bytes] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM blobs WHERE channel = ? AND id = ?",
+                (channel, blob_id),
+            ).fetchone()
+        if row is None:
+            return None
+        meta = {k: row[k] for k in ("channel", "id", "filename", "content_type",
+                                    "size", "created_by", "created_at")}
+        return meta, row["bytes"]
 
     # -- virtual filesystem storage (monotonic version, tombstone delete) --------
     #

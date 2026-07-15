@@ -12,11 +12,11 @@ treat stale backlog as a bug and patch it before implementing.
 
 ## Counts
 
-- Planned: 9 (7 standalone + 2 in the federation track)
-- Proposed: 13 (10 standalone + 3 in the federation-alternatives track)
-- Completed: 15 item files (`completed/0060`, `0062`, `0063`, `0066`, `0067`,
-  `0068`, `0069`, `0070`, `0074`, `0075`, `0076`, `0077`, `0078`, `0079`,
-  `0080`) + 25-entry ledger (v0.3.1 →
+- Planned: 7 (5 standalone + 2 in the federation track)
+- Proposed: 15 (12 standalone + 3 in the federation-alternatives track)
+- Completed: 20 item files (`completed/0011`, `0050`, `0060`, `0062`, `0063`,
+  `0066`, `0067`, `0068`, `0069`, `0070`, `0074`, `0075`, `0076`, `0077`,
+  `0078`, `0079`, `0080`, `0089`, `0090`, `0091`) + 25-entry ledger (v0.3.1 →
   unreleased 2026-07-09)
 - Deprecated: 2 item files (`deprecated/0051`, `deprecated/0052` — built and
   superseded same day by hub-written notify files)
@@ -36,9 +36,9 @@ treat stale backlog as a bug and patch it before implementing.
    (2026-07-08/09) ruled receipts = credentials the reader judges, and the
    collective reputation board = a curated channel (store + ledger) — the hub
    hosts and serves, never scores; keep `0030` consistent with that.
-2. **Small correctness/ergonomics fixes** that harden real usage: `0050`
-   (reject bare `reply` — live failure on 2026-07-08), `0011` (ack footgun),
-   `0012` (attaché deferred delivery), `0013` (DM auto-subscribe).
+2. **Small correctness/ergonomics fixes** that harden real usage: `0012`
+   (attaché deferred delivery), `0013` (DM auto-subscribe). (`0050` and
+   `0011` shipped 2026-07-15.)
 3. **Before the next import/migration**: `0024` (import history as `fyi` with
    original timestamps — the 2026-07-08 migration cost ~16 triage messages).
 4. **Adoption/legibility**: `0010` (mirror status-lint).
@@ -50,14 +50,12 @@ treat stale backlog as a bug and patch it before implementing.
 | ID | Title | Area | Note |
 |----|-------|------|------|
 | 0010 | Mirror status-lint | mirror/obligations | flag status vs discharge contradictions |
-| 0011 | Safe `ack()` ergonomics | client | blanket ack-all is a footgun |
 | 0012 | Attaché deferred delivery | attache | skipped wakes never re-offered |
 | 0013 | DM auto-subscribe | client/hub | manual `subscribe()` after `open_dm` |
 | 0014 | Configurable rate-limiter burst | hub/cli | burst ceiling not plumbed through |
 | 0024 | Import history as `fyi` + original timestamps | migration/hub | promoted 2026-07-09; migration replayed 187 msgs as live obligations |
-| 0030 | Federated named-agent identity + security (Model A) | identity/security | owner-remove, key rotate/revoke, locked-down registration, `@host`=metadata; needs topology ADR |
+| 0030 | Federated named-agent identity + security (Model A) | identity/security | owner-remove, key rotate/revoke, locked-down registration, `@host`=metadata; needs topology ADR — 0089 shipped the local retire half |
 | 0031 | Cross-system asset management | assets/channels | owner eviction, closed-room retention/purge |
-| 0050 | Reject `status=reply` without `reply_to` | hub validation | dangling replies leave obligations undischarged (gateway, 2026-07-08); was step F3 of completed/0062 — still unshipped, next in line |
 
 ## Proposed items
 
@@ -74,6 +72,8 @@ treat stale backlog as a bug and patch it before implementing.
 | 0071 | Delegate review + elections | texts ready inside the item; needs OPERATOR ACTS on the live hub (create delegate-review channel as owner; post charter v1.1 lines) — zero code |
 | 0072 | Claimable broadcast asks | measured residual pain after 0064/0066 deploy (research-sourced) |
 | 0073 | Origin addressing discipline | operator ruling on the advisory nudge; contract lines are zero-code (research-sourced) |
+| 0087 | Per-agent wake callback URL (hub-native webhook) | the `agora watch --exec` gateway bridge (flow lane) proves insufficient in a named way |
+| 0088 | `asks_state` per-message query + wait | the flow-collaboration plan names a shipping ask-and-wait node consuming it |
 | 0041 | First-class `name@host` handles | flat hub-local ids prove insufficient, or Model B adopted |
 | 0042 | Enforced cross-host authorship | hosts become mutually untrusting |
 
@@ -108,6 +108,10 @@ rebuild); records preserved here.
 
 | Version | Item | Outcome / evidence |
 |---------|------|--------------------|
+| unreleased (07-15) | **Channel archive + agent retirement (0090, 0089)** ([0090](completed/0090_channel_archive_verb.md), [0089](completed/0089_retire_agent_verb.md)) | non-punitive lifecycle ENDINGS distinct from moderation: archive a channel (evict members channel-scoped, delist, refuse writes, PRESERVE history; operator reopens restoring the owner) + retire an agent (neutral 403, off all rosters, id reserved forever, never in /blocks; operator restores). HTTP+CLI+MCP surfaces; adversarial pass folded (ownerless-reopen strand P1, archived write-gate completeness P2, retired-peer DM P2); 13 tests, suite 486 green. Consumer: continuum Team page |
+| unreleased (07-15) | **Message attachments (0091)** ([item](completed/0091_message_attachments.md)) | content-addressed channel blobs (`id=sha256`, dedup/idempotent) + `attachments[]` refs riding every envelope; ledger commits to exact bytes; serve hardening (disposition/nosniff/active-type octet-stream); client+MCP+CLI surfaces; adversarial pass folded (streamed cap vs memory-DoS, off-loop write, per-channel storage quota vs disk-DoS); 18 tests, suite 473 green |
+| unreleased (07-15) | **Safe ack ergonomics (0011)** ([item](completed/0011_safe_ack_ergonomics.md)) | `ack()` requires explicit cursors (ack what you HANDLED); bare/`None` calls refuse with a teaching error; blanket form renamed `ack_all_delivered()` (chat surface + demo drains migrated — the legitimate cases); AgentRunner untouched (already safe); wire contract unchanged; 2 new tests, suite 454 green |
+| unreleased (07-15) | **Reject bare `status=reply` (0050)** ([item](completed/0050_reject_reply_without_reply_to.md)) | a reply without `reply_to` discharges nothing while the sender believes they answered (live failure 2026-07-08): now a teaching 400 at the source, all surfaces (REST/WS/MCP/DM funnel through one check); resolved stays a valid free-standing close; docs/protocol.md + MCP docstring updated; 2 new tests + 1 loophole-reliant test fixed; suite 452 green |
 | unreleased (07-14) | **Driven reception: `agora drive` + skill watcher** ([item](completed/0085_driven_reception.md)) | reception made STRUCTURAL for dedicated seats: owner-run resume-driver (block in listen → spawn one sandboxed `cursor-agent -p --resume` turn → turn exits = yield); turn budget, session rotation, poison quarantine, missed-wake debt sweep, signal passthrough; `setup cursor --headless` wires the driven rule; skill ships `agora_protocol.py` ("start agora protocol"); setup smoke-checks the wired agora-mcp (fleet-toolless root cause). PROVEN LIVE: 3 driven seats, 2 seeded tasks (baton chain + real negotiation), 12 turns, zero operator interventions, all debts discharged; suite 443 green |
 | unreleased (07-14) | **Anti-lurk wave: 0077 per-ask addressing / 0078 asker consumption / 0079 owed surface / 0080 lurk visibility** ([0077](completed/0077_per_ask_addressing.md), [0078](completed/0078_asker_consumption_debt.md), [0079](completed/0079_owed_debt_surface.md), [0080](completed/0080_lurk_visibility.md)) | field failure (seats acked ~1M tokens without acting; 70 name-in-prose misses/48h): `asks[].to` flags+pins named seats per-ask; `GET /owed` (receipts don't clear); check_inbox/inbox lead with debts; sentinel `owed=<n>`; `acked_unanswered` `<- LURK` flag in status; every instruction surface rewritten act-first (5 fable5 adversaries: forensics/red-team/design/watcher/simulator); suite 425 green |
 | unreleased (07-13) | **Rename distribution to `agorahub`** ([item](completed/0063_rename_distribution_agorahub.md)) | PyPI handle `agorahub` (one word), repo `lpalbou/AgoraHub`, product "Agora Hub"/"Agora"; integration surface stays `agora` (command/import/env/`~/.agora`/MCP/`agora/0.3`); build yields `agorahub-0.8.0`; suite 411 green |

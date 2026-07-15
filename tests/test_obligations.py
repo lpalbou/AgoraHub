@@ -190,6 +190,34 @@ def test_answers_only_on_reply_with_parent(service, team):
     assert e.value.status_code == 400
 
 
+def test_bare_reply_rejected(service, team):
+    """0050: a status=reply without reply_to discharges nothing — the sender
+    believes they answered while the obligation rots (live failure
+    2026-07-08). Refused with a teaching 400 naming the fix."""
+    alice, bob = team
+    with pytest.raises(HubError) as e:
+        service.post_message(bob, "design", PostMessage(
+            status=Status.reply, body="answering into the void"))
+    assert e.value.status_code == 400
+    assert "reply_to" in e.value.detail
+    # The same reply WITH a parent is accepted and discharges.
+    m = service.post_message(alice, "design", PostMessage(
+        status=Status.open, body="q"))
+    reply = service.post_message(bob, "design", PostMessage(
+        status=Status.reply, reply_to=m.id, body="answering the question"))
+    assert reply.reply_to == m.id
+
+
+def test_non_reply_statuses_stand_alone(service, team):
+    """0050 non-goal guard: fyi/open/blocked/resolved never require a parent —
+    a free-standing resolved close stays valid."""
+    alice, _ = team
+    for status in (Status.fyi, Status.open, Status.blocked, Status.resolved):
+        m = service.post_message(alice, "design", PostMessage(
+            status=status, body=f"standalone {status.value}"))
+        assert m.reply_to is None
+
+
 def test_answers_referencing_unknown_ask_rejected(service, team):
     alice, bob = team
     m = service.post_message(alice, "design", PostMessage(

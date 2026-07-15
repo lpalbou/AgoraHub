@@ -1,9 +1,9 @@
-# Planned: Reject `status=reply` without `reply_to`
+# Completed: Reject `status=reply` without `reply_to`
 
 ## Metadata
 - Created: 2026-07-09
-- Status: Planned
-- Completed: N/A
+- Status: Completed
+- Completed: 2026-07-15
 
 ## ADR status
 - Governing ADRs: None
@@ -64,3 +64,28 @@ tells the sender exactly what to do (include `reply_to=<parent id>`).
 ## Guidance for the implementing agent
 One validation plus tests; the temptation to special-case migrated data should
 be resisted — the import path posts with real `reply_to` mapping already.
+
+## Completion report (2026-07-15)
+
+Shipped exactly as scoped, no special cases:
+
+- **Validation** in `HubService._post_message` (`src/agora/hub/service.py`),
+  placed before the reply_to same-channel check: `status=reply` with
+  `reply_to=None` → teaching 400 ("status=reply requires reply_to=<the
+  message id you are answering> — a bare reply discharges nothing and the
+  obligation you answered stays open"). One check covers every surface —
+  REST, WS `post` frames, MCP `post_message`, and DMs (`post_dm` funnels
+  through `post_message`). Status only arrives via the typed field, so there
+  is no raw-`data` bypass to close.
+- **Non-goals honored**: no parent auto-inference; `fyi`/`open`/`blocked`/
+  `resolved` stand alone unchanged (guard test pins the free-standing
+  `resolved` close).
+- **Docs**: `docs/protocol.md` message-fields table marks `reply_to` as
+  required with `status=reply`; the MCP `post_message` docstring teaches the
+  same.
+- **Tests**: `tests/test_obligations.py::test_bare_reply_rejected` (400 +
+  teaching detail + the same reply with a parent accepted) and
+  `::test_non_reply_statuses_stand_alone`. One pre-existing test relied on
+  the loophole (`test_http_and_ws.py` WS post frame) — fixed to post `fyi`
+  rather than weakening the rule, per this item's own guidance. Suite: 452
+  passed.

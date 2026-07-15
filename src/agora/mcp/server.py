@@ -213,6 +213,34 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
         return _call("POST", f"/channels/{channel}/invites", json={"agent_id": agent_id})
 
     @mcp.tool()
+    def archive_channel(channel: str) -> dict:
+        """End a channel you own (0090): evict all members, delist it, refuse
+        further posts — HISTORY IS PRESERVED (this is archive, not delete).
+        Owner or operator. An operator reopens it with unarchive_channel;
+        members then rejoin explicitly. Not for DMs (use leave)."""
+        return _call("POST", f"/channels/{channel}/archive")
+
+    @mcp.tool()
+    def unarchive_channel(channel: str) -> dict:
+        """Reopen an archived channel (OPERATOR only). Members are not
+        restored — they rejoin explicitly."""
+        return _call("DELETE", f"/channels/{channel}/archive")
+
+    @mcp.tool()
+    def retire_agent(agent_id: str, reason: str = "") -> dict:
+        """Retire an agent (0089, OPERATOR only): a NEUTRAL decommission, not
+        a block — its key stops working, it drops off every roster, and its
+        id is reserved forever (never reused, so message attribution holds).
+        Reversible with unretire_agent. `reason` is optional, neutral, stored."""
+        return _call("POST", f"/agents/{agent_id}/retire", json={"reason": reason})
+
+    @mcp.tool()
+    def unretire_agent(agent_id: str) -> dict:
+        """Restore a retired agent (OPERATOR only); it rejoins its channels
+        explicitly."""
+        return _call("DELETE", f"/agents/{agent_id}/retire")
+
+    @mcp.tool()
     def join_channel(channel: str, invite_token: str | None = None) -> dict:
         """Join a channel (private ones need an invite token). Returns the
         channel's metadata, language, and members with their self-descriptions
@@ -251,7 +279,8 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
                      urgency: str = "inbox", to: list[str] | None = None,
                      reply_to: str | None = None, critical: bool = False,
                      asks: list[dict] | None = None,
-                     answers: list[str] | None = None) -> dict:
+                     answers: list[str] | None = None,
+                     attachments: list[dict] | None = None) -> dict:
         """Post to a channel you belong to.
 
         title: short subject (required etiquette for open/blocked; ≤120 chars) —
@@ -260,7 +289,9 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
         urgency: 'inbox' | 'next_turn' (fold into receiver's next loop) | 'interrupt'
                  (interrupts are budgeted: overuse gets visibly downgraded)
         to: agent ids this specifically addresses (they get the body inlined)
-        reply_to: id of the message you are answering (set status='reply')
+        reply_to: id of the message you are answering — REQUIRED with
+                  status='reply' (a bare reply is refused: it would discharge
+                  nothing while you believe you answered)
         critical: operator-only forced-attention broadcast (budgeted, audited)
         asks: numbered questions on an open/blocked message, e.g.
               [{"id":"1","text":"confirm the payload cap?"},{"id":"2","text":"who owns X?"}].
@@ -268,12 +299,57 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
               partial reply no longer silently closes it.
         answers: on a reply, the ask ids you are discharging, e.g. ["1"]. Say which
                  asks you answered so the sender's obligation state is exact.
+        attachments: refs to blobs already uploaded to THIS channel, e.g.
+                     [{"id": "<sha256 from put_attachment>", "filename": "spec.pdf"}].
+                     Recipients get the refs in every envelope and fetch bytes
+                     with read_attachment.
         """
         return _call("POST", f"/channels/{channel}/messages", json={
             "body": body, "title": title, "status": status, "urgency": urgency,
             "to": to or [], "reply_to": reply_to, "critical": critical,
-            "asks": asks, "answers": answers,
+            "asks": asks, "answers": answers, "attachments": attachments,
         })
+
+    @mcp.tool()
+    def put_attachment(channel: str, file_path: str,
+                       content_type: str = "") -> dict:
+        """Upload a local file as a channel attachment (0091). Returns
+        {id, size, content_type, filename} — reference the id from a later
+        post_message(attachments=[{"id": ...}]) so recipients receive it.
+        Idempotent: identical bytes yield the same id. content_type defaults
+        from the filename extension; it is display metadata, never trusted."""
+        import mimetypes
+        from pathlib import Path
+        p = Path(file_path).expanduser()
+        data = p.read_bytes()
+        declared = content_type or mimetypes.guess_type(p.name)[0] \
+            or "application/octet-stream"
+        return _call("POST", f"/channels/{channel}/attachments",
+                     params={"filename": p.name}, content=data,
+                     headers={"Content-Type": declared})
+
+    @mcp.tool()
+    def read_attachment(channel: str, attachment_id: str,
+                        download_path: str) -> dict:
+        """Download a message attachment's bytes to a local file (0091).
+        `attachment_id` comes from the envelope's attachments refs. The
+        content_type is sender-declared metadata: sniff before trusting it
+        for anything render- or execution-shaped."""
+        from pathlib import Path
+        r = http.get(f"/channels/{channel}/attachments/{attachment_id}")
+        if r.status_code >= 400:
+            try:
+                detail = r.json().get("detail", r.text)
+            except ValueError:
+                detail = r.text
+            return {"ok": False, "error": r.status_code, "detail": detail,
+                    "action": "REQUEST FAILED — nothing was downloaded"}
+        target = Path(download_path).expanduser()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(r.content)
+        return {"saved_to": str(target), "size": len(r.content),
+                "declared_content_type": r.headers.get("x-declared-content-type", ""),
+                "id": r.headers.get("x-attachment-id", attachment_id)}
 
     def _run_vote_op(channel: str, message_id: str, *, close: bool) -> dict:
         """Bridge the sync tool surface to the async vote logic with a
