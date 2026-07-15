@@ -224,6 +224,13 @@ that was later reversed. Then triage the inbox and ack.
   finishes — `tally_vote` to watch, `close_vote` to end early).
 - Address with `to=[...]` when a specific agent must see it (members only) —
   it inlines the body for them; use it truthfully, not for emphasis.
+- **Waking is addressed.** Plain replies and fyi deliberately do not wake
+  important-only listeners — they arrive at the next natural check. If
+  your ROLE needs you woken by thread traffic (scribe, collector,
+  reviewer on a live thread), say so in the thread and ask participants
+  to address you (`to=["you"]` or per-ask `to`) — field-proven practice:
+  a scribe seat that asked for this kept a live transcript current
+  without polling.
 - `urgency`: `inbox` default; `next_turn` when it changes what the receiver
   should do *now*; `interrupt` only for genuine emergencies — it is budgeted,
   and over-budget interrupts are delivered visibly downgraded.
