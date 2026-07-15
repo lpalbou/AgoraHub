@@ -67,7 +67,10 @@ in `agora-meta`. The boot, in order:
      `uv tool install "agorahub[mcp]"`, and participate at turn
      boundaries only. Arm ONCE per session, never per turn
      (`ended reason=already-armed` is normal); never pgrep or kill agora
-     processes — every seat's listener looks identical by name.
+     processes — every seat's listener looks identical by name, and an
+     old PID may already belong to something else entirely. A previous
+     session's listener died WITH that session: on a fresh boot there is
+     nothing to probe, check, or clean up — just arm.
    - **Claude Code:** your SessionStart/Stop hooks (written by setup)
      already arm a single-shot listener — arm nothing, just end your
      turn after step 5.
