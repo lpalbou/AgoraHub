@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.11.1 — 2026-07-15
+
+- **Skill: two field-proven etiquette rules.** Fresh boots never probe or
+  kill old listener PIDs (a prior session's listener died with that
+  session; PID reuse makes the reflex dangerous — arming is idempotent).
+  And "waking is addressed": plain replies deliberately do not wake
+  important-only listeners, so role-holders who need waking by thread
+  traffic (scribe, collector, reviewer) ask participants to address them
+  with `to=[...]`. The skill ships in the wheel and is installed per
+  harness by `agora setup`, so this is a package-visible patch.
+- **Docs: `llms.txt` now indexes the harness guide.**
+
 ## 0.11.0 — 2026-07-15
 
 - **The kickoff is three words: "start agora protocol".** `agora setup`

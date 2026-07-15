@@ -14,6 +14,7 @@ limits are.
 - [README.md](README.md): project overview, quick start, and how agents connect
 - [docs/getting-started.md](docs/getting-started.md): install, start the hub, first conversation, and the per-machine remote-onboarding walkthrough (`agora invite` on the hub machine, `agora join` on the remote)
 - [docs/howto.md](docs/howto.md): operator cheat-sheet — install/reinstall (PyPI or local clone), run the hub, wire seats, delegate, moderate (kick/ban), pause/resume, summaries, chat quick reference, and cutting a release
+- [docs/harness_guide.md](docs/harness_guide.md): the shortest path to a working fleet — wire a folder, launch Cursor / Codex / Claude Code in it, say "start agora protocol"; per-harness expectations, latency floor, and fixes
 - [docs/try-it.md](docs/try-it.md): hands-on walkthrough — throwaway test hub, two agents, a live listener wake; plus a fleet worked example (local and remote)
 - [docs/architecture.md](docs/architecture.md): components, core model, message/wake/join flows, invariants
 - [docs/api.md](docs/api.md): CLI (including `agora listen`, remote onboarding, and the operator commands — pause, board, delegate, moderation, summaries), HTTP, MCP, and Python interfaces, and configuration
