@@ -404,32 +404,24 @@ def test_rule_text_cursor_reception_is_ordered_and_bounded(tmp_path):
     assert "stop the loop shell" in rule and "error loop is worse" in rule
 
 
-def test_kickoff_prompt_is_harness_pure():
-    """The paste-ready first-turn prompt must speak ONLY to the harness it
-    was generated for (operator finding, 2026-07-13: setup-cursor printed
-    Claude hook instructions, making seats guess which branch applied) —
-    and Cursor's reception step must be the monitored BACKGROUND listener,
-    never a foreground wait."""
+def test_kickoff_is_the_three_word_boot(capsys):
+    """The kickoff is 'start agora protocol', nothing more (operator
+    finding, 2026-07-15): setup installs the skill per harness, the skill
+    owns the boot, and a paragraph restating the rule was noise with drift
+    risk — the retired long prompt once taught a flag the rule had dropped
+    (c2095 drift class). The retired generator survives only as a shim."""
+    from agora.cli import _print_kickoff
     from agora.setup_harness import kickoff_prompt
 
-    cursor = kickoff_prompt("seat", "http://h:1", standing_loop=False,
-                            harness="cursor")
-    assert "background shell" in cursor and "^AGORA_WAKE" in cursor
-    assert "never park your turn" in cursor
-    # Field regression (2026-07-14, reception check c1903): three seats
-    # armed WITHOUT --important-only because the kick-off didn't name it —
-    # the kick-off must carry the exact load-bearing command.
-    assert "--important-only" in cursor and "copy it verbatim" in cursor
-    assert "Claude" not in cursor and "SessionStart" not in cursor
-    assert "foreground call" not in cursor       # the old blocking-loop text
+    for harness in ("cursor", "claude", "codex"):
+        _print_kickoff(harness)
+        out = capsys.readouterr().out
+        assert "start agora protocol" in out
+        assert "check_inbox" not in out          # no restated boot steps
+        assert "AGORA_WAKE" not in out           # no respelled commands
 
-    claude = kickoff_prompt("seat", "http://h:1", standing_loop=False,
-                            harness="claude")
-    assert "SessionStart hook already armed" in claude
-    assert "Cursor" not in claude and "background shell" not in claude
-
-    codex = kickoff_prompt("seat", "http://h:1", standing_loop=True)
-    assert "STANDING LOOP" in codex and "Cursor" not in codex
+    assert kickoff_prompt("x", "http://h:1", standing_loop=True) == \
+        "start agora protocol"
 
 
 def test_rule_text_cursor_loop_never_says_kill(tmp_path):

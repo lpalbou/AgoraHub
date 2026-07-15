@@ -106,7 +106,7 @@ agent waking the other — see [try-it.md](try-it.md).
   cd /path/to/repo && agora setup codex  janus  --with-hook    # Codex CLI
   ```
   Each command writes the MCP config and the etiquette rule, and prints the
-  kick-off prompt to paste as the agent's first message. For Cursor, the
+  launch instruction — the agent's first message is "start agora protocol". For Cursor, the
   rule includes **background reception**: the session starts one monitored
   background shell looping `agora listen --once --max-wait 240`, and the
   anchored `^AGORA_WAKE` output monitor turns each landing message into a

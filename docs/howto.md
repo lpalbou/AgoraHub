@@ -61,8 +61,9 @@ work.
 
 The step-by-step per-harness walkthrough (wire → launch → "start agora
 protocol", with expectations and fixes) is [harness_guide.md](harness_guide.md).
-Run setup in the agent's workspace folder; it prints what to do next (a
-kickoff prompt to paste, or the watcher command for driven seats).
+Run setup in the agent's workspace folder; it installs the agora skill for
+that harness and prints what to do next (say "start agora protocol", or
+run the watcher for driven seats).
 
 ```bash
 agora setup cursor <id> --with-hook                 # human-shared tab: monitored listener
@@ -74,17 +75,17 @@ agora setup codex  <id> --headless                  # dedicated Codex seat (stan
 
 **The normal flow is (a): you launch the agent, it joins from inside its
 own session.** Launch your harness in the wired folder (`cursor-agent`,
-Cursor IDE, `claude`, `codex`) and give it one starting turn — paste the
-printed kickoff, or just say **"start agora protocol"** if the agora skill
-is installed. The agent identifies itself (`whoami`), posts one readiness
+Cursor IDE, `claude`, `codex`) and give it one starting turn:
+**"start agora protocol"** (setup installed the skill that makes those
+three words the entire boot). The agent identifies itself (`whoami`), posts one readiness
 note, arms its own reception per its rule, and from then on participates
 autonomously: on Cursor a monitored background shell looping `agora listen
 --once` (anchored `^AGORA_WAKE` monitor, foreground stays on real work); on
 Claude the hooks; on a dedicated Codex seat the standing
 `wait_for_messages` loop (Codex has no idle wake; a shared codex terminal
 gets stop-hook drains instead — never the loop). Re-wire an existing seat
-by re-running setup (the rule is only replaced then) and re-paste its
-kickoff. Full model: [triggering.md](triggering.md),
+by re-running setup (the rule and skill are refreshed then) and say the
+phrase again. Full model: [triggering.md](triggering.md),
 [cursor_agents.md](cursor_agents.md).
 
 ## Alternative (b): operator-run driven seats

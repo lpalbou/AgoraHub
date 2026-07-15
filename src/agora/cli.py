@@ -166,19 +166,18 @@ def _print_key_placement(written_config: Path) -> None:
     print("  keep that file out of version control (gitignore it).")
 
 
-def _print_kickoff(agent_id: str, url: str, *, standing_loop: bool,
-                   harness: str = "cursor") -> None:
+def _print_kickoff(harness: str = "cursor") -> None:
     """A rule only reaches a harness session's context INSIDE a turn, so a
-    just-launched idle session never arms itself — it needs one kick-off turn.
-    Print the paste-ready first-turn prompt so the operator can start the agent
-    without hand-writing it (the standing-loop variant on harnesses with no
-    event wake; the arm-then-end variant otherwise)."""
-    from .setup_harness import kickoff_prompt
-    print("\nTo start this agent, paste this as its FIRST message:\n")
-    print(kickoff_prompt(agent_id, url, standing_loop=standing_loop,
-                         harness=harness))
-    print("\n(If the agent carries the agora skill, saying \"start agora "
-          "protocol\" is equivalent.)")
+    just-launched idle session never arms itself — it needs one kick-off
+    turn. That turn is three words: setup installs the agora skill for the
+    harness, and the skill owns the whole boot (identity, orientation,
+    reception, readiness). The old paste-a-paragraph kickoff is gone —
+    operator finding, 2026-07-15: a long prompt that restates what the rule
+    and skill already teach is noise with drift risk."""
+    launch = {"cursor": "cursor-agent (or open the folder in Cursor)",
+              "claude": "claude", "codex": "codex"}[harness]
+    print(f"\nStart the agent: launch {launch} in this folder and give it "
+          "one message:\n\n  start agora protocol\n")
 
 
 def cmd_setup(args: argparse.Namespace) -> None:
@@ -274,7 +273,7 @@ def cmd_setup_cursor(args: argparse.Namespace) -> None:
     else:
         print("Open this folder in Cursor. The agent self-registers on first tool use.")
     _warn_if_not_project_root(workspace, args.agent)
-    _print_kickoff(args.agent, url, standing_loop=False, harness="cursor")
+    _print_kickoff("cursor")
 
 
 def cmd_setup_claude(args: argparse.Namespace) -> None:
@@ -309,7 +308,7 @@ def cmd_setup_claude(args: argparse.Namespace) -> None:
         print("Run `claude` in this folder and approve the 'agora' MCP "
               "server (/mcp).")
     _warn_if_not_project_root(workspace, args.agent, harness="claude")
-    _print_kickoff(args.agent, url, standing_loop=False, harness="claude")
+    _print_kickoff("claude")
 
 
 def cmd_setup_codex(args: argparse.Namespace) -> None:
@@ -360,13 +359,7 @@ def cmd_setup_codex(args: argparse.Namespace) -> None:
           "turn ends, otherwise messages wait for the next turn (that is "
           "expected). Harnesses with a wake surface use `agora listen`.")
     _warn_if_not_project_root(workspace, args.agent, harness="codex")
-    if dedicated:
-        # The standing loop IS this seat's reachability; the kickoff says so.
-        _print_kickoff(args.agent, url, standing_loop=True)
-    else:
-        # Shared session: never teach the standing loop (it freezes the
-        # human's terminal); reception is stop-hook drain + next turn.
-        _print_kickoff(args.agent, url, standing_loop=False, harness="codex")
+    _print_kickoff("codex")
 
 
 def _warn_if_not_project_root(workspace: Path, agent_id: str,
@@ -994,10 +987,11 @@ def cmd_join(args):
             sys.exit(code)
         agent_id = pinned or args.as_agent
         if args.harness and args.harness != "none" and agent_id:
-            # Codex has no event wake → standing loop; others arm-then-end.
-            _print_kickoff(agent_id, url,
-                           standing_loop=(args.harness == "codex"),
-                           harness=args.harness)
+            # A joined machine gets the skill too, so the three-word boot
+            # works there exactly as on setup-wired machines.
+            from .setup_harness import install_skill
+            print(f"  {install_skill(args.harness)}")
+            _print_kickoff(args.harness)
         return
 
     if not args.channel:

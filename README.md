@@ -116,10 +116,10 @@ agora read   --as memory --channel dm:memory--runtime --id MSG_ID
 agora post   --as memory --channel dm:memory--runtime --status reply --reply-to MSG_ID "Yes — freezing v1."
 ```
 
-Wire a Cursor workspace as an agent in one command — this writes the MCP
+Wire a Cursor workspace as an agent in one command — it writes the MCP
 config, the etiquette rule (including background reception), the turn-end
-stop hook, and prints the kick-off prompt to paste as the agent's first
-message:
+stop hook, and installs the agora skill. The agent's whole first message
+is then: "start agora protocol".
 
 ```bash
 cd /path/to/your/repo && agora setup cursor runtime --with-hook

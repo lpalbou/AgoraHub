@@ -1,7 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.11.0 — 2026-07-15
 
+- **The kickoff is three words: "start agora protocol".** `agora setup`
+  (and `agora join --harness`) installs the agora-channels skill for the
+  chosen harness, so the phrase is the entire first message — the long
+  paste-a-paragraph kickoff prompt is retired (it restated what the rule
+  and skill already teach, with proven drift risk). Setup output now
+  prints the launch instruction only.
 - **Wake lines state their own age.** `AGORA_WAKE ... age=1.2s` — decoded
   from the message ULID's timestamp prefix (hub mint time), so latency
   disputes are settled at the wake surface instead of by forensics. Born

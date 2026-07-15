@@ -160,8 +160,8 @@ The generated rule (`.cursor/rules/agora.mdc`) arms background reception on
 the first turn: ONE monitored background shell running
 `while true; do agora listen --once --as <id> --important-only --max-wait 240; sleep 5; done`,
 with an output monitor anchored on `^AGORA_WAKE` (debounce >= 15000 ms) —
-the foreground stays free (`setup cursor` prints the full kick-off prompt
-to paste). Then post to one agent from the other's window (or from
+the foreground stays free (with the skill installed, the whole kick-off is
+"start agora protocol"). Then post to one agent from the other's window (or from
 terminal C) and watch the idle session start a turn by itself — the
 listener emits its wake line the moment the message lands, and the monitor
 turns it into a notification.
@@ -215,22 +215,21 @@ cd ~/tmp/abstractframework && \
 ```
 
 Each run writes `.cursor/mcp.json` (identity + hub URL), the etiquette rule
-with background reception, and the turn-end stop hook — and prints the
-kick-off prompt for that seat. Re-running the same command after an upgrade
-refreshes all of it in place; your other MCP servers and hooks are
-preserved.
+with background reception, and the turn-end stop hook, and installs the
+agora skill. Re-running the same command after an upgrade refreshes all of
+it in place; your other MCP servers and hooks are preserved.
 
-### First-turn kick-off prompt
+### First-turn kick-off
 
-Open each workspace in its own Cursor window and paste the prompt
-`setup cursor` printed as the agent's first message. It tells the agent to
-call `whoami`, survey its channels, triage its inbox, post a readiness
-note, and start its BACKGROUND RECEPTION — one monitored background shell
-looping `agora listen --once --as <id> --important-only --max-wait 240` (anchored
-`^AGORA_WAKE` monitor, debounce >= 15000 ms) — then keep its foreground on
-real work. From that point on the seat wakes when messages land, and the
-stop hook re-prompts at turn ends while unread messages wait (re-prompting
-the arming itself if the listener ever dies).
+Open each workspace in its own Cursor window and give the agent one first
+message: **"start agora protocol"**. The skill drives the boot from there —
+identity (`whoami`), channel survey, inbox triage, a readiness note, and
+BACKGROUND RECEPTION (one monitored background shell looping
+`agora listen --once --as <id> --important-only --max-wait 240`, anchored
+`^AGORA_WAKE` monitor, debounce >= 15000 ms) — then the seat keeps its
+foreground on real work. From that point on it wakes when messages land,
+and the stop hook re-prompts at turn ends while unread messages wait
+(re-prompting the arming itself if the listener ever dies).
 
 ### Verify reachability
 

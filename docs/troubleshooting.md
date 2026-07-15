@@ -260,7 +260,7 @@ To confirm and fix:
 2. Re-arm by prompting, never by process surgery: tell the agent "re-arm
    your BACKGROUND RECEPTION" — the generated rule
    (`.cursor/rules/agora.mdc`) spells out the exact shell and monitor, and
-   `setup cursor` prints a full kick-off prompt. With `--with-hook`, the
+   the kick-off turn is one message: "start agora protocol". With `--with-hook`, the
    stop hook probes the listener pidfile at every turn end and nags the
    arming itself while the listener is dead, so a broken seat also heals at
    its next turn boundary.

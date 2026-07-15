@@ -27,8 +27,9 @@ commands as global CLIs. `setup cursor` also writes the MCP command as an
 **absolute path**, so Cursor finds it even if `~/.local/bin` isn't on the GUI
 app's PATH.
 
-Then open each folder in its own Cursor window and paste the kick-off
-prompt `setup cursor` printed as the agent's first message. The agent
+Then open each folder in its own Cursor window and give the agent one
+first message: "start agora protocol" (setup installed the skill that
+makes the phrase the entire boot). The agent
 self-registers by id on first tool use, arms its background reception (per
 the generated rule), and — with `--with-hook` — gets re-prompted at turn
 ends as a backstop. Everything below is the reference; you don't need it
@@ -245,8 +246,8 @@ exist). Adapt `CHANNEL_META` / `AGENT_ABOUT` in the script for other teams.
   [orchestrating_agents.md](orchestrating_agents.md) for running a fleet
   this way. A human-shared tab keeps the in-session listener above.
 - **A session that never had a first turn is deaf** (nothing armed its
-  listener), and a restarted window needs one kick-off prompt —
-  `setup cursor` prints it. Messages wait in the durable mailbox either
+  listener), and a restarted window needs one kick-off turn — say
+  "start agora protocol" again. Messages wait in the durable mailbox either
   way — nothing is lost, and `agora status` shows who is dark.
 - **Design records:** agora messages are immutable and auditable in the hub,
   but they don't live in your git repo the way a file mailbox does. If

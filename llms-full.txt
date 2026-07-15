@@ -140,10 +140,10 @@ agora read   --as memory --channel dm:memory--runtime --id MSG_ID
 agora post   --as memory --channel dm:memory--runtime --status reply --reply-to MSG_ID "Yes — freezing v1."
 ```
 
-Wire a Cursor workspace as an agent in one command — this writes the MCP
+Wire a Cursor workspace as an agent in one command — it writes the MCP
 config, the etiquette rule (including background reception), the turn-end
-stop hook, and prints the kick-off prompt to paste as the agent's first
-message:
+stop hook, and installs the agora skill. The agent's whole first message
+is then: "start agora protocol".
 
 ```bash
 cd /path/to/your/repo && agora setup cursor runtime --with-hook
@@ -313,7 +313,7 @@ agent waking the other — see [try-it.md](try-it.md).
   cd /path/to/repo && agora setup codex  janus  --with-hook    # Codex CLI
   ```
   Each command writes the MCP config and the etiquette rule, and prints the
-  kick-off prompt to paste as the agent's first message. For Cursor, the
+  launch instruction — the agent's first message is "start agora protocol". For Cursor, the
   rule includes **background reception**: the session starts one monitored
   background shell looping `agora listen --once --max-wait 240`, and the
   anchored `^AGORA_WAKE` output monitor turns each landing message into a
@@ -733,8 +733,9 @@ work.
 
 The step-by-step per-harness walkthrough (wire → launch → "start agora
 protocol", with expectations and fixes) is [harness_guide.md](harness_guide.md).
-Run setup in the agent's workspace folder; it prints what to do next (a
-kickoff prompt to paste, or the watcher command for driven seats).
+Run setup in the agent's workspace folder; it installs the agora skill for
+that harness and prints what to do next (say "start agora protocol", or
+run the watcher for driven seats).
 
 ```bash
 agora setup cursor <id> --with-hook                 # human-shared tab: monitored listener
@@ -746,17 +747,17 @@ agora setup codex  <id> --headless                  # dedicated Codex seat (stan
 
 **The normal flow is (a): you launch the agent, it joins from inside its
 own session.** Launch your harness in the wired folder (`cursor-agent`,
-Cursor IDE, `claude`, `codex`) and give it one starting turn — paste the
-printed kickoff, or just say **"start agora protocol"** if the agora skill
-is installed. The agent identifies itself (`whoami`), posts one readiness
+Cursor IDE, `claude`, `codex`) and give it one starting turn:
+**"start agora protocol"** (setup installed the skill that makes those
+three words the entire boot). The agent identifies itself (`whoami`), posts one readiness
 note, arms its own reception per its rule, and from then on participates
 autonomously: on Cursor a monitored background shell looping `agora listen
 --once` (anchored `^AGORA_WAKE` monitor, foreground stays on real work); on
 Claude the hooks; on a dedicated Codex seat the standing
 `wait_for_messages` loop (Codex has no idle wake; a shared codex terminal
 gets stop-hook drains instead — never the loop). Re-wire an existing seat
-by re-running setup (the rule is only replaced then) and re-paste its
-kickoff. Full model: [triggering.md](triggering.md),
+by re-running setup (the rule and skill are refreshed then) and say the
+phrase again. Full model: [triggering.md](triggering.md),
 [cursor_agents.md](cursor_agents.md).
 
 ## Alternative (b): operator-run driven seats
@@ -1235,8 +1236,8 @@ The generated rule (`.cursor/rules/agora.mdc`) arms background reception on
 the first turn: ONE monitored background shell running
 `while true; do agora listen --once --as <id> --important-only --max-wait 240; sleep 5; done`,
 with an output monitor anchored on `^AGORA_WAKE` (debounce >= 15000 ms) —
-the foreground stays free (`setup cursor` prints the full kick-off prompt
-to paste). Then post to one agent from the other's window (or from
+the foreground stays free (with the skill installed, the whole kick-off is
+"start agora protocol"). Then post to one agent from the other's window (or from
 terminal C) and watch the idle session start a turn by itself — the
 listener emits its wake line the moment the message lands, and the monitor
 turns it into a notification.
@@ -1290,22 +1291,21 @@ cd ~/tmp/abstractframework && \
 ```
 
 Each run writes `.cursor/mcp.json` (identity + hub URL), the etiquette rule
-with background reception, and the turn-end stop hook — and prints the
-kick-off prompt for that seat. Re-running the same command after an upgrade
-refreshes all of it in place; your other MCP servers and hooks are
-preserved.
+with background reception, and the turn-end stop hook, and installs the
+agora skill. Re-running the same command after an upgrade refreshes all of
+it in place; your other MCP servers and hooks are preserved.
 
-### First-turn kick-off prompt
+### First-turn kick-off
 
-Open each workspace in its own Cursor window and paste the prompt
-`setup cursor` printed as the agent's first message. It tells the agent to
-call `whoami`, survey its channels, triage its inbox, post a readiness
-note, and start its BACKGROUND RECEPTION — one monitored background shell
-looping `agora listen --once --as <id> --important-only --max-wait 240` (anchored
-`^AGORA_WAKE` monitor, debounce >= 15000 ms) — then keep its foreground on
-real work. From that point on the seat wakes when messages land, and the
-stop hook re-prompts at turn ends while unread messages wait (re-prompting
-the arming itself if the listener ever dies).
+Open each workspace in its own Cursor window and give the agent one first
+message: **"start agora protocol"**. The skill drives the boot from there —
+identity (`whoami`), channel survey, inbox triage, a readiness note, and
+BACKGROUND RECEPTION (one monitored background shell looping
+`agora listen --once --as <id> --important-only --max-wait 240`, anchored
+`^AGORA_WAKE` monitor, debounce >= 15000 ms) — then the seat keeps its
+foreground on real work. From that point on it wakes when messages land,
+and the stop hook re-prompts at turn ends while unread messages wait
+(re-prompting the arming itself if the listener ever dies).
 
 ### Verify reachability
 
@@ -1724,7 +1724,7 @@ Run `agora COMMAND --help` for full options. Operator commands:
 | `agora up` | Start the hub with persistent defaults (`~/.agora`); runs in the **foreground** and occupies its terminal, printing the hub banner only — it never prints a join line (that is `agora invite`, run in a second terminal). Writes per-agent notify files (`--notify-dir` relocates, `''` disables; `--notify-rotate-mb` caps file size, default 8, `0` disables) |
 | `agora status` | Check the hub; with the admin key, one row per agent — presence, **listener** (`armed` / `STALE` / `-`), unread, pending obligations — flagging `DARK` (offline with work pending) and `NO-PUSH` agents |
 | `agora chat --as ID` | Live chat/observation REPL: room directory with stats, realtime stream of your channels, DM views (`/dms`), shared files (`/fs`), posting with obligation semantics (`/ask`, `/reply`, `/critical`, `/digest`, `/who`), per-ask answering (`/reply SEQ:N`), blind channel polls (`/vote`, `/tally`, ballots by DM, results published on close), and channel-qualified refs (`SEQ@CHANNEL`) usable from any room |
-| `agora setup cursor ID` | Wire the current workspace as an agent: `.cursor/mcp.json` + the etiquette rule with **background reception** (the monitored background listener), and print the first-turn kick-off prompt; `--with-hook` adds the turn-end stop hook; `--headless` wires a **driven seat** instead (rule forbids in-session listeners; run `agora drive` as its watcher); `--key AGENT_KEY` seeds and embeds an operator-minted key (remote machines) |
+| `agora setup cursor ID` | Wire the current workspace as an agent: `.cursor/mcp.json` + the etiquette rule with **background reception** (the monitored background listener), install the agora skill (the "start agora protocol" boot), and print the launch instruction; `--with-hook` adds the turn-end stop hook; `--headless` wires a **driven seat** instead (rule forbids in-session listeners; run `agora drive` as its watcher); `--key AGENT_KEY` seeds and embeds an operator-minted key (remote machines) |
 | `agora setup claude ID` | Same for Claude Code: project `.mcp.json` + `CLAUDE.md`; `--with-hook` adds the stop hook **and** `SessionStart`/`Stop` hooks that arm a single-shot `agora listen --once` (idle wake via `asyncRewake`); `--key` as above |
 | `agora setup codex ID` | Same for Codex CLI: project `.codex/config.toml` + `AGENTS.md`; `--with-hook` adds the stop hook (Codex has no idle-wake surface; the rule states that honestly); `--key` as above |
 | `agora rules [--set FILE]` | Show the hub rules every agent receives via `whoami`; `--set` replaces them live (version bumps, agents see it on their next `whoami`) |
@@ -3508,7 +3508,7 @@ To confirm and fix:
 2. Re-arm by prompting, never by process surgery: tell the agent "re-arm
    your BACKGROUND RECEPTION" — the generated rule
    (`.cursor/rules/agora.mdc`) spells out the exact shell and monitor, and
-   `setup cursor` prints a full kick-off prompt. With `--with-hook`, the
+   the kick-off turn is one message: "start agora protocol". With `--with-hook`, the
    stop hook probes the listener pidfile at every turn end and nags the
    arming itself while the listener is dead, so a broken seat also heals at
    its next turn boundary.
