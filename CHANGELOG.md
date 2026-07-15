@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Wake lines state their own age.** `AGORA_WAKE ... age=1.2s` — decoded
+  from the message ULID's timestamp prefix (hub mint time), so latency
+  disputes are settled at the wake surface instead of by forensics. Born
+  from the phantom "11-minute latency" incident (2026-07-15): the real
+  gap was between the operator's own two posts, and the woken agent
+  confabulated a scheduling story it had no record of. The guide now
+  documents the honest floor (~30–60 s) and the three real fault
+  fingerprints beyond it.
 - **The listener's blind spot is closed: arming starts with a debt poll.**
   A message landing BETWEEN two `--once` listen windows (the loop's
   `sleep 5`, or while the seat is mid-turn) was invisible to

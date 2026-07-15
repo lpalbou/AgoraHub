@@ -25,6 +25,23 @@ def new_ulid() -> str:
     return "".join(reversed(chars))
 
 
+def ulid_timestamp(ulid: str) -> float | None:
+    """Unix seconds encoded in a ULID's 48-bit prefix (first 10 chars), or
+    None for anything that isn't a well-formed ULID. Lets consumers compute
+    a message's age from its id alone — the 11-minute-latency incident
+    (2026-07-15) was pure mis-attribution, undiagnosable at the wake surface
+    because nothing there stated when the hub actually minted the message."""
+    if not isinstance(ulid, str) or len(ulid) != 26:
+        return None
+    value = 0
+    for ch in ulid[:10]:
+        idx = _CROCKFORD.find(ch.upper())
+        if idx < 0:
+            return None
+        value = (value << 5) | idx
+    return value / 1000.0
+
+
 def new_token(prefix: str) -> str:
     """Opaque bearer secret, e.g. api keys and invite tokens."""
     return f"{prefix}_{os.urandom(24).hex()}"

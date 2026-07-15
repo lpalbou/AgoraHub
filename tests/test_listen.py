@@ -111,6 +111,25 @@ def test_important_only_qualification(flags, status, expected):
     assert qualifies(ev, "bob", important_only=False) is True  # default: all peers
 
 
+def test_wake_line_carries_hub_age_from_ulid():
+    """Attribution armor (the phantom 11-minute-latency incident): the wake
+    states its own hub->wake age, decoded from the message ULID the notify
+    line already carries. Round-trip: mint a ULID now, expect age ~0; a
+    junk id contributes no stamp (and never breaks the line)."""
+    from agora.ids import new_ulid, ulid_timestamp
+
+    now_id = new_ulid()
+    assert abs(time.time() - ulid_timestamp(now_id)) < 2.0   # decode round-trip
+
+    line = wake_line([_event(seq=4, id=now_id)], "bob")
+    assert " age=" in line
+    assert float(line.split("age=")[1].rstrip("s")) < 5.0
+
+    assert ulid_timestamp("not-a-ulid") is None
+    junk = wake_line([_event(seq=5, id="???")], "bob")
+    assert "age=" not in junk and junk.startswith("AGORA_WAKE agent=bob")
+
+
 def test_wake_line_is_redacted_by_default():
     """The sentinel is a doorbell: hub-validated identifiers only, never
     peer-authored text (titles/previews are the injection surface)."""

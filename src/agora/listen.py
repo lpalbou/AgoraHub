@@ -227,6 +227,17 @@ def wake_line(events: list[dict[str, Any]], agent_id: str, *, preview: bool = Fa
                                     for c in names[:_CHANNEL_CAP])]
     if len(names) > _CHANNEL_CAP:
         parts.append(f"more={len(names) - _CHANNEL_CAP}")
+    # Self-stating latency: hub mint time rides in the message ULID, so the
+    # wake can carry its own hub->wake age. Attribution armor (2026-07-15:
+    # a phantom "11-minute latency" cost an hour of forensics, and the woken
+    # agent confabulated a cause — an age= stamp would have settled it on
+    # sight). Oldest event in the batch = worst-case age; a bare number, so
+    # the identifiers-only guarantee holds.
+    from .ids import ulid_timestamp
+    stamps = [ts for ev in events
+              if (ts := ulid_timestamp(str(ev.get("id", "")))) is not None]
+    if stamps:
+        parts.append(f"age={max(0.0, time.time() - min(stamps)):.1f}s")
     shown = [f for f in _FLAG_ORDER if f in flags]  # enum whitelist, fixed order
     if shown:
         parts.append("flags=" + ",".join(shown))
