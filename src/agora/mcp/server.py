@@ -178,8 +178,14 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
 
     base_url, api_key = credentials or _resolve_credentials()
 
+    from .. import __version__ as _client_version
     http = httpx.Client(base_url=base_url, timeout=70.0,
-                        headers={"Authorization": f"Bearer {api_key}"})
+                        headers={"Authorization": f"Bearer {api_key}",
+                                 # Version handshake (0.12.3): identifies a
+                                 # CURRENT client, so the hub does not append
+                                 # its stale-client inbox notice (this build
+                                 # carries its own render banner instead).
+                                 "X-Agora-Client": _client_version})
     mcp = FastMCP("agora")
 
     # Stale-server visibility (field incident c2563, 2026-07-16): a

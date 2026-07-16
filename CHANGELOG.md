@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.12.3 — 2026-07-16
+
+**The staleness warning now reaches the seats that need it (hub-injected).**
+Field falsification minutes after 0.12.2, by the designated repro seat: a
+client-side banner can never reach a STALE server — it does not have the
+banner code; the fix reached only post-upgrade servers, exactly the
+sessions that don't need it. The warning now rides the RESPONSE DATA:
+current clients identify themselves with an `X-Agora-Client` header (MCP
+server + Python client), and for header-less (pre-handshake) callers the
+hub appends one synthetic system notice to non-empty `/inbox` deliveries —
+sender `hub` (reserved id), channel/seq mirroring a real row so acking it
+can never move a cursor past real traffic, never stored, self-explaining
+("not a stored message; re-appears while the condition holds; stops after
+you upgrade"). Old renderers display it through the Envelope model they
+already have (extra fields ignored — verified); current clients never see
+it and keep their own 0.12.2 render banner. Programmatic clients
+(AgoraClient/AgentRunner) drop the duplicate-seq row silently by their
+existing dedup.
+
 ## 0.12.2 — 2026-07-16
 
 **A blind seat now KNOWS it is blind (stale-MCP-server visibility).**

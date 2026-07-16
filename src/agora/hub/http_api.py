@@ -8,6 +8,7 @@ WebSocket endpoint (ws.py) adds low-latency push on top of the same service.
 from __future__ import annotations
 
 import hmac
+import time
 from typing import Any
 from urllib.parse import quote
 
@@ -597,8 +598,55 @@ def channel_digest(
 
 # -- inbox (the trigger surface: long-poll for unread across all my channels) --------
 
+def _stale_client_notice(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """A synthetic system envelope the HUB appends for clients that predate
+    the version handshake (no X-Agora-Client header). Field incident c2578:
+    a client-side staleness banner can never reach a stale server — it does
+    not have the banner code. The warning must ride the RESPONSE DATA
+    through render paths old clients already have.
+
+    Safety by construction (all load-bearing):
+    - channel/seq MIRROR the first real row, so acking it never moves any
+      cursor beyond real traffic (set_cursor SETS; a novel low seq acked by
+      an LLM would rewind and re-flood — duplicate seqs cannot).
+    - AgoraClient/AgentRunner dedup by per-channel seq high-water, so
+      programmatic clients drop it silently (they render nothing anyway).
+    - kind=system + sender=hub ('hub' is a reserved id no agent can mint);
+      never stored: read_message on its id 404s, and the body says so.
+    """
+    from ..ids import new_ulid
+    first = rows[0]
+    body = ("Your session's agora client/MCP server booted on an older "
+            "agorahub than this hub now runs, so newer message fields "
+            "are silently missing from what you see and newer tools are "
+            "absent. Do NOT treat absence in your renders as absence in "
+            "the record. Fix: restart this session (or the agora-mcp "
+            "process) to load current code; until then the `agora` CLI "
+            "runs current code and is the reliable read path. This is a "
+            "synthetic notice from the hub, not a stored message: do "
+            "not reply to it, ack it, or read_message its id — it "
+            "re-appears while the condition holds and stops by itself "
+            "after you upgrade.")
+    return {
+        "id": new_ulid(), "channel": first["channel"], "seq": first["seq"],
+        "sender": "hub", "kind": "system", "status": "fyi",
+        "urgency": "inbox", "effective_urgency": "inbox",
+        "escalated": False, "downgraded": False, "critical": False,
+        "to_me": True, "reply_to_me": False,
+        "title": "HUB NOTICE: your agora tooling predates this hub — some "
+                 "message content (e.g. attachments) is INVISIBLE to you",
+        "body": body, "body_bytes": len(body.encode()),
+        "data": None, "reply_to": None,
+        "pending_asks": [], "your_pending_asks": [], "ask_progress": "",
+        "has_resolved_reply": False, "redelivery": False,
+        "attachments": [], "signature": None, "verified_by": None,
+        "created_at": time.time(),
+    }
+
+
 @router.get("/inbox")
 async def inbox(
+    request: Request,
     wait: float = Query(default=0.0, ge=0.0, le=55.0),
     agent: AgentInfo = Depends(current_agent),
     service: HubService = Depends(get_service),
@@ -607,7 +655,14 @@ async def inbox(
         messages = await service.wait_inbox(agent, wait)
     else:
         messages = service.inbox(agent)
-    return [m.model_dump() for m in messages]
+    rows = [m.model_dump() for m in messages]
+    # Version handshake (0.12.3): current clients identify themselves with
+    # X-Agora-Client and carry their OWN staleness banner. A missing header
+    # means a pre-handshake client — the blind audience — so the hub appends
+    # the notice to non-empty deliveries (an empty inbox hides nothing).
+    if rows and not request.headers.get("x-agora-client"):
+        rows.append(_stale_client_notice(rows))
+    return rows
 
 
 @router.get("/owed")

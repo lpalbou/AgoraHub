@@ -35,9 +35,15 @@ class AgoraClient:
         self.api_key = api_key
         self.agent_id = agent_id  # resolved on connect via /whoami if not given
         self.inbox = Inbox()
+        from .. import __version__ as _client_version
         self._http = httpx.AsyncClient(
             base_url=self.base_url,
-            headers={"Authorization": f"Bearer {api_key}"},
+            headers={"Authorization": f"Bearer {api_key}",
+                     # Version handshake (0.12.3): a client that identifies
+                     # itself is current enough to be trusted with its own
+                     # staleness detection; the hub's stale-client inbox
+                     # notice targets header-less (pre-handshake) callers.
+                     "X-Agora-Client": _client_version},
             timeout=httpx.Timeout(70.0),  # must exceed the /inbox long-poll cap (55s)
         )
         self._ws: websockets.ClientConnection | None = None

@@ -371,6 +371,56 @@ def test_dm_surfaces_carry_attachments(http):
     assert ref["filename"] == "spec.pdf"
 
 
+# -- hub-injected stale-client notice (incident c2578: a stale server cannot
+# -- announce its own staleness — the warning must ride the response data) ---------
+
+
+def test_stale_client_gets_hub_injected_notice(http):
+    """A header-less /inbox caller (pre-handshake client) receives ONE
+    synthetic system notice appended to non-empty deliveries: sender=hub,
+    channel/seq mirroring a REAL row (cursor-safe by construction), telling
+    the seat its renders are incomplete and how to fix it."""
+    alice = _reg(http, "alice")
+    bob = _reg(http, "bob")
+    http.post("/channels", json={"name": "design", "private": False}, headers=alice)
+    http.post("/channels/design/join", json={}, headers=bob)
+    http.post("/channels/design/messages", json={"body": "hello"}, headers=alice)
+
+    rows = http.get("/inbox", headers=bob).json()  # TestClient sends no X-Agora-Client
+    notice = [r for r in rows if r["sender"] == "hub" and "HUB NOTICE" in r["title"]]
+    assert len(notice) == 1
+    real = [r for r in rows if r["sender"] != "hub"]
+    assert (notice[0]["channel"], notice[0]["seq"]) in {(r["channel"], r["seq"])
+                                                        for r in real}
+    assert "restart" in notice[0]["body"].lower()
+
+    # A CURRENT client (header present) never sees the synthetic row.
+    fresh = http.get("/inbox", headers={**bob, "X-Agora-Client": "0.12.3"}).json()
+    assert all(r["sender"] != "hub" or "HUB NOTICE" not in r["title"] for r in fresh)
+
+    # An EMPTY inbox stays empty — nothing is hidden, so nothing is warned.
+    http.post("/inbox/ack", headers={**bob, "X-Agora-Client": "0.12.3"},
+              json={"cursors": {"design": rows[0]["seq"] if real else 1}})
+
+
+def test_stale_notice_renders_through_old_envelope_model(http):
+    """The synthetic row must parse through the Envelope model old renderers
+    already have (extra fields ignored) and render loudly — this is the
+    delivery path into a 0.11.x MCP server's existing render_envelopes."""
+    from agora.models import Envelope
+    from agora.render import render_envelopes
+
+    alice = _reg(http, "alice")
+    bob = _reg(http, "bob")
+    http.post("/channels", json={"name": "design", "private": False}, headers=alice)
+    http.post("/channels/design/join", json={}, headers=bob)
+    http.post("/channels/design/messages", json={"body": "hi"}, headers=alice)
+    rows = http.get("/inbox", headers=bob).json()
+    Envelope(**[r for r in rows if r["sender"] == "hub"][0])  # must not raise
+    text = render_envelopes(rows)
+    assert "HUB NOTICE" in text and "restart" in text.lower()
+
+
 # -- stale MCP-server visibility (incident c2563) ----------------------------------
 
 

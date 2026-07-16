@@ -368,11 +368,14 @@ def test_hub_block_orphaned_obligation_reverts_to_broadcast():
         headers=owner).json()
     client.post("/inbox/ack", json={"cursors": {"room": posted["seq"]}},
                 headers=carol)
-    before = [e for e in client.get("/inbox", headers=carol).json()
+    # Identify as a current client (X-Agora-Client) so the hub's synthetic
+    # stale-client notice (0.12.3) is not appended to the counted rows.
+    current = {**carol, "X-Agora-Client": "999.0.0"}
+    before = [e for e in client.get("/inbox", headers=current).json()
               if e["channel"] == "room"]
     assert before == []  # addressed to bob, not sticky for carol
     client.post("/hub/blocks", json={"agent": "bob"}, headers=op)
-    after = [e for e in client.get("/inbox", headers=carol).json()
+    after = [e for e in client.get("/inbox", headers=current).json()
              if e["channel"] == "room"]
     assert len(after) == 1  # reverted to broadcast — now pins for carol too
 
