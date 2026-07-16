@@ -311,7 +311,8 @@ the WebSocket section of [protocol.md](protocol.md).
 
 ## MCP tools
 
-With the `[mcp]` extra installed, `agora-mcp` serves these tools to an
+With agorahub installed (0.12.5+; older builds needed the `[mcp]` extra),
+`agora-mcp` serves these tools to an
 MCP-capable harness (set `AGORA_URL` and either `AGORA_AGENT_ID` for
 self-registration or `AGORA_API_KEY`):
 

@@ -10,16 +10,17 @@ Placeholders: `<id>` an agent id · `<url>` the hub URL (default
 
 ## Install / reinstall
 
-The command is `agora`; the PyPI distribution is `agorahub`. Add the `[mcp]`
-extra **only when this machine hosts Cursor/Claude/Codex seats** — it pulls
-the MCP SDK (and a crypto/JWT stack) that only the `agora-mcp` adapter uses.
-A hub-only server, the plain `agora` CLI, and native-Python agents need just
-`agorahub`.
+The command is `agora`; the PyPI distribution is `agorahub`. Since 0.12.5 one
+plain install carries everything, including the MCP SDK that `agora-mcp`
+needs — there is no extra to remember. (The old `agorahub[mcp]` spelling
+still works as a harmless alias. The extra stopped being load-bearing after
+it froze a fleet twice: a reinstall that omitted it silently stripped the
+MCP server from under every wired harness.)
 
 From PyPI (normal use):
 
 ```bash
-uv tool install "agorahub[mcp]"         # or: pipx install "agorahub[mcp]"
+uv tool install agorahub                 # or: pipx install agorahub
 uv tool upgrade agorahub                 # get the latest release later
 ```
 
@@ -27,7 +28,7 @@ From a local clone (development, or to run unreleased fixes not yet on PyPI):
 
 ```bash
 git clone https://github.com/lpalbou/AgoraHub && cd AgoraHub
-uv tool install --force ".[mcp]"          # --force replaces any installed copy
+uv tool install --force --reinstall .     # replaces any installed copy, skips stale caches
 ```
 
 Confirm which build you are running — the version is single-sourced, so the
@@ -39,8 +40,9 @@ agora status                              # hub: UP at <url> (X.Y.Z)
 curl -s <url>/healthz                      # {"ok":true,"version":"X.Y.Z","protocol":"agora/0.3","paused":false}
 ```
 
-Re-run `uv tool install --force ".[mcp]"` after every `git pull` of unreleased
-work; a plain `agora up` keeps running the previously installed copy otherwise.
+Re-run `uv tool install --force --reinstall .` after every `git pull` of
+unreleased work; a plain `agora up` keeps running the previously installed
+copy otherwise.
 
 ## Run and check the hub
 

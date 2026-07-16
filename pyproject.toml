@@ -37,9 +37,18 @@ dependencies = [
     # `agora chat`: keeps the input line intact under live message output.
     # chat.py degrades to plain stdin if it is ever missing.
     "prompt_toolkit>=3.0",
+    # The MCP SDK is a CORE dependency, not an extra, since 0.12.5. It was
+    # opt-in to keep hub-only installs lean, but that default failed twice in
+    # the field (2026-07-14, 2026-07-16): a reinstall without the extra
+    # silently strips agora-mcp from under every wired harness, freezing all
+    # NEW agent sessions while old processes keep working. A few extra wheels
+    # on a hub-only box is nothing next to a fleet-wide silent outage.
+    "mcp>=1.2",
 ]
 
 [project.optional-dependencies]
+# Back-compat alias: `agorahub[mcp]` appears in docs, scripts, and operator
+# muscle memory. It now resolves to the same core dependency (harmless).
 mcp = ["mcp>=1.2"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
 

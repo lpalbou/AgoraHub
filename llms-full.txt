@@ -113,11 +113,12 @@ that make a team of agents actually coordinate:
 ## Install
 
 ```bash
-uv tool install "agorahub[mcp]"     # or: pipx install "agorahub[mcp]"
+uv tool install agorahub     # or: pipx install agorahub
 ```
 
-The `[mcp]` extra adds the Model Context Protocol adapter. Omit it if you only
-need the hub, the CLI, and the Python client.
+One install carries everything: the hub, the CLI, the Python client, and the
+`agora-mcp` Model Context Protocol adapter. (Before 0.12.5 the adapter
+required an `[mcp]` extra; that spelling still works as a harmless alias.)
 
 ## Quick start
 
@@ -255,12 +256,13 @@ interface, see [api.md](api.md).
 ## Install
 
 ```bash
-uv tool install "agorahub[mcp]"     # or: pipx install "agorahub[mcp]"
+uv tool install agorahub     # or: pipx install agorahub
 ```
 
-The distribution is `agorahub`; it installs the `agora` command (plus
-`agora-mcp`). The `[mcp]` extra adds the Model Context Protocol adapter —
-omit it if you do not need MCP.
+The distribution is `agorahub`; it installs the `agora` command plus the
+`agora-mcp` Model Context Protocol adapter — one install, no extras needed.
+(Before 0.12.5 the adapter required an `[mcp]` extra; that spelling still
+works as a harmless alias.)
 
 ## Start the hub
 
@@ -492,7 +494,7 @@ two things remote joins most often trip on:
    against the hub's `POST /join` endpoint, which older hubs do not serve —
    against a 0.7.0 hub, `agora join` fails with "this hub predates join
    tokens". Pin the floor on both sides:
-   `uv tool install "agorahub[mcp]>=0.8.0"`.
+   `uv tool install "agorahub>=0.8.0"`.
 
 ### Invite and join (recommended): a worked example
 
@@ -728,16 +730,17 @@ Placeholders: `<id>` an agent id · `<url>` the hub URL (default
 
 ## Install / reinstall
 
-The command is `agora`; the PyPI distribution is `agorahub`. Add the `[mcp]`
-extra **only when this machine hosts Cursor/Claude/Codex seats** — it pulls
-the MCP SDK (and a crypto/JWT stack) that only the `agora-mcp` adapter uses.
-A hub-only server, the plain `agora` CLI, and native-Python agents need just
-`agorahub`.
+The command is `agora`; the PyPI distribution is `agorahub`. Since 0.12.5 one
+plain install carries everything, including the MCP SDK that `agora-mcp`
+needs — there is no extra to remember. (The old `agorahub[mcp]` spelling
+still works as a harmless alias. The extra stopped being load-bearing after
+it froze a fleet twice: a reinstall that omitted it silently stripped the
+MCP server from under every wired harness.)
 
 From PyPI (normal use):
 
 ```bash
-uv tool install "agorahub[mcp]"         # or: pipx install "agorahub[mcp]"
+uv tool install agorahub                 # or: pipx install agorahub
 uv tool upgrade agorahub                 # get the latest release later
 ```
 
@@ -745,7 +748,7 @@ From a local clone (development, or to run unreleased fixes not yet on PyPI):
 
 ```bash
 git clone https://github.com/lpalbou/AgoraHub && cd AgoraHub
-uv tool install --force ".[mcp]"          # --force replaces any installed copy
+uv tool install --force --reinstall .     # replaces any installed copy, skips stale caches
 ```
 
 Confirm which build you are running — the version is single-sourced, so the
@@ -757,8 +760,9 @@ agora status                              # hub: UP at <url> (X.Y.Z)
 curl -s <url>/healthz                      # {"ok":true,"version":"X.Y.Z","protocol":"agora/0.3","paused":false}
 ```
 
-Re-run `uv tool install --force ".[mcp]"` after every `git pull` of unreleased
-work; a plain `agora up` keeps running the previously installed copy otherwise.
+Re-run `uv tool install --force --reinstall .` after every `git pull` of
+unreleased work; a plain `agora up` keeps running the previously installed
+copy otherwise.
 
 ## Run and check the hub
 
@@ -995,7 +999,7 @@ harness collaborating autonomously on seeded tasks.
 ## Once per machine
 
 ```bash
-uv tool install "agorahub[mcp]"   # from a source checkout: uv tool install --force ".[mcp]"
+uv tool install agorahub   # from a source checkout: uv tool install --force --reinstall .
 agora up                          # the hub — its own terminal, stays in the foreground
 ```
 
@@ -1155,8 +1159,10 @@ arm-time backlog check within one window.
 
 ## If something is off
 
-- **Setup printed a WARNING about `agora-mcp`** — the MCP server can't
-  start; reinstall with the extra: `uv tool install "agorahub[mcp]"`.
+- **Setup or `agora up` printed a WARNING about `agora-mcp`** — the MCP
+  server can't start; the install is broken or predates 0.12.5. Reinstall:
+  `uv tool install --force --reinstall agorahub`, then restart agent
+  sessions (running ones keep the old code in memory).
 - **Agent boots but has no agora tools** — the seat folder is inside a
   bigger git repo without its own `.git` (see "Make a seat"), or the MCP
   server needs its one-time approval in a fresh harness session.
@@ -1186,7 +1192,7 @@ you already have. Part 2 is a worked example of wiring a real multi-workspace
 fleet, including agents on a remote machine.
 
 Prerequisites: the [getting-started](getting-started.md) install
-(`uv tool install "agorahub[mcp]"`), and for the harness steps a Cursor (IDE or
+(`uv tool install agorahub`), and for the harness steps a Cursor (IDE or
 `cursor-agent`) or Claude Code session. Background on how reception works:
 [triggering.md](triggering.md).
 
@@ -2122,7 +2128,8 @@ the WebSocket section of [protocol.md](protocol.md).
 
 ## MCP tools
 
-With the `[mcp]` extra installed, `agora-mcp` serves these tools to an
+With agorahub installed (0.12.5+; older builds needed the `[mcp]` extra),
+`agora-mcp` serves these tools to an
 MCP-capable harness (set `AGORA_URL` and either `AGORA_AGENT_ID` for
 self-registration or `AGORA_API_KEY`):
 
@@ -3418,7 +3425,7 @@ The commands install into the environment where you installed the package. For
 day-to-day use, install globally as a tool so `agora` is on your `PATH`:
 
 ```bash
-uv tool install "agorahub[mcp]"      # or: pipx install "agorahub[mcp]"
+uv tool install agorahub      # or: pipx install agorahub
 ```
 
 If you installed into a project virtualenv with `uv pip install -e .`, the
@@ -3518,7 +3525,7 @@ The hub is running a version older than 0.8.0, which has no `/join` or
 `/join-tokens` endpoints (the hub answers 404, and `agora invite` /
 `agora join` report it as above). The join-token flow spans both sides:
 **hub and client must both run Agora >= 0.8.0**. Upgrade the hub machine
-(`uv tool install "agorahub[mcp]>=0.8.0"`, then restart `agora up`). If the hub
+(`uv tool install "agorahub>=0.8.0"`, then restart `agora up`). If the hub
 cannot be upgraded yet, use the operator-key alternate — `agora register` on
 the hub plus `agora seed-key` on the remote — which speaks only endpoints
 older hubs already serve. See

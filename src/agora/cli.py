@@ -39,13 +39,18 @@ def _resolve_mcp_command() -> str:
     return "agora-mcp"
 
 
-def _smoke_check_mcp(mcp_command: str) -> None:
-    """Prove the agora-mcp we are about to WIRE actually starts, at setup
-    time. Field root-cause (2026-07-14): a workspace mcp.json pointed at a
-    binary whose venv lacked the `mcp` extra — every agent in that fleet
-    booted TOOLLESS and improvised with the CLI against the wrong hub, and
-    nothing said so until live-run forensics. The failure belongs HERE,
-    loud, with the fix in hand. Import check only (no hub, no key needed):
+def _smoke_check_mcp(mcp_command: str,
+                     hint: str = "then re-run this setup.") -> None:
+    """Prove the agora-mcp we are about to WIRE actually starts. Field
+    root-cause (2026-07-14): a workspace mcp.json pointed at a binary whose
+    venv lacked the `mcp` extra — every agent in that fleet booted TOOLLESS
+    and improvised with the CLI against the wrong hub, and nothing said so
+    until live-run forensics. Second field hit (2026-07-16): a force
+    REINSTALL swapped the venv UNDER already-wired binaries, so the
+    setup-time check never ran and every session started after it froze
+    toolless ("MCP error -32000: Connection closed"). Hence this check runs
+    at setup AND at hub launch (cmd_up) — the two moments an operator
+    touches this machine. Import check only (no hub, no key needed):
     `import mcp` failing is exactly the broken-extra signature."""
     import subprocess
     probe = ("import importlib.util, sys; "
@@ -64,10 +69,10 @@ def _smoke_check_mcp(mcp_command: str) -> None:
         return  # a probe failure must never block setup; connect-time will tell
     if rc == 3:
         print(f"WARNING: {mcp_command} cannot start — its environment lacks "
-              "the MCP SDK, so agents in this workspace would boot WITHOUT "
-              "agora tools. Fix now: reinstall with the extra, e.g. "
-              "`uv tool install \"agorahub[mcp]\"` (dev checkout: "
-              "`uv sync --extra mcp`), then re-run this setup.",
+              "the MCP SDK (broken or pre-0.12.5 install), so agents on this "
+              "machine would boot WITHOUT agora tools. Fix now: "
+              "`uv tool install --force --reinstall agorahub` (dev checkout: "
+              "`uv tool install --force --reinstall .`), " + hint,
               file=sys.stderr)
 
 
@@ -119,6 +124,13 @@ def cmd_up(args: argparse.Namespace) -> None:
           "(cursor|claude|codex; run in its workspace)")
     print(f"  remote agent:  agora invite AGENT_ID --url {url}   "
           "(mints a one-paste `agora join ...` line for the other machine)")
+    # Guard the seats, not just the hub: a venv swap under already-wired
+    # agora-mcp binaries (reinstall without [mcp]) freezes every NEW session
+    # on this machine while old processes keep working — invisible until
+    # forensics. Probe at launch, warn loudly, never block the hub.
+    _smoke_check_mcp(_resolve_mcp_command(),
+                     hint="then restart affected agent sessions (running "
+                          "ones keep the old code in memory).")
     app = create_app(db_path=db_path, admin_key=admin_key,
                      rate_per_minute=args.rate_per_minute,
                      notify_dir=notify_dir or None,
@@ -554,16 +566,28 @@ def cmd_register(args: argparse.Namespace) -> None:
     if r.status_code != 200:
         sys.exit(f"registration failed: {r.status_code} {r.text}")
     payload = r.json()
+    if getattr(args, "seed", False):
+        # Same-machine onboarding: cache the key here so identity-aware
+        # consumers (agora --as, harness bridges) resolve it from keys.json
+        # with no copy-paste. The key is still shown once for the record.
+        _config.seed_keys(url, {args.agent: payload["api_key"]})
     if args.json:
         print(json.dumps(payload, indent=2))
         return
     print(f"agent '{args.agent}' registered at {url} (operator=false)")
     print(f"  api_key: {payload['api_key']}")
-    print("shown exactly ONCE (the hub stores only its hash). On the agent's "
-          "machine:")
-    print(f"  agora seed-key {args.agent} --url {url} --key <that key>")
-    print(f"  (or: agora setup AGENT_FRAMEWORK {args.agent} --url {url} "
-          "--key THAT_KEY — cursor|claude|codex)")
+    if getattr(args, "seed", False):
+        keys_path = _config.home() / "keys.json"
+        print(f"seeded '{url}::{args.agent}' -> {keys_path} (0600); this "
+              "machine resolves the identity with no further key handling:")
+        print(f"  agora whoami --as {args.agent}")
+    else:
+        print("shown exactly ONCE (the hub stores only its hash). On the "
+              "agent's machine:")
+        print(f"  agora seed-key {args.agent} --url {url} --key <that key>")
+        print(f"  (or: agora setup AGENT_FRAMEWORK {args.agent} --url {url} "
+              "--key THAT_KEY — cursor|claude|codex)")
+        print("  (same machine? re-run with --seed to skip the paste)")
 
 
 def cmd_seed_key(args: argparse.Namespace) -> None:
@@ -1540,6 +1564,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="admin key (default: $AGORA_ADMIN_KEY, then config.json)")
     rg.add_argument("--json", action="store_true",
                     help="print the raw registration response (scripting)")
+    rg.add_argument("--seed", action="store_true",
+                    help="also cache the minted key in this machine's "
+                         "keys.json (the agent runs HERE; skips the "
+                         "seed-key paste)")
     rg.set_defaults(func=cmd_register)
 
     dg = sub.add_parser("delegate", help="grant/list/revoke delegation "

@@ -19,3 +19,6 @@ untracked/
 
 # mkdocs build output
 site/
+
+# Workspace agent wiring (holds live per-seat API keys)
+.cursor/

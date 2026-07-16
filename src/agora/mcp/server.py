@@ -166,15 +166,16 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
     try:
         from mcp.server.fastmcp import FastMCP
     except ModuleNotFoundError as exc:
-        # The MCP SDK is an opt-in extra: only this adapter needs it (the hub,
-        # the CLI, and native-Python agents do not), and it pulls a compiled
-        # crypto/JWT stack the lean install avoids. Fail with the fix, not a
-        # bare traceback in the harness's MCP logs.
+        # The MCP SDK is a CORE dependency since 0.12.5 (it was an opt-in
+        # extra before; that default froze the fleet twice when a reinstall
+        # dropped it). If this import fails the install itself is broken or
+        # predates 0.12.5. Fail with the fix, not a bare traceback in the
+        # harness's MCP logs.
         raise SystemExit(
-            "agora-mcp needs the MCP SDK, which is an optional extra. Reinstall "
-            "with it: `uv tool install \"agorahub[mcp]\"` (or `pipx install "
-            "\"agorahub[mcp]\"`). The hub and the plain `agora` CLI do not need "
-            "it — only this MCP server for Cursor/Claude/Codex seats does.") from exc
+            "agora-mcp cannot import the MCP SDK, so this install is broken "
+            "or outdated (the SDK ships with agorahub since 0.12.5). Fix: "
+            "`uv tool install --force --reinstall agorahub` (or `pipx "
+            "reinstall agorahub`), then restart agent sessions.") from exc
 
     base_url, api_key = credentials or _resolve_credentials()
 

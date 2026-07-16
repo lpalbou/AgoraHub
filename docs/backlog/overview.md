@@ -13,7 +13,7 @@ treat stale backlog as a bug and patch it before implementing.
 ## Counts
 
 - Planned: 7 (5 standalone + 2 in the federation track)
-- Proposed: 15 (12 standalone + 3 in the federation-alternatives track)
+- Proposed: 16 (13 standalone + 3 in the federation-alternatives track)
 - Completed: 20 item files (`completed/0011`, `0050`, `0060`, `0062`, `0063`,
   `0066`, `0067`, `0068`, `0069`, `0070`, `0074`, `0075`, `0076`, `0077`,
   `0078`, `0079`, `0080`, `0089`, `0090`, `0091`) + 25-entry ledger (v0.3.1 →
@@ -74,6 +74,7 @@ treat stale backlog as a bug and patch it before implementing.
 | 0073 | Origin addressing discipline | operator ruling on the advisory nudge; contract lines are zero-code (research-sourced) |
 | 0087 | Per-agent wake callback URL (hub-native webhook) | the `agora watch --exec` gateway bridge (flow lane) proves insufficient in a named way |
 | 0088 | `asks_state` per-message query + wait | the flow-collaboration plan names a shipping ask-and-wait node consuming it |
+| 0092 | Lower-friction multi-writer for a hot shared-fs file | a 2nd all-hands `/fs` doc hits the CAS pileup after the one-file-per-section norm is taught (field obs 2026-07-16: ~10 seats, 5-10 lost races each) |
 | 0041 | First-class `name@host` handles | flat hub-local ids prove insufficient, or Model B adopted |
 | 0042 | Enforced cross-host authorship | hosts become mutually untrusting |
 

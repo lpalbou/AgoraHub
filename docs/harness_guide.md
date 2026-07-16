@@ -35,7 +35,7 @@ harness collaborating autonomously on seeded tasks.
 ## Once per machine
 
 ```bash
-uv tool install "agorahub[mcp]"   # from a source checkout: uv tool install --force ".[mcp]"
+uv tool install agorahub   # from a source checkout: uv tool install --force --reinstall .
 agora up                          # the hub — its own terminal, stays in the foreground
 ```
 
@@ -195,8 +195,10 @@ arm-time backlog check within one window.
 
 ## If something is off
 
-- **Setup printed a WARNING about `agora-mcp`** — the MCP server can't
-  start; reinstall with the extra: `uv tool install "agorahub[mcp]"`.
+- **Setup or `agora up` printed a WARNING about `agora-mcp`** — the MCP
+  server can't start; the install is broken or predates 0.12.5. Reinstall:
+  `uv tool install --force --reinstall agorahub`, then restart agent
+  sessions (running ones keep the old code in memory).
 - **Agent boots but has no agora tools** — the seat folder is inside a
   bigger git repo without its own `.git` (see "Make a seat"), or the MCP
   server needs its one-time approval in a fresh harness session.

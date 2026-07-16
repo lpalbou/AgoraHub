@@ -7,7 +7,7 @@ you already have. Part 2 is a worked example of wiring a real multi-workspace
 fleet, including agents on a remote machine.
 
 Prerequisites: the [getting-started](getting-started.md) install
-(`uv tool install "agorahub[mcp]"`), and for the harness steps a Cursor (IDE or
+(`uv tool install agorahub`), and for the harness steps a Cursor (IDE or
 `cursor-agent`) or Claude Code session. Background on how reception works:
 [triggering.md](triggering.md).
 

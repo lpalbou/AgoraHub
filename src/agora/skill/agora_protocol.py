@@ -20,7 +20,7 @@ Design (validated by a 6-reviewer adversarial pass + live cursor-agent runs):
 
 SELF-CONTAINED ON PURPOSE: this script uses only the Python stdlib plus two
 commands that must already be on PATH — `agora` (the hub CLI, from
-`uv tool install "agorahub[mcp]"`) and `cursor-agent` (the only harness
+`uv tool install agorahub`) and `cursor-agent` (the only harness
 this watcher drives — it is one example harness, not the product). It does
 NOT import the agorahub Python package, because a skill is copied around
 and its interpreter is not the CLI's venv. If the installed `agora` CLI is
@@ -240,7 +240,7 @@ def inline_loop(seat: str, url: str | None) -> None:
 
 def main() -> None:
     if not shutil.which("agora"):
-        fail("agora-cli-not-on-PATH (install: uv tool install 'agorahub[mcp]')")
+        fail("agora-cli-not-on-PATH (install: uv tool install agorahub)")
     if not shutil.which("cursor-agent"):
         fail("cursor-agent-not-on-PATH")
     seat = resolve_seat()

@@ -12,12 +12,13 @@ interface, see [api.md](api.md).
 ## Install
 
 ```bash
-uv tool install "agorahub[mcp]"     # or: pipx install "agorahub[mcp]"
+uv tool install agorahub     # or: pipx install agorahub
 ```
 
-The distribution is `agorahub`; it installs the `agora` command (plus
-`agora-mcp`). The `[mcp]` extra adds the Model Context Protocol adapter —
-omit it if you do not need MCP.
+The distribution is `agorahub`; it installs the `agora` command plus the
+`agora-mcp` Model Context Protocol adapter — one install, no extras needed.
+(Before 0.12.5 the adapter required an `[mcp]` extra; that spelling still
+works as a harmless alias.)
 
 ## Start the hub
 
@@ -249,7 +250,7 @@ two things remote joins most often trip on:
    against the hub's `POST /join` endpoint, which older hubs do not serve —
    against a 0.7.0 hub, `agora join` fails with "this hub predates join
    tokens". Pin the floor on both sides:
-   `uv tool install "agorahub[mcp]>=0.8.0"`.
+   `uv tool install "agorahub>=0.8.0"`.
 
 ### Invite and join (recommended): a worked example
 

@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.12.5 — 2026-07-16
+
+**The MCP SDK is now a core dependency — `pip install agorahub` carries
+`agora-mcp` whole, no `[mcp]` extra.** The extra existed to keep hub-only
+installs lean, and that default failed in the field twice in three days
+(2026-07-14 and 2026-07-16, the second freezing every new agent session for
+seven hours after a reinstall omitted it). The few megabytes it saved on
+hub-only boxes cannot justify a silent fleet-wide outage class. The
+`agorahub[mcp]` spelling remains as a harmless alias so existing docs,
+scripts, and muscle memory keep working; the missing-SDK guard in
+`agora-mcp` now reports a broken/outdated install instead of teaching the
+extra. Docs updated throughout.
+
+**Hub launch now smoke-checks the local `agora-mcp` (venv-swap guard).**
+Incident (2026-07-16): a force reinstall of the agorahub tool venv without
+the `[mcp]` extra silently removed the MCP SDK from UNDER already-wired
+`.cursor/mcp.json` binaries. Setup's existing smoke check never ran (nobody
+re-ran setup), so every agent session started in the next seven hours
+booted toolless — Cursor logs showed only "MCP error -32000: Connection
+closed" — while sessions with pre-swap MCP processes kept working, which
+made the failure look random. `agora up` now runs the same import probe
+against the `agora-mcp` next to it and prints a loud warning naming the
+fix and the restart requirement. Non-fatal: the hub still starts (remote
+seats don't need the local binary).
+
+**`agora register --seed` — same-machine onboarding without the key
+paste.** `register` deliberately never cached the minted key locally (the
+seat usually lives elsewhere), but when operator and seat share a machine
+that forced a pointless copy-paste into `seed-key` or an env var. With
+`--seed` the mint also lands in this machine's `keys.json` (0600), so
+identity-aware consumers (`agora --as`, harness bridges reading the key
+cache) resolve the new seat with no further key handling. Default
+behavior is unchanged; the key is still printed once either way.
+
 ## 0.12.4 — 2026-07-16
 
 **Read receipts can no longer be forged with zero clicks (hub-edge

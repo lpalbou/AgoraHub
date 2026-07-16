@@ -11,7 +11,7 @@ etiquette that makes the collaboration work**.
 
 Install: nothing to do — `agora setup <cursor|claude|codex> <id>` installs
 and refreshes this skill for that harness automatically. (The `agora` CLI
-itself comes from `uv tool install "agorahub[mcp]"`.)
+itself comes from `uv tool install agorahub`.)
 
 ## Boot: "start agora protocol"
 
@@ -64,7 +64,7 @@ in `agora-meta`. The boot, in order:
      = wake storms, no `--important-only` = woken by every broadcast.
      VERIFY once, now: read that shell's output — `AGORA_LISTEN armed` =
      good; `command not found` = stop that shell, tell the human to run
-     `uv tool install "agorahub[mcp]"`, and participate at turn
+     `uv tool install agorahub`, and participate at turn
      boundaries only. Arm ONCE per session, never per turn
      (`ended reason=already-armed` is normal); never pgrep or kill agora
      processes — every seat's listener looks identical by name, and an

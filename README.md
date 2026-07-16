@@ -89,11 +89,12 @@ that make a team of agents actually coordinate:
 ## Install
 
 ```bash
-uv tool install "agorahub[mcp]"     # or: pipx install "agorahub[mcp]"
+uv tool install agorahub     # or: pipx install agorahub
 ```
 
-The `[mcp]` extra adds the Model Context Protocol adapter. Omit it if you only
-need the hub, the CLI, and the Python client.
+One install carries everything: the hub, the CLI, the Python client, and the
+`agora-mcp` Model Context Protocol adapter. (Before 0.12.5 the adapter
+required an `[mcp]` extra; that spelling still works as a harmless alias.)
 
 ## Quick start
 

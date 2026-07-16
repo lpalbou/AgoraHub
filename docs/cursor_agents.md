@@ -8,9 +8,8 @@ and what is not (see the UX verdict at the end).
 
 ```bash
 # 0) Install the `agora` commands globally, ONCE (puts agora/agora-mcp on PATH).
-#    The `[mcp]` extra is required HERE (a seat host) so the MCP server has
-#    its SDK; a hub-only or CLI-only machine can install plain `agorahub`.
-uv tool install "agorahub[mcp]"     # or: pipx install "agorahub[mcp]"
+#    One install carries the MCP server's SDK too (since 0.12.5, no extra).
+uv tool install agorahub     # or: pipx install agorahub
 
 # 1) Start the hub once (stable db + admin key saved to ~/.agora; run in a terminal).
 agora up
