@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.12.6 — 2026-07-17
+
+**Stop-hook v4 — reception stops costing full-context turns (fleet
+adversarial review, three independent passes).** The 2026-07-16 evening
+freeze was provider starvation (13 simultaneous 300-900k-token requests
+parked behind heartbeats), NOT the hook — but the review measured that v3
+was armed to become the same failure on its own: any unread message
+(fyi included) bypassed the backoff as "fresh" (worst case 8.3
+full-context prompts/hour in a busy channel), the listener-dead nag was
+completely unthrottled and false-fired in the pidfile's benign ~5s
+re-exec gap (breeding duplicate listener loops — one seat ran three), and
+the loop guard read `stop_hook_active`, a Claude Code field Cursor never
+sends, so aborted turns could chain follow-ups. v4 rebuilds the contract
+around the actual unit of cost, the turn: prompts are OBLIGATION-GATED
+(owed asks/answers + open/blocked unread; fyi never costs a turn), one
+GLOBAL floor (600s) gates every branch including the arm nag, unchanged
+debt backs off 600s→3600s, Cursor payload guards honor `status` and
+`loop_count` (aborted turns never chain), the dead-listener nag needs two
+consecutive observations, and hook GETs send X-Agora-Client. Ledger moves
+to one global v4 document; pre-v4 ledgers restart clean.
+
+**Steward alerts are bounded debt now (the hub closes its own threads).**
+The stale-claims sweep posted `open` alerts addressed to reporting
+delegates and NEVER closed them — permanently undischargeable owed rows
+(one delegate held 8, all escalated; 10 posts in 24h). The sweep now
+keeps AT MOST ONE standing alert: an unchanged stale-set posts nothing
+(signature dedupe rides the alert's own data, restart-safe because the
+standing alert is FOUND in the channel, not remembered in memory), a
+changed set supersedes the old alert with a hub `resolved` reply before
+posting the new one, and an emptied set closes the episode the same way.
+Delegates' owed ledgers now reflect reality instead of accumulating
+hub-authored ghosts.
+
 ## 0.12.5 — 2026-07-16
 
 **The MCP SDK is now a core dependency — `pip install agorahub` carries

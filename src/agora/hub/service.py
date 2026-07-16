@@ -160,8 +160,9 @@ class HubService:
         # In-memory by design: a hub restart re-alerts once, which is honest.
         self._dark_since: dict[str, float] = {}
         self._dark_alerted_at: dict[str, float] = {}
-        # Stewardship episodes (0084): (channel, claim-key) -> last alert ts.
-        self._stale_claim_alerted: dict[tuple[str, str], float] = {}
+        # Stewardship (0084/0093): stale-claim alert dedupe lives in the
+        # standing alert's steward_sig — read from the channel, restart-safe
+        # — not in process memory.
         # Pause state cache (0069) + last long-pause reminder timestamp.
         self._pause_cache: dict[str, Any] | None = None
         self._pause_cache_at = 0.0
@@ -939,16 +940,24 @@ class HubService:
                                 f"'{channel}' (v{row['version']}), then retry")
 
     def _post_system(self, channel: str, body: str,
-                     to: list[str] | None = None) -> None:
+                     to: list[str] | None = None,
+                     status: str | None = None,
+                     reply_to: str | None = None,
+                     data: dict[str, Any] | None = None) -> Message:
         # `to` lets an alert ADDRESS its steward (0084): an addressed
         # message rides the to-me wake path and the owed ledger — a
         # broadcast alert would unpin on a bare read and decay.
+        # `status`/`reply_to` let the hub CLOSE its own alerts (0093): an
+        # open system message is an obligation, and obligations the hub
+        # never discharges accumulate as permanent owed debt on the
+        # addressees (measured: 8 undischargeable rows on one delegate).
         message = self.db.insert_message(
             channel, "hub", kind=Kind.system.value,
-            status="open" if to else "fyi", urgency="inbox",
-            title="", body=body, data=None, reply_to=None, to=to or [],
+            status=status or ("open" if to else "fyi"), urgency="inbox",
+            title="", body=body, data=data, reply_to=reply_to, to=to or [],
         )
         self._wake(message)
+        return message
 
     def _wake(self, message: Message) -> None:
         payload = {"type": "message", "message": message.model_dump()}
@@ -2389,23 +2398,29 @@ class HubService:
         return alerted
 
     def _steward_sweep(self) -> list[str]:
-        """Stewardship half of the watchdog (0084): a claim whose row has
-        not been touched past its channel SLA is work going quietly stale —
-        exactly what the reporting delegate exists to chase, and exactly
-        what it cannot see without a turn. One coalesced alert per sweep,
-        ADDRESSED to the reporting delegates (addressed = the wake path
-        that provably works; the claim-row overwrite is the progress
-        receipt, so touching the claim ends its episode). Episode-deduped
-        like AGENT DARK: one alert per (channel, claim) episode, re-alert
-        only after the flap window. No delegates -> no scan, no alert (the
-        operator's own board shows staleness anyway)."""
+        """Stewardship half of the watchdog (0084, hardened 0093): a claim
+        whose row has not been touched past its channel SLA is work going
+        quietly stale — exactly what the reporting delegate exists to
+        chase, and exactly what it cannot see without a turn.
+
+        BOUNDED-DEBT CONTRACT (0093, from the 2026-07-17 adversarial
+        review): an open system alert is an OBLIGATION on its addressees,
+        and v1 posted a new one per flap window without ever closing the
+        old — delegates accumulated permanently undischargeable owed rows
+        (measured: 8 on one seat, 10 posts in 24h). Now the hub closes its
+        own thread like any well-behaved asker: at most ONE stale-claims
+        alert stands at any time; a sweep whose live set matches the
+        standing alert posts nothing; a changed set supersedes (resolved
+        reply, then the new alert); an empty set closes the standing alert.
+        Survives hub restarts because the standing alert is FOUND in the
+        channel (sender=hub, open, unresolved), not remembered in memory."""
         stewards = sorted({d["agent_id"] for d in self.active_delegations()
                            if "reporting" in d.get("powers", ())})
         if not stewards:
             return []
         now = time.time()
-        fresh: list[str] = []
-        live: set[tuple[str, str]] = set()
+        live: list[str] = []
+        live_keys: list[str] = []
         for ch in self.db.channel_names():
             sla_s = self.channel_sla(ch) * 60.0
             for entry in self.db.store_keys(ch):
@@ -2417,43 +2432,68 @@ class HubService:
                     continue
                 if self._claim_done(stored.value):
                     # Finished work is never stale work: a done/shipped row
-                    # must not re-escalate on age (c2409) — the episode ends
-                    # below exactly as if the row were touched.
+                    # must not re-escalate on age (c2409).
                     continue
                 if stored.value.get("done"):
                     continue
                 age = now - stored.updated_at
                 if age <= sla_s:
                     continue
-                ep = (ch, key)
-                live.add(ep)
-                if now - self._stale_claim_alerted.get(ep, 0.0) < DARK_REALERT_SECONDS:
-                    continue
-                self._stale_claim_alerted[ep] = now
+                live_keys.append(f"{ch}/{key}")
                 owner = str(stored.value.get("owner", "?"))
                 # Redact private channels like every alert (HIGH-2).
                 info = self.db.get_channel(ch)
                 shown = (f"{ch}/{key}" if info is not None and not info.private
                          else "a private-channel claim")
-                fresh.append(f"{shown} (owner {owner}, idle {age / 60:.0f}m)")
-        # Episodes end when the claim is touched, finished, or its row ages
-        # back under the SLA (channel SLA raised).
-        for ep in list(self._stale_claim_alerted):
-            if ep not in live:
-                del self._stale_claim_alerted[ep]
-        if fresh:
-            self._ensure_alerts_channel()
+                live.append(f"{shown} (owner {owner}, idle {age / 60:.0f}m)")
+        sig = hashlib.sha256("\n".join(sorted(live_keys)).encode()).hexdigest()[:16]
+        standing = self._standing_steward_alerts()
+        if not live:
+            for old in standing:
+                self._post_system(
+                    self.DARK_ALERTS_CHANNEL,
+                    "stale-claims episode closed: every flagged claim was "
+                    "touched, finished, or aged back under its SLA.",
+                    status="resolved", reply_to=old.id)
+            return ["stale-claims:cleared"] if standing else []
+        if standing and any(
+                isinstance(m.data, dict)
+                and m.data.get("steward_sig") == sig for m in standing):
+            return []  # the standing alert already states exactly this debt
+        for old in standing:
             self._post_system(
                 self.DARK_ALERTS_CHANNEL,
-                "STALE CLAIMS (stewardship): " + "; ".join(fresh[:8])
-                + (f" (+{len(fresh) - 8} more)" if len(fresh) > 8 else "")
-                + ". Canvass the owners per your charter: one bundled ask "
-                  "per seat, or reassign via the queue. Touching the claim "
-                  "row is the progress receipt that clears this; a row "
-                  "marked done/shipped never alerts.",
-                to=stewards)
-            return [f"stale-claims:{len(fresh)}"]
-        return []
+                "superseded by the next stale-claims alert (the live set "
+                "changed); this episode is closed.",
+                status="resolved", reply_to=old.id)
+        self._ensure_alerts_channel()
+        self._post_system(
+            self.DARK_ALERTS_CHANNEL,
+            "STALE CLAIMS (stewardship): " + "; ".join(live[:8])
+            + (f" (+{len(live) - 8} more)" if len(live) > 8 else "")
+            + ". Canvass the owners per your charter: one bundled ask "
+              "per seat, or reassign via the queue. Touching the claim "
+              "row is the progress receipt that clears this; a row "
+              "marked done/shipped never alerts. The hub closes this "
+              "alert itself when the set changes or empties.",
+            to=stewards, data={"steward_sig": sig})
+        return [f"stale-claims:{len(live)}"]
+
+    def _standing_steward_alerts(self) -> list[Message]:
+        """Every hub-authored stale-claims alert still standing open (no
+        authoritative close). Read from the channel, not memory, so a hub
+        restart cannot orphan an open alert."""
+        if self.db.get_channel(self.DARK_ALERTS_CHANNEL) is None:
+            return []
+        out: list[Message] = []
+        ops = self.operator_ids()
+        for m in self.db.open_obligations([self.DARK_ALERTS_CHANNEL]):
+            if m.sender != "hub" or not m.body.startswith("STALE CLAIMS"):
+                continue
+            if closed_authoritatively(m, self.db.replies_to(m.id), ops):
+                continue
+            out.append(m)
+        return out
 
     async def dark_watchdog(self, interval_seconds: float = 300.0) -> None:
         """Background loop for dark_sweep (started by the app lifespan;

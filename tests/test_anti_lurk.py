@@ -240,11 +240,12 @@ def test_debrief_fixes_envelope_scope_redelivery_and_waiting_on(client, room):
 
 
 def test_stewardship_stale_claim_alerts_address_the_delegate(client, room):
-    """0084: a claim untouched past its channel SLA produces ONE coalesced
-    hub-alert ADDRESSED to the reporting delegate (addressed = the wake
-    path that works; broadcast alerts decay on a bare read). Touching the
-    claim row is the progress receipt that ends the episode. No delegate,
-    no alert."""
+    """0084 + 0093: a claim untouched past its channel SLA produces ONE
+    coalesced hub-alert ADDRESSED to the reporting delegate. Bounded-debt
+    contract (0093): at most one alert stands; an unchanged live set posts
+    nothing; touching the claim (the progress receipt) makes the next sweep
+    CLOSE the standing alert with the hub's own resolved reply, so the
+    delegate's owed row disappears instead of accumulating forever."""
     service = client.app.state.service
 
     # A claim, then age it past the SLA by backdating the store row.
@@ -268,14 +269,71 @@ def test_stewardship_stale_claim_alerts_address_the_delegate(client, room):
     alert = next(m for m in reversed(alerts) if "STALE CLAIMS" in m.body)
     assert alert.to == ["bystander"] and alert.status.value == "open"
     assert "canvass/claim:build-x" in alert.body and "owner named" in alert.body
+    # The delegate now OWES an answer on the alert.
+    owed = client.get("/owed", headers=_auth(room["bystander"])).json()
+    assert any(o["id"] == alert.id for o in owed["to_answer"])
 
-    # Same episode never re-alerts within the flap window...
+    # Unchanged live set: nothing new posted, the ONE alert keeps standing.
     assert service._steward_sweep() == []
-    # ...and touching the claim row (the progress receipt) ends the episode.
+    count_before = sum("STALE CLAIMS" in m.body
+                       for m in service.db.get_messages("hub-alerts", 0, 100))
+    assert count_before == 1
+
+    # Touching the claim row ends the episode: the hub CLOSES its own alert.
     client.put("/channels/canvass/store/claim:build-x", headers=_auth(key),
                json={"value": {"owner": "named", "note": "progress"}})
+    assert service._steward_sweep() == ["stale-claims:cleared"]
+    replies = service.db.replies_to(alert.id)
+    assert any(r.sender == "hub" and r.status.value == "resolved"
+               for r in replies)
+    # The debt is gone from the delegate's owed ledger.
+    owed = client.get("/owed", headers=_auth(room["bystander"])).json()
+    assert not any(o["id"] == alert.id for o in owed["to_answer"])
+    # And a further sweep with nothing stale posts nothing at all.
     assert service._steward_sweep() == []
-    assert service._stale_claim_alerted == {}
+
+
+def test_stewardship_changed_set_supersedes_bounded_to_one(client, room):
+    """0093: when the stale set CHANGES, the old alert is closed (resolved
+    reply) and one new alert replaces it — never two standing obligations.
+    Restart-safety: the standing alert is found in the channel, so a fresh
+    service instance still closes it."""
+    service = client.app.state.service
+    key = room["named"]
+    client.put("/admin/delegation", headers={"Authorization": f"Bearer {ADMIN_KEY}"},
+               json={"agent_id": "bystander", "powers": ["reporting"]})
+
+    client.put("/channels/canvass/store/claim:one", headers=_auth(key),
+               json={"value": {"owner": "named"}, "expect_version": 0})
+    service.db._conn.execute(
+        "UPDATE store SET updated_at = updated_at - 7200 "
+        "WHERE channel='canvass' AND key='claim:one'")
+    service.db._conn.commit()
+    assert service._steward_sweep() == ["stale-claims:1"]
+
+    # The set grows: a second stale claim appears.
+    client.put("/channels/canvass/store/claim:two", headers=_auth(key),
+               json={"value": {"owner": "named"}, "expect_version": 0})
+    service.db._conn.execute(
+        "UPDATE store SET updated_at = updated_at - 7200 "
+        "WHERE channel='canvass' AND key='claim:two'")
+    service.db._conn.commit()
+    assert service._steward_sweep() == ["stale-claims:2"]
+
+    msgs = service.db.get_messages("hub-alerts", 0, 100)
+    alerts = [m for m in msgs if "STALE CLAIMS" in m.body]
+    assert len(alerts) == 2  # history keeps both, but only one STANDS:
+    standing = service._standing_steward_alerts()
+    assert len(standing) == 1
+    assert "claim:two" in standing[0].body
+    # The superseded alert carries the hub's closing reply.
+    closed = next(m for m in alerts if m.id != standing[0].id)
+    assert any(r.sender == "hub" and r.status.value == "resolved"
+               for r in service.db.replies_to(closed.id))
+    # The delegate owes exactly ONE answer, not one per sweep.
+    owed = client.get("/owed", headers=_auth(room["bystander"])).json()
+    hub_debts = [o for o in owed["to_answer"] if o["from"] == "hub"]
+    assert len(hub_debts) == 1
 
 
 def test_terminal_claims_never_go_stale(client, room):

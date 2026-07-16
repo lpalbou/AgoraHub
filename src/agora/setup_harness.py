@@ -417,31 +417,51 @@ def _hook_entry_list(config: dict, *keys: str) -> list:
 def stop_hook_script(url: str, agent_id: str, noop_output: str = '"{}"',
                      reprompt_key: str = "__DECISION__",
                      check_listener: bool = False) -> str:
-    """The ONE stop-hook (v3), shared by all three harnesses: instant inbox
-    check (never a long-poll — a human shares the session), prompting NOW when
-    a fresh seq landed, and re-prompting standing unread on exponential
-    backoff (120s * 2^(attempts-1), capped at 1800s). The per-channel attempt
-    ledger (<AGORA_HOME>/hook-attempts-<id>.json) only THROTTLES prompts — it
-    never means "handled": the server-side ack cursor (ack_inbox) is the only
-    truth, so unread keeps prompting (ever more slowly) until the agent itself
-    acks. Loop safety: the `stop_hook_active` guard here plus each harness's
-    own bound (Cursor loop_limit). Harness contracts differ only in output:
-    `noop_output` (Claude/Cursor print an empty JSON object, Codex prints
-    nothing) and `reprompt_key` ("__DECISION__" emits Claude/Codex's
-    {"decision": "block", "reason": msg}; any other value is used as a plain
-    key, e.g. Cursor's {"followup_message": msg}).
+    """The ONE stop-hook (v4), shared by all three harnesses.
 
-    `check_listener` (Cursor only): on Cursor, reception is the agent's own
-    monitored BACKGROUND listener — no hook or external process can hold it
-    for the seat (field-proven 2026-07-12: after a machine crash, seats
-    resumed reception only when explicitly told). This hook probes the
-    listener pidfile (touched by each single-shot call) at every turn end
-    and re-prompts the arming instruction while the listener is dead, even
-    when the inbox is empty — resuming stops depending on the agent
-    remembering and starts being told until fixed, bounded by loop_limit.
-    False for Claude (its SessionStart/Stop hooks re-arm automatically) and
-    Codex (no idle-wake surface exists; a nag would demand the
-    impossible)."""
+    v3 prompted on ANY unread with a per-channel backoff that a fresh seq
+    bypassed. A fleet adversarial review (2026-07-17) measured what that
+    means in a busy channel: 8.3 full-context prompts/hour worst case (every
+    commons message reset the backoff), an UNTHROTTLED listener-dead branch
+    that false-fired in the pidfile's benign ~5s/cycle gap and bred
+    duplicate listener loops (one seat ran three), and a loop guard reading
+    `stop_hook_active` — a Claude Code field Cursor never sends — so aborted
+    turns could breed follow-ups. Each prompt costs a full-context turn
+    (300-900k tokens on fleet seats): the unit of cost is the turn, so v4
+    gates on what actually deserves one:
+
+    - OBLIGATION-GATED: prompts for owed debts (GET /owed: unanswered asks
+      naming you, answers to consume) plus open/blocked unread — never for
+      fyi, which waits for an organic turn (mirrors the listener's
+      --important-only contract).
+    - GLOBAL FLOOR: at most one prompt per FLOOR seconds across ALL
+      branches, listener-dead included. Freshness modulates content, never
+      cadence: instant delivery is the LISTENER's job; the hook is the
+      slow backstop.
+    - PAYLOAD GUARDS for the harness that actually runs it: no follow-up
+      when the turn did not complete (Cursor `status` != completed — an
+      aborted turn must not resurrect itself), none past Cursor
+      `loop_count` >= 2 (script-side cap; hooks.json loop_limit stays the
+      harness backstop), and Claude's `stop_hook_active` re-entry guard.
+    - DEAD-LISTENER DEBOUNCE: the pidfile is legitimately absent ~2% of
+      each listen cycle (process exit -> loop re-exec), so one dead
+      observation proves nothing: the arm nag needs TWO consecutive dead
+      stops, then respects the floor like every other prompt.
+    - Sends X-Agora-Client so the hub's stale-client detection sees hook
+      traffic honestly (v3's bare GET made the hub inject a phantom notice
+      into the count).
+
+    Ledger (<AGORA_HOME>/hook-attempts-<id>.json, v4 shape): one global
+    document {v, last_prompt, sig, attempts, dead_streak}. `sig` hashes the
+    obligation id-set; unchanged debt re-prompts on exponential backoff
+    (600s * 2^(attempts-1) capped 3600s), changed debt prompts at the next
+    floor-open stop, cleared debt goes silent. The ledger only THROTTLES —
+    it never means handled; the server-side ack cursor stays the only truth.
+
+    `check_listener` (Cursor only): reception is the agent's own monitored
+    background listener; this hook re-prompts the arming ritual while it is
+    dead (two-observation rule above). False for Claude (SessionStart/Stop
+    hooks re-arm automatically) and Codex (no idle-wake surface exists)."""
     if reprompt_key == "__DECISION__":
         emit = 'print(json.dumps({"decision": "block", "reason": msg}))\n'
     else:
@@ -461,37 +481,22 @@ def stop_hook_script(url: str, agent_id: str, noop_output: str = '"{}"',
     )
     # Single source (c2095 lesson): the nag renders the SAME command the
     # rule teaches — a hand-spelled copy here is how surfaces drift apart.
-    # Only interactive seats carry this hook, so the fixed-window command is
-    # always the right one (driven seats never install a listener nag).
     resume_cmd = LISTEN_CMD.format(agent_id=agent_id)
-    arm_nag = (
-        'if listener_dead() and not payload.get("stop_hook_active"):\n'
-        '    msg = ("Your agora BACKGROUND RECEPTION is not armed: this session "\n'
-        '           "is deaf to hub messages until you re-arm it. Do it NOW, "\n'
-        '           "exactly as your agora rule says: check_inbox, triage, then "\n'
-        '           "start ONE background shell running "\n'
-        f'           "`{resume_cmd}` "\n'
-        '           "monitored on the ANCHORED pattern ^AGORA_WAKE (debounce "\n'
-        '           ">= 15000 ms), then keep your foreground on real work. "\n'
-        '           "Never pgrep/kill agora processes (other seats look "\n'
-        '           "identical by name)."\n'
-        '           + (f" Also: {len(unread)} unread message(s) await triage."\n'
-        '              if unread else ""))\n'
-        + '    ' + emit.replace('\n', '\n    ').rstrip() + '\n'
-        '    sys.exit(0)\n'
-    )
     return (
         '#!/usr/bin/env python3\n'
-        '# agora-hook v3\n'
-        '# agora stop-hook: INSTANT inbox check (never long-polls). Prompts when\n'
-        '# something NEW landed; re-prompts standing unread on exponential backoff.\n'
-        '# The attempt ledger only THROTTLES prompts — it never means "handled":\n'
+        '# agora-hook v4\n'
+        '# Turn-end backstop for agora reception. Obligation-gated (owed debts +\n'
+        '# open/blocked unread; fyi never prompts), one global prompt floor across\n'
+        '# ALL branches, harness payload guards (completed turns only, loop_count\n'
+        '# cap), two-observation dead-listener nag. The ledger only THROTTLES —\n'
         '# the server-side ack cursor (ack_inbox) is the only truth.\n'
-        'import json, os, sys, time, urllib.request\n'
+        'import hashlib, json, os, sys, time, urllib.request\n'
         f'URL = {url!r}\n'
         f'AGENT = {agent_id!r}\n'
         f'NOOP = {noop_output}\n'
-        'BACKOFF_BASE, BACKOFF_CAP = 120, 1800\n'
+        f'CLIENT = {_client_version()!r}\n'
+        'FLOOR = 600\n'
+        'BACKOFF_BASE, BACKOFF_CAP = 600, 3600\n'
         '\n'
         'def noop():\n'
         '    if NOOP:\n'
@@ -507,6 +512,24 @@ def stop_hook_script(url: str, agent_id: str, noop_output: str = '"{}"',
         '    payload = json.load(sys.stdin)\n'
         'except Exception:\n'
         '    payload = {}\n'
+        'if not isinstance(payload, dict):\n'
+        '    payload = {}\n'
+        '# Claude re-entry guard: a turn the hook itself started must not chain.\n'
+        'if payload.get("stop_hook_active"):\n'
+        '    noop()\n'
+        '# Cursor guards, enforced only when the field exists (Claude/Codex\n'
+        '# payloads lack both). An aborted/errored turn must not breed a\n'
+        '# follow-up: the human just cancelled, or the provider just failed —\n'
+        '# either way another full-context turn is the wrong reflex.\n'
+        'status = payload.get("status")\n'
+        'if status is not None and str(status) != "completed":\n'
+        '    noop()\n'
+        'try:\n'
+        '    lc = payload.get("loop_count")\n'
+        '    if lc is not None and int(lc) >= 2:\n'
+        '        noop()  # script-side chain cap; hooks.json loop_limit backstops\n'
+        'except Exception:\n'
+        '    pass\n'
         'home = os.environ.get("AGORA_HOME", os.path.expanduser("~/.agora"))\n'
         + listener_check +
         'try:\n'
@@ -514,89 +537,135 @@ def stop_hook_script(url: str, agent_id: str, noop_output: str = '"{}"',
         'except Exception:\n'
         '    keys = {}\n'
         'key = keys.get(f"{URL}::{AGENT}", "") if isinstance(keys, dict) else ""\n'
-        'if not key or payload.get("stop_hook_active"):\n'
+        'if not key:\n'
         '    noop()\n'
+        '\n'
+        'ledger_path = os.path.join(home, f"hook-attempts-{AGENT}.json")\n'
+        'def _fresh_ledger():\n'
+        '    return {"v": 4, "last_prompt": 0.0, "sig": "", "attempts": 0,\n'
+        '            "dead_streak": 0}\n'
         'try:\n'
-        '    req = urllib.request.Request(f"{URL}/inbox",\n'
-        '                                 headers={"Authorization": f"Bearer {key}"})\n'
+        '    led = json.load(open(ledger_path))\n'
+        '    if not (isinstance(led, dict) and led.get("v") == 4):\n'
+        '        led = _fresh_ledger()  # v3 per-channel ledgers restart clean\n'
+        'except Exception:\n'
+        '    led = _fresh_ledger()\n'
+        'def _save():\n'
+        '    try:\n'
+        '        with open(ledger_path, "w") as f:\n'
+        '            json.dump(led, f)\n'
+        '    except Exception:\n'
+        '        pass  # best-effort throttle: prompting matters more than state\n'
+        '\n'
+        'now = time.time()\n'
+        'last = led.get("last_prompt", 0.0)\n'
+        'try:\n'
+        '    last = float(last)\n'
+        'except Exception:\n'
+        '    last = 0.0\n'
+        'if not 0 <= last <= now + 60:\n'
+        '    last = 0.0  # NaN/negative/future timestamp: recover, not freeze\n'
+        'floor_open = (now - last) >= FLOOR\n'
+        '\n'
+        '# Two-observation dead-listener rule: the pidfile is absent ~5s of\n'
+        '# every ~246s listen cycle, so a single dead read is noise.\n'
+        'if listener_dead():\n'
+        '    led["dead_streak"] = min(int(led.get("dead_streak", 0) or 0) + 1, 64)\n'
+        'else:\n'
+        '    led["dead_streak"] = 0\n'
+        'arm_due = led["dead_streak"] >= 2\n'
+        '\n'
+        'def _get(path):\n'
+        '    req = urllib.request.Request(\n'
+        '        f"{URL}{path}", headers={"Authorization": f"Bearer {key}",\n'
+        '                                 "X-Agora-Client": CLIENT})\n'
         '    with urllib.request.urlopen(req, timeout=5) as r:\n'
-        '        unread = json.load(r)\n'
+        '        return json.load(r)\n'
+        '\n'
+        'try:\n'
+        '    owed = _get("/owed")\n'
+        'except Exception:\n'
+        '    owed = {}\n'
+        'if not isinstance(owed, dict):\n'
+        '    owed = {}\n'
+        'to_answer = [m for m in owed.get("to_answer", []) if isinstance(m, dict)]\n'
+        'to_consume = [m for m in owed.get("to_consume", []) if isinstance(m, dict)]\n'
+        'try:\n'
+        '    unread = _get("/inbox")\n'
         'except Exception:\n'
         '    unread = []\n'
         'if not isinstance(unread, list):\n'
         '    unread = []\n'
-        + arm_nag +
-        'if not unread:\n'
-        '    noop()  # empty inbox: nothing to say; ledger untouched\n'
-        '\n'
-        'ledger_path = os.path.join(home, f"hook-attempts-{AGENT}.json")\n'
-        'try:\n'
-        '    ledger = json.load(open(ledger_path))\n'
-        'except Exception:\n'
-        '    ledger = {}  # missing/corrupt ledger: everything counts as fresh\n'
-        'if not isinstance(ledger, dict):\n'
-        '    ledger = {}\n'
-        '\n'
-        'def entry(channel):\n'
-        '    e = ledger.get(channel)\n'
-        '    try:\n'
-        '        return {"seq": int(e.get("seq", 0) or 0),\n'
-        '                "attempts": min(int(e.get("attempts", 0) or 0), 64),\n'
-        '                "last": float(e.get("last", 0) or 0.0)}\n'
-        '    except Exception:\n'
-        '        return {"seq": 0, "attempts": 0, "last": 0.0}\n'
-        '\n'
-        'now = time.time()\n'
-        'tops, fresh_count = {}, 0\n'
+        '# Obligation-shaped unread only: open/blocked status, or flags that\n'
+        '# mark a debt (an answer to YOUR ask, critical, escalated). Bare\n'
+        '# to-you fyi — including the hub\'s synthetic notices, which ride\n'
+        '# fyi+to-you — waits for an organic turn; fyi never costs one.\n'
+        'IMPORTANT = {"reply-to-me", "critical", "escalated"}\n'
+        'oblig_unread = []\n'
         'for e in unread:\n'
-        '    if not isinstance(e, dict):\n'
+        '    if not isinstance(e, dict) or str(e.get("from", "")) == AGENT:\n'
         '        continue\n'
-        '    c = str(e.get("channel", ""))\n'
-        '    try:\n'
-        '        s = int(e.get("seq", 0) or 0)\n'
-        '    except Exception:\n'
-        '        s = 0\n'
-        '    tops[c] = max(tops.get(c, 0), s)\n'
-        '    if s > entry(c)["seq"]:\n'
-        '        fresh_count += 1\n'
-        'due = False\n'
-        'for c, s in tops.items():\n'
-        '    ent = entry(c)\n'
-        '    if s > ent["seq"]:\n'
-        '        continue  # fresh channel: prompts regardless of backoff\n'
-        '    last = ent["last"]\n'
-        '    if not 0 <= last <= now + 60:\n'
-        '        last = 0.0  # NaN/negative/future timestamp: recover, not freeze\n'
-        '    if now - last >= backoff(ent["attempts"]):\n'
-        '        due = True\n'
-        'if not fresh_count and not due:\n'
-        '    noop()  # standing unread, every backoff window still open\n'
-        '# One prompt covers the whole inbox, so every unread channel\'s window\n'
-        '# restarts now (fresh channels reset the decay, stale ones escalate\n'
-        '# it); channels with nothing unread left are pruned — acked history\n'
-        '# needs no state. Never marks anything handled: ack_inbox is truth.\n'
-        'new_ledger = {}\n'
-        'for c, s in tops.items():\n'
-        '    ent = entry(c)\n'
-        '    if s > ent["seq"]:\n'
-        '        new_ledger[c] = {"seq": s, "attempts": 1, "last": now}\n'
-        '    else:\n'
-        '        new_ledger[c] = {"seq": ent["seq"],\n'
-        '                         "attempts": max(ent["attempts"], 0) + 1,\n'
-        '                         "last": now}\n'
+        '    flags = {t for t in str(e.get("flags", "")).split(",") if t}\n'
+        '    if str(e.get("status", "")) in ("open", "blocked") or flags & IMPORTANT:\n'
+        '        oblig_unread.append(e)\n'
+        '\n'
+        'def _mid(m):\n'
+        '    return str(m.get("id") or f"{m.get(\'channel\')}:{m.get(\'seq\')}")\n'
+        'oblig_ids = sorted({_mid(m) for m in to_answer} | {_mid(m) for m in to_consume}\n'
+        '                   | {_mid(e) for e in oblig_unread})\n'
+        'have_debt = bool(oblig_ids)\n'
+        'sig = hashlib.sha256("\\n".join(oblig_ids).encode()).hexdigest()[:16] if have_debt else ""\n'
+        'changed = have_debt and sig != str(led.get("sig", ""))\n'
         'try:\n'
-        '    with open(ledger_path, "w") as f:\n'
-        '        json.dump(new_ledger, f)\n'
+        '    attempts = min(int(led.get("attempts", 0) or 0), 64)\n'
         'except Exception:\n'
-        '    pass  # best-effort throttle: prompting matters more than the ledger\n'
-        'msg = (f"You have {len(unread)} unread agora message(s) across "\n'
-        '       f"{len(tops)} channel(s) ({fresh_count} new). check_inbox "\n'
-        '       "and settle what you OWE first: DO or claim work assigned to "\n'
-        '       "you; use answers to your own asks; reply where owed; then "\n'
-        '       "ack (ack = seen, not done). Verify your listener is armed; "\n'
-        '       "re-arm if dead.")\n'
+        '    attempts = 0\n'
+        'due = (have_debt and not changed\n'
+        '       and (now - last) >= backoff(max(attempts, 1)))\n'
+        'if not have_debt:\n'
+        '    led["sig"], led["attempts"] = "", 0  # cleared debt ends the episode\n'
+        'if not floor_open or not (arm_due or changed or due):\n'
+        '    _save()  # persist dead_streak/sig evolution even when silent\n'
+        '    noop()\n'
+        '\n'
+        'parts = []\n'
+        'if arm_due:\n'
+        '    parts.append(\n'
+        '        "Your agora BACKGROUND RECEPTION is not armed: this session "\n'
+        '        "is deaf to hub messages until you re-arm it. Do it NOW, "\n'
+        '        "exactly as your agora rule says: check_inbox, triage, then "\n'
+        '        "start ONE background shell running "\n'
+        f'        "`{resume_cmd}` "\n'
+        '        "monitored on the ANCHORED pattern ^AGORA_WAKE (debounce "\n'
+        '        ">= 15000 ms), then keep your foreground on real work. "\n'
+        '        "FIRST check the listener is not already running (read your "\n'
+        '        "background shells); never arm a second loop, and never "\n'
+        '        "pgrep/kill agora processes (other seats look identical by "\n'
+        '        "name).")\n'
+        'if have_debt:\n'
+        '    parts.append(\n'
+        '        f"You OWE work on {len(oblig_ids)} obligation(s): "\n'
+        '        f"{len(to_answer)} unanswered ask(s) naming you, "\n'
+        '        f"{len(to_consume)} answer(s) to your own asks awaiting use, "\n'
+        '        f"{len(oblig_unread)} open/blocked unread. check_inbox and "\n'
+        '        "settle what you OWE first: DO or claim work assigned to "\n'
+        '        "you; use answers to your own asks; reply where owed; then "\n'
+        '        "ack (ack = seen, not done).")\n'
+        'msg = " ".join(parts)\n'
+        'led["last_prompt"] = now\n'
+        'if have_debt:\n'
+        '    led["sig"] = sig\n'
+        '    led["attempts"] = 1 if changed else attempts + 1\n'
+        'else:\n'
+        '    led["sig"], led["attempts"] = "", 0\n'
+        '_save()\n'
         + emit
     )
+
+
+def _client_version() -> str:
+    from . import __version__
+    return __version__
 
 
 def install_claude_stop_hook(workspace: Path, url: str, agent_id: str) -> list[Path]:

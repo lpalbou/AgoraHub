@@ -1,13 +1,14 @@
-"""setup-cursor / setup-claude / setup-codex: project-scoped wiring, v2 hooks.
+"""setup-cursor / setup-claude / setup-codex: project-scoped wiring, v4 hooks.
 
 What must hold: configs land in the harness's documented project-scope
 locations (never global), re-runs refresh in place without duplicating agora
 entries or clobbering FOREIGN hooks, hook command paths are absolute, and the
-generated v2 stop-hook — executed here as a real subprocess against a stubbed
-hub `/inbox` — prompts on fresh seqs, throttles standing unread on exponential
-backoff via the attempt ledger, noops on empty inbox / stop_hook_active /
-missing key, and never lets the ledger block a prompt once the server-side
-ack cursor (the only truth) says something new is unread.
+generated v4 stop-hook — executed here as a real subprocess against a stubbed
+hub `/owed` + `/inbox` — prompts ONLY for obligations (owed debts and
+open/blocked unread, never fyi), enforces one global prompt floor across all
+branches, obeys the harness payload guards (completed turns only, loop_count
+cap, stop_hook_active), needs two consecutive dead observations before the
+listener nag, and noops silently on missing key / unreachable hub.
 """
 
 import json
@@ -39,15 +40,21 @@ class _InboxHandler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802 (BaseHTTPRequestHandler API)
         stub = self.server.stub
         stub.requests.append(self.headers.get("Authorization", ""))
-        if self.path.partition("?")[0] == "/inbox":
-            body = json.dumps(stub.messages).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+        stub.client_headers.append(self.headers.get("X-Agora-Client", ""))
+        path = self.path.partition("?")[0]
+        if path == "/inbox":
+            payload = stub.messages
+        elif path == "/owed":
+            payload = stub.owed
         else:
             self.send_error(404)
+            return
+        body = json.dumps(payload).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def log_message(self, *_args):  # keep pytest output clean
         pass
@@ -56,7 +63,9 @@ class _InboxHandler(BaseHTTPRequestHandler):
 @pytest.fixture()
 def inbox_stub():
     server = ThreadingHTTPServer(("127.0.0.1", 0), _InboxHandler)
-    stub = SimpleNamespace(messages=[], requests=[],
+    stub = SimpleNamespace(messages=[], requests=[], client_headers=[],
+                           owed={"to_answer": [], "to_consume": [],
+                                 "waiting_on": []},
                            url=f"http://127.0.0.1:{server.server_address[1]}")
     server.stub = stub
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -89,51 +98,63 @@ def _ledger_path(home, agent="runtime"):
     return home / f"hook-attempts-{agent}.json"
 
 
-def _shift_last(home, channel, seconds, agent="runtime"):
-    """Simulate time passing by editing the ledger's `last` timestamp."""
+def _ledger(home, agent="runtime"):
+    return json.loads(_ledger_path(home, agent).read_text())
+
+
+def _shift_last_prompt(home, seconds, agent="runtime"):
+    """Simulate time passing by editing the v4 ledger's last_prompt."""
     path = _ledger_path(home, agent)
-    ledger = json.loads(path.read_text())
-    ledger[channel]["last"] = time.time() - seconds
-    path.write_text(json.dumps(ledger))
+    led = json.loads(path.read_text())
+    led["last_prompt"] = time.time() - seconds
+    path.write_text(json.dumps(led))
 
 
 # ---------------------------------------------------------------------------
-# generated hook, executed: fresh-seq prompt / backoff / noop paths
+# generated hook, executed: obligation gate / floor / guards / noop paths
 # ---------------------------------------------------------------------------
 
 
-def test_hook_fresh_seq_prompts_and_seeds_ledger(tmp_path, inbox_stub):
+def test_hook_obligations_prompt_and_seed_ledger(tmp_path, inbox_stub):
     inbox_stub.messages = [
-        {"channel": "commons", "seq": 4, "from": "memory"},
-        {"channel": "commons", "seq": 5, "from": "memory"},
-        {"channel": "dm:runtime--memory", "seq": 2, "from": "memory"},
+        {"channel": "commons", "seq": 4, "from": "memory", "status": "open",
+         "id": "m4"},
+        {"channel": "commons", "seq": 5, "from": "memory", "status": "fyi",
+         "id": "m5"},
+        {"channel": "dm:runtime--memory", "seq": 2, "from": "memory",
+         "status": "reply", "flags": "reply-to-me", "id": "m2"},
     ]
+    inbox_stub.owed = {"to_answer": [{"id": "a1"}], "to_consume": [],
+                       "waiting_on": []}
     script, home = _hook_env(tmp_path, inbox_stub.url,
                              reprompt_key="followup_message")
     out = _run_hook(script, home)
-    assert out.returncode == 0
+    assert out.returncode == 0, out.stderr
     prompt = json.loads(out.stdout)["followup_message"]
-    assert "3 unread" in prompt and "2 channel(s)" in prompt
-    assert "(3 new)" in prompt
+    # 3 obligations: owed ask a1 + open m4 + flagged m2. The fyi m5 is NOT
+    # counted — fyi waits for an organic turn.
+    assert "3 obligation(s)" in prompt
+    assert "1 unanswered ask(s)" in prompt
+    assert "2 open/blocked unread" in prompt
     # Anti-lurk wording (2026-07-13): debts first, ack demoted to a
     # seen-marker — never "review and decide" with ack as the goal.
     assert "settle what you OWE first" in prompt
     assert "ack = seen, not done" in prompt
-    assert "listener is armed" in prompt
     assert inbox_stub.requests[0] == "Bearer k1"  # authenticated instant GET
+    # v4 declares itself to the hub (stale-client detection, notice hygiene).
+    assert all(h for h in inbox_stub.client_headers)
 
-    ledger = json.loads(_ledger_path(home).read_text())
-    assert ledger["commons"] == pytest.approx(
-        {"seq": 5, "attempts": 1, "last": ledger["commons"]["last"]})
-    assert ledger["commons"]["last"] == pytest.approx(time.time(), abs=30)
-    assert ledger["dm:runtime--memory"]["seq"] == 2
+    led = _ledger(home)
+    assert led["v"] == 4 and led["attempts"] == 1
+    assert len(led["sig"]) == 16
+    assert led["last_prompt"] == pytest.approx(time.time(), abs=30)
 
 
-def test_hook_fresh_seq_prompts_decision_block_contract(tmp_path, inbox_stub):
-    """The Claude/Codex re-prompt contract, EXECUTED (the fresh-seq test above
-    only runs Cursor's followup_message variant): stdout must be exactly one
-    {"decision": "block", "reason": ...} object."""
-    inbox_stub.messages = [{"channel": "commons", "seq": 7, "from": "memory"}]
+def test_hook_prompts_decision_block_contract(tmp_path, inbox_stub):
+    """The Claude/Codex re-prompt contract, EXECUTED: stdout must be exactly
+    one {"decision": "block", "reason": ...} object."""
+    inbox_stub.messages = [{"channel": "commons", "seq": 7, "from": "memory",
+                            "status": "open", "id": "m7"}]
     for name, kw in [("claude", {}), ("codex", {"noop_output": '""'})]:
         sub = tmp_path / name
         sub.mkdir()
@@ -142,84 +163,136 @@ def test_hook_fresh_seq_prompts_decision_block_contract(tmp_path, inbox_stub):
         assert out.returncode == 0, out.stderr
         obj = json.loads(out.stdout)
         assert obj["decision"] == "block"
-        assert "1 unread" in obj["reason"] and "(1 new)" in obj["reason"]
-        assert "listener is armed" in obj["reason"]
-        assert json.loads(_ledger_path(home).read_text())["commons"]["seq"] == 7
+        assert "1 obligation(s)" in obj["reason"]
+        assert _ledger(home)["attempts"] == 1
 
 
-def test_hook_backoff_throttles_then_reprompts(tmp_path, inbox_stub):
-    """Standing unread: silent while the window is open, re-prompt after
-    120s*2^(n-1). Time is simulated by editing the ledger's timestamps."""
-    inbox_stub.messages = [{"channel": "commons", "seq": 5}]
+def test_hook_fyi_never_prompts(tmp_path, inbox_stub):
+    """fyi unread — including the hub's synthetic notices — must never cost
+    a turn: it waits for the next organic check_inbox."""
+    inbox_stub.messages = [
+        {"channel": "commons", "seq": 5, "from": "memory", "status": "fyi"},
+        {"channel": "commons", "seq": 6, "from": "hub", "status": "fyi",
+         "flags": "to-you"},  # hub notices ride from=hub: never a turn
+    ]
     script, home = _hook_env(tmp_path, inbox_stub.url,
                              reprompt_key="followup_message")
-    assert "followup_message" in _run_hook(script, home).stdout  # seeds ledger
-
-    # Immediately after the prompt: window (120s) open -> noop.
     out = _run_hook(script, home)
     assert json.loads(out.stdout) == {}
 
-    # 130s later (edited): due again -> re-prompt, 0 new, attempts -> 2.
-    _shift_last(home, "commons", 130)
-    out = _run_hook(script, home)
-    assert "(0 new)" in json.loads(out.stdout)["followup_message"]
-    assert json.loads(_ledger_path(home).read_text())["commons"]["attempts"] == 2
 
-    # 130s after THAT prompt: attempts=2 window is 240s -> still throttled.
-    _shift_last(home, "commons", 130)
+def test_hook_global_floor_gates_even_changed_debt(tmp_path, inbox_stub):
+    """One prompt per FLOOR seconds, PERIOD: a brand-new obligation arriving
+    seconds after a prompt does not buy another turn (instant delivery is
+    the listener's job; the hook is the slow backstop)."""
+    inbox_stub.owed = {"to_answer": [{"id": "a1"}], "to_consume": [],
+                       "waiting_on": []}
+    script, home = _hook_env(tmp_path, inbox_stub.url,
+                             reprompt_key="followup_message")
+    assert "followup_message" in _run_hook(script, home).stdout
+
+    # New debt lands immediately: sig changed, but the floor is closed.
+    inbox_stub.owed = {"to_answer": [{"id": "a1"}, {"id": "a2"}],
+                       "to_consume": [], "waiting_on": []}
     assert json.loads(_run_hook(script, home).stdout) == {}
 
-    # 250s: past the 240s window -> re-prompt, attempts -> 3.
-    _shift_last(home, "commons", 250)
-    assert "followup_message" in _run_hook(script, home).stdout
-    assert json.loads(_ledger_path(home).read_text())["commons"]["attempts"] == 3
-
-
-def test_hook_backoff_caps_at_1800s(tmp_path, inbox_stub):
-    """Uncapped, attempts=30 would mean a ~2-century window; the cap keeps
-    standing unread re-prompting at least every 30 minutes."""
-    inbox_stub.messages = [{"channel": "commons", "seq": 5}]
-    script, home = _hook_env(tmp_path, inbox_stub.url,
-                             reprompt_key="followup_message")
-    _ledger_path(home).write_text(json.dumps(
-        {"commons": {"seq": 5, "attempts": 30, "last": time.time() - 1700}}))
-    assert json.loads(_run_hook(script, home).stdout) == {}  # 1700 < 1800
-
-    _ledger_path(home).write_text(json.dumps(
-        {"commons": {"seq": 5, "attempts": 30, "last": time.time() - 1900}}))
-    assert "followup_message" in _run_hook(script, home).stdout  # 1900 >= cap
-
-
-def test_hook_empty_inbox_noops_and_leaves_ledger_alone(tmp_path, inbox_stub):
-    inbox_stub.messages = []
-    script, home = _hook_env(tmp_path, inbox_stub.url,
-                             reprompt_key="followup_message")
-    sentinel = json.dumps({"commons": {"seq": 9, "attempts": 3, "last": 1.0}})
-    _ledger_path(home).write_text(sentinel)
+    # 610s later the floor opens: the changed debt prompts, attempts resets.
+    _shift_last_prompt(home, 610)
     out = _run_hook(script, home)
-    assert json.loads(out.stdout) == {}
-    assert _ledger_path(home).read_text() == sentinel  # untouched, byte-same
-
-    # And with no ledger at all: noop must not create one.
-    _ledger_path(home).unlink()
-    _run_hook(script, home)
-    assert not _ledger_path(home).exists()
+    assert "2 obligation(s)" in json.loads(out.stdout)["followup_message"]
+    assert _ledger(home)["attempts"] == 1
 
 
-def test_hook_stop_hook_active_noops_without_touching_hub(tmp_path, inbox_stub):
-    inbox_stub.messages = [{"channel": "commons", "seq": 5}]
+def test_hook_unchanged_debt_backs_off_to_cap(tmp_path, inbox_stub):
+    """Standing UNCHANGED debt re-prompts on exponential backoff
+    600s*2^(n-1) capped at 3600s — never at the raw floor rate."""
+    inbox_stub.owed = {"to_answer": [{"id": "a1"}], "to_consume": [],
+                       "waiting_on": []}
     script, home = _hook_env(tmp_path, inbox_stub.url,
                              reprompt_key="followup_message")
-    out = _run_hook(script, home, payload=json.dumps({"stop_hook_active": True}))
-    assert json.loads(out.stdout) == {}
-    assert inbox_stub.requests == []           # guard fires BEFORE the GET
+    assert "followup_message" in _run_hook(script, home).stdout  # attempts=1
+
+    # 610s: attempts=1 window is 600s -> due, prompt, attempts -> 2.
+    _shift_last_prompt(home, 610)
+    assert "followup_message" in _run_hook(script, home).stdout
+    assert _ledger(home)["attempts"] == 2
+
+    # 610s again: attempts=2 window is 1200s -> throttled.
+    _shift_last_prompt(home, 610)
+    assert json.loads(_run_hook(script, home).stdout) == {}
+
+    # 1250s: past the 1200s window -> prompt, attempts -> 3.
+    _shift_last_prompt(home, 1250)
+    assert "followup_message" in _run_hook(script, home).stdout
+    assert _ledger(home)["attempts"] == 3
+
+    # Cap: attempts=30 would be centuries uncapped; 3600s is the ceiling.
+    led = _ledger(home)
+    led["attempts"] = 30
+    led["last_prompt"] = time.time() - 3500
+    _ledger_path(home).write_text(json.dumps(led))
+    assert json.loads(_run_hook(script, home).stdout) == {}  # 3500 < 3600
+    _shift_last_prompt(home, 3700)
+    assert "followup_message" in _run_hook(script, home).stdout
+
+
+def test_hook_cleared_debt_silent_then_new_debt_prompts(tmp_path, inbox_stub):
+    """The ledger THROTTLES, it never means handled: once debts clear the
+    hook goes silent, and a NEW obligation prompts at the next floor-open
+    stop with the decay reset."""
+    inbox_stub.owed = {"to_answer": [{"id": "a1"}], "to_consume": [],
+                       "waiting_on": []}
+    script, home = _hook_env(tmp_path, inbox_stub.url,
+                             reprompt_key="followup_message")
+    assert "followup_message" in _run_hook(script, home).stdout
+
+    inbox_stub.owed = {"to_answer": [], "to_consume": [], "waiting_on": []}
+    assert json.loads(_run_hook(script, home).stdout) == {}
+    assert _ledger(home)["sig"] == ""           # cleared debt resets the sig
+
+    inbox_stub.owed = {"to_answer": [{"id": "a9"}], "to_consume": [],
+                       "waiting_on": []}
+    _shift_last_prompt(home, 610)
+    out = _run_hook(script, home)
+    assert "1 obligation(s)" in json.loads(out.stdout)["followup_message"]
+    assert _ledger(home)["attempts"] == 1       # fresh debt resets the decay
+
+
+def test_hook_payload_guards_completed_and_loop_count(tmp_path, inbox_stub):
+    """Cursor guards: an aborted/errored turn must not breed a follow-up
+    (the human just cancelled, or the provider just failed), and loop_count
+    >= 2 caps the chain script-side. Both fire BEFORE any hub contact.
+    Claude/Codex payloads lack the fields: same script still prompts."""
+    inbox_stub.owed = {"to_answer": [{"id": "a1"}], "to_consume": [],
+                       "waiting_on": []}
+    script, home = _hook_env(tmp_path, inbox_stub.url,
+                             reprompt_key="followup_message")
+
+    for payload in ({"status": "aborted"}, {"status": "error"},
+                    {"loop_count": 2}, {"loop_count": 7},
+                    {"stop_hook_active": True}):
+        out = _run_hook(script, home, payload=json.dumps(payload))
+        assert json.loads(out.stdout) == {}, payload
+    assert inbox_stub.requests == []            # guards fire BEFORE any GET
     assert not _ledger_path(home).exists()
+
+    # A completed turn under the cap prompts normally.
+    out = _run_hook(script, home,
+                    payload=json.dumps({"status": "completed",
+                                        "loop_count": 1}))
+    assert "followup_message" in out.stdout
+    # And a payload with NEITHER field (Claude/Codex shape) still works.
+    sub = tmp_path / "claudeshape"
+    sub.mkdir()
+    script2, home2 = _hook_env(sub, inbox_stub.url,
+                               reprompt_key="followup_message")
+    assert "followup_message" in _run_hook(script2, home2, payload="{}").stdout
 
 
 def test_hook_missing_keys_noops_silently_all_variants(tmp_path, inbox_stub):
     """No credentials -> silent no-op in each harness's output contract,
     without ever contacting the hub or writing state."""
-    inbox_stub.messages = [{"channel": "commons", "seq": 5}]
+    inbox_stub.messages = [{"channel": "commons", "seq": 5, "status": "open"}]
     for name, kw, expected in [
         ("cursor", {"reprompt_key": "followup_message"}, "{}"),
         ("claude", {}, "{}"),
@@ -232,6 +305,7 @@ def test_hook_missing_keys_noops_silently_all_variants(tmp_path, inbox_stub):
         assert out.returncode == 0, out.stderr
         assert out.stdout.strip() == expected
         assert out.stderr == ""
+        assert not _ledger_path(home).exists()
     assert inbox_stub.requests == []
 
 
@@ -243,62 +317,49 @@ def test_hook_hub_unreachable_noops(tmp_path):
     assert json.loads(out.stdout) == {}
 
 
-def test_hook_ledger_never_blocks_after_ack(tmp_path, inbox_stub):
-    """The ledger THROTTLES, it never means handled: once the agent acks
-    (unread empties), a NEW seq must prompt immediately even though the
-    channel's backoff window is still wide open."""
-    inbox_stub.messages = [{"channel": "commons", "seq": 5}]
-    script, home = _hook_env(tmp_path, inbox_stub.url,
-                             reprompt_key="followup_message")
-    assert "followup_message" in _run_hook(script, home).stdout
-    assert json.loads(_run_hook(script, home).stdout) == {}  # throttled now
-
-    inbox_stub.messages = []                    # agent ack'd: unread empty
-    assert json.loads(_run_hook(script, home).stdout) == {}
-
-    inbox_stub.messages = [{"channel": "commons", "seq": 6}]  # new delivery
-    out = _run_hook(script, home)               # window open, but seq is FRESH
-    prompt = json.loads(out.stdout)["followup_message"]
-    assert "(1 new)" in prompt
-    ledger = json.loads(_ledger_path(home).read_text())
-    assert ledger["commons"]["seq"] == 6
-    assert ledger["commons"]["attempts"] == 1   # fresh resets the decay
-
-
 def test_hook_corrupt_ledger_recovers(tmp_path, inbox_stub):
-    """A missing, truncated, or garbage ledger must never wedge the hook:
-    everything counts as fresh, and a valid ledger is rewritten."""
-    inbox_stub.messages = [{"channel": "commons", "seq": 5}]
+    """A missing, truncated, garbage, or PRE-v4 ledger must never wedge the
+    hook: state restarts clean and a valid v4 ledger is rewritten."""
+    inbox_stub.owed = {"to_answer": [{"id": "a1"}], "to_consume": [],
+                       "waiting_on": []}
     script, home = _hook_env(tmp_path, inbox_stub.url,
                              reprompt_key="followup_message")
     for garbage in ['not json at all', '[1, 2, 3]',
                     json.dumps({"commons": "what"}),
-                    json.dumps({"commons": {"seq": "NaN", "attempts": "x"}}),
-                    json.dumps({"commons": {"seq": 5, "attempts": 1e12,
-                                            "last": time.time() + 9e9}})]:
+                    # v3 per-channel shape: restarts clean under v4
+                    json.dumps({"commons": {"seq": 5, "attempts": 3,
+                                            "last": time.time()}}),
+                    json.dumps({"v": 4, "last_prompt": 9e18, "sig": 7,
+                                "attempts": "x", "dead_streak": None})]:
         _ledger_path(home).write_text(garbage)
         out = _run_hook(script, home)
         assert "followup_message" in out.stdout, (garbage, out.stderr)
-        ledger = json.loads(_ledger_path(home).read_text())
-        assert ledger["commons"]["seq"] == 5    # sane state rewritten
+        led = _ledger(home)
+        assert led["v"] == 4 and len(led["sig"]) == 16  # sane state rewritten
 
 
 def test_hook_version_stamp_and_shared_guards():
     for kw in [{}, {"reprompt_key": "followup_message"},
                {"noop_output": '""'}]:
         script = stop_hook_script("http://h:1", "a", **kw)
-        assert script.splitlines()[1] == "# agora-hook v3"
+        assert script.splitlines()[1] == "# agora-hook v4"
         assert "stop_hook_active" in script
-        assert "hook-attempts-" in script       # v2+ ledger, not v1 hook-state
+        assert "loop_count" in script           # Cursor chain cap, v4
+        assert '"completed"' in script          # aborted turns never chain
+        assert "X-Agora-Client" in script       # honest client version
+        assert "FLOOR" in script                # one global prompt floor
+        assert "hook-attempts-" in script
         assert "hook-state" not in script
         assert "wait=" not in script            # instant check, never long-poll
 
 
-def test_cursor_hook_nags_dead_listener_and_only_cursor():
+def test_cursor_hook_dead_listener_needs_two_observations():
     """Cursor reception exists only while the agent's own RECEPTION LOOP
-    runs — so ONLY the Cursor hook carries the broken-loop nag (Claude
-    re-arms via its own hooks; Codex has no idle wake and must not be
-    nagged toward the impossible)."""
+    runs — ONLY the Cursor hook carries the broken-loop nag (Claude re-arms
+    via its own hooks; Codex has no idle wake). v4: the pidfile is
+    legitimately absent ~5s of every listen cycle, so ONE dead observation
+    is noise — the nag needs two consecutive dead stops, then obeys the
+    global floor like every other prompt."""
     import json as _json
     import os
     import pathlib
@@ -311,12 +372,11 @@ def test_cursor_hook_nags_dead_listener_and_only_cursor():
     assert "BACKGROUND RECEPTION" in cursor and "listen-{AGENT}.pid" in cursor
     assert "listen --once" in cursor and "^AGORA_WAKE" in cursor
     assert "foreground on real work" in cursor
+    assert "never arm a second loop" in cursor  # the ×3-loops lesson
     for other in (stop_hook_script("http://h:1", "a"),
                   stop_hook_script("http://h:1", "a", noop_output='""')):
         assert "os.kill" not in other           # no pidfile probe elsewhere
 
-    # Behavior: dead pidfile -> nag even with an unreachable hub/empty inbox;
-    # live pid -> silent noop; stop_hook_active -> silent (loop guard).
     script = pathlib.Path(tempfile.mkdtemp()) / "hook.py"
     script.write_text(cursor)
     home = tempfile.mkdtemp()
@@ -324,21 +384,28 @@ def test_cursor_hook_nags_dead_listener_and_only_cursor():
         _json.dumps({"http://127.0.0.1:9::seat": "k"}))
     env = {**os.environ, "AGORA_HOME": home}
 
+    def run(payload="{}"):
+        return subprocess.run(["python3", str(script)], input=payload,
+                              capture_output=True, text=True, env=env).stdout
+
+    # First dead observation: NOISE (the listen loop's re-exec gap) -> noop.
     (pathlib.Path(home) / "listen-seat.pid").write_text("999999")
-    out = subprocess.run(["python3", str(script)], input="{}",
-                         capture_output=True, text=True, env=env).stdout
+    assert run().strip() == "{}"
+    # Second consecutive dead stop: now it is real -> nag.
+    out = run()
     assert "BACKGROUND RECEPTION" in _json.loads(out)["followup_message"]
+    # Third dead stop seconds later: the global floor holds -> silent.
+    assert run().strip() == "{}"
 
+    # A live pid resets the streak: one later dead read is noise again.
     (pathlib.Path(home) / "listen-seat.pid").write_text(str(os.getpid()))
-    out = subprocess.run(["python3", str(script)], input="{}",
-                         capture_output=True, text=True, env=env).stdout
-    assert out.strip() == "{}"
-
+    assert run().strip() == "{}"
     (pathlib.Path(home) / "listen-seat.pid").write_text("999999")
-    out = subprocess.run(["python3", str(script)],
-                         input='{"stop_hook_active": true}',
-                         capture_output=True, text=True, env=env).stdout
-    assert out.strip() == "{}"
+    assert run().strip() == "{}"
+
+    # Guards still dominate: an aborted turn never nags, dead or not.
+    assert run('{"status": "aborted"}').strip() == "{}"
+    assert run('{"stop_hook_active": true}').strip() == "{}"
 
 
 # ---------------------------------------------------------------------------
