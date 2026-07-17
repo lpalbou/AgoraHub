@@ -275,6 +275,78 @@ def test_note_is_sanitized():
     assert "line1" in note and "red" in note
 
 
+def test_dm_exclusion_is_case_sensitive():
+    """0094 hardening (adversary F1): the hub excludes real DM channels
+    (dm:a--b) but NOT a legitimate public channel whose name merely starts
+    with 'DM:' — the creation guard is case-sensitive, so the exclusion
+    must be too (GLOB, not case-insensitive LIKE), or such a channel's
+    votes silently vanish from the hub score."""
+    client = make_client()
+    k = setup_room(client)
+    # A public channel named with an uppercase 'DM:' prefix is legal.
+    r = client.post("/channels", json={"name": "DM:project", "private": False},
+                    headers=k["alpha"])
+    assert r.status_code == 200, r.text
+    client.post("/channels/DM:project/join", json={}, headers=k["beta"])
+    rate(client, k["alpha"], "beta", axis="trust", value=1, channel="DM:project")
+    hub = client.get("/reputation", headers=k["gamma"]).json()
+    # The 'DM:project' vote COUNTS (it is not a real DM).
+    assert any(r["target"] == "beta" for r in hub["leaderboard"])
+    beta = next(r for r in hub["leaderboard"] if r["target"] == "beta")
+    assert beta["axes"]["trust"]["score"] == 1
+
+
+def test_leaving_withdraws_your_votes_keeps_votes_about_you():
+    """0094 hardening (adversary F2): a rater can't drive-by downvote then
+    leave, stranding a vote neither they nor the target can remove. Leaving
+    withdraws the leaver's OWN votes; votes ABOUT the leaver stay."""
+    client = make_client()
+    k = setup_room(client)
+    rate(client, k["gamma"], "beta", axis="trust", value=-1, note="hit and run")
+    rate(client, k["alpha"], "gamma", axis="helper", value=1)  # about gamma
+    # gamma leaves the channel.
+    r = client.post("/channels/workroom/leave", json={}, headers=k["gamma"])
+    assert r.status_code == 200, r.text
+    board = client.get("/channels/workroom/reputation",
+                       headers=k["alpha"]).json()
+    targets = {row["target"]: row for row in board["leaderboard"]}
+    # gamma's drive-by downvote on beta is GONE.
+    assert "beta" not in targets or targets["beta"]["total"] == 0
+    # But alpha's vote ABOUT gamma survives gamma's departure.
+    assert targets.get("gamma", {}).get("total") == 1
+
+
+def test_unrate_is_pause_gated():
+    """0094 hardening (adversary F3): the board is shared state — a hub
+    stand-down freezes withdrawals just as it freezes casting."""
+    client = make_client()
+    k = setup_room(client)
+    rate(client, k["alpha"], "beta", axis="trust", value=1)
+    # Pause requires the admin key (never an agent/operator seat key).
+    client.put("/admin/pause", headers=ADMIN, json={"reason": "stand down"})
+    r = client.delete("/channels/workroom/reputation/beta", headers=k["alpha"])
+    assert r.status_code == 423  # paused: no board mutation, cast or withdraw
+
+
+def test_net_zero_target_stays_visible_with_split():
+    """0094 hardening (adversary F4): a controversial target must not read
+    as unrated. A target whose vouchers net to zero still appears, with the
+    up/down split showing the disagreement."""
+    client = make_client()
+    k = setup_room(client)
+    # Second room so alpha can hold opposite signs across channels.
+    client.post("/channels", json={"name": "lab", "private": False},
+                headers=k["alpha"])
+    client.post("/channels/lab/join", json={}, headers=k["beta"])
+    rate(client, k["alpha"], "beta", axis="trust", value=1)
+    rate(client, k["gamma"], "beta", axis="trust", value=-1)
+    hub = client.get("/reputation", headers=k["gamma"]).json()
+    beta = next(r for r in hub["leaderboard"] if r["target"] == "beta")
+    # Net zero, but PRESENT and showing the +1/-1 controversy, not hidden.
+    assert beta["axes"]["trust"] == {"score": 0, "up": 1, "down": 1}
+    assert beta["raters"] == 2
+
+
 def test_archived_channel_refuses_new_votes_keeps_board_readable():
     client = make_client()
     k = setup_room(client)

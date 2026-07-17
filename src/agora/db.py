@@ -1191,6 +1191,19 @@ class Database:
             ).fetchone()
         return dict(row)
 
+    def reputation_clear_rater(self, channel: str, rater: str) -> int:
+        """Withdraw ALL of one rater's votes in a channel (used when the
+        rater leaves — 0094 hardening F2: otherwise a rater could drive-by
+        downvote then leave, and the membership gate would forever block
+        both their withdrawal and the target's recourse). Votes ABOUT the
+        leaver, cast by others, are untouched."""
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM reputation_votes WHERE channel = ? AND rater = ?",
+                (channel, rater))
+            self._conn.commit()
+        return cur.rowcount
+
     def reputation_clear(self, channel: str, target: str, rater: str,
                          axis: str | None = None) -> int:
         """Withdraw the rater's live vote(s) on a target (one axis, or all
@@ -1255,6 +1268,14 @@ class Database:
             # Inner query: each rater's net sign per (target, axis) across
             # non-DM channels. Outer: sum those signs (distinct vouchers)
             # and count the +/- voucher raters.
+            # NOT GLOB 'dm:*' (case-SENSITIVE) not LIKE 'dm:%' (case-
+            # INSENSITIVE in SQLite): the channel-creation guard rejects
+            # only lowercase 'dm:', so a public channel named 'DM:x' is
+            # legal — a case-insensitive exclusion would silently drop its
+            # votes from the hub score (adversary F1). Keeping sign==0 rows
+            # (no WHERE filter) so a net-neutral rater still appears with
+            # up/down showing the split — controversy is signal, and the
+            # counts below now share this exact universe (adversary F4).
             rows = self._conn.execute(
                 "SELECT target, axis, SUM(sign) AS score,"
                 " SUM(CASE WHEN sign > 0 THEN 1 ELSE 0 END) AS up,"
@@ -1262,14 +1283,14 @@ class Database:
                 "  SELECT target, axis, rater,"
                 "   CASE WHEN SUM(value) > 0 THEN 1"
                 "        WHEN SUM(value) < 0 THEN -1 ELSE 0 END AS sign"
-                "  FROM reputation_votes WHERE channel NOT LIKE 'dm:%'"
+                "  FROM reputation_votes WHERE channel NOT GLOB 'dm:*'"
                 "  GROUP BY target, axis, rater"
-                " ) WHERE sign != 0 GROUP BY target, axis",
+                " ) GROUP BY target, axis",
             ).fetchall()
             spread = self._conn.execute(
                 "SELECT target, COUNT(DISTINCT channel) AS channels,"
                 " COUNT(DISTINCT rater) AS raters"
-                " FROM reputation_votes WHERE channel NOT LIKE 'dm:%'"
+                " FROM reputation_votes WHERE channel NOT GLOB 'dm:*'"
                 " GROUP BY target", (),
             ).fetchall()
         by_target: dict[str, dict[str, Any]] = {}

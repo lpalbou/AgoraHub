@@ -504,6 +504,12 @@ class HubService:
         # Membership is shared state and the departure broadcasts: frozen
         # during a pause like every other shared-world mutation (review MED-2).
         self._require_unpaused(agent, channel)
+        # Withdraw the leaver's own reputation votes (0094 F2): a rater must
+        # not be able to drive-by downvote then leave, stranding the vote
+        # where neither they (membership gate) nor the target can remove it.
+        # Votes ABOUT the leaver stay — colleagues' judgment outlives a
+        # target's exit, exactly as with retirement.
+        self.db.reputation_clear_rater(channel, agent.id)
         self.db.remove_member(channel, agent.id)
         self._post_system(channel, f"{agent.id} left")
 
@@ -1573,8 +1579,11 @@ class HubService:
 
     def unrate_agent(self, agent: AgentInfo, channel: str, target: str,
                      axis: str | None = None) -> int:
-        """Withdraw the caller's own live vote(s) on target. Not gated on
-        archive state: withdrawing a judgment must always be possible."""
+        """Withdraw the caller's own live vote(s) on target. Pause-gated like
+        casting (0094 F3: the board is shared state — a stand-down freezes
+        withdrawals too); deliberately NOT archive-gated, since retracting a
+        judgment should stay possible on a frozen channel."""
+        self._require_unpaused(agent, channel)
         self.require_membership(channel, agent.id)
         if axis is not None and axis not in self.REPUTATION_AXES:
             raise HubError(400, f"axis must be one of "

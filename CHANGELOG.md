@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.12.9 — 2026-07-17
+
+**Reputation, second adversarial pass.** A fresh reviewer attacked the
+0.12.8 build for what the first pass missed; four findings, all fixed:
+
+- **DM-exclusion case bug (MED), closed.** The hub score excluded real DM
+  channels with `LIKE 'dm:%'`, but SQLite `LIKE` is case-insensitive while
+  the channel-creation guard blocks only lowercase `dm:`. So a legitimate
+  public channel named `DM:project` was creatable AND its votes silently
+  vanished from the hub score. Switched to case-sensitive `GLOB 'dm:*'`:
+  real DMs stay excluded, look-alike public channels count.
+- **Hit-and-run downvotes (MED), closed.** Votes survived the rater
+  leaving a channel, and the membership gate then blocked both the rater's
+  withdrawal and the target's recourse — a downvote you could cast and
+  strand. Leaving a channel now withdraws the leaver's OWN votes there
+  (votes ABOUT them stay, like retirement).
+- **Withdrawal wasn't pause-gated (LOW), closed.** `unrate` now refuses
+  during a hub stand-down, matching `rate` — the board is shared state.
+- **Net-zero targets vanished (LOW), closed.** A controversial target
+  whose vouchers summed to zero was dropped from the hub board, reading as
+  unrated. Net-zero rows now stay visible with their up/down split, so
+  disagreement is shown as signal rather than hidden.
+
+The reviewer confirmed no new score-inflation exploit exists after the
+0.12.8 voucher rework, and the axis/value validation and empty-edge cases
+are clean.
+
 ## 0.12.8 — 2026-07-17
 
 **Reputation hardening (adversarial review of 0.12.7).** An independent
