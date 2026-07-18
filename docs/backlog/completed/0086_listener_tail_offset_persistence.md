@@ -30,3 +30,22 @@ Complementary, not required: `/owed` covers the class that carries
 consequences (obligations). Offsets add replay-correctness machinery for
 the low-stakes remainder; ship when a field incident shows a gap-missed
 non-obligation actually mattered.
+
+## Completion report (2026-07-18, 0.12.13)
+
+Shipped: `_offset_path`/`_read_offset`/`_write_offset`/`_resume_offset` in
+listen.py; `follow_lines` gained an optional `pos` dict it keeps current
+with (inode, offset-after-last-yielded-line); `run_file_mode` resumes from
+the persisted offset at attach and persists on exit + per heartbeat.
+Guards: inode-mismatch and offset>size fall back to END (rotation/
+truncation, no replay); corrupt offset file -> None -> END; debounce
+coalesces replayed bursts. Receipts: 3 new tests (gap replay, rotation/
+truncation fallback, corruption tolerance), full listen suite 62 green,
+whole suite 525 green. Non-obligation events in the between-instance gap
+are now recovered on the next arm; obligations were already covered by the
+arm-time owed check (both may fire for one gap obligation — harmless, the
+debounce + check_inbox dedupe reality).
+
+Follow-ups revealed: none. The offset file joins the per-seat listen-*
+family under AGORA_HOME (pid/backoff/owedsig/offset); all are best-effort
+and self-healing.

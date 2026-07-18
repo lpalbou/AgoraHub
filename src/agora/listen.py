@@ -288,6 +288,50 @@ def _sig_path(agent_id: str) -> Path:
     return _config.home() / f"listen-{agent_id}.owedsig"
 
 
+def _offset_path(agent_id: str) -> Path:
+    return _config.home() / f"listen-{agent_id}.offset"
+
+
+def _read_offset(agent_id: str) -> tuple[int, int] | None:
+    """Stored (inode, byte-offset) from the previous --once instance, or
+    None. Corruption is treated as absent — a bad offset must never wedge
+    reception, only cost a replay-from-END like the pre-0086 behavior."""
+    try:
+        raw = json.loads(_offset_path(agent_id).read_text())
+        return int(raw["inode"]), int(raw["offset"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _write_offset(agent_id: str, inode: int, offset: int) -> None:
+    """Persist the tail position so the next --once instance resumes from
+    it instead of END, closing the ~2% per-cycle gap where a NON-obligation
+    event (a plain fyi, a gap-missed critical) lands between instances and
+    is seen by no one (0086). Best-effort: a write failure just degrades to
+    the old resume-from-END, never blocks the wake path."""
+    with contextlib.suppress(OSError):
+        _offset_path(agent_id).write_text(
+            json.dumps({"inode": inode, "offset": offset}))
+
+
+def _resume_offset(fh, agent_id: str) -> None:
+    """Position an open notify-file handle: resume from the stored offset
+    when the inode still matches AND the offset is within the current size
+    (guards truncation/rotation), else seek to END. The debounce already
+    coalesces any replayed burst into one wake, so a slightly stale offset
+    costs at most a harmless re-yield, never a storm."""
+    stored = _read_offset(agent_id)
+    try:
+        st = os.fstat(fh.fileno())
+    except OSError:
+        fh.seek(0, os.SEEK_END)
+        return
+    if stored is not None and stored[0] == st.st_ino and 0 <= stored[1] <= st.st_size:
+        fh.seek(stored[1])  # same file, valid position: replay the blind-spot gap
+    else:
+        fh.seek(0, os.SEEK_END)  # new/rotated/truncated file, or first arm: no replay
+
+
 def _record_owed_signature(hub: str, agent_id: str,
                            sig: str | None = None) -> None:
     """Persist the debt signature we last WOKE for, so the arm-time backlog
@@ -478,11 +522,20 @@ def _heartbeat(pid_path: Path) -> None:
 
 
 def follow_lines(fh, path: Path, *, poll: float = 0.5,
-                 stop: Callable[[], bool] = lambda: False) -> Iterator[str | None]:
-    """Yield lines appended to an open (END-seeked) handle; None = idle tick.
-    Follows by NAME: rotation (inode change), truncation (size shrink) and
-    delete-then-recreate reopen at 0 — a fresh file is entirely post-arm."""
+                 stop: Callable[[], bool] = lambda: False,
+                 pos: dict | None = None) -> Iterator[str | None]:
+    """Yield lines appended to an open handle; None = idle tick. Follows by
+    NAME: rotation (inode change), truncation (size shrink) and
+    delete-then-recreate reopen at 0 — a fresh file is entirely post-arm.
+
+    `pos` (0086): an optional mutable dict the caller owns; kept current
+    with {"inode", "offset"} of the tail position so it can persist the
+    resume point across --once instances. offset = the byte AFTER the last
+    yielded line (buffered-but-unsplit bytes excluded), so a resume neither
+    loses a partial trailing line nor re-yields a drained one."""
     inode, buf = os.fstat(fh.fileno()).st_ino, b""
+    if pos is not None:
+        pos["inode"], pos["offset"] = inode, fh.tell()
     try:
         while not stop():
             chunk = fh.read()
@@ -490,6 +543,8 @@ def follow_lines(fh, path: Path, *, poll: float = 0.5,
                 buf += chunk
                 while b"\n" in buf:
                     line, buf = buf.split(b"\n", 1)
+                    if pos is not None:
+                        pos["offset"] = fh.tell() - len(buf)
                     yield line.decode("utf-8", "replace")
                 continue  # drain to EOF before idling
             try:
@@ -514,6 +569,8 @@ def follow_lines(fh, path: Path, *, poll: float = 0.5,
                 else:
                     fh.close()
                     fh, inode, buf = new_fh, os.fstat(new_fh.fileno()).st_ino, b""
+                    if pos is not None:  # rotated file: new identity, fresh 0
+                        pos["inode"], pos["offset"] = inode, 0
                     continue
             yield None
             time.sleep(poll)
@@ -532,7 +589,10 @@ def run_file_mode(path: Path, agent_id: str, hub_url: str, pid_path: Path, *,
     except FileNotFoundError:
         _emit("AGORA_LISTEN ended reason=no-notify-file")
         return 1  # forced file mode with nothing to tail must fail LOUDLY
-    fh.seek(0, os.SEEK_END)  # attach point: no history replay, ever
+    # Attach point: resume from the previous instance's persisted offset
+    # (0086 — closes the per-cycle blind spot for non-obligation events),
+    # falling back to END on a new/rotated/truncated file or first arm.
+    _resume_offset(fh, agent_id)
     _announce_armed("file", agent_id, hub_url, once=once, window=window)
     batcher, last_beat = DebounceBatcher(debounce), time.monotonic()
     deadline = (time.monotonic() + max_wait) if (once and max_wait is not None) else None
@@ -540,26 +600,38 @@ def run_file_mode(path: Path, agent_id: str, hub_url: str, pid_path: Path, *,
     # abandon the generator mid-yield; closing it explicitly runs its finally
     # and releases the file handle deterministically instead of leaning on
     # refcount GC (an implementation detail of CPython, not a contract).
-    with contextlib.closing(follow_lines(fh, path, poll=poll, stop=stop)) as lines:
-        for item in lines:
-            if item is not None:
-                event = parse_line(item)
-                if event is not None and qualifies(event, agent_id, important_only):
-                    batcher.add(event)
-            batch = batcher.pop_ready()
-            if batch:
-                code = _deliver_wake(batch, agent_id, preview=preview,
-                                     once=once, hub=hub_url)
-                if code is not None:
-                    return code
-            if heartbeat > 0 and time.monotonic() - last_beat >= heartbeat:
-                last_beat = time.monotonic()
-                _heartbeat(pid_path)
-            # An open debounce window may close just past the deadline: a real
-            # wake at the boundary beats a punctual empty exit.
-            if deadline is not None and not batcher.pending and time.monotonic() >= deadline:
-                return 0
-    return 0  # stop() asked us to end (in-process tests)
+    # pos tracks the live tail position; persisted at exit AND per heartbeat
+    # so an instance killed by signal mid-window still leaves a resume point
+    # (0086). Seed it from the attach position we just seeked to.
+    pos: dict[str, int] = {"inode": os.fstat(fh.fileno()).st_ino,
+                           "offset": fh.tell()}
+    try:
+        with contextlib.closing(
+                follow_lines(fh, path, poll=poll, stop=stop, pos=pos)) as lines:
+            for item in lines:
+                if item is not None:
+                    event = parse_line(item)
+                    if event is not None and qualifies(event, agent_id, important_only):
+                        batcher.add(event)
+                batch = batcher.pop_ready()
+                if batch:
+                    code = _deliver_wake(batch, agent_id, preview=preview,
+                                         once=once, hub=hub_url)
+                    if code is not None:
+                        return code
+                if heartbeat > 0 and time.monotonic() - last_beat >= heartbeat:
+                    last_beat = time.monotonic()
+                    _heartbeat(pid_path)
+                    _write_offset(agent_id, pos["inode"], pos["offset"])
+                # An open debounce window may close just past the deadline: a real
+                # wake at the boundary beats a punctual empty exit.
+                if deadline is not None and not batcher.pending and time.monotonic() >= deadline:
+                    return 0
+        return 0  # stop() asked us to end (in-process tests)
+    finally:
+        # Persist the final tail position for the NEXT --once instance to
+        # resume from — the whole point of 0086.
+        _write_offset(agent_id, pos["inode"], pos["offset"])
 
 
 async def run_ws_mode(url: str, key: str, agent_id: str, pid_path: Path, *,

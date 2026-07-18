@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.12.13 — 2026-07-18
+
+**Listener resumes from its persisted tail offset across `--once`
+iterations (closes the per-cycle blind spot, backlog 0086).** An
+interactive reception loop re-runs `agora listen --once`, and each
+instance tailed the notify file from END — so an event landing in the
+~5.5s gap between instances (sleep + startup, ≈2% of uniformly-arriving
+events) was seen by no one. The arm-time owed check already recovered
+OBLIGATIONS within a window, but consequence-free events (a gap-missed
+critical fyi, a plain fyi the seat would have read) were lost forever.
+Now the listener persists `(inode, offset)` on exit and per heartbeat, and
+the next instance resumes from it when the inode matches and the offset is
+within the file, else falls back to END. Guards keep it safe: rotation
+(inode change) and truncation (offset past size) fall back to END with no
+replay, a corrupt offset file degrades to END rather than wedging, and
+the existing debounce coalesces any replayed burst into one wake. The
+`--once` no-lock shape is unchanged.
+
 ## 0.12.12 — 2026-07-18
 
 **`GET /work/{item_id}` — the hub half of the Option-A stitch (vote

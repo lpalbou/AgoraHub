@@ -31,7 +31,8 @@ import pytest
 
 from agora.hub.notify_sink import NotifySink, notify_line
 from agora.listen import (ADAPT_CAP_DEFAULT, ADAPT_MIN, ARM_BANNER, DebounceBatcher,
-                          _announce_armed, acquire_lock, follow_lines, next_backoff,
+                          _announce_armed, _read_offset, _resume_offset,
+                          _write_offset, acquire_lock, follow_lines, next_backoff,
                           once_digest, parse_line, qualifies, read_backoff,
                           resolve_identity, resolve_source, run_file_mode, run_listen,
                           wake_line, write_backoff)
@@ -276,6 +277,91 @@ def test_backlog_wake_fires_at_arm_for_missed_debt(tmp_path, monkeypatch,
 
     assert run_listen(**common) == 2                   # new obligation: wake again
     assert "backlog owed=2" in capsys.readouterr().out
+
+
+def test_offset_resume_replays_the_between_instance_gap(tmp_path, monkeypatch):
+    """0086: an event landing BETWEEN two --once instances (the ~2%
+    per-cycle blind spot) is lost by tail-from-END. With offset
+    persistence, instance 2 resumes from where instance 1 stopped and DOES
+    see it. Verified at the follower layer with a real notify file."""
+    import agora.listen as listen_mod
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(listen_mod._config, "home", lambda: home)
+    log = home / "bob-inbox.log"
+    log.write_text("line-before-arm\n")   # pre-existing history: never replayed
+
+    # Instance 1: attach (resume-or-END), read nothing new, persist offset.
+    fh = open(log, "rb")
+    _resume_offset(fh, "bob")              # first arm: no stored offset -> END
+    assert fh.tell() == len(b"line-before-arm\n")
+    pos = {"inode": os.fstat(fh.fileno()).st_ino, "offset": fh.tell()}
+    fh.close()
+    _write_offset("bob", pos["inode"], pos["offset"])
+    saved = _read_offset("bob")
+    assert saved == (pos["inode"], len(b"line-before-arm\n"))
+
+    # THE GAP: an event lands while no instance is tailing.
+    with open(log, "a") as f:
+        f.write("gap-event\n")
+
+    # Instance 2: resume from the stored offset -> sees the gap event.
+    fh2 = open(log, "rb")
+    _resume_offset(fh2, "bob")
+    assert fh2.tell() == saved[1]          # resumed, NOT seeked to END
+    seen = []
+    pos2 = {"inode": os.fstat(fh2.fileno()).st_ino, "offset": fh2.tell()}
+    # stop() returns False once (one read pass drains the gap event), then
+    # True so the follower exits deterministically without sleeping.
+    calls = {"n": 0}
+    def _stop() -> bool:
+        calls["n"] += 1
+        return calls["n"] > 1
+    with __import__("contextlib").closing(
+            listen_mod.follow_lines(fh2, log, poll=0.01,
+                                    stop=_stop, pos=pos2)) as g:
+        for item in g:
+            if item is not None:
+                seen.append(item)
+    assert "gap-event" in seen and "line-before-arm" not in seen
+
+
+def test_offset_resume_falls_back_to_end_on_rotation(tmp_path, monkeypatch):
+    """A truncated/rotated notify file (inode change or offset past size)
+    must NOT replay: the stored offset is stale, so attach seeks to END and
+    the new file is treated as entirely post-arm (no spurious old lines)."""
+    import agora.listen as listen_mod
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(listen_mod._config, "home", lambda: home)
+    log = home / "bob-inbox.log"
+    log.write_text("a\nb\nc\n")
+    _write_offset("bob", 999999, 4)        # stored inode won't match this file
+    fh = open(log, "rb")
+    _resume_offset(fh, "bob")
+    assert fh.tell() == len(b"a\nb\nc\n")   # inode mismatch -> END, no replay
+
+    # Offset past current size (truncation) also falls back to END.
+    _write_offset("bob", os.fstat(fh.fileno()).st_ino, 10_000)
+    fh2 = open(log, "rb")
+    _resume_offset(fh2, "bob")
+    assert fh2.tell() == len(b"a\nb\nc\n")
+
+
+def test_offset_corruption_is_treated_as_absent(tmp_path, monkeypatch):
+    """A garbage offset file must never wedge reception — it degrades to
+    resume-from-END, exactly the pre-0086 behavior."""
+    import agora.listen as listen_mod
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(listen_mod._config, "home", lambda: home)
+    (home / "listen-bob.offset").write_text("not json{")
+    assert _read_offset("bob") is None
+    log = home / "bob-inbox.log"
+    log.write_text("x\ny\n")
+    fh = open(log, "rb")
+    _resume_offset(fh, "bob")              # corrupt -> END, no crash
+    assert fh.tell() == len(b"x\ny\n")
 
 
 def test_event_wake_records_signature_so_arm_check_stays_quiet(tmp_path):
