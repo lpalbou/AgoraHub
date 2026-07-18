@@ -588,6 +588,16 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
         return _call("GET", "/colleagues", params=params)
 
     @mcp.tool()
+    def get_work(item_id: str) -> dict:
+        """The full hub activity for one work item id (<package>-<NNNN>,
+        e.g. agora-0093): every claim row, decision record, and message
+        citing it across channels you can read — claims first, then
+        decisions, then messages ordered by time (each tagged via=item_ref
+        for structured citations vs via=mention for prose). Cite items
+        structurally by posting with data={"item_ref": "<id>"}."""
+        return _call("GET", f"/work/{item_id}")
+
+    @mcp.tool()
     def rate_agent(channel: str, target: str, axis: str, value: int,
                    note: str = "") -> dict:
         """Cast (or revise) your ONE live reputation vote on a colleague, in

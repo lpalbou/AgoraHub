@@ -1163,6 +1163,60 @@ class Database:
                                     "size", "created_by", "created_at")}
         return meta, row["bytes"]
 
+    # -- work-id activity index (0093): the stitch between hub and files ---------
+
+    def work_activity(self, item_id: str,
+                      channels: list[str]) -> dict[str, list[dict[str, Any]]]:
+        """Everything in the CALLER'S channels citing one work id: pointer
+        claims (`claim:<id>` rows), decisions (`decision:*` rows whose value
+        cites the id), and messages (structured `item_ref` first, free-text
+        mentions second). One query set, so the board renders 'claimed by X,
+        discussed here' in ONE call instead of scraping channels. The
+        channel list is the membership gate — computed by the service from
+        the caller, never trusted from input."""
+        if not channels:
+            return {"claims": [], "decisions": [], "messages": []}
+        ph = ",".join("?" * len(channels))
+        needle = f"%{item_id}%"
+        with self._lock:
+            claims = self._conn.execute(
+                f"SELECT channel, key, value, version, updated_by, updated_at"
+                f" FROM store WHERE channel IN ({ph}) AND key = ?",
+                (*channels, f"claim:{item_id}"),
+            ).fetchall()
+            decisions = self._conn.execute(
+                f"SELECT channel, key, value, version, updated_by, updated_at"
+                f" FROM store WHERE channel IN ({ph})"
+                f" AND key LIKE 'decision:%' AND value LIKE ?",
+                (*channels, needle),
+            ).fetchall()
+            messages = self._conn.execute(
+                f"SELECT id, channel, seq, sender, status, title, body, data,"
+                f" reply_to, created_at FROM messages"
+                f" WHERE channel IN ({ph})"
+                f" AND (data LIKE ? OR body LIKE ? OR title LIKE ?)"
+                f" ORDER BY created_at",
+                (*channels, needle, needle, needle),
+            ).fetchall()
+        out_msgs: list[dict[str, Any]] = []
+        for r in messages:
+            data = json.loads(r["data"]) if r["data"] else {}
+            structured = isinstance(data, dict) and data.get("item_ref") == item_id
+            out_msgs.append({
+                "id": r["id"], "channel": r["channel"], "seq": r["seq"],
+                "sender": r["sender"], "status": r["status"],
+                "title": r["title"], "reply_to": r["reply_to"],
+                "created_at": r["created_at"],
+                "via": "item_ref" if structured else "mention",
+            })
+        def _row(r: Any) -> dict[str, Any]:
+            return {"channel": r["channel"], "key": r["key"],
+                    "value": json.loads(r["value"]), "version": r["version"],
+                    "updated_by": r["updated_by"], "updated_at": r["updated_at"]}
+        return {"claims": [_row(r) for r in claims],
+                "decisions": [_row(r) for r in decisions],
+                "messages": out_msgs}
+
     # -- reputation (0094): peer ±1 votes on fixed axes, one live per rater ------
 
     def reputation_cast(self, channel: str, target: str, rater: str,

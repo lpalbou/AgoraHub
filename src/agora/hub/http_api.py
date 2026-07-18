@@ -989,6 +989,19 @@ def get_notes(
     return _run(service.get_notes, agent, subject)
 
 
+# -- work-id activity index (0093): the hub half of the Option-A stitch -------------
+
+@router.get("/work/{item_id}")
+def work_activity(
+    item_id: str,
+    agent: AgentInfo = Depends(current_agent),
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    """Every claim, decision, and message citing one work id, across the
+    channels the CALLER can read — the board's one-call render source."""
+    return _run(service.work_activity, agent, item_id)
+
+
 # -- reputation (0094): peer ±1 votes, per-channel and hub leaderboards -------------
 
 class CastVote(BaseModel):

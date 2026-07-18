@@ -47,6 +47,7 @@ from ..models import (
     StoreEntry,
     Urgency,
     dm_channel_name,
+    parse_work_id,
     sanitize_text,
     sanitize_title,
 )
@@ -643,6 +644,18 @@ class HubService:
             # the typed param or a hand-built data payload.
             data["attachments"] = self._validate_attachments(data["attachments"],
                                                              channel)
+        if "item_ref" in data:
+            # Work-id citation (0093): the STRUCTURED stitch between a hub
+            # message and a backlog item. Validated when present so the
+            # /work index never accumulates rotten refs; prose mentions
+            # stay free-form (they index as 'mention', never refused).
+            ref = str(data["item_ref"])
+            if parse_work_id(ref) is None:
+                raise HubError(400, f"item_ref '{sanitize_text(ref, 64)}' is "
+                                    "not a work id — the ruled form is "
+                                    "<package>-<NNNN> (e.g. agora-0093); "
+                                    "citing in prose needs no field at all")
+            data["item_ref"] = ref
         if "settled_by" in data:
             if payload.status != Status.resolved or not payload.reply_to:
                 raise HubError(400, "settled_by is only allowed on a resolved "
@@ -1437,6 +1450,19 @@ class HubService:
                                         "existing owner unchanged")
             elif current_owner is not None:
                 value = {**value, "owner": current_owner}
+            # Claim/key consistency (0093): when the claim key's task part
+            # parses as a WORK ID and the value carries an `item` field,
+            # they must agree — a pointer row that points two ways would
+            # poison the /work index. Free-text claims (non-id task names)
+            # and item-less values stay untouched forever.
+            task = key[len("claim:"):]
+            if (parse_work_id(task) is not None and "item" in value
+                    and str(value["item"]) != task):
+                raise HubError(400, f"claim key names work id '{task}' but "
+                                    f"value.item says "
+                                    f"'{sanitize_text(str(value['item']), 64)}'"
+                                    " — a pointer claim must cite ONE id; "
+                                    "drop value.item or make them agree")
         return self.db.store_set(channel, key, value, agent.id, expect_version)
 
     @staticmethod
@@ -1528,6 +1554,21 @@ class HubService:
     def store_keys(self, agent: AgentInfo, channel: str) -> list[dict[str, Any]]:
         self.require_membership(channel, agent.id)
         return self.db.store_keys(channel)
+
+    # -- work-id activity index (0093) ---------------------------------------------
+
+    def work_activity(self, agent: AgentInfo, item_id: str) -> dict[str, Any]:
+        """One call for the whole stitch: every claim, decision, and message
+        citing `item_id` across the channels THE CALLER can read. The
+        membership gate is the caller's own channel list — private rooms a
+        non-member cannot read simply do not contribute rows."""
+        if parse_work_id(item_id) is None:
+            raise HubError(400, f"'{sanitize_text(item_id, 64)}' is not a "
+                                "work id — the ruled form is <package>-<NNNN> "
+                                "(e.g. agora-0093)")
+        channels = self.db.channels_of(agent.id)
+        out = self.db.work_activity(item_id, channels)
+        return {"item_id": item_id, **out}
 
     # -- reputation (0094): peer ±1 on four fixed axes, per channel ---------------
     #

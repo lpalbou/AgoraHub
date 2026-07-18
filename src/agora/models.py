@@ -68,6 +68,20 @@ def sanitize_text(text: str, cap: int) -> str:
     return _TEXT_CLEAN.sub(" ", text).strip()[:cap]
 
 
+# Work-item id grammar (0093, S0 ruling): `<package>-<NNNN>` — URL-safe
+# slug, LAST-hyphen parse, all-digits tail. The one shared definition for
+# the /work endpoint, item_ref validation, and claim-key consistency; `#`
+# forms were rejected at S0 because they break the endpoint path.
+_WORK_ID = re.compile(r"^([a-z0-9][a-z0-9_.-]*)-(\d+)$")
+
+
+def parse_work_id(text: str) -> tuple[str, str] | None:
+    """(package, number) for a ruled work id, else None. Last-hyphen parse:
+    'abstract-core-0017' -> ('abstract-core', '0017')."""
+    m = _WORK_ID.match(text)
+    return (m.group(1), m.group(2)) if m else None
+
+
 def sanitize_title(title: str) -> str:
     return sanitize_text(title, MAX_TITLE_CHARS)
 

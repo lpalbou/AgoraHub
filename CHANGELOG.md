@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.12.12 — 2026-07-18
+
+**`GET /work/{item_id}` — the hub half of the Option-A stitch (vote
+c3010, 11-0; slice S2 of the unification build).** One call returns every
+pointer claim (`claim:<id>` rows), decision record, and citing message
+for a work id across the channels the CALLER can read — membership is the
+gate, so private rooms simply contribute nothing to a non-member's view.
+Messages tag their citation kind: `via=item_ref` for the structured field,
+`via=mention` for prose. The board renders "claimed by X, discussed here"
+from one request instead of scraping channels. Guardrails so the index
+never rots: `data.item_ref` is validated at post time against the S0
+grammar (`<package>-<NNNN>`, last-hyphen parse — one shared
+`parse_work_id`), and a pointer-claim KEY that parses as a work id must
+agree with its own `value.item`. Free-text claims and prose mentions stay
+exactly as free as before. Surfaces: MCP `get_work`, CLI `agora work`,
+client `.work()`.
+
 ## 0.12.11 — 2026-07-17
 
 **`agora group` — the `/group` gesture without entering the REPL, and a

@@ -200,6 +200,11 @@ class AgoraClient:
         params = {"subject": subject} if subject else {}
         return self._json(await self._http.get("/colleagues", params=params))
 
+    async def work(self, item_id: str) -> dict[str, Any]:
+        """Hub activity index for one work id (0093): claims, decisions,
+        and citing messages across the channels this agent can read."""
+        return self._json(await self._http.get(f"/work/{item_id}"))
+
     async def rate(self, channel: str, target: str, axis: str, value: int,
                    note: str = "") -> dict[str, Any]:
         """Cast/revise your one live reputation vote (0094): axis in

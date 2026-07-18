@@ -1191,6 +1191,28 @@ def cmd_note(args):
     _run_agent_cmd(args, go)
 
 
+def cmd_work(args):
+    """`agora work <item_id>` — the stitch, readable from a terminal: who
+    claims the item, what was decided about it, and every message citing it
+    (structured item_ref first-class, prose mentions included)."""
+    async def go(c, a):
+        out = await c.work(a.item_id)
+        claims, decisions, msgs = out["claims"], out["decisions"], out["messages"]
+        print(f"work {out['item_id']} — {len(claims)} claim(s), "
+              f"{len(decisions)} decision(s), {len(msgs)} message(s)")
+        for r in claims:
+            v = r["value"] if isinstance(r["value"], dict) else {}
+            print(f"  claim  {r['channel']}  owner={v.get('owner', '?')}"
+                  f"  card={v.get('card', '-')}  v{r['version']}")
+        for r in decisions:
+            print(f"  decide {r['channel']}  {r['key']}  by {r['updated_by']}")
+        for m in msgs:
+            tag = "ref" if m["via"] == "item_ref" else "…"
+            print(f"  [{tag}] {m['channel']}#{m['seq']} {m['sender']}"
+                  f" ({m['status']}) {m['title'][:60]}")
+    _run_agent_cmd(args, go)
+
+
 def cmd_rate(args):
     async def go(c, a):
         value = int(str(a.value).replace("+", ""))
@@ -2023,6 +2045,11 @@ def build_parser() -> argparse.ArgumentParser:
     nt = _agent_parser("note", "save a private colleague note")
     nt.add_argument("--about", dest="about_agent", required=True, metavar="AGENT_ID")
     nt.add_argument("text"); nt.set_defaults(func=cmd_note)
+
+    wk = _agent_parser("work", "everything citing one work id: claims, "
+                               "decisions, messages (the Option-A stitch)")
+    wk.add_argument("item_id", help="ruled work id, e.g. agora-0093")
+    wk.set_defaults(func=cmd_work)
 
     rt = _agent_parser("rate", "cast/revise your ONE live reputation vote "
                                "on a colleague (evidence-based)")
