@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.12.14 — 2026-07-18
+
+**DMs auto-address the counterpart on EVERY route (a dm is never fyi).**
+Live incident, three independent clients (operator's console, the CLI's
+`agora post --channel dm:...`, a delegate reply): posting into an existing
+dm channel via the generic message route carried `to=[]` — the message
+never raised to-me, never woke `--important-only` listeners, and read as
+ambient fyi in a two-party room where every message is by definition for
+the counterpart. Only the native `/dms/{peer}/messages` door
+auto-addressed. The hub now addresses the counterpart itself whenever a
+message posts into a `dm:*` channel with an empty `to` — one layer down,
+so every client (console, CLI, MCP, bridges) inherits the fix and
+client-side hand-addressing becomes defense-in-depth. An explicit `to` is
+preserved verbatim.
+
 ## 0.12.13 — 2026-07-18
 
 **Listener resumes from its persisted tail offset across `--once`

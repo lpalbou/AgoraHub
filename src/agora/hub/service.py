@@ -850,6 +850,18 @@ class HubService:
                 raise HubError(409, f"'{retired[0]}' has been retired "
                                     "(decommissioned) — this direct channel is "
                                     "closed to new messages")
+            if not payload.to and peers:
+                # A DM is a two-party room: every message in it is by
+                # definition FOR the counterpart. The native /dms door
+                # (post_dm) has always auto-addressed; posts arriving via
+                # this generic channel route carried to=[] — they never
+                # raised to-me, never woke --important-only listeners, and
+                # read as ambient fyi (live incident: operator dm 84 /
+                # c3073, three independent clients hit it). Address at the
+                # hub so EVERY client inherits; an explicit `to` is kept
+                # verbatim (it can only name the counterpart anyway —
+                # there is nobody else in the room).
+                payload = payload.model_copy(update={"to": peers})
         self._require_charter_read(channel, agent)
         if len(payload.body.encode()) > MAX_BODY_BYTES:
             raise HubError(413, f"body exceeds {MAX_BODY_BYTES} bytes")

@@ -41,6 +41,32 @@ def test_dm_is_created_on_first_send_and_is_pairwise(service, agents):
     assert e.value.status_code == 403
 
 
+def test_generic_route_posts_into_dm_auto_address_the_counterpart(service, agents):
+    """Live incident (operator dm 84 / c3073, three independent clients):
+    posting into an EXISTING dm channel via the generic post_message route
+    carried to=[] — the message never raised to-me, never woke
+    --important-only listeners, and read as ambient fyi in a two-party room
+    where every message is by definition for the counterpart. The hub now
+    addresses the counterpart itself when `to` is empty, so every client
+    (console, CLI, MCP, bridge) inherits the fix; an explicit `to` is kept
+    verbatim."""
+    alice, bob, _ = agents
+    service.post_dm(alice, "bob", PostMessage(body="opens the dm"))
+
+    # The defect path: generic route, no `to` — now auto-addressed.
+    msg = service.post_message(bob, "dm:alice--bob",
+                               PostMessage(body="reply via generic route"))
+    assert msg.to == ["alice"]
+    env = next(e for e in service.inbox(alice)
+               if e.body == "reply via generic route")
+    assert env.to_me                        # raises to-me: listeners wake
+
+    # An explicit `to` is preserved verbatim, not overwritten.
+    msg = service.post_message(alice, "dm:alice--bob",
+                               PostMessage(body="explicit", to=["bob"]))
+    assert msg.to == ["bob"]
+
+
 def test_dm_is_structurally_closed(service, agents):
     alice, bob, eve = agents
     service.post_dm(alice, "bob", PostMessage(body="hi"))
