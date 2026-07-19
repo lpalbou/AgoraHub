@@ -284,6 +284,77 @@ def test_addressee_leaving_reverts_obligation_to_broadcast():
 
 # -- 0067: dark-episode operator alerts -------------------------------------------
 
+def test_deaf_sweep_alerts_when_present_seat_stops_arming():
+    """0098: a seat that LOOKS present (recent session activity) but whose
+    reception loop went silent while it holds escalated addressed work is
+    DEAF — it wakes for nothing. The watchdog must alarm it (AGENT DEAF),
+    once per episode, distinctly from AGENT DARK (offline)."""
+    client = make_client()
+    flow = register(client, "flow")
+    register(client, "op", operator=True)
+    deaf = register(client, "uic")
+    make_channel(client, flow, "room", deaf)
+    client.put("/channels/room/store/channel:meta",
+               json={"value": {"response_sla_minutes": 0.001}}, headers=flow)
+    post(client, flow, body="for uic", title="q", status="open", to=["uic"],
+         asks=[{"id": "1", "text": "a?"}])
+    time.sleep(0.2)  # cross the SLA
+
+    service = client.app.state.service
+    # uic LOOKS present: keep its session activity fresh (NOT offline) but
+    # make its reception loop stale — it was arming, then the listener died.
+    service.presence.touch("uic")
+    service.presence._last_reception["uic"] = time.time() - 1000.0  # > 900s
+
+    assert service.dark_sweep() == ["uic"]      # DEAF, not DARK
+    assert service.dark_sweep() == []           # same episode: no duplicate
+    op2 = register(client, "op2", operator=True)
+    service.dark_sweep()
+    msgs = client.get("/channels/hub-alerts/messages", headers=op2).json()
+    assert any("AGENT DEAF: uic" in m["body"] for m in msgs)
+    assert not any("AGENT DARK: uic" in m["body"] for m in msgs)
+
+    # An armed reception loop is NOT deaf: recovery ends the episode.
+    service.presence.mark_reception("uic")
+    assert service.dark_sweep() == []
+    assert "uic" not in service._deaf_since
+
+
+def test_reception_unknown_is_never_alarmed():
+    """0098: a seat that never announced a reception heartbeat (drives
+    reception another way, or predates the feature) reads 'unknown' — the
+    absence of the signal must NOT be treated as deafness."""
+    client = make_client()
+    flow = register(client, "flow")
+    register(client, "op", operator=True)
+    quiet = register(client, "uic")
+    make_channel(client, flow, "room", quiet)
+    client.put("/channels/room/store/channel:meta",
+               json={"value": {"response_sla_minutes": 0.001}}, headers=flow)
+    post(client, flow, body="for uic", title="q", status="open", to=["uic"],
+         asks=[{"id": "1", "text": "a?"}])
+    time.sleep(0.2)
+
+    service = client.app.state.service
+    service.presence.touch("uic")  # present, but reception NEVER announced
+    state, age = service.presence.reception("uic")
+    assert state == "unknown" and age is None
+    assert service.dark_sweep() == []            # unknown != deaf
+
+
+def test_reception_marked_by_owed_header():
+    """0098: the /owed poll carrying X-Agora-Reception marks the seat armed;
+    a plain /owed read does not."""
+    client = make_client()
+    uic = register(client, "uic")
+    # Plain read: no reception mark.
+    client.get("/owed", headers=uic)
+    assert client.app.state.service.presence.reception("uic")[0] == "unknown"
+    # Reception poll: armed.
+    client.get("/owed", headers={**uic, "X-Agora-Reception": "arm"})
+    assert client.app.state.service.presence.reception("uic")[0] == "armed"
+
+
 def test_dark_sweep_alerts_operator_once_per_episode():
     client = make_client()
     flow = register(client, "flow")

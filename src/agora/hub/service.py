@@ -161,6 +161,9 @@ class HubService:
         # In-memory by design: a hub restart re-alerts once, which is honest.
         self._dark_since: dict[str, float] = {}
         self._dark_alerted_at: dict[str, float] = {}
+        # Deaf-seat episodes (0098): present-looking but reception-stale.
+        self._deaf_since: dict[str, float] = {}
+        self._deaf_alerted_at: dict[str, float] = {}
         # Stewardship (0084/0093): stale-claim alert dedupe lives in the
         # standing alert's steward_sig — read from the channel, restart-safe
         # — not in process memory.
@@ -2506,6 +2509,16 @@ class HubService:
         hub_blocked = {b["agent_id"] for b in self.db.blocks_active(self.HUB_SCOPE)}
         for agent_id in self.db.list_agent_ids():
             if self.presence.get(agent_id).state != "offline":
+                # NOT offline, but is it actually HEARING? A seat whose
+                # reception loop was arming and then stopped is DEAF: it
+                # looks present (stray session calls keep it "active") yet
+                # wakes for nothing — the exact class that hid uic/camera/
+                # framework for hours (0098). Alarm only when it has
+                # SLA-breached addressed work it cannot hear (deafness with
+                # consequence) and only if it WAS arming (reception 'stale',
+                # never 'unknown' — absence of the heartbeat is not death).
+                if agent_id not in hub_blocked:
+                    self._deaf_sweep_one(agent_id, dark_now, alerted)
                 continue
             # A hub-blocked seat is offline BY DESIGN — the operator locked it
             # out. Alerting "only the operator can start it" is a standing
@@ -2560,8 +2573,50 @@ class HubService:
         for agent_id in list(self._dark_since):
             if agent_id not in dark_now:
                 del self._dark_since[agent_id]
+        # Deaf episodes end the same way: reception recovered or work cleared.
+        for agent_id in list(self._deaf_since):
+            if agent_id not in dark_now:
+                del self._deaf_since[agent_id]
         alerted.extend(self._steward_sweep())
         return alerted
+
+    def _deaf_sweep_one(self, agent_id: str, dark_now: set[str],
+                        alerted: list[str]) -> None:
+        """DEAF leg of the watchdog (0098): a present-looking seat whose
+        reception loop went stale while it holds SLA-breached addressed
+        obligations. Same episode-dedupe + flap-guard as AGENT DARK, and
+        it shares dark_now so the reception-recovered/work-cleared teardown
+        above ends the episode."""
+        state, age = self.presence.reception(agent_id)
+        if state != "stale":  # 'armed' = hearing; 'unknown' = never announced
+            return
+        envelopes = self.inbox(AgentInfo(id=agent_id, name=agent_id))
+        overdue = [e for e in envelopes if e.escalated
+                   and e.status in (Status.open, Status.blocked)]
+        if not overdue:
+            return
+        dark_now.add(agent_id)
+        if agent_id in self._deaf_since:
+            return  # already alerted this deaf episode
+        now = time.time()
+        self._deaf_since[agent_id] = now
+        if now - self._deaf_alerted_at.get(agent_id, 0.0) < DARK_REALERT_SECONDS:
+            return
+        self._deaf_alerted_at[agent_id] = now
+        example = "a private thread"
+        ch = self.db.get_channel(overdue[0].channel)
+        if ch is not None and not ch.private:
+            example = f"{overdue[0].channel}#{overdue[0].seq}"
+        self._ensure_alerts_channel()
+        self._post_system(
+            self.DARK_ALERTS_CHANNEL,
+            f"AGENT DEAF: {agent_id} looks present but its reception loop "
+            f"went silent ~{age / 60:.0f} min ago while it holds "
+            f"{len(overdue)} SLA-breached obligation(s) (e.g. {example}). "
+            "Its listener is almost certainly dead — the seat wakes for "
+            "nothing. Re-arm it (restart the reception loop / the session); "
+            "escalation cannot reach a deaf seat. One alert per deaf episode.")
+        alerted.append(agent_id)
 
     def _steward_sweep(self) -> list[str]:
         """Stewardship half of the watchdog (0084, hardened 0093): a claim
@@ -2701,9 +2756,17 @@ class HubService:
                     cursor_cache[ch] = self.db.get_cursor(agent_id, ch)
                 if cursor_cache[ch] >= row["seq"]:
                     acked_unanswered += 1
+            reception_state, reception_age = self.presence.reception(agent_id)
             out.append({
                 "agent_id": agent_id,
                 "state": presence.state,
+                # Reception truth (0098): armed = listener heard from within
+                # the window; stale = it was arming and stopped (DEAF risk);
+                # unknown = never announced (not alarmed). Distinct from
+                # `state`, which any stray call keeps "active".
+                "reception": reception_state,
+                "reception_age_minutes": round(reception_age / 60, 1) if reception_age is not None else None,
+                "deaf": reception_state == "stale" and len(pending) > 0,
                 "unread": len(envelopes),
                 "pending_obligations": len(pending),
                 "oldest_pending_minutes": round((now - oldest) / 60, 1) if oldest else None,

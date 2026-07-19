@@ -717,10 +717,17 @@ async def inbox(
 def owed(
     agent: AgentInfo = Depends(current_agent),
     service: HubService = Depends(get_service),
+    reception: str = Header(default="", alias="X-Agora-Reception"),
 ) -> dict[str, Any]:
     """The caller's outstanding debts (anti-lurk, 0079): asks awaiting THEIR
     answer and answers to THEIR OWN asks awaiting consumption. Read receipts
-    are deliberately ignored — read-but-unanswered is the lurk case."""
+    are deliberately ignored — read-but-unanswered is the lurk case.
+
+    X-Agora-Reception on this poll (0098) marks the seat's reception loop as
+    armed NOW — the heartbeat that lets the hub distinguish a live listener
+    from a dead one and raise DEAF alarms instead of hiding the deafness."""
+    if reception:
+        service.presence.mark_reception(agent.id)
     return _run(service.owed, agent)
 
 

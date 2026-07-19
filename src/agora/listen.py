@@ -262,8 +262,12 @@ def _owed_snapshot(hub: str, agent_id: str) -> tuple[tuple[int, int] | None, str
         if not key:
             return None, None
         import httpx
+        # X-Agora-Reception (0098): this /owed poll runs at every arm, so it
+        # doubles as the reception heartbeat the hub uses to tell an armed
+        # listener from a dead one (DEAF detection). Rides the existing call.
         r = httpx.get(f"{hub.rstrip('/')}/owed",
-                      headers={"Authorization": f"Bearer {key}"}, timeout=5.0)
+                      headers={"Authorization": f"Bearer {key}",
+                               "X-Agora-Reception": "arm"}, timeout=5.0)
         if r.status_code != 200:
             return None, None
         owed = r.json()

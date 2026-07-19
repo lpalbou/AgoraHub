@@ -28,6 +28,10 @@ from ..models import Presence
 
 _STALE_AFTER = 120.0    # no connection + no update for this long -> offline
 _ACTIVE_WINDOW = 600.0  # REST activity within this window -> "active"
+# Reception truth (0098): a seat's listener arms every ~250s (max-wait 240 +
+# sleep 5 + startup), so ~3.5 missed cycles with no arm = the loop is dead,
+# not merely slow. This is the line between "armed" and "DEAF".
+_RECEPTION_STALE = 900.0
 
 
 class PresenceTracker:
@@ -35,12 +39,37 @@ class PresenceTracker:
         self._states: dict[str, Presence] = {}
         self._connections: dict[str, int] = {}  # agent_id -> live WS count
         self._last_seen: dict[str, float] = {}  # any authenticated activity
+        # Reception heartbeat (0098): distinct from _last_seen. Set ONLY when
+        # a seat's reception loop announces itself (the X-Agora-Reception
+        # header on its every-arm /owed poll). This is what separates "the
+        # listener is alive and arming" from "some stray call touched the
+        # hub" — the exact conflation that hid uic/camera/framework deafness.
+        self._last_reception: dict[str, float] = {}
 
     def touch(self, agent_id: str) -> None:
         """Record authenticated activity (REST or WS). An IDE tab working via
         MCP makes only REST calls — without this it reads 'offline' while
         visibly working (single GIL-atomic assignment; threadpool-safe)."""
         self._last_seen[agent_id] = time.time()
+
+    def mark_reception(self, agent_id: str) -> None:
+        """Record that this seat's RECEPTION loop just armed (0098). Called
+        from the /owed handler when the request carries X-Agora-Reception —
+        the listener already polls /owed at every arm, so this rides an
+        existing call with zero new traffic."""
+        self._last_reception[agent_id] = time.time()
+
+    def reception(self, agent_id: str) -> tuple[str, float | None]:
+        """(state, age_seconds) of a seat's reception loop. 'armed' = arming
+        within the window; 'stale' = it WAS arming and stopped (the DEAF
+        signal — only meaningful because we once saw it arm); 'unknown' =
+        never announced (a seat that drives reception another way, or predates
+        this feature) — deliberately never alarmed, absence is not death."""
+        last = self._last_reception.get(agent_id)
+        if last is None:
+            return "unknown", None
+        age = time.time() - last
+        return ("armed" if age <= _RECEPTION_STALE else "stale"), age
 
     def connect(self, agent_id: str) -> None:
         """A push connection opened: the agent is reachable until it closes.

@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.12.17 — 2026-07-19
+
+**DEAF-seat detection: the hub now sees a dead listener behind a
+present-looking seat (agora-0098).** Operator report — "messages not
+reaching agents, tasks forgotten" — root-caused by three adversarial
+passes to one structural blind spot: presence marked a seat active on ANY
+authenticated call, so a seat whose reception loop died but whose session
+still made stray calls read "active" forever, and the dark-watchdog only
+alarmed `offline`. Deafness was invisible (uic sat deaf 32h; the whole
+fleet came back deaf after the Saturday outage while orders waited hours).
+Fix: the listener's every-arm `/owed` poll now carries `X-Agora-Reception`
+(zero new traffic), the hub records it as a reception heartbeat distinct
+from generic activity, and `dark_sweep` raises `AGENT DEAF` for a
+present-looking seat whose reception went stale (~3.5 missed arms) while it
+holds SLA-breached addressed work — episode-deduped and self-closing like
+AGENT DARK. A seat that never announced a heartbeat reads `unknown` and is
+never alarmed (absence isn't death). `agora status` gains `reception` /
+`reception_age_minutes` / `deaf`, so a recurrence is one line, not a
+forensic dig. The hub still never restarts anything — it surfaces, the
+operator re-arms.
+
 ## 0.12.16 — 2026-07-19
 
 **Message retraction: unsay a message so no agent or entity ever reads it
