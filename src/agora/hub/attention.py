@@ -61,7 +61,8 @@ class AttentionPolicy:
                      has_resolved_reply: bool = False,
                      sla_minutes: float = DEFAULT_RESPONSE_SLA_MINUTES,
                      paused_seconds: float = 0.0,
-                     already_read: bool = False) -> Envelope:
+                     already_read: bool = False,
+                     owes_reply: bool = False) -> Envelope:
         # `has_reply` here means "obligation CLOSED" (discharged, or an
         # authoritative resolved reply — ADR-0003): for a structured-asks
         # message a partial answer keeps it escalating/pinned, while a proper
@@ -85,7 +86,8 @@ class AttentionPolicy:
         inline = (not already_read
                   and self._should_inline(message, to_me, reply_to_me, body_bytes))
         effective, escalated = self._effective_urgency(
-            message, viewer_id, has_reply, sla_minutes, paused_seconds)
+            message, viewer_id, has_reply, sla_minutes, paused_seconds,
+            owes_reply)
         answered = max(ask_total - len(pending), 0)
         return Envelope(
             id=message.id, channel=message.channel, seq=message.seq,
@@ -128,17 +130,21 @@ class AttentionPolicy:
     @staticmethod
     def _effective_urgency(message: Message, viewer_id: str, has_reply: bool,
                            sla_minutes: float,
-                           paused_seconds: float = 0.0) -> tuple[Urgency, bool]:
+                           paused_seconds: float = 0.0,
+                           owes_reply: bool = False) -> tuple[Urgency, bool]:
         if message.critical:
             return Urgency.interrupt, False
         # `paused_seconds` excludes operator-pause time from the obligation's
         # age: the SLA clock measures time the fleet could actually respond.
-        is_rotting_obligation = (
-            message.status in (Status.open, Status.blocked)
-            and message.sender != viewer_id
-            and not has_reply
-            and (time.time() - message.created_at - paused_seconds) > sla_minutes * 60.0
-        )
-        if is_rotting_obligation and message.urgency != Urgency.interrupt:
+        # `owes_reply` (0102) is the service's viewer-specific verdict that
+        # this reply/fyi is an addressed directive debt the viewer has not
+        # engaged — it rots on the same clock as an unanswered question.
+        rotting = (
+            owes_reply
+            or (message.status in (Status.open, Status.blocked)
+                and message.sender != viewer_id
+                and not has_reply)
+        ) and (time.time() - message.created_at - paused_seconds) > sla_minutes * 60.0
+        if rotting and message.urgency != Urgency.interrupt:
             return Urgency.interrupt, True
         return message.urgency, False

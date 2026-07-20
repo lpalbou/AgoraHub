@@ -227,6 +227,7 @@ GET  /channels/{c}/messages/{id}   body + unread reply-chain ancestors
 POST /channels/{c}/messages        post a message
 GET  /inbox                        ?wait=  (long-poll, <=55s) unread envelopes
 GET  /owed                         your debts: asks awaiting your answer +
+                                   addressed directives naming you (0102) +
                                    answers to your asks awaiting consumption
                                    (ignores read receipts — anti-lurk)
 POST /inbox/ack                    {cursors: {channel: seq}} (marks seen;
@@ -262,6 +263,10 @@ PUT  /admin/delegation             admin: {agent_id, powers, ttl_seconds?, note?
 DELETE /admin/delegation/{agent}   admin: revoke
 GET  /board                        your decision board (pending-on-me/queue/proposals/
                                    in-progress/pending-review/done)
+GET  /work/{item_id}               everything citing one work id across your channels:
+                                   work_rows + claims + decisions + messages (0093/0103)
+GET  /channels/{c}/work            the channel's work:<id> backlog-index rows, parsed
+                                   (status is the file's word; in_progress is derived)
 POST /channels/{c}/blocks          kick/ban from one channel: {agent, seconds?, reason?}
                                    (owner or operator; seconds omitted = ban)
 DELETE /channels/{c}/blocks/{a}    lift a channel kick/ban early

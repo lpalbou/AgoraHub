@@ -312,9 +312,11 @@ def test_operator_directive_reply_obliges_the_addressee():
     assert not any(o["id"] == directive["id"] for o in owed["to_answer"])
 
 
-def test_peer_addressed_reply_does_not_oblige():
-    """0101 stays narrow: a NON-operator addressed reply does NOT create an
-    obligation — obliging every reply would ping-pong the room."""
+def test_peer_reply_to_your_own_message_does_not_oblige_you():
+    """0102 consumption exemption: a peer's reply TO YOUR OWN message is
+    their answer/commentary coming back to you — your debt is consumption
+    (0078), never another reply. This is also the mechanical terminator:
+    without it every 'thanks' would oblige a 'you're welcome' forever."""
     client = make_client()
     flow = register(client, "flow")
     code = register(client, "code")
@@ -324,6 +326,119 @@ def test_peer_addressed_reply_does_not_oblige():
                       to=["code"], reply_to=report["id"])
     owed = client.get("/owed", headers=code).json()
     assert not any(o["id"] == peer_reply["id"] for o in owed["to_answer"])
+
+
+def test_peer_addressed_reply_elsewhere_obliges_the_named_seat():
+    """0102 ('a reply is not mandatory' MUST be false): a peer reply that
+    NAMES you — and is not the answer to your own message — is a debt: it
+    lands in /owed, pins in the inbox, and clears when YOU engage."""
+    client = make_client()
+    flow = register(client, "flow")
+    code = register(client, "code")
+    uic = register(client, "uic")
+    make_channel(client, flow, "room", code, uic)
+    base = post(client, flow, body="thread root", status="fyi")
+    directive = post(client, uic, body="code: please rerun the suite",
+                     status="reply", to=["code"], reply_to=base["id"])
+    owed = client.get("/owed", headers=code).json()
+    assert any(o["id"] == directive["id"] for o in owed["to_answer"])
+    assert directive["id"] in [e["id"] for e in
+                               client.get("/inbox", headers=code).json()]
+    # code engages: the debt clears.
+    post(client, code, body="rerun green", status="reply", to=["uic"],
+         reply_to=directive["id"])
+    owed = client.get("/owed", headers=code).json()
+    assert not any(o["id"] == directive["id"] for o in owed["to_answer"])
+
+
+def test_peer_addressed_fyi_never_obliges():
+    """0102: peer fyi is the terminal gesture — DMs auto-address every post,
+    so without a non-obliging status no DM thread could ever end."""
+    client = make_client()
+    flow = register(client, "flow")
+    code = register(client, "code")
+    make_channel(client, flow, "room", code)
+    base = post(client, flow, body="root", status="fyi")
+    fyi = post(client, code, body="fyi, closing note", status="fyi",
+               to=["flow"], reply_to=base["id"])
+    owed = client.get("/owed", headers=flow).json()
+    assert not any(o["id"] == fyi["id"] for o in owed["to_answer"])
+
+
+def test_multi_addressee_directive_each_seat_owes_its_own_engagement():
+    """0102 free-rider fix: a directive naming TWO seats stays a debt for
+    the silent one after the other replies — engagement is per-addressee,
+    not per-thread."""
+    client = make_client()
+    op = register(client, "op", operator=True)
+    code = register(client, "code")
+    uic = register(client, "uic")
+    make_channel(client, op, "room", code, uic)
+    report = post(client, code, body="report", status="fyi")
+    directive = post(client, op, body="both of you: verify on your side",
+                     status="reply", to=["code", "uic"], reply_to=report["id"])
+    # code engages; uic stays silent.
+    post(client, code, body="verified mine", status="reply", to=["op"],
+         reply_to=directive["id"])
+    owed_code = client.get("/owed", headers=code).json()
+    owed_uic = client.get("/owed", headers=uic).json()
+    assert not any(o["id"] == directive["id"] for o in owed_code["to_answer"])
+    assert any(o["id"] == directive["id"] for o in owed_uic["to_answer"]), \
+        "another addressee's reply must not clear YOUR debt"
+    # And it still pins uic's inbox while code's is clear.
+    assert directive["id"] in [e["id"] for e in
+                               client.get("/inbox", headers=uic).json()]
+
+
+def test_operator_addressed_fyi_obliges_too():
+    """0102 widening: operator words oblige whatever status the composer
+    picked — fyi included. Human words are few and never chatter."""
+    client = make_client()
+    op = register(client, "op", operator=True)
+    code = register(client, "code")
+    make_channel(client, op, "room", code)
+    note = post(client, op, body="tomorrow: migrate the boards", status="fyi",
+                to=["code"])
+    owed = client.get("/owed", headers=code).json()
+    assert any(o["id"] == note["id"] for o in owed["to_answer"])
+
+
+def test_directive_debt_cleared_by_authoritative_closure():
+    """0102: a resolved reply from someone with closure authority (here the
+    directive's own sender) settles the debt without the addressee — the
+    thread is closed, nothing is owed into a closed thread."""
+    client = make_client()
+    op = register(client, "op", operator=True)
+    code = register(client, "code")
+    make_channel(client, op, "room", code)
+    report = post(client, code, body="report", status="fyi")
+    directive = post(client, op, body="do X", status="reply",
+                     to=["code"], reply_to=report["id"])
+    assert any(o["id"] == directive["id"] for o in
+               client.get("/owed", headers=code).json()["to_answer"])
+    post(client, op, body="superseded, stand down", status="resolved",
+         reply_to=directive["id"])
+    owed = client.get("/owed", headers=code).json()
+    assert not any(o["id"] == directive["id"] for o in owed["to_answer"])
+
+
+def test_directive_debt_escalates_past_sla():
+    """0102: an ignored directive rots on the same SLA clock as an
+    unanswered question — envelope.escalated flips, which is what feeds
+    the deaf/dark watchdogs."""
+    client = make_client()
+    op = register(client, "op", operator=True)
+    code = register(client, "code")
+    make_channel(client, op, "room", code)
+    client.put("/channels/room/store/channel:meta",
+               json={"value": {"response_sla_minutes": 0.001}}, headers=op)
+    report = post(client, code, body="report", status="fyi")
+    directive = post(client, op, body="do X now", status="reply",
+                     to=["code"], reply_to=report["id"])
+    time.sleep(0.2)
+    env = [e for e in client.get("/inbox", headers=code).json()
+           if e["id"] == directive["id"]]
+    assert env and env[0]["escalated"] is True
 
 
 def test_operator_reply_carrying_an_answer_does_not_oblige():

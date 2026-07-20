@@ -1054,15 +1054,16 @@ class Database:
             ).fetchall()
         return [self._row_to_message(r) for r in rows]
 
-    def addressed_replies(self, channels: list[str]) -> list[Message]:
-        """Reply-status messages that NAME specific recipients (to_agents
-        non-empty), read or not (0101). Replies normally oblige nobody — a
-        peer answering your ask is discharge, not a new debt, and obliging
-        every reply would create ping-pong. But an ADDRESSED reply that
-        carries a directive (the operator replying 'now do X') must not
-        silently drop: the service filters these to operator senders and
-        treats them as obligations the addressee owes. Retracted rows
-        excluded like every read surface."""
+    def addressed_directives(self, channels: list[str]) -> list[Message]:
+        """Reply/fyi messages that NAME specific recipients (to_agents
+        non-empty), read or not (0101, widened 0102). Replies and fyi
+        normally oblige nobody — a peer answering your ask is discharge, not
+        a new debt, and obliging every reply would create ping-pong. But an
+        ADDRESSED one can carry a directive ('now do X') that must not
+        silently drop: the service applies the per-sender/per-viewer
+        exemptions (answers, replies-to-your-own-message, operator authority)
+        and treats the rest as obligations each named seat owes. Retracted
+        rows excluded like every read surface."""
         if not channels:
             return []
         placeholders = ",".join("?" for _ in channels)
@@ -1070,7 +1071,8 @@ class Database:
             rows = self._conn.execute(
                 f"""
                 SELECT m.* FROM messages m
-                WHERE m.status = 'reply' AND m.to_agents != '[]'
+                WHERE m.status IN ('reply', 'fyi') AND m.to_agents != '[]'
+                  AND m.kind = 'message'
                   AND m.channel IN ({placeholders})
                   AND m.retracted_at IS NULL
                 ORDER BY m.created_at

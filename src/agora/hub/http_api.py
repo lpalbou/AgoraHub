@@ -1022,6 +1022,17 @@ def work_activity(
     return _run(service.work_activity, agent, item_id)
 
 
+@router.get("/channels/{channel}/work")
+def work_rows(
+    channel: str,
+    agent: AgentInfo = Depends(current_agent),
+    service: HubService = Depends(get_service),
+) -> list[dict[str, Any]]:
+    """All work:* backlog-index rows of a channel, parsed (0103) — the
+    console's one-call backlog list; no store paging."""
+    return _run(service.work_rows, agent, channel)
+
+
 # -- reputation (0094): peer ±1 votes, per-channel and hub leaderboards -------------
 
 class CastVote(BaseModel):

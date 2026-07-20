@@ -378,6 +378,46 @@ def test_terminal_claims_never_go_stale(client, room):
     assert tasks.isdisjoint({"done-x", "shipped-y", "status-done-z"})
 
 
+def test_prose_after_the_state_word_and_parked_claims(client, room):
+    """c3349 item 9: owners wrote status='DONE — shipped x, receipt c123'
+    and the exact-whole-string match re-alerted rows closed twice. The
+    vocabulary keys on the FIRST word now; PARKED rows are deliberately
+    idle — no alert — while staying live on the board (unfinished work)."""
+    service = client.app.state.service
+    key = room["named"]
+    client.put("/admin/delegation", headers={"Authorization": f"Bearer {ADMIN_KEY}"},
+               json={"agent_id": "bystander", "powers": ["reporting"]})
+
+    for slug, status in (("prose-done", "DONE — shipped xyz, receipt c123"),
+                         ("prose-closed", "CLOSED by canvass, twice"),
+                         ("parked-a", "PARKED until the gateway wave lands")):
+        client.put(f"/channels/canvass/store/claim:{slug}", headers=_auth(key),
+                   json={"value": {"owner": "named", "status": status},
+                         "expect_version": 0})
+    client.put("/channels/canvass/store/claim:still-live", headers=_auth(key),
+               json={"value": {"owner": "named", "status": "doneish is not done"},
+                     "expect_version": 0})
+    service.db._conn.execute(
+        "UPDATE store SET updated_at = updated_at - 7200 "
+        "WHERE channel='canvass' AND key LIKE 'claim:%'")
+    service.db._conn.commit()
+
+    out = service._steward_sweep()
+    assert out == ["stale-claims:1"]
+    alerts = service.db.get_messages("hub-alerts", 0, 50)
+    alert = next(m for m in reversed(alerts) if "STALE CLAIMS" in m.body)
+    assert "claim:still-live" in alert.body
+    for quiet in ("prose-done", "prose-closed", "parked-a"):
+        assert quiet not in alert.body
+
+    # Board: prose-DONE/CLOSED rows are terminal (out of in_progress);
+    # PARKED stays IN progress — parked work is unfinished work.
+    board = client.get("/board", headers=_auth(key)).json()
+    tasks = {row["task"] for row in board["in_progress"]}
+    assert "parked-a" in tasks and "still-live" in tasks
+    assert tasks.isdisjoint({"prose-done", "prose-closed"})
+
+
 def test_fleet_status_gated_to_operators_and_reporting_delegates(client, room):
     """0084: GET /status serves the operator overview to reporting delegates
     (the steward could not see lurk metrics behind the admin key), with

@@ -1130,6 +1130,7 @@ class HubService:
         # asks visible; has_resolved_reply travels so a reader is never cold.
         closed, pending, total, has_resolved = False, [], 0, False
         already_read = False
+        owes_reply = False
         if message.status in (Status.open, Status.blocked):
             state = discharge_state(message, self.db.replies_to(message.id),
                                     self.operator_ids())
@@ -1139,11 +1140,21 @@ class HubService:
             # Only the pinned class can re-deliver; a read receipt turns its
             # re-surfaces headline-only (redelivery=true, body withheld).
             already_read = self.db.has_read(message.id, viewer_id)
+        elif self._is_addressed_debt(viewer_id, message):
+            # Directive debts (0102) age exactly like open/blocked: an
+            # ignored addressed reply/fyi escalates past the channel SLA
+            # and feeds the deaf/dark watchdogs — 'a reply is not
+            # mandatory' stops being true mechanically, not hortatorily.
+            replies = self.db.replies_to(message.id)
+            owes_reply = not (
+                closed_authoritatively(message, replies, self.operator_ids())
+                or any(r.sender == viewer_id for r in replies))
+            already_read = self.db.has_read(message.id, viewer_id)
         return self.attention.envelope_for(
             viewer_id, message,
             parent_sender=parent.sender if parent else None,
             has_reply=closed, pending_asks=pending, ask_total=total,
-            has_resolved_reply=has_resolved,
+            has_resolved_reply=has_resolved, owes_reply=owes_reply,
             sla_minutes=sla_minutes if sla_minutes is not None
             else self.channel_sla(message.channel),
             # Escalation clock exclusion (0069): paused time never ages an
@@ -1246,10 +1257,23 @@ class HubService:
         # them up.
         members_cache: dict[str, set[str]] = {}
         hub_blocked = {b["agent_id"] for b in self.db.blocks_active(self.HUB_SCOPE)}
-        # Operator directive-replies pin like obligations (0101): an addressed
-        # operator reply must not drop below the cursor unheard.
+        # Addressed reply/fyi debts pin like obligations (0101/0102): an
+        # addressed directive must not drop below the cursor unheard.
         for message in (self.db.obligation_candidates(agent.id, channels)
-                        + self._directive_replies(agent.id, channels)):
+                        + self._addressed_debts(agent.id, channels)):
+            if message.status in (Status.reply, Status.fyi):
+                # Directive debts (0102): PER-ADDRESSEE engagement — another
+                # addressee's reply never unpins YOURS; only your own reply
+                # or an authoritative closure does. (obligation_candidates
+                # yields only open/blocked, so this branch is exactly the
+                # _addressed_debts rows.)
+                replies = self.db.replies_to(message.id)
+                if closed_authoritatively(message, replies, self.operator_ids()):
+                    continue
+                if any(r.sender == agent.id for r in replies):
+                    continue
+                by_id[message.id] = message
+                continue
             # Effective addressees = message-level `to` plus every seat named
             # by a per-ask `to` (0077): a canvass that names you in an ask IS
             # addressed to you — names living only in prose pinned nobody.
@@ -1304,28 +1328,54 @@ class HubService:
         envelopes.sort(key=lambda e: (not e.critical, not e.escalated, e.created_at))
         return envelopes
 
-    def _directive_replies(self, agent_id: str,
-                           channels: list[str]) -> list[Message]:
-        """Operator-authored ADDRESSED replies that carry a directive rather
-        than an answer (0101). Replies normally oblige nobody — obliging
-        every reply would ping-pong — but 'a reply, you must answer too'
-        (operator, 2026-07-19): when the human replies to you in-thread with
-        an order ('now do X', 'redo it properly'), that is an obligation,
-        not chatter, and it must not silently drop because status=reply is
-        not an owed class. Narrowed to keep it safe: OPERATOR senders only
-        (trusted, few, never idle), and NOT replies that carry `answers`
-        (those discharge someone's ask — they direct nobody). The addressee
-        engaging (any reply of theirs) clears it, via the same discharge
-        path as any binary obligation."""
-        ops = self.operator_ids()
-        out: list[Message] = []
-        for m in self.db.addressed_replies(channels):
-            if m.sender == agent_id or m.sender not in ops:
-                continue
-            if (m.data or {}).get("answers"):
-                continue  # an answer, not a directive
-            out.append(m)
-        return out
+    def _is_addressed_debt(self, viewer_id: str, m: Message) -> bool:
+        """Is this reply/fyi message a DEBT the viewer owes an answer to?
+        (0101, generalized 0102). Replies normally oblige nobody — obliging
+        every reply would ping-pong — but 'a reply is not mandatory' was
+        exactly the excuse behind silently dropped directives (operator,
+        2026-07-19: 'it MUST be'). The rule, mechanical:
+
+        - OPERATOR sender, status reply OR fyi: always obliges the named
+          seats. Human words are few and never chatter; a DM auto-addresses
+          (c3073), so every operator DM line lands here regardless of the
+          status the composer picked. The operator ends a thread with
+          status=resolved (closes), never by being ignored.
+        - PEER sender, status reply: obliges the named seats UNLESS it is
+          the sender's answer coming back to you — i.e. it replies to YOUR
+          OWN message. Your debt for an answer is CONSUMPTION (0078's
+          to_consume), not another reply; this exemption is also what
+          terminates ack chains ('thanks' replying to their answer obliges
+          them nothing) instead of ping-ponging forever.
+        - PEER sender, status fyi: never obliges — fyi is the documented
+          terminal gesture ('no reply owed'), and DMs auto-address, so
+          without a non-obliging status no DM thread could ever end.
+        - A reply carrying `answers` never obliges (both classes): it
+          discharges an ask; the asker's debt is consumption.
+
+        The viewer engaging (any reply of theirs to it) clears it, via the
+        same per-addressee discharge as any addressed binary obligation."""
+        if (m.kind != Kind.message or m.retracted
+                or m.status not in (Status.reply, Status.fyi)):
+            return False
+        if m.sender == viewer_id or viewer_id not in m.to:
+            return False
+        if (m.data or {}).get("answers"):
+            return False  # an answer, not a directive
+        if m.sender in self.operator_ids():
+            return True
+        if m.status != Status.reply:
+            return False  # peer fyi: terminal gesture, never a debt
+        parent = self.db.get_message(m.reply_to) if m.reply_to else None
+        return not (parent is not None and parent.sender == viewer_id)
+
+    def _addressed_debts(self, agent_id: str,
+                         channels: list[str]) -> list[Message]:
+        """Every reply/fyi debt the viewer owes across these channels — the
+        candidate feed `owed` and the inbox pin merge with open/blocked
+        obligations (0102). Engagement/closure filtering stays with the
+        callers, identical to any other obligation."""
+        return [m for m in self.db.addressed_directives(channels)
+                if self._is_addressed_debt(agent_id, m)]
 
     def owed(self, agent: AgentInfo) -> dict[str, Any]:
         """The agent's outstanding debts (0079), read receipts deliberately
@@ -1350,16 +1400,37 @@ class HubService:
         now = time.time()
         sla_cache: dict[str, float] = {}
         to_answer: list[dict[str, Any]] = []
-        # Candidates: open/blocked obligations PLUS operator directive-replies
-        # (0101) — an addressed operator reply is an order the addressee owes,
-        # not idle chatter. Both run the identical discharge/engagement checks
-        # below; a reply carries no asks, so it is a binary obligation that
-        # any reply from the addressee discharges.
-        candidates = self.db.open_obligations(channels) + self._directive_replies(agent.id, channels)
+        # Candidates: open/blocked obligations PLUS addressed reply/fyi debts
+        # (0101/0102) — a message that NAMES you owes your engagement, not
+        # just messages that opened a thread. Both run the identical
+        # discharge/engagement checks below; a directive carries no asks, so
+        # it is a binary obligation that any reply from the addressee
+        # discharges.
+        candidates = self.db.open_obligations(channels) + self._addressed_debts(agent.id, channels)
         for m in candidates:
             if m.sender == agent.id:
                 continue
             replies = self.db.replies_to(m.id)
+            if m.status in (Status.reply, Status.fyi):
+                # Directive debts (0102): PER-ADDRESSEE engagement — another
+                # seat's reply never clears YOUR debt (the multi-addressee
+                # free-rider hole); only your own reply or an authoritative
+                # closure does.
+                if closed_authoritatively(m, replies, ops):
+                    continue
+                if any(r.sender == agent.id for r in replies):
+                    continue
+                if m.channel not in sla_cache:
+                    sla_cache[m.channel] = self.channel_sla(m.channel)
+                age = now - m.created_at - self.paused_seconds_since(m.created_at)
+                to_answer.append({
+                    "channel": m.channel, "id": m.id, "seq": m.seq,
+                    "from": m.sender, "title": m.title,
+                    "pending_asks": [], "asks_naming_you": [],
+                    "age_minutes": round(age / 60, 1),
+                    "escalated": age > sla_cache[m.channel] * 60.0,
+                })
+                continue
             ds = discharge_state(m, replies, ops)
             if ds.closed:
                 continue
@@ -1538,7 +1609,75 @@ class HubService:
                                     f"'{sanitize_text(str(value['item']), 64)}'"
                                     " — a pointer claim must cite ONE id; "
                                     "drop value.item or make them agree")
+        if key.startswith(self.WORK_ROW_PREFIX):
+            self._validate_work_row(key, value)
         return self.db.store_set(channel, key, value, agent.id, expect_version)
+
+    # -- unified backlog rows (0103, operator ruling c3328) ----------------------
+    #
+    # `work:<package>-<NNNN>` store rows are the hub-resident INDEX of the
+    # room's backlog: the repo file stays the deep record; the row mirrors
+    # its directory state so every seat (and the console) sees one
+    # cross-agent picture without a gateway. claim:* stays the WHO/liveness
+    # record; work:* is the WHAT/state record.
+
+    WORK_ROW_PREFIX = "work:"
+    #: The FILE's own directory words (continuum's S0 clause, c3343): rendered
+    #: words like in_progress/in_review/done are DERIVATIONS over
+    #: work-row + live claim, never stored — storing one would create a
+    #: rendered word with no transition trigger and no disagreement owner.
+    WORK_STATUSES = ("proposed", "planned", "completed", "deprecated")
+    _WORK_DERIVED_STATUSES = frozenset(
+        {"in_progress", "in-progress", "in_review", "in-review", "done"})
+
+    def _validate_work_row(self, key: str, value: Any) -> None:
+        item = key[len(self.WORK_ROW_PREFIX):]
+        if parse_work_id(item) is None:
+            raise HubError(400, f"'{sanitize_text(item, 64)}' is not a work id "
+                                "— work:* rows are the backlog INDEX and key "
+                                "on the ruled form <package>-<NNNN> "
+                                "(e.g. agora-0093); free-text task names "
+                                "belong on claim:* rows")
+        if not isinstance(value, dict):
+            raise HubError(400, "a work:* row must be an object: {title, "
+                                "status, owner, card, priority?, receipt?}")
+        status = str(value.get("status", "")).strip().lower()
+        if status in self._WORK_DERIVED_STATUSES:
+            raise HubError(400, f"status '{status}' is a DERIVED word, never "
+                                "stored: in-progress = planned + a live "
+                                "claim:* row; done = completed + receipt. "
+                                "Store the file's directory word "
+                                f"({'|'.join(self.WORK_STATUSES)}) and let "
+                                "boards derive the rest")
+        if status not in self.WORK_STATUSES:
+            raise HubError(400, f"work:* status must be one of "
+                                f"{'|'.join(self.WORK_STATUSES)} — the file's "
+                                f"own directory word (got "
+                                f"'{sanitize_text(status, 32)}')")
+
+    def work_rows(self, agent: AgentInfo, channel: str) -> list[dict[str, Any]]:
+        """All work:* rows of a channel, parsed — the one-call backlog list
+        (0103) so consoles never page the raw store. Membership-gated like
+        any store read."""
+        self.require_membership(channel, agent.id)
+        out: list[dict[str, Any]] = []
+        for entry in self.db.store_keys(channel):
+            if not entry["key"].startswith(self.WORK_ROW_PREFIX):
+                continue
+            stored = self.db.store_get(channel, entry["key"])
+            if stored is None or not isinstance(stored.value, dict):
+                continue
+            v = stored.value
+            out.append({
+                "id": entry["key"][len(self.WORK_ROW_PREFIX):],
+                "title": v.get("title", ""), "status": v.get("status", ""),
+                "owner": v.get("owner", ""), "card": v.get("card", ""),
+                "priority": v.get("priority"), "receipt": v.get("receipt"),
+                "version": stored.version, "updated_by": stored.updated_by,
+                "updated_at": stored.updated_at,
+            })
+        out.sort(key=lambda r: r["id"])
+        return out
 
     @staticmethod
     def _validate_channel_meta(value: Any) -> None:
@@ -1643,7 +1782,18 @@ class HubService:
                                 "(e.g. agora-0093)")
         channels = self.db.channels_of(agent.id)
         out = self.db.work_activity(item_id, channels)
-        return {"item_id": item_id, **out}
+        # The unified-backlog index rows (0103) ride the stitch surface too:
+        # the work: row is the item's cross-agent state record, shown beside
+        # who claimed it and where it was discussed.
+        rows: list[dict[str, Any]] = []
+        for ch in channels:
+            stored = self.db.store_get(ch, f"{self.WORK_ROW_PREFIX}{item_id}")
+            if stored is not None:
+                rows.append({"channel": ch, "value": stored.value,
+                             "version": stored.version,
+                             "updated_by": stored.updated_by,
+                             "updated_at": stored.updated_at})
+        return {"item_id": item_id, "work_rows": rows, **out}
 
     # -- reputation (0094): peer ±1 on four fixed axes, per channel ---------------
     #
@@ -2252,11 +2402,26 @@ class HubService:
 
     # Terminal claim-status spellings observed in the field beside the taught
     # {"done": true} (hub rule 2 / the skill): seats write status="done" or
-    # "shipped" and mean the same thing. Exact match on the whole lowered
-    # string — a free-text status like "designed ...; build next session"
-    # stays live.
+    # "shipped" and mean the same thing. Matched on the status's FIRST word
+    # (lowered, punctuation-stripped) since c3349 item 9: seats write
+    # "DONE — shipped xyz, receipt c123" and the exact-whole-string match
+    # kept re-alerting rows their owners had closed twice. A free-text
+    # status like "designed ...; build next session" still stays live —
+    # writers lead with the state word, prose follows it.
     _TERMINAL_CLAIM_STATUSES = frozenset(
-        {"done", "shipped", "complete", "completed", "delivered"})
+        {"done", "shipped", "complete", "completed", "delivered", "closed"})
+    # Parked spellings: deliberately-idle work. NOT terminal (the board keeps
+    # showing it in progress) but the steward sweep must not nag it every SLA
+    # window — parking IS the owner's answer to "is this stale?".
+    _PARKED_CLAIM_STATUSES = frozenset({"parked", "paused", "on-hold", "onhold"})
+
+    @staticmethod
+    def _claim_status_word(value: dict[str, Any]) -> str:
+        """First word of the claim's status, lowered, stripped of trailing
+        punctuation — the state word the vocabulary keys on."""
+        status = str(value.get("status", "")).strip().lower()
+        first = status.split()[0] if status.split() else ""
+        return first.rstrip(".,;:!—-")
 
     @classmethod
     def _claim_done(cls, value: dict[str, Any]) -> bool:
@@ -2267,8 +2432,14 @@ class HubService:
         canvass round bumped timestamps nobody would ever touch again)."""
         if value.get("done"):
             return True
-        status = str(value.get("status", "")).strip().lower()
-        return status in cls._TERMINAL_CLAIM_STATUSES
+        return cls._claim_status_word(value) in cls._TERMINAL_CLAIM_STATUSES
+
+    @classmethod
+    def _claim_parked(cls, value: dict[str, Any]) -> bool:
+        """Deliberately-idle claims (c3349): excluded from stale alerts —
+        the owner already answered the staleness question — while staying
+        live on the board (parked work is unfinished work)."""
+        return cls._claim_status_word(value) in cls._PARKED_CLAIM_STATUSES
 
     def board(self, agent: AgentInfo) -> dict[str, Any]:
         """The viewer's decision board, derived from structure the messages
@@ -2559,8 +2730,9 @@ class HubService:
             if agent_id in hub_blocked:
                 continue
             envelopes = self.inbox(AgentInfo(id=agent_id, name=agent_id))
-            overdue = [e for e in envelopes if e.escalated
-                       and e.status in (Status.open, Status.blocked)]
+            # escalated is viewer-specific: open/blocked past SLA, or an
+            # addressed directive debt (0102) the seat never engaged.
+            overdue = [e for e in envelopes if e.escalated]
             # A dark DELEGATE is the reactive fleet one layer deeper (0084):
             # everything it stewards stalls silently. Alert on ANY pending
             # obligation it holds, not just escalated ones — the operator
@@ -2623,8 +2795,9 @@ class HubService:
         if state != "stale":  # 'armed' = hearing; 'unknown' = never announced
             return
         envelopes = self.inbox(AgentInfo(id=agent_id, name=agent_id))
-        overdue = [e for e in envelopes if e.escalated
-                   and e.status in (Status.open, Status.blocked)]
+        # Same widened predicate as AGENT DARK: any escalated row — an
+        # SLA-breached question OR an ignored directive debt (0102).
+        overdue = [e for e in envelopes if e.escalated]
         if not overdue:
             return
         dark_now.add(agent_id)
@@ -2687,7 +2860,9 @@ class HubService:
                     # Finished work is never stale work: a done/shipped row
                     # must not re-escalate on age (c2409).
                     continue
-                if stored.value.get("done"):
+                if self._claim_parked(stored.value):
+                    # Parked work is deliberately idle (c3349): the owner
+                    # already answered the staleness question.
                     continue
                 age = now - stored.updated_at
                 if age <= sla_s:

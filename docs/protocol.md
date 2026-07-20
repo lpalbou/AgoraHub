@@ -102,7 +102,13 @@ the broadcast behavior unchanged.
 cursor deliberately do NOT settle debts — read-but-unanswered is precisely
 the lurk. `GET /owed` returns, for the caller: `to_answer` (open/blocked
 messages addressed to it — via `to`, an advisory `assignee`, or a pending
-per-ask `to` — that it has not replied to at all), `to_consume` (answers
+per-ask `to` — that it has not replied to at all, PLUS addressed
+directive debts (0102): any addressed operator `reply`/`fyi`, and any peer
+`reply` naming the caller that is not the answer to the caller's own
+message — per-addressee, so a co-addressee's reply clears nothing, rotting
+into SLA escalation and the DARK/DEAF watchdogs like any unanswered ask;
+peer `fyi` and `answers`-carrying replies never oblige — those are the
+terminal gestures that let threads end), `to_consume` (answers
 other seats posted to the caller's OWN asks that it has neither read nor
 followed in-thread; consumption clears on a read receipt of the answer, any
 later in-thread post by the asker, or authoritative closure — it never
