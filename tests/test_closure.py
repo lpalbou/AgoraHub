@@ -449,6 +449,41 @@ def test_peer_directive_debts_are_epoch_bounded():
     assert old_op["id"] in owed_ids, "operator words are epoch-unbounded"
 
 
+def test_operator_key_burst_raises_one_alert():
+    """0104 (the Jul-14 forgery): 13 DMs in 10s under the operator's cached
+    key impersonated the human and nothing flagged it. Machine cadence on a
+    human key now raises ONE loud hub-alerts alert per episode; a human-
+    paced operator (or any peer burst) never trips it."""
+    client = make_client()
+    op = register(client, "op", operator=True)
+    peer = register(client, "flow")
+    make_channel(client, op, "room", peer)
+    service = client.app.state.service
+
+    # A peer burst never trips the operator tripwire.
+    for i in range(8):
+        post(client, peer, body=f"peer {i}", status="fyi")
+    assert service.db.get_channel("hub-alerts") is None or not any(
+        "OPERATOR-KEY BURST" in m.body
+        for m in service.db.get_messages("hub-alerts", 0, 50))
+
+    # Five operator posts: under threshold, silent.
+    for i in range(5):
+        post(client, op, body=f"op {i}", status="fyi")
+    alerts = (service.db.get_messages("hub-alerts", 0, 50)
+              if service.db.get_channel("hub-alerts") else [])
+    assert not any("OPERATOR-KEY BURST" in m.body for m in alerts)
+
+    # The sixth inside the window trips it — exactly once, even if the
+    # burst continues (episode cooldown).
+    for i in range(4):
+        post(client, op, body=f"blast {i}", status="fyi")
+    alerts = service.db.get_messages("hub-alerts", 0, 50)
+    hits = [m for m in alerts if "OPERATOR-KEY BURST" in m.body]
+    assert len(hits) == 1
+    assert "machine cadence" in hits[0].body
+
+
 def test_directive_debt_escalates_past_sla():
     """0102: an ignored directive rots on the same SLA clock as an
     unanswered question — envelope.escalated flips, which is what feeds

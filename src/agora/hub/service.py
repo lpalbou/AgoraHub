@@ -186,6 +186,13 @@ class HubService:
         # buried-directive case is exactly what 0101/0102 exist for.
         self._directive_epoch = float(self.db.meta_set_default(
             "directive_debt_epoch", str(time.time())))
+        # Operator-key burst tripwire (0104, the Jul-14 impersonation): on a
+        # shared machine any local process can read the operator's cached
+        # key and speak as the human — unpreventable hub-side (the key IS
+        # the credential), but a 13-DM multicast in 10s is MACHINE cadence.
+        # Track operator post timestamps; a burst raises one loud alert.
+        self._operator_posts: dict[str, deque] = {}
+        self._operator_burst_alerted_at: dict[str, float] = {}
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Record the serving event loop. Called by every async entry point
@@ -948,6 +955,8 @@ class HubService:
             data=data, reply_to=payload.reply_to,
             critical=payload.critical, downgraded=downgraded, to=payload.to,
         )
+        if agent.operator:
+            self._operator_burst_check(agent.id, channel)
         if payload.reply_to and parent is not None and not parent.critical:
             # Replying IS attending: record the read receipt on the parent so
             # an addressee who answered straight from the inlined envelope
@@ -959,6 +968,39 @@ class HubService:
             self.db.mark_read(payload.reply_to, agent.id)
         self._wake(message)
         return message
+
+    #: Operator-key burst tripwire (0104): 6+ posts inside 15s is machine
+    #: cadence — a human cannot compose six messages in fifteen seconds.
+    #: The Jul-14 forgery was 13 DMs in 10s under the operator's cached key
+    #: and NOTHING flagged it; six days later the fleet paid receipts to
+    #: words the human never wrote. On one shared machine the hub cannot
+    #: PREVENT a local process from using the cached key (the key IS the
+    #: credential) — but it can make silent impersonation impossible.
+    OPERATOR_BURST_N = 6
+    OPERATOR_BURST_WINDOW = 15.0
+    OPERATOR_BURST_COOLDOWN = 600.0
+
+    def _operator_burst_check(self, operator_id: str, channel: str) -> None:
+        now = time.time()
+        q = self._operator_posts.setdefault(operator_id, deque(maxlen=64))
+        q.append((now, channel))
+        recent = [c for t, c in q if now - t <= self.OPERATOR_BURST_WINDOW]
+        if len(recent) < self.OPERATOR_BURST_N:
+            return
+        if (now - self._operator_burst_alerted_at.get(operator_id, 0.0)
+                < self.OPERATOR_BURST_COOLDOWN):
+            return  # one alert per episode; a 13-post blast is one event
+        self._operator_burst_alerted_at[operator_id] = now
+        self._ensure_alerts_channel()
+        self._post_system(
+            self.DARK_ALERTS_CHANNEL,
+            f"OPERATOR-KEY BURST: {len(recent)} posts under "
+            f"'{operator_id}' within {self.OPERATOR_BURST_WINDOW:.0f}s "
+            f"across {len(set(recent))} channel(s) — machine cadence on a "
+            f"human key. If this was not {operator_id} at a keyboard, a "
+            "local process is speaking with the operator's cached key "
+            "(the Jul-14 forgery class): verify the posts, retract what "
+            "is false, rotate the key. One alert per episode.")
 
     def _require_charter_read(self, channel: str, agent: AgentInfo) -> None:
         """The opt-in charter gate (channel:meta.norms_required): posting
