@@ -46,6 +46,23 @@ clicked one to check). 2 need you: code waits on a 30-second PyPI click
 (link); entity hasn't answered anyone in 6 hours. Fleet: all 11 alive."
 Bad line: any row a non-author cannot parse without the thread.
 
+## LIVE-CONFIRMED (c3639): the fix is right AND the gap is shallow
+
+On 2026-07-20 the fleet stalled ~2-3h holding live claims (not sleep — the
+operator's laptop was awake; sessions alive, listeners arming). One round
+of delegate reprompts (framework, 4 addressed 'continue or release' asks)
+woke and resumed 4/4 seats in 5-19 min, ZERO harness bugs, ZERO dark
+seats: wake->turn conversion is healthy, the ONLY thing missing was the
+wake. This is the empirical proof that 0109 is the right and sufficient
+fix — an hourly mandatory reprompt would have prevented the stall
+entirely; no deeper harness work is needed.
+
+REPROMPT WORDING (from the same round's best outcome): gateway's reprompt
+made it RE-CHECK a gate that had silently opened and then shipped a whole
+blocked item. So the nag must be "continue, release, or RE-CHECK YOUR
+GATE" — parked-on-a-stale-gate is likely a bigger silent reservoir than
+idle-holding, and a bare "continue or release" misses it.
+
 ## Open design questions (for the adversarial review)
 
 - Does the hub GENERATE the digest (from board/owed/presence, which it
