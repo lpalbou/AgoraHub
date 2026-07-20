@@ -62,7 +62,8 @@ class AttentionPolicy:
                      sla_minutes: float = DEFAULT_RESPONSE_SLA_MINUTES,
                      paused_seconds: float = 0.0,
                      already_read: bool = False,
-                     owes_reply: bool = False) -> Envelope:
+                     owes_reply: bool = False,
+                     debt_epoch: float = 0.0) -> Envelope:
         # `has_reply` here means "obligation CLOSED" (discharged, or an
         # authoritative resolved reply — ADR-0003): for a structured-asks
         # message a partial answer keeps it escalating/pinned, while a proper
@@ -87,7 +88,7 @@ class AttentionPolicy:
                   and self._should_inline(message, to_me, reply_to_me, body_bytes))
         effective, escalated = self._effective_urgency(
             message, viewer_id, has_reply, sla_minutes, paused_seconds,
-            owes_reply)
+            owes_reply, debt_epoch)
         answered = max(ask_total - len(pending), 0)
         return Envelope(
             id=message.id, channel=message.channel, seq=message.seq,
@@ -131,7 +132,8 @@ class AttentionPolicy:
     def _effective_urgency(message: Message, viewer_id: str, has_reply: bool,
                            sla_minutes: float,
                            paused_seconds: float = 0.0,
-                           owes_reply: bool = False) -> tuple[Urgency, bool]:
+                           owes_reply: bool = False,
+                           debt_epoch: float = 0.0) -> tuple[Urgency, bool]:
         if message.critical:
             return Urgency.interrupt, False
         # `paused_seconds` excludes operator-pause time from the obligation's
@@ -139,12 +141,17 @@ class AttentionPolicy:
         # `owes_reply` (0102) is the service's viewer-specific verdict that
         # this reply/fyi is an addressed directive debt the viewer has not
         # engaged — it rots on the same clock as an unanswered question.
+        # `debt_epoch` (c3436) floors a directive debt's age at the epoch
+        # that created the debt class: a message newly classified by a
+        # semantics change is never born escalated. Open/blocked questions
+        # keep aging from their true post time (anti-rot invariant intact).
+        born = max(message.created_at, debt_epoch) if owes_reply else message.created_at
         rotting = (
             owes_reply
             or (message.status in (Status.open, Status.blocked)
                 and message.sender != viewer_id
                 and not has_reply)
-        ) and (time.time() - message.created_at - paused_seconds) > sla_minutes * 60.0
+        ) and (time.time() - born - paused_seconds) > sla_minutes * 60.0
         if rotting and message.urgency != Urgency.interrupt:
             return Urgency.interrupt, True
         return message.urgency, False

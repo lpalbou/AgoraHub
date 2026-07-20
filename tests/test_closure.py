@@ -403,6 +403,21 @@ def test_operator_addressed_fyi_obliges_too():
     assert any(o["id"] == note["id"] for o in owed["to_answer"])
 
 
+def test_retired_operator_excluded_from_operator_ids():
+    """c3436 HOLE 7 (defense-in-depth): the service guards against retiring
+    an operator, but if a retirement ever lands on an operator row,
+    list_operator_ids must exclude it — a decommissioned operator must keep
+    neither closure authority nor unbounded directive-debt minting."""
+    client = make_client()
+    register(client, "op", operator=True)
+    service = client.app.state.service
+    assert "op" in service.db.list_operator_ids()
+    service.db.retire_agent("op", "decommissioned")  # direct DB (service 403s this)
+    assert "op" not in service.db.list_operator_ids()
+
+
+
+
 def test_directive_debt_cleared_by_authoritative_closure():
     """0102: a resolved reply from someone with closure authority (here the
     directive's own sender) settles the debt without the addressee — the
@@ -422,11 +437,15 @@ def test_directive_debt_cleared_by_authoritative_closure():
     assert not any(o["id"] == directive["id"] for o in owed["to_answer"])
 
 
-def test_peer_directive_debts_are_epoch_bounded():
-    """0102 hardening (c3379): a peer reply posted BEFORE this hub learned
-    the directive-debt semantics must not become a debt retroactively —
-    the morning after 0.12.19, seats woke to 15+ phantom debts from
-    weeks-old settled traffic. Operator words stay unbounded."""
+def test_directive_debts_are_epoch_bounded_for_every_sender():
+    """0102 hardening (c3379, generalized c3436): a directive posted BEFORE
+    this hub learned the directive-debt semantics must not become a debt
+    retroactively — for EVERY sender, operator included. The morning after
+    0.12.19 seats woke to phantom debts from weeks-old settled traffic; the
+    0.12.20 operator carve-out then resurfaced weeks-old and FORGED operator
+    DMs, so the operator ruled 'no more surfacing old requests already
+    emitted and treated' (dm#42). A debt can never be older than the rule
+    that created it; a pre-epoch directive that still matters is re-emitted."""
     client = make_client()
     op = register(client, "op", operator=True)
     flow = register(client, "flow")
@@ -435,7 +454,7 @@ def test_peer_directive_debts_are_epoch_bounded():
     base = post(client, flow, body="root", status="fyi")
     old_peer = post(client, code, body="flow: check this", status="reply",
                     to=["flow"], reply_to=base["id"])
-    old_op = post(client, op, body="flow: directive", status="reply",
+    old_op = post(client, op, body="flow: old directive", status="reply",
                   to=["flow"], reply_to=base["id"])
     # Rewind both posts to before the service's epoch.
     service = client.app.state.service
@@ -446,7 +465,16 @@ def test_peer_directive_debts_are_epoch_bounded():
     owed_ids = [o["id"] for o in
                 client.get("/owed", headers=flow).json()["to_answer"]]
     assert old_peer["id"] not in owed_ids, "pre-epoch peer reply must not oblige"
-    assert old_op["id"] in owed_ids, "operator words are epoch-unbounded"
+    assert old_op["id"] not in owed_ids, \
+        "pre-epoch OPERATOR directive must not oblige either (c3436 ruling)"
+
+    # But a POST-epoch operator directive still obliges — the feature works
+    # for everything born after the rule.
+    fresh_op = post(client, op, body="flow: do this now", status="reply",
+                    to=["flow"], reply_to=base["id"])
+    owed_ids = [o["id"] for o in
+                client.get("/owed", headers=flow).json()["to_answer"]]
+    assert fresh_op["id"] in owed_ids, "post-epoch operator directive must oblige"
 
 
 def test_operator_key_burst_raises_one_alert():

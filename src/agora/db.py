@@ -1108,6 +1108,17 @@ class Database:
                 "SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
         return row["value"]
 
+    def meta_set(self, key: str, value: str) -> None:
+        """Upsert a meta key. Used for restart-durable watchdog flap guards
+        (c3436): a re-alert cooldown kept only in process memory re-fires
+        the whole DARK/DEAF wave on every hub restart."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO meta (key, value) VALUES (?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value))
+            self._conn.commit()
+
     def my_open_messages(self, sender: str, channels: list[str]) -> list[Message]:
         """The agent's own still-open questions (0078): the messages whose
         incoming answers can create a consumption debt for their asker."""
@@ -1628,9 +1639,14 @@ class Database:
             self._conn.commit()
 
     def list_operator_ids(self) -> list[str]:
+        # Retired operators are excluded (c3436, HOLE 7): a decommissioned
+        # operator must not keep minting unbounded directive debts nor keep
+        # closure authority. Its id is never recycled, so this only ever
+        # narrows the set.
         with self._lock:
             rows = self._conn.execute(
-                "SELECT id FROM agents WHERE operator = 1").fetchall()
+                "SELECT id FROM agents WHERE operator = 1 "
+                "AND retired_at IS NULL").fetchall()
         return [r["id"] for r in rows]
 
     # -- charter receipts + hub rules (governance surfaces) ----------------------

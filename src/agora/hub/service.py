@@ -160,10 +160,15 @@ class HubService:
         # plus a re-alert cooldown per agent (flap guard, review MED-4).
         # In-memory by design: a hub restart re-alerts once, which is honest.
         self._dark_since: dict[str, float] = {}
-        self._dark_alerted_at: dict[str, float] = {}
         # Deaf-seat episodes (0098): present-looking but reception-stale.
         self._deaf_since: dict[str, float] = {}
-        self._deaf_alerted_at: dict[str, float] = {}
+        # DARK/DEAF re-alert cooldown (c3436, HOLE 3): PERSISTED, not
+        # in-memory. The old in-memory flap guard reset on every restart,
+        # so each hub bounce re-fired the whole DARK/DEAF wave off the same
+        # standing debts (21 alerts across three restarts one morning). The
+        # cache is read-through from the `meta` table so the cooldown
+        # survives a bounce; keyed (kind, agent_id).
+        self._alerted_cache: dict[tuple[str, str], float] = {}
         # Stewardship (0084/0093): stale-claim alert dedupe lives in the
         # standing alert's steward_sig — read from the channel, restart-safe
         # — not in process memory.
@@ -1214,6 +1219,10 @@ class HubService:
             # escalation storm the pause itself manufactured.
             paused_seconds=self.paused_seconds_since(message.created_at),
             already_read=already_read,
+            # Debt-age floor (c3436): a directive debt ages from the later
+            # of its post time and the epoch that created the debt class —
+            # a semantics change can never make a message born escalated.
+            debt_epoch=self._directive_epoch if owes_reply else 0.0,
         )
 
     def channel_sla(self, channel: str) -> float:
@@ -1413,14 +1422,22 @@ class HubService:
             return False
         if (m.data or {}).get("answers"):
             return False  # an answer, not a directive
+        # Epoch bound (c3379, generalized c3436 by operator ruling dm#42):
+        # a debt can never be OLDER THAN THE RULE THAT CREATED IT. A message
+        # posted before this hub learned the directive-debt semantics
+        # predates the class and must not become a debt retroactively —
+        # for EVERY sender, operator included. The unbounded-operator
+        # carve-out (0.12.20) was exactly what resurfaced weeks-old and
+        # forged operator DMs the morning after the feature shipped
+        # ("no more surfacing old requests already emitted and treated").
+        # A pre-epoch directive that still matters is RE-EMITTED (the
+        # operator's own verb) — it lands post-epoch and obliges cleanly.
+        if m.created_at < self._directive_epoch:
+            return False
         if m.sender in self.operator_ids():
             return True
         if m.status != Status.reply:
             return False  # peer fyi: terminal gesture, never a debt
-        if m.created_at < self._directive_epoch:
-            # Epoch bound (c3379): posted under the old 'replies oblige
-            # nobody' semantics — it must not become a debt retroactively.
-            return False
         parent = self.db.get_message(m.reply_to) if m.reply_to else None
         return not (parent is not None and parent.sender == viewer_id)
 
@@ -1478,7 +1495,14 @@ class HubService:
                     continue
                 if m.channel not in sla_cache:
                     sla_cache[m.channel] = self.channel_sla(m.channel)
-                age = now - m.created_at - self.paused_seconds_since(m.created_at)
+                # Age from max(created_at, epoch) (c3436): a debt cannot be
+                # older than the rule that created it, so a message newly
+                # classified as a directive by a semantics change is not
+                # born SLA-breached. No-op today (all directive debts are
+                # post-epoch since c3436) — the durable invariant that
+                # stops the NEXT semantics change repeating the storm.
+                born = max(m.created_at, self._directive_epoch)
+                age = now - born - self.paused_seconds_since(born)
                 to_answer.append({
                     "channel": m.channel, "id": m.id, "seq": m.seq,
                     "from": m.sender, "title": m.title,
@@ -2812,12 +2836,12 @@ class HubService:
                 continue  # already alerted this episode
             now = time.time()
             self._dark_since[agent_id] = now
-            # Flap guard (review MED-4): an agent oscillating between active
-            # and offline (one REST call per hour) must not re-alert on every
-            # oscillation while the same overdue work stands.
-            if now - self._dark_alerted_at.get(agent_id, 0.0) < DARK_REALERT_SECONDS:
+            # Flap guard (review MED-4), now RESTART-DURABLE (c3436): an
+            # agent oscillating — or a hub that just bounced — must not
+            # re-alert while the same overdue work stands.
+            if now - self._alerted_at("dark", agent_id) < DARK_REALERT_SECONDS:
                 continue
-            self._dark_alerted_at[agent_id] = now
+            self._mark_alerted("dark", agent_id, now)
             oldest = min(e.created_at for e in overdue)
             age_min = (now - oldest) / 60
             # Never leak private/DM channel names into the alert (HIGH-2 —
@@ -2847,6 +2871,20 @@ class HubService:
         alerted.extend(self._steward_sweep())
         return alerted
 
+    def _alerted_at(self, kind: str, agent_id: str) -> float:
+        """Last time a DARK/DEAF alert fired for this (kind, agent), read
+        through the persisted `meta` flap guard (c3436) so a hub restart
+        cannot re-fire the whole wave. Cached in-process after first read."""
+        key = (kind, agent_id)
+        if key not in self._alerted_cache:
+            raw = self.db.meta_get(f"alerted:{kind}:{agent_id}")
+            self._alerted_cache[key] = float(raw) if raw else 0.0
+        return self._alerted_cache[key]
+
+    def _mark_alerted(self, kind: str, agent_id: str, when: float) -> None:
+        self._alerted_cache[(kind, agent_id)] = when
+        self.db.meta_set(f"alerted:{kind}:{agent_id}", str(when))
+
     def _deaf_sweep_one(self, agent_id: str, dark_now: set[str],
                         alerted: list[str]) -> None:
         """DEAF leg of the watchdog (0098): a present-looking seat whose
@@ -2868,9 +2906,9 @@ class HubService:
             return  # already alerted this deaf episode
         now = time.time()
         self._deaf_since[agent_id] = now
-        if now - self._deaf_alerted_at.get(agent_id, 0.0) < DARK_REALERT_SECONDS:
+        if now - self._alerted_at("deaf", agent_id) < DARK_REALERT_SECONDS:
             return
-        self._deaf_alerted_at[agent_id] = now
+        self._mark_alerted("deaf", agent_id, now)
         example = "a private thread"
         ch = self.db.get_channel(overdue[0].channel)
         if ch is not None and not ch.private:

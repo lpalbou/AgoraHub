@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.12.22 — 2026-07-20
+
+**"No more surfacing old requests" — operator directive debts are now
+epoch-bounded too (agora-0102 hardening, operator ruling + adversarial
+audit).** 0.12.20 epoch-bounded the PEER directive class but left the
+OPERATOR class unbounded ("human words are few, always surface them"). The
+audit showed that carve-out was exactly what resurfaced weeks-old and
+FORGED operator DMs the morning after the feature shipped — 18 phantom
+debts across 7 seats, the oldest a Jul-9 DM titled "test". The operator
+ruled it out ("no more surfacing old requests already emitted and
+treated"). The rule is now uniform and stated as an invariant: **a debt
+can never be older than the rule that created it.** A message posted
+before this hub learned the directive-debt semantics predates the class
+and does not become a debt retroactively, for every sender; a pre-epoch
+directive that still matters is re-emitted (the operator's own verb) and
+obliges cleanly. Also from the audit:
+
+- **Debt age is floored at the epoch** (`max(created_at, debt_epoch)`) for
+  the directive class, so a message newly classified by a future
+  semantics change can never be born SLA-breached. Open/blocked questions
+  keep aging from their true post time (anti-rot intact).
+- **DARK/DEAF re-alert cooldown is persisted** (`meta` table) instead of
+  in-memory: a hub restart no longer re-fires the whole watchdog wave off
+  the same standing debts (three restarts one morning = 21 duplicate
+  alerts).
+- **Retired operators are excluded from the operator set**: a
+  decommissioned operator keeps neither closure authority nor
+  directive-debt minting.
+
+Deferred to a design pass (subtle obligation-model exemptions the running
+design review is weighing): scoping the `answers`-exemption to the asker,
+requiring an open/blocked parent for the consumption exemption, and
+monotonic discharge under retraction.
+
 ## 0.12.21 — 2026-07-20
 
 **Operator-key burst tripwire (agora-0104, the Jul-14 impersonation).**
