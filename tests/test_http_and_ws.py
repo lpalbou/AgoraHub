@@ -459,3 +459,53 @@ def test_presence_listing_scoped_to_shared_channels(client):
         rows = {r["agent_id"]: r["state"] for r in client.get("/presence", headers=alice).json()}
         assert rows["bob"] == "idle"      # live connection visible in the listing
         assert rows["alice"] == "active"  # alice is the caller: REST activity
+
+
+def test_create_group_composite_one_call(client):
+    """agora-0119: /groups creates the room + purpose + invites (DM'd fyi) +
+    opening OPEN post in one call, with a uniform invite shape so clients no
+    longer re-script the recipe and drift on the invite status."""
+    owner = register(client, "owner")
+    register(client, "gw")
+    register(client, "core")
+    r = client.post("/groups", headers=owner, json={
+        "name": "voice-fix", "members": ["gw", "core"],
+        "purpose": "fix the voice outage", "opening_post": "root-cause the TTS 500s"})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["channel"] == "voice-fix"
+    assert sorted(out["invited"]) == ["core", "gw"] and out["failed"] == []
+    assert out["opening_seq"] is not None
+    # Purpose landed in channel:meta; the opening post is an OPEN obligation.
+    meta = client.get("/channels/voice-fix/store/channel:meta", headers=owner).json()
+    assert meta["value"]["purpose"] == "fix the voice outage"
+    msgs = client.get("/channels/voice-fix/messages", headers=owner).json()
+    assert any(m["status"] == "open" and m["body"] == "root-cause the TTS 500s"
+               for m in msgs)
+
+
+def test_create_group_invite_dm_is_fyi_with_redeemable_token(client):
+    owner = register(client, "owner")
+    gwkey = register(client, "gw")
+    client.post("/groups", headers=owner, json={
+        "name": "room-x", "members": ["gw"], "purpose": "p", "opening_post": "o"})
+    dm = client.get("/channels/dm:gw--owner/messages", headers=gwkey).json()
+    invites = [m for m in dm if (m.get("data") or {}).get("invite_token")]
+    assert len(invites) == 1 and invites[0]["status"] == "fyi"
+    token = invites[0]["data"]["invite_token"]
+    # The token redeems: gw joins room-x.
+    joined = client.post("/channels/room-x/join", json={"invite_token": token},
+                         headers=gwkey)
+    assert joined.status_code == 200
+    # The opening post is an OPEN obligation now visible to the joiner.
+    msgs = client.get("/channels/room-x/messages", headers=gwkey).json()
+    assert any(m["status"] == "open" and m["body"] == "o" for m in msgs)
+
+
+def test_create_group_reports_partial_invite_failure(client):
+    owner = register(client, "owner")
+    register(client, "gw")
+    out = client.post("/groups", headers=owner, json={
+        "name": "room-y", "members": ["gw", "ghost"], "purpose": "p"}).json()
+    assert out["invited"] == ["gw"]
+    assert len(out["failed"]) == 1 and out["failed"][0]["agent"] == "ghost"

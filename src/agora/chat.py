@@ -1056,40 +1056,22 @@ class ChatApp:
         if not title:
             title = "focused work with " + ", ".join(members)
         s = self.style
+        # Slug derivation stays client-side (presentation); the 4-call recipe
+        # (create + purpose + invites + opening post) is now ONE hub call
+        # (agora-0119), so chat and continuum can no longer drift on the
+        # invite status. The name-collision suffix is computed from the
+        # rooms this client can see; the hub still refuses a true collision.
         taken = {c["name"] for c in await self.client.list_channels()}
         name = group_slug(title, taken)
         try:
-            await self.client.create_channel(name, private=True)
+            out = await self.client.create_group(name, members, purpose=title,
+                                                 opening_post=title)
         except Exception as exc:
-            self._print(s.red(f"cannot create '{name}': {exc}"))
+            self._print(s.red(f"cannot create group '{name}': {exc}"))
             return
-        with contextlib.suppress(Exception):
-            await self.client.store_set(name, "channel:meta",
-                                        {"purpose": title})
-        invited: list[str] = []
-        for peer in members:
-            try:
-                token = await self.client.create_invite(name, agent_id=peer)
-                await self.client.dm(
-                    peer,
-                    f"You are invited to '{name}' — focused room: {title}. "
-                    f"Join with join_channel(channel={name!r}, "
-                    f"invite_token={token!r}), read the opening post, and "
-                    "work the topic THERE (not in commons).",
-                    title=f"invite to {name}: {title}")
-                invited.append(peer)
-            except Exception as exc:
-                self._print(s.red(f"  {peer}: invite failed — {exc}"))
-        # The opening post is the room's charter-in-miniature: the topic as
-        # a room-wide OPEN obligation. Deliberately NO per-seat asks: the
-        # hub refuses asks naming non-members, and invitees have not joined
-        # yet (live-proof catch) — the invite DM is the per-seat nudge, and
-        # the open topic is unread for each seat the moment they join.
-        try:
-            await self.client.post(name, title, title=derive_title(title),
-                                   status=Status.open)
-        except Exception as exc:
-            self._print(s.red(f"  opening post failed: {exc}"))
+        invited = out.get("invited", [])
+        for f in out.get("failed", []):
+            self._print(s.red(f"  {f.get('agent')}: invite failed — {f.get('error')}"))
         self._print(f"group room {s.bold(name)} created — private, "
                     f"{len(invited)} invited: {', '.join(invited) or '-'}")
         await self.cmd_switch(name)

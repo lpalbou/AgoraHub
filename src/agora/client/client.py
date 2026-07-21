@@ -89,6 +89,16 @@ class AgoraClient:
         answers to their own asks awaiting consumption (anti-lurk, 0079)."""
         return self._json(await self._http.get("/owed"))
 
+    async def create_group(self, name: str, members: list[str], *,
+                           purpose: str = "", opening_post: str = "",
+                           private: bool = True) -> dict[str, Any]:
+        """Focused-room composite (agora-0119): one call = create + purpose +
+        invite each member (DM'd) + opening open post. Replaces the 4-call
+        client recipe; the hub owns the uniform invite shape."""
+        return self._json(await self._http.post("/groups", json={
+            "name": name, "members": members, "purpose": purpose,
+            "opening_post": opening_post, "private": private}))
+
     async def create_channel(self, name: str, private: bool = True) -> dict[str, Any]:
         return self._json(await self._http.post("/channels", json={"name": name, "private": private}))
 

@@ -413,6 +413,51 @@ class HubService:
         self._post_system(name, f"channel created by {agent.id}")
         return channel.model_dump()
 
+    def create_group(self, agent: AgentInfo, name: str, members: list[str],
+                     *, purpose: str = "", opening_post: str = "",
+                     private: bool = True) -> dict[str, Any]:
+        """Spin up a focused room in ONE hub call (agora-0119, operator go
+        2026-07-21): create the channel, set its purpose, invite each named
+        member (token DM'd — joining stays their auditable act), and post
+        the topic as the room's opening OPEN obligation. Every client used
+        to re-script these 4 calls and they DRIFTED — chat sent the invite
+        DM `fyi`, continuum forced `open`, so invitees were treated
+        differently. The hub now owns the recipe with ONE uniform shape:
+        the invite DM is `fyi` (a nudge; joining is the act, not a reply
+        owed) and the opening post is the in-room `open` obligation once
+        they join. Not DB-atomic (each step commits), but ONE
+        implementation and one status — partial failures are reported per
+        member, never silently dropped."""
+        self._require_unpaused(agent)
+        channel = self.create_channel(agent, name, private)  # validates slug/collision
+        if purpose:
+            self.store_set(agent, name, CHANNEL_META_KEY,
+                           {"purpose": sanitize_text(purpose, MAX_ABOUT_CHARS)})
+        invited: list[str] = []
+        failed: list[dict[str, str]] = []
+        for peer in members:
+            try:
+                token = self.create_invite(agent, name, peer)
+                self.post_dm(agent, peer, PostMessage(
+                    body=(f"You are invited to '{name}' — focused room"
+                          + (f": {purpose}" if purpose else "")
+                          + f". Join, read the opening post, and work the topic "
+                            "THERE (not in commons). invite_token below."),
+                    title=f"invite to {name}",
+                    status=Status.fyi,
+                    data={"invite_token": token, "channel": name}))
+                invited.append(peer)
+            except HubError as e:
+                failed.append({"agent": peer, "error": e.detail})
+        opening = None
+        if opening_post:
+            opening = self.post_message(agent, name, PostMessage(
+                body=opening_post, title=sanitize_title(opening_post[:80]),
+                status=Status.open))
+        return {"channel": name, "created": channel, "invited": invited,
+                "failed": failed,
+                "opening_seq": opening.seq if opening else None}
+
     # -- direct (1:1) channels ---------------------------------------------------
 
     def open_dm(self, agent: AgentInfo, peer: str) -> dict[str, Any]:

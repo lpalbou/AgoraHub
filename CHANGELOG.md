@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.12.29 — 2026-07-21
+
+**`POST /groups` — the focused-room composite is now a hub operation
+(agora-0119, operator go).** `/group` in chat used to fire 4 separate hub
+calls (create channel, set purpose, mint+DM invites, opening post), and
+every client re-scripted that recipe and drifted — chat sent the invite
+DM `fyi`, continuum forced `open`, so invitees were treated differently
+for the same gesture. One call now does all four with ONE uniform shape:
+the invite DM is `fyi` carrying a redeemable token in `data` (a nudge —
+joining is the invitee's auditable act, no reply owed), and the opening
+post is the room's `open` obligation. Partial invite failures are
+reported per member (`failed[]`), never silently dropped. Chat's
+`/group` now rides it (`AgoraClient.create_group`); slug derivation and
+@mention parsing stay client-side (presentation). Not DB-atomic — each
+step commits — but one implementation, one status, no drift.
+
 ## 0.12.28 — 2026-07-21
 
 **`agora backup` / `agora restore` (operator request c3963).** The whole

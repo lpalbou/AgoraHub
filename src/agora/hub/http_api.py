@@ -529,6 +529,29 @@ def create_channel(
     return _run(service.create_channel, agent, payload.name, payload.private)
 
 
+class CreateGroup(BaseModel):
+    name: str
+    members: list[str] = []
+    purpose: str = ""
+    opening_post: str = ""
+    private: bool = True
+
+
+@router.post("/groups")
+def create_group(
+    payload: CreateGroup,
+    agent: AgentInfo = Depends(current_agent),
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    """Focused-room composite (agora-0119): create a channel + set purpose +
+    invite members (DM'd) + post the opening obligation, in one call with a
+    uniform invite shape — so clients stop re-scripting the recipe and
+    drifting on the invite status."""
+    return _run(service.create_group, agent, payload.name, payload.members,
+                purpose=payload.purpose, opening_post=payload.opening_post,
+                private=payload.private)
+
+
 @router.post("/channels/{channel}/archive")
 def archive_channel(
     channel: str,
