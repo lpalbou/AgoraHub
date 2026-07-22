@@ -2058,62 +2058,53 @@ class HubService:
                                 f"{'|'.join(self.REPUTATION_AXES)}")
         return self.db.reputation_clear(channel, target, agent.id, axis)
 
-    #: DM ratings -> public standing: RULED INCLUDE (operator, dm#118
-    #: 2026-07-22, answering dm#114's yes/no/operator-only). A DM rating
-    #: carries the same collapsed per-rater weight as any channel's, and
-    #: excluding them was exactly what made the operator's -1s invisible.
-    #: Privacy fold: aggregates never name the DM channel (the hub board
-    #: reports counts, not sources). Axis VOTES keep their dm:* exclusion
-    #: (unchanged surface, separate rationale — unilateral-open channels
-    #: must not add axis-vote weight; revisit only on its own ruling).
-    RATINGS_DM_PUBLIC = True
+    #: The unified category set (agora-0123, operator ruling dm#129: thumbs
+    #: and categorized votes are ONE system — reputation score). 'general'
+    #: is the thumbs/message-rating category; the four named categories are
+    #: the sub-category granularity agents opt into via agent-level votes.
+    REPUTATION_CATEGORIES = ("general",) + tuple(REPUTATION_AXES)
 
     def reputation_leaderboard(self, agent: AgentInfo,
                                channel: str | None = None) -> dict[str, Any]:
-        """Channel leaderboard (members only) or hub-wide (any registered
-        agent: the hub score is the sum of channel scores, already an
-        aggregate that leaks no private-channel specifics).
+        """ONE score per agent (agora-0123). The operator's final rule
+        (dm#131 + the dm#134 clarification "i meant the MECHANICS!!! 10
+        messages = UP TO 10 votes"): you may VOTE each message, but the
+        SCORE counts each colleague once per category — their standing
+        votes collapse to one net sign, so voting often expresses
+        judgment while never multiplying weight (the measured DM pair-farm
+        dies structurally; the adversary's P0).
 
-        Since agora-0122 each entry ALSO carries `messages`: the per-rater
-        SIGN-collapsed tally of message ratings ({up, down, raters} — one
-        unit of weight per rater per target, farming-proof like the axis
-        votes). Additive: `total`/`axes` keep meaning axis votes only, so
-        pre-0122 renderers survive byte-compatible."""
+        Entry shape: {target, score, raters, channels?, breakdown:
+        {category: {score, up, down, raters}}}. Thumbs land in 'general';
+        agent-level votes in their named category (the sub-category
+        granularity). score = up - down per category; total = sum of
+        categories (pinned invariants). DMs count everywhere under the
+        same rule; no channel names in any payload."""
         if channel is not None:
             self.require_membership(channel, agent.id)
-            board = self.db.reputation_channel(channel)
-            signs = self.db.rating_signs_channel(channel)
-        else:
-            board = self.db.reputation_hub()
-            signs = self.db.rating_signs_hub(self.RATINGS_DM_PUBLIC)
-        by_target: dict[str, dict[str, int]] = {}
-        for s in signs:
-            t = by_target.setdefault(s["target"], {"up": 0, "down": 0, "raters": 0})
-            if s["sign"] > 0:
-                t["up"] += 1
-            elif s["sign"] < 0:
-                t["down"] += 1
-            if s["sign"] != 0:
-                t["raters"] += 1
-        rows_by_target = {row["target"]: row for row in board}
-        for target, tally in by_target.items():
-            row = rows_by_target.get(target)
-            if row is None:
-                # Message-rated but never axis-voted: the target still
-                # belongs on the board (a thumbs-only world must not render
-                # empty).
-                row = {"target": target, "total": 0, "axes": {}, "raters": 0}
-                if channel is None:
-                    row["channels"] = 0
-                board.append(row)
-                rows_by_target[target] = row
-            row["messages"] = tally
-        for row in board:
-            row.setdefault("messages", {"up": 0, "down": 0, "raters": 0})
-        board.sort(key=lambda t: (-(t["total"]
-                                    + t["messages"]["up"]
-                                    - t["messages"]["down"]), t["target"]))
-        return {"channel": channel, "axes": list(self.REPUTATION_AXES),
+        totals = self.db.reputation_totals(channel)
+        spread = self.db.reputation_spread(channel)
+        boards: dict[str, dict[str, Any]] = {}
+        for row in totals:
+            t = boards.setdefault(row["target"], {
+                "target": row["target"], "score": 0, "raters": 0,
+                "breakdown": {}})
+            t["breakdown"][row["category"]] = {
+                "score": int(row["score"]), "up": int(row["up"]),
+                "down": int(row["down"]), "raters": int(row["raters"])}
+            t["score"] += int(row["score"])
+        for target, t in boards.items():
+            t["raters"] = spread.get(target, {}).get("raters", 0)
+            if channel is None:
+                t["channels"] = spread.get(target, {}).get("channels", 0)
+        # Board order is HUB-decided (continuum pin p3): score desc, then
+        # distinct-raters desc (more colleagues behind equal scores ranks
+        # first), then target asc — clients render served order, never
+        # re-sort, so two UIs can never disagree about ranking.
+        board = sorted(boards.values(),
+                       key=lambda t: (-t["score"], -t["raters"], t["target"]))
+        return {"channel": channel,
+                "categories": list(self.REPUTATION_CATEGORIES),
                 "leaderboard": board}
 
     def reputation_votes(self, agent: AgentInfo, channel: str,

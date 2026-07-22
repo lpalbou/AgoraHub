@@ -225,7 +225,7 @@ CREATE INDEX IF NOT EXISTS idx_blocks_scope_agent ON blocks (scope, agent_id);
 -- row (updated_at moves), so the table IS the audit trail: who stands where
 -- on whom, right now, with full attribution. Identity-bound (rater is the
 -- authenticated agent), self-votes refused in the service, membership
--- required for both parties. Hub-level reputation = sum over channels.
+-- required for both parties. Aggregation: docs/protocol.md 'Reputation'.
 CREATE TABLE IF NOT EXISTS reputation_votes (
     channel     TEXT NOT NULL,
     target      TEXT NOT NULL,
@@ -1521,92 +1521,84 @@ class Database:
             self._conn.commit()
         return cur.rowcount
 
-    def reputation_channel(self, channel: str) -> list[dict[str, Any]]:
-        """Per-target axis sums and voter counts for one channel, total
-        descending. Shape: {target, total, axes: {axis: {score, up, down}},
-        raters: N}."""
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT target, axis, SUM(value) AS score,"
-                " SUM(CASE WHEN value > 0 THEN 1 ELSE 0 END) AS up,"
-                " SUM(CASE WHEN value < 0 THEN 1 ELSE 0 END) AS down"
-                " FROM reputation_votes WHERE channel = ?"
-                " GROUP BY target, axis", (channel,),
-            ).fetchall()
-            raters = self._conn.execute(
-                "SELECT target, COUNT(DISTINCT rater) AS raters"
-                " FROM reputation_votes WHERE channel = ?"
-                " GROUP BY target", (channel,),
-            ).fetchall()
-        by_target: dict[str, dict[str, Any]] = {}
-        for r in rows:
-            t = by_target.setdefault(
-                r["target"], {"target": r["target"], "total": 0, "axes": {},
-                              "raters": 0})
-            t["axes"][r["axis"]] = {"score": int(r["score"]),
-                                    "up": int(r["up"]), "down": int(r["down"])}
-            t["total"] += int(r["score"])
-        for r in raters:
-            if r["target"] in by_target:
-                by_target[r["target"]]["raters"] = int(r["raters"])
-        return sorted(by_target.values(),
-                      key=lambda t: (-t["total"], t["target"]))
+    def reputation_totals(self, channel: str | None) -> list[dict[str, Any]]:
+        """ONE unified aggregation for the whole reputation system
+        (agora-0123). The operator's final rule (dm#134: "i meant the
+        MECHANICS!!! 10 messages = UP TO 10 votes"), two sentences:
 
-    def reputation_hub(self) -> list[dict[str, Any]]:
-        """Hub-level reputation as DISTINCT VOUCHERS, not channel-vote sums
-        (0094 hardening, adversarial review 2026-07-17). A naive SUM over
-        channels let a colluding pair farm self-created channels to pump a
-        score without bound (measured: +240 in 0.38s over 60 channels). The
-        honest hub number is 'how many colleagues vouch on this axis': each
-        rater collapses to ONE net sign per (target, axis) — the sign of
-        their summed votes across channels — so N channels can never
-        multiply one rater. DM channels are excluded entirely (a DM is
-        unilateral — the rater opens it alone — so it must not add weight).
-        `channels` reports the distinct NON-DM channels the target was rated
-        in; `raters` the distinct raters with a non-zero net stance."""
+        You may vote each message (the CASTING mechanics — one standing
+        vote per rater per message, flip/withdraw any time). The SCORE
+        counts each colleague once per category: their net stance,
+        collapsed to one sign — so fifty pleased thumbs from one colleague
+        weigh one voice, and the measured pair-farm (30 points from 1
+        rater in 4.7s) is structurally impossible.
+
+        Same collapse in every scope; `channel=None` = hub-wide, DMs
+        included (with collapse a DM adds at most one voice per colleague);
+        no channel names returned. up/down are collapsed-RATER counts, so
+        score = up - down per category and total = sum(categories) — the
+        invariants continuum's conformance suite pins.
+
+        Rows: {target, category, score, up, down, raters} where raters =
+        distinct colleagues with any standing input in the category (a
+        net-zero stance shows engagement without adding weight)."""
+        scope = "WHERE channel = ?" if channel else ""
+        args = (channel,) if channel else ()
         with self._lock:
-            # Inner query: each rater's net sign per (target, axis) across
-            # non-DM channels. Outer: sum those signs (distinct vouchers)
-            # and count the +/- voucher raters.
-            # NOT GLOB 'dm:*' (case-SENSITIVE) not LIKE 'dm:%' (case-
-            # INSENSITIVE in SQLite): the channel-creation guard rejects
-            # only lowercase 'dm:', so a public channel named 'DM:x' is
-            # legal — a case-insensitive exclusion would silently drop its
-            # votes from the hub score (adversary F1). Keeping sign==0 rows
-            # (no WHERE filter) so a net-neutral rater still appears with
-            # up/down showing the split — controversy is signal, and the
-            # counts below now share this exact universe (adversary F4).
             rows = self._conn.execute(
-                "SELECT target, axis, SUM(sign) AS score,"
-                " SUM(CASE WHEN sign > 0 THEN 1 ELSE 0 END) AS up,"
-                " SUM(CASE WHEN sign < 0 THEN 1 ELSE 0 END) AS down FROM ("
-                "  SELECT target, axis, rater,"
-                "   CASE WHEN SUM(value) > 0 THEN 1"
-                "        WHEN SUM(value) < 0 THEN -1 ELSE 0 END AS sign"
-                "  FROM reputation_votes WHERE channel NOT GLOB 'dm:*'"
-                "  GROUP BY target, axis, rater"
-                " ) GROUP BY target, axis",
-            ).fetchall()
-            spread = self._conn.execute(
-                "SELECT target, COUNT(DISTINCT channel) AS channels,"
-                " COUNT(DISTINCT rater) AS raters"
-                " FROM reputation_votes WHERE channel NOT GLOB 'dm:*'"
-                " GROUP BY target", (),
-            ).fetchall()
-        by_target: dict[str, dict[str, Any]] = {}
-        for r in rows:
-            t = by_target.setdefault(
-                r["target"], {"target": r["target"], "total": 0, "axes": {},
-                              "raters": 0, "channels": 0})
-            t["axes"][r["axis"]] = {"score": int(r["score"]),
-                                    "up": int(r["up"]), "down": int(r["down"])}
-            t["total"] += int(r["score"])
-        for r in spread:
-            if r["target"] in by_target:
-                by_target[r["target"]]["channels"] = int(r["channels"])
-                by_target[r["target"]]["raters"] = int(r["raters"])
-        return sorted(by_target.values(),
-                      key=lambda t: (-t["total"], t["target"]))
+                f"""
+                SELECT target, category, SUM(sign) AS score,
+                       SUM(CASE WHEN sign > 0 THEN 1 ELSE 0 END) AS up,
+                       SUM(CASE WHEN sign < 0 THEN 1 ELSE 0 END) AS down,
+                       COUNT(*) AS raters
+                FROM (
+                  SELECT target, category, rater,
+                         CASE WHEN SUM(value) > 0 THEN 1
+                              WHEN SUM(value) < 0 THEN -1 ELSE 0 END AS sign
+                  FROM (
+                    SELECT target, axis AS category, rater, value
+                    FROM reputation_votes {scope}
+                    UNION ALL
+                    SELECT target, 'general' AS category, rater, value
+                    FROM message_ratings {scope}
+                  ) GROUP BY target, category, rater
+                ) GROUP BY target, category
+                """, (*args, *args)).fetchall()
+        return [dict(r) for r in rows]
+
+    def reputation_spread(self, channel: str | None = None) -> dict[str, dict[str, int]]:
+        """Per-target spread within the scope: distinct channels + distinct
+        raters across BOTH reputation tables (DMs included — one system,
+        one rule). The raters count is the honesty signal that rides next
+        to the per-action score: 40 points from 2 raters READS differently
+        than 40 from 15, and serving that distinction is the anti-farming
+        design under the operator's per-action ruling."""
+        scope = "WHERE channel = ?" if channel else ""
+        args = (channel,) if channel else ()
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT target, COUNT(DISTINCT channel) AS channels,
+                       COUNT(DISTINCT rater) AS raters
+                FROM (
+                  SELECT target, channel, rater FROM reputation_votes {scope}
+                  UNION
+                  SELECT target, channel, rater FROM message_ratings {scope}
+                ) GROUP BY target
+                """, (*args, *args)).fetchall()
+        return {r["target"]: {"channels": int(r["channels"]),
+                              "raters": int(r["raters"])} for r in rows}
+
+    # History note (agora-0123): the pre-unification aggregations
+    # (reputation_channel with raw axis sums + total/axes, reputation_hub
+    # with voucher collapse EXCLUDING dm:*, and the messages-fold overlay)
+    # were replaced by reputation_totals/reputation_spread above — ONE
+    # collapse rule for every reputation input, DMs included, per the
+    # operator's dm#129 ruling ("all one and the same system... you really
+    # over complexified"). The 0094 anti-farming property (one colleague =
+    # one voice, enforced by collapse not policy prose) is preserved and
+    # now UNIFORM: the channel board previously summed raw axis votes while
+    # the hub board collapsed — that inconsistency is gone.
 
     def reputation_votes_for(self, channel: str,
                              target: str) -> list[dict[str, Any]]:
@@ -1681,36 +1673,9 @@ class Database:
                 out.setdefault(r["message_id"], []).append(dict(r))
         return out
 
-    def rating_signs_channel(self, channel: str) -> list[dict[str, Any]]:
-        """Per (target, rater) net SIGN of message ratings in one channel —
-        the collapse that makes message ratings farming-proof: N ratings of
-        one agent's messages by one rater still weigh ONE unit (0094's
-        hardening applied to the new surface from birth)."""
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT target, rater,"
-                " CASE WHEN SUM(value) > 0 THEN 1"
-                "      WHEN SUM(value) < 0 THEN -1 ELSE 0 END AS sign,"
-                " COUNT(*) AS rated_messages"
-                " FROM message_ratings WHERE channel = ?"
-                " GROUP BY target, rater", (channel,)).fetchall()
-        return [dict(r) for r in rows]
-
-    def rating_signs_hub(self, include_dms: bool) -> list[dict[str, Any]]:
-        """Per (target, rater) net sign across channels for the hub-wide
-        fold. `include_dms` is the operator's ruling switch (dm#114): when
-        False, dm:* channels are excluded with the same case-SENSITIVE GLOB
-        as reputation_hub (F1: a public 'DM:x' channel must still count)."""
-        where = "" if include_dms else " WHERE channel NOT GLOB 'dm:*'"
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT target, rater,"
-                " CASE WHEN SUM(value) > 0 THEN 1"
-                "      WHEN SUM(value) < 0 THEN -1 ELSE 0 END AS sign,"
-                " COUNT(*) AS rated_messages"
-                f" FROM message_ratings{where}"
-                " GROUP BY target, rater").fetchall()
-        return [dict(r) for r in rows]
+    # (rating_signs_channel / rating_signs_hub, 0122's message-ratings-only
+    # folds, were absorbed into reputation_signs above — one query, one
+    # collapse rule for every reputation input; agora-0123.)
 
     # -- virtual filesystem storage (monotonic version, tombstone delete) --------
     #

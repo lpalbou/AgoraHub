@@ -26,14 +26,15 @@
       {"seq": "$m1.seq", "ratings": {"up": 0, "down": 2, "mine": -1}}]},
 
     {"call": "leaderboard", "as": "alice", "channel": "room", "match": {
+      "categories": ["general", "trust", "wisdom", "thorough", "helper"],
       "leaderboard": [
-        {"target": "alice",
-         "messages": {"up": 0, "down": 1, "raters": 1},
-         "total": 0}]}},
+        {"target": "alice", "score": -1, "raters": 2,
+         "breakdown": {"general": {"score": -1, "up": 0, "down": 1,
+                                   "raters": 2}}}]}},
 
     {"op": "unrate", "as": "carol", "channel": "room", "message": "$m1.id"},
     {"call": "messages", "as": "carol", "channel": "room", "since": 0, "match_subset": [
       {"seq": "$m1.seq", "ratings": {"up": 0, "down": 1, "mine": 0}}]}
   ],
-  "note": "The leaderboard expectation is deliberately NOT the per-message tally: bob's flip leaves him at net sign 0 across alice's messages (one +1, one -1), so he contributes NOTHING to the collapse — carol's single -1 is the only voucher. That asymmetry (tally counts standings, leaderboard counts collapsed raters) IS the farming-proof contract."
+  "note": "Counting rule pinned here is the operator's FINAL one (dm#134): voting is per message (bob may rate both messages), but the SCORE collapses each colleague to one net sign per category. At the leaderboard step bob holds m1 -1 (flip replaced his +1) and m2 +1 = net 0, so bob is a rater with NO voice; carol holds one -1 = the only voice. general = {score:-1, up:0, down:1, raters:2} — raters counts engaged colleagues, up/down count VOICES; score = up - down and total = sum(categories) are the pinned invariants. DMs included everywhere; boards serve ONE score + per-category breakdown."
 }

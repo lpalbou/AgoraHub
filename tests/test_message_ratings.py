@@ -4,13 +4,14 @@ message IS reputation input about its sender.
 What must hold (from the two adversarial design reviews):
 - ONE standing rating per (message, rater): PUT flips, DELETE withdraws,
   nothing ever stacks (the NULL-hole class is closed by the NOT NULL PK).
-- Farming-proof aggregation: N ratings of one agent's messages by one rater
-  collapse to ONE unit of leaderboard weight (per-rater sign collapse).
+- Counting rule (operator dm#134): voting is per message (mechanics);
+  the SCORE counts each colleague once per category (net-sign collapse).
+  Honesty = visible raters count + per-message idempotency + budget.
 - Gates: no self-rating, no system/retracted/foreign-channel targets,
   budget-limited writes.
 - Lifecycle parity: leave, kick and retire all clear the rater's ratings
   (the kick door previously stranded votes — fixed in the same change).
-- Wire compat: leaderboard keeps total/axes meanings; `messages` is additive.
+- Board shape (0123): one score + per-category breakdown {score,up,down,raters}.
 - Migration: OPERATOR reaction rows convert once (meta-guarded); agent rows
   and withdrawn/self/system rows never do.
 """
@@ -105,11 +106,17 @@ def test_rating_gates(client):
                       json={"value": 1}, headers=bob).status_code == 404
 
 
-def test_leaderboard_sign_collapse_is_farming_proof(client):
+def test_score_counts_colleagues_while_votes_are_per_message(client):
+    """The operator's FINAL rule (dm#134: 'i meant the MECHANICS!!! 10
+    messages = UP TO 10 votes'): casting is per message — one standing
+    vote per (rater, message), flip/withdraw free — but the SCORE counts
+    each colleague once per category (net sign). Five pleased thumbs from
+    bob = one voice; the adversary-measured DM pair-farm (30 points from
+    one rater) is structurally impossible."""
     alice, bob = register(client, "alice"), register(client, "bob")
     carol = register(client, "carol")
     make_room(client, alice, {"bob": bob, "carol": carol})
-    # bob rates FIVE of alice's messages up: one unit of weight, not five.
+    # bob rates FIVE of alice's messages up: five votes, ONE voice.
     for i in range(5):
         m = post(client, alice, body=f"msg {i}")
         client.put(f"/channels/room/messages/{m['id']}/rating",
@@ -119,21 +126,51 @@ def test_leaderboard_sign_collapse_is_farming_proof(client):
                json={"value": -1}, headers=carol)
     board = client.get("/channels/room/reputation", headers=alice).json()
     entry = next(e for e in board["leaderboard"] if e["target"] == "alice")
-    assert entry["messages"] == {"up": 1, "down": 1, "raters": 2}
-    # Axis-vote fields keep their meaning (no axis votes cast -> zeros).
-    assert entry["total"] == 0 and entry["axes"] == {}
+    assert entry["breakdown"]["general"] == {"score": 0, "up": 1, "down": 1,
+                                             "raters": 2}
+    assert entry["raters"] == 2 and entry["score"] == 0
     # Hub-wide: same collapse.
     hub = client.get("/reputation", headers=alice).json()
     entry = next(e for e in hub["leaderboard"] if e["target"] == "alice")
-    assert entry["messages"] == {"up": 1, "down": 1, "raters": 2}
+    assert entry["breakdown"]["general"]["score"] == 0
+    # The per-message TALLY still shows all five standings (mechanics
+    # intact): the row decoration is where per-message truth lives.
+    row = client.get(f"/channels/room/messages/by-seq/{m['seq']}",
+                     headers=alice).json()
+    assert row["ratings"] == {"up": 0, "down": 1, "mine": 0}
+
+
+def test_hub_axis_opinions_stay_one_voice_per_colleague(client):
+    """The other half of the rule: a categorized OPINION (trust/...) is a
+    standing judgment, not a per-action signal — hub-wide it counts once
+    per colleague however many channels repeat it (the measured 0094
+    channel-farm stays closed). Within one channel the primary key already
+    guarantees one standing vote per rater."""
+    alice, bob = register(client, "alice"), register(client, "bob")
+    make_room(client, alice, {"bob": bob})
+    # bob states the same trust opinion about alice in three rooms.
+    for name in ("r1", "r2"):
+        client.post("/channels", json={"name": name}, headers=alice)
+        t = client.post(f"/channels/{name}/invites", json={"agent_id": "bob"},
+                        headers=alice).json()["invite_token"]
+        client.post(f"/channels/{name}/join", json={"invite_token": t},
+                    headers=bob)
+        client.put(f"/channels/{name}/reputation/alice",
+                   json={"axis": "trust", "value": 1}, headers=bob)
+    client.put("/channels/room/reputation/alice",
+               json={"axis": "trust", "value": 1}, headers=bob)
+    hub = client.get("/reputation", headers=alice).json()
+    entry = next(e for e in hub["leaderboard"] if e["target"] == "alice")
+    assert entry["breakdown"]["trust"] == {"score": 1, "up": 1, "down": 0,
+                                           "raters": 1}
+    assert entry["score"] == 1
 
 
 def test_dm_ratings_count_hub_wide_per_operator_ruling(client):
     """Operator ruling dm#118 (2026-07-22, 'yes' to include): DM-channel
     message ratings COUNT toward public standing — excluding them was
     exactly what made the operator's -1s invisible. The privacy fold holds:
-    the hub board reports counts, never the DM channel name. Axis VOTES
-    keep their dm:* exclusion (separate surface, separate rationale)."""
+    the hub board reports counts, never the DM channel name."""
     alice, bob = register(client, "alice"), register(client, "bob")
     client.post("/dms/bob", headers=alice)
     dm = "dm:alice--bob"
@@ -145,13 +182,14 @@ def test_dm_ratings_count_hub_wide_per_operator_ruling(client):
                       json={"value": -1}, headers=bob).status_code == 200
     hub = client.get("/reputation", headers=alice).json()
     entry = next(e for e in hub["leaderboard"] if e["target"] == "alice")
-    assert entry["messages"] == {"up": 0, "down": 1, "raters": 1}
+    assert entry["breakdown"]["general"] == {"score": -1, "up": 0, "down": 1, "raters": 1}
+    assert entry["raters"] == 1 and entry["score"] == -1
     # Privacy fold: no dm channel name anywhere in the hub-wide payload.
     assert "dm:" not in json.dumps(hub)
     # The DM channel's own board still shows it locally to its members.
     local = client.get(f"/channels/{dm}/reputation", headers=alice).json()
     entry = next(e for e in local["leaderboard"] if e["target"] == "alice")
-    assert entry["messages"]["down"] == 1
+    assert entry["breakdown"].get("general", {"score":0,"up":0,"down":0})["down"] == 1
 
 
 def test_lifecycle_clears_ratings_through_every_door(client):

@@ -1401,21 +1401,24 @@ def cmd_rate(args):
 def cmd_leaderboard(args):
     async def go(c, a):
         board = await c.reputation(a.channel)
-        scope = board["channel"] or "hub-wide (sum over channels)"
-        axes = board["axes"]
+        scope = board["channel"] or "hub-wide"
+        cats = board["categories"]
         rows = board["leaderboard"]
         if not rows:
-            print(f"no reputation votes yet ({scope})")
+            print(f"no reputation yet ({scope})")
             return
-        head = "agent".ljust(16) + "total".rjust(6)
-        for ax in axes:
-            head += ax.rjust(10)
+        # ONE score per agent (agora-0123); the categories are the optional
+        # granularity — 'general' is thumbs on messages, the named four are
+        # agent-level votes. Counting rule: docs/protocol.md 'Reputation'.
+        head = "agent".ljust(16) + "score".rjust(6)
+        for cat in cats:
+            head += cat.rjust(10)
         print(f"leaderboard — {scope}")
         print(head)
         for r in rows:
-            line = r["target"].ljust(16) + f'{r["total"]:+d}'.rjust(6)
-            for ax in axes:
-                cell = r["axes"].get(ax)
+            line = r["target"].ljust(16) + f'{r["score"]:+d}'.rjust(6)
+            for cat in cats:
+                cell = r["breakdown"].get(cat)
                 line += (f'{cell["score"]:+d}' if cell else "·").rjust(10)
             print(line + f"   ({r['raters']} rater(s))")
     _run_agent_cmd(args, go)

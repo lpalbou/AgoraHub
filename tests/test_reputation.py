@@ -97,7 +97,7 @@ def test_revision_replaces_never_stacks():
                        headers=k["alpha"]).json()
     row = next(r for r in board["leaderboard"] if r["target"] == "beta")
     # Three casts, ONE ballot: the score is +1, not +3.
-    assert row["total"] == 1 and row["axes"]["trust"]["score"] == 1
+    assert row["score"] == 1 and row["breakdown"]["trust"]["score"] == 1
     assert row["raters"] == 1
 
     # Flipping the vote replaces it in place: -1, not 0-sum history.
@@ -106,8 +106,8 @@ def test_revision_replaces_never_stacks():
     board = client.get("/channels/workroom/reputation",
                        headers=k["alpha"]).json()
     row = next(r for r in board["leaderboard"] if r["target"] == "beta")
-    assert row["total"] == -1
-    assert row["axes"]["trust"] == {"score": -1, "up": 0, "down": 1}
+    assert row["score"] == -1
+    assert row["breakdown"]["trust"] == {"score": -1, "up": 0, "down": 1, "raters": 1}
 
 
 def test_withdraw_vote():
@@ -138,13 +138,13 @@ def test_channel_leaderboard_shape_and_order():
     board = client.get("/channels/workroom/reputation",
                        headers=k["beta"]).json()
     assert board["channel"] == "workroom"
-    assert board["axes"] == ["trust", "wisdom", "thorough", "helper"]
+    assert board["categories"] == ["general", "trust", "wisdom", "thorough", "helper"]
     lb = board["leaderboard"]
     assert [r["target"] for r in lb] == ["beta", "gamma"]  # +2 before -1
     beta = lb[0]
-    assert beta["total"] == 2 and beta["raters"] == 2
-    assert beta["axes"]["trust"] == {"score": 1, "up": 1, "down": 0}
-    assert beta["axes"]["thorough"] == {"score": 1, "up": 1, "down": 0}
+    assert beta["score"] == 2 and beta["raters"] == 2
+    assert beta["breakdown"]["trust"] == {"score": 1, "up": 1, "down": 0, "raters": 1}
+    assert beta["breakdown"]["thorough"] == {"score": 1, "up": 1, "down": 0, "raters": 1}
 
 
 def test_hub_reputation_is_sum_over_channels():
@@ -164,8 +164,8 @@ def test_hub_reputation_is_sum_over_channels():
     # DISTINCT VOUCHERS (0094 hardening), not the channel sum: alpha voted
     # +trust in BOTH workroom and lab but counts ONCE (+1); gamma once (+1).
     # Total = 2 vouchers across 2 channels, not 3 channel-votes.
-    assert row["total"] == 2 and row["channels"] == 2
-    assert row["axes"]["trust"]["up"] == 2
+    assert row["score"] == 2 and row["channels"] == 2
+    assert row["breakdown"]["trust"]["up"] == 2
 
     # Channel boards stay membership-gated; the outsider reads only hub.
     r = client.get("/channels/workroom/reputation", headers=k["outsider"])
@@ -215,15 +215,15 @@ def test_hub_score_counts_distinct_vouchers_not_channel_farms():
 
     hub = client.get("/reputation", headers=k["gamma"]).json()
     beta = next(r for r in hub["leaderboard"] if r["target"] == "beta")
-    assert beta["total"] == 1                       # ONE voucher, not 6 or 7
-    assert beta["axes"]["trust"] == {"score": 1, "up": 1, "down": 0}
+    assert beta["score"] == 1                       # ONE voucher, not 6 or 7
+    assert beta["breakdown"]["trust"] == {"score": 1, "up": 1, "down": 0, "raters": 1}
     assert beta["raters"] == 1
 
     # A SECOND independent rater is what raises the score.
     rate(client, k["gamma"], "beta", axis="trust", value=1)
     hub = client.get("/reputation", headers=k["gamma"]).json()
     beta = next(r for r in hub["leaderboard"] if r["target"] == "beta")
-    assert beta["total"] == 2 and beta["raters"] == 2
+    assert beta["score"] == 2 and beta["raters"] == 2
 
 
 def test_retiring_a_rater_withdraws_its_votes():
@@ -243,7 +243,7 @@ def test_retiring_a_rater_withdraws_its_votes():
     board = client.get("/channels/workroom/reputation",
                        headers=k["gamma"]).json()
     beta = next(r for r in board["leaderboard"] if r["target"] == "beta")
-    assert beta["total"] == 1 and beta["raters"] == 1   # alpha's vote gone
+    assert beta["score"] == 1 and beta["raters"] == 1   # alpha's vote gone
     votes = client.get("/channels/workroom/reputation/beta/votes",
                        headers=k["gamma"]).json()
     assert {v["rater"] for v in votes} == {"gamma"}
@@ -293,7 +293,7 @@ def test_dm_exclusion_is_case_sensitive():
     # The 'DM:project' vote COUNTS (it is not a real DM).
     assert any(r["target"] == "beta" for r in hub["leaderboard"])
     beta = next(r for r in hub["leaderboard"] if r["target"] == "beta")
-    assert beta["axes"]["trust"]["score"] == 1
+    assert beta["breakdown"]["trust"]["score"] == 1
 
 
 def test_leaving_withdraws_your_votes_keeps_votes_about_you():
@@ -311,9 +311,9 @@ def test_leaving_withdraws_your_votes_keeps_votes_about_you():
                        headers=k["alpha"]).json()
     targets = {row["target"]: row for row in board["leaderboard"]}
     # gamma's drive-by downvote on beta is GONE.
-    assert "beta" not in targets or targets["beta"]["total"] == 0
+    assert "beta" not in targets or targets["beta"]["score"] == 0
     # But alpha's vote ABOUT gamma survives gamma's departure.
-    assert targets.get("gamma", {}).get("total") == 1
+    assert targets.get("gamma", {}).get("score") == 1
 
 
 def test_unrate_is_pause_gated():
@@ -343,7 +343,7 @@ def test_net_zero_target_stays_visible_with_split():
     hub = client.get("/reputation", headers=k["gamma"]).json()
     beta = next(r for r in hub["leaderboard"] if r["target"] == "beta")
     # Net zero, but PRESENT and showing the +1/-1 controversy, not hidden.
-    assert beta["axes"]["trust"] == {"score": 0, "up": 1, "down": 1}
+    assert beta["breakdown"]["trust"] == {"score": 0, "up": 1, "down": 1, "raters": 2}
     assert beta["raters"] == 2
 
 

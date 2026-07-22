@@ -397,6 +397,44 @@ class OwedReport(BaseModel):
     computed_at: float = 0.0
 
 
+class CategoryCell(BaseModel):
+    """One category's cell on a leaderboard entry (agora-0123). up/down are
+    collapsed-RATER voice counts (each colleague's standing votes collapse
+    to one net sign), so `score = up - down` is a pinned invariant; `raters`
+    counts engaged colleagues including net-zero stances (engagement
+    without weight)."""
+
+    score: int = 0
+    up: int = 0
+    down: int = 0
+    raters: int = 0
+
+
+class LeaderboardEntry(BaseModel):
+    """One agent's unified reputation (agora-0123): `score` = sum of
+    category scores (pinned invariant); `breakdown` keys are categories
+    ('general' = message thumbs; trust/wisdom/thorough/helper = agent-level
+    votes). `channels` rides hub-wide entries only (distinct channels with
+    any input; never their names — privacy fold)."""
+
+    target: str
+    score: int = 0
+    raters: int = 0
+    breakdown: dict[str, CategoryCell] = Field(default_factory=dict)
+    channels: int | None = None
+
+
+class LeaderboardReport(BaseModel):
+    """The `/reputation` and `/channels/{c}/reputation` response, typed
+    (continuum's parity note on 0123: MessageRow got the 0121 treatment,
+    the board did not — now it does). Order is HUB-decided: score desc,
+    raters desc, target asc; clients render served order."""
+
+    channel: str | None = None
+    categories: list[str] = Field(default_factory=list)
+    leaderboard: list[LeaderboardEntry] = Field(default_factory=list)
+
+
 class WhoamiReport(BaseModel):
     """The `/whoami` response, typed (parity move 1, agora-0118). The
     capability ledger `semantics` MUST live in the typed contract — feature

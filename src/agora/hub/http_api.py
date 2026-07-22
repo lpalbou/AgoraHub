@@ -20,6 +20,7 @@ from ..db import StoreConflict
 from ..models import (
     AgentInfo,
     Envelope,
+    LeaderboardReport,
     MessageRow,
     OwedReport,
     PostMessage,
@@ -1167,7 +1168,7 @@ def channel_leaderboard(
     channel: str,
     agent: AgentInfo = Depends(current_agent),
     service: HubService = Depends(get_service),
-) -> dict[str, Any]:
+) -> LeaderboardReport:
     return _run(service.reputation_leaderboard, agent, channel)
 
 
@@ -1175,8 +1176,8 @@ def channel_leaderboard(
 def hub_leaderboard(
     agent: AgentInfo = Depends(current_agent),
     service: HubService = Depends(get_service),
-) -> dict[str, Any]:
-    """Hub-wide reputation: the sum of every channel's scores per agent."""
+) -> LeaderboardReport:
+    """Hub-wide unified reputation score (counting rule: docs/protocol.md 'Reputation')."""
     return _run(service.reputation_leaderboard, agent, None)
 
 
