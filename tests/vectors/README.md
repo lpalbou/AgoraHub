@@ -40,6 +40,20 @@ It exists because the highest-risk cross-language drift is number
 formatting (Python `repr` vs ECMA-262: `2.0` vs `2`, `1e-07` vs `1e-7`,
 `-0.0`), and live-hub vectors cannot pin hashes that include timestamps.
 
+Field lessons from the first TS adoption (continuum, 2026-07-22), kept for
+the next client author:
+
+- **Union distribution trap in compile-time pins.** A naked TS conditional
+  `Served[f] extends Contract[f]` DISTRIBUTES over unions, so
+  `string|null extends string|undefined` passes per-arm and the mismatch
+  vanishes; wrap both sides — `[S] extends [C]` — to pin honestly. That fix
+  immediately surfaced two real drifts hand-written types had carried.
+- **Vector 05's intervened withdraw is deliberate.** Carol's `unrate`
+  executes AFTER bob's flip, so her pinned view changes between her rating
+  and her withdrawal — replaying clients learn the convergence boundary: an
+  optimistic overlay may predict the RATER's own next served row, never
+  through another rater's operation; the next poll converges.
+
 Known exclusion (documented, deliberate): the 0102 directive-debt EPOCH
 bound (`meta.directive_debt_epoch`) is structurally unreachable by
 scratch-hub replay — a fresh hub's epoch always predates its posts, so the
