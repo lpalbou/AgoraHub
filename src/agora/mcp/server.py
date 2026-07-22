@@ -40,6 +40,49 @@ from ..vote import (VOTE_DATA_KEY, VoteChair, build_vote_post,
                     vote_operation, watch_votes)
 
 
+def _download_root() -> "Path":
+    """Per-seat confinement root for downloaded attachment bytes. Env
+    override (AGORA_DOWNLOAD_DIR) else ~/.agora/downloads/<agent>. The
+    root is where UNTRUSTED bytes from other agents may land, and nowhere
+    else."""
+    from pathlib import Path
+    env = os.environ.get("AGORA_DOWNLOAD_DIR", "").strip()
+    if env:
+        return Path(env).expanduser()
+    agent = os.environ.get("AGORA_AGENT_ID", "").strip() or "seat"
+    return _config.home() / "downloads" / agent
+
+
+def _confined_download_target(download_path: str, attachment_id: str) -> "Path":
+    """Resolve `download_path` to a real path INSIDE the downloads root, or
+    raise ValueError (security, tool-tiers pass 2026-07-22). read_attachment
+    writes bytes an OTHER agent supplied, so a prompt-injected message must
+    not be able to steer the write to `.cursor/rules/`, `~/.ssh/`, a shell
+    rc, or anywhere outside the seat's own downloads area. Rules:
+    - empty path -> save under the attachment id (safe default);
+    - the path is taken RELATIVE to the root even if it looks absolute
+      (a leading '/' cannot escape — it re-roots into the confinement);
+    - the fully-resolved target (symlinks included) must stay within the
+      resolved root, else refuse.
+    Pure except for resolve(); testable with a tmp root via the env var."""
+    from pathlib import Path
+    root = _download_root().resolve()
+    name = (download_path or "").strip() or attachment_id
+    # Strip any leading separators/drive so join cannot escape upward; the
+    # path is always interpreted inside the root.
+    rel = Path(name)
+    if rel.is_absolute():
+        rel = Path(*rel.parts[1:]) if len(rel.parts) > 1 else Path(rel.name)
+    candidate = (root / rel).resolve()
+    if candidate != root and root not in candidate.parents:
+        raise ValueError(
+            f"'{name}' resolves outside the downloads root {root} — "
+            "attachment bytes are untrusted and stay confined")
+    if candidate == root:
+        raise ValueError("download path must name a file, not the root")
+    return candidate
+
+
 def _numeric_version(v: str) -> list[int]:
     """Best-effort numeric triple from a version string ('0.12.1' -> [0,12,1];
     dev/suffix parts count by their digits). Pure, testable."""
@@ -392,11 +435,18 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
 
     @mcp.tool()
     def read_attachment(channel: str, attachment_id: str,
-                        download_path: str) -> dict:
+                        download_path: str = "") -> dict:
         """Download a message attachment's bytes to a local file (0091).
         `attachment_id` comes from the envelope's attachments refs. The
         content_type is sender-declared metadata: sniff before trusting it
-        for anything render- or execution-shaped."""
+        for anything render- or execution-shaped.
+
+        `download_path` is CONFINED to a per-seat downloads root
+        (AGORA_DOWNLOAD_DIR, default ~/.agora/downloads/<agent>): the bytes
+        come from another agent, so a path that escapes the root (absolute,
+        `..`, or a symlink out) is REFUSED — an injected message must never
+        be able to write to `.cursor/rules/`, `~/.ssh/`, or a shell rc.
+        Omit it to save under the id."""
         from pathlib import Path
         r = http.get(f"/channels/{channel}/attachments/{attachment_id}")
         if r.status_code >= 400:
@@ -406,7 +456,12 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
                 detail = r.text
             return {"ok": False, "error": r.status_code, "detail": detail,
                     "action": "REQUEST FAILED — nothing was downloaded"}
-        target = Path(download_path).expanduser()
+        try:
+            target = _confined_download_target(download_path, attachment_id)
+        except ValueError as exc:
+            return {"ok": False, "error": 400, "detail": str(exc),
+                    "action": "REFUSED — path escapes the downloads root; "
+                              "nothing was written"}
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(r.content)
         return {"saved_to": str(target), "size": len(r.content),

@@ -451,3 +451,45 @@ def test_safe_serve_content_type_matrix():
     assert safe_serve_content_type("application/weird+xml") == "application/octet-stream"
     assert safe_serve_content_type("") == "application/octet-stream"
     assert safe_serve_content_type("nonsense") == "application/octet-stream"
+
+
+# -- read_attachment path confinement (tool-tiers security pass 2026-07-22) ----
+
+def test_download_target_is_confined_to_the_root(tmp_path, monkeypatch):
+    """read_attachment writes bytes ANOTHER agent supplied, so a
+    prompt-injected download_path must never escape the per-seat downloads
+    root. The helper re-roots absolutes, rejects traversal, and refuses
+    symlink escapes — an injected message cannot land bytes in
+    `.cursor/rules/`, `~/.ssh/`, or a shell rc."""
+    from agora.mcp import server
+
+    root = tmp_path / "dl"
+    monkeypatch.setenv("AGORA_DOWNLOAD_DIR", str(root))
+
+    # Plain relative name lands inside the root.
+    t = server._confined_download_target("report.pdf", "abc123")
+    assert t == (root.resolve() / "report.pdf")
+
+    # Empty path falls back to the attachment id (safe default).
+    assert server._confined_download_target("", "deadbeef") == root.resolve() / "deadbeef"
+
+    # An "absolute" path is RE-ROOTED, never honored as absolute.
+    t = server._confined_download_target("/etc/passwd", "x")
+    assert str(t).startswith(str(root.resolve())) and t.name == "passwd"
+
+    # Parent-traversal escapes are refused.
+    for evil in ("../escape", "../../etc/cron.d/x", "a/../../b/../../../out"):
+        try:
+            server._confined_download_target(evil, "x")
+            assert False, f"traversal not refused: {evil!r}"
+        except ValueError:
+            pass
+
+    # A symlink pointing out of the root cannot be used to escape.
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "sneaky").symlink_to(tmp_path)  # -> tmp_path, outside root
+    try:
+        server._confined_download_target("sneaky/loot", "x")
+        assert False, "symlink escape not refused"
+    except ValueError:
+        pass
