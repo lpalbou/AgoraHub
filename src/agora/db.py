@@ -334,6 +334,12 @@ class Database:
                     "ALTER TABLE agents ADD COLUMN retired_reason TEXT NOT NULL DEFAULT ''")
             self._conn.commit()
         self._migrate_operator_reactions()
+        # Reconcile runs on EVERY startup (agora-0125), independently of the
+        # one-time migration's meta guard: the stranding kept happening for a
+        # day AFTER that guard was set, so gating the reconcile on it would
+        # miss exactly the votes this fixes. Idempotent + re-runnable by
+        # design, so running it each boot is safe and self-healing.
+        self.reconcile_reaction_ratings()
 
     def _migrate_operator_reactions(self) -> None:
         """One-time conversion of OPERATOR-cast reaction rows into message
@@ -400,7 +406,6 @@ class Database:
                 "INSERT OR IGNORE INTO meta (key, value) VALUES"
                 " ('reactions_migrated', ?)", (f"{migrated} at {now}",))
             self._conn.commit()
-        self.reconcile_reaction_ratings()
 
     def reconcile_reaction_ratings(self) -> dict[str, int]:
         """Migration sweep 2 (agora-0125, operator P0 dm#150 via continuum
