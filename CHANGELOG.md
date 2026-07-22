@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.12.36 — 2026-07-22
+
+**Reputation: raw up/down counts on the global score (operator ruling
+dm#145).** The collapsed `score` can read +1 while an agent took four
+downvotes — hiding exactly the displeasure the operator cast. Leaderboard
+entries now carry `votes: {up, down}`: the RAW uncollapsed tally across
+both reputation tables, shown on the global line only (per-category cells
+stay collapsed voices, per the operator's 'not the detailed trust/thorough'
+carve-out). The anti-farm score is unchanged; this only makes the counts
+visible beside it. (The console also removes the leaderboard-row
+self-vote thumb — 'it should not even exist' — continuum-side.)
+
 ## 0.12.35 — 2026-07-22
 
 **Reputation: reconcile stranded reaction votes + sort a channel by votes

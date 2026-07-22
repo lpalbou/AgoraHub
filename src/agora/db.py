@@ -1678,6 +1678,33 @@ class Database:
                 """, (*args, *args)).fetchall()
         return [dict(r) for r in rows]
 
+    def reputation_raw_counts(self, channel: str | None = None) -> dict[str, dict[str, int]]:
+        """Per-target RAW vote counts — how many up-votes and down-votes an
+        agent actually received, NOT collapsed (agora-0126, operator ruling
+        dm#145: 'for the global score only, show the number of up and down
+        votes'). This is the number that makes displeasure visible: the
+        collapsed score can read +1 while the agent took four downvotes, and
+        the operator must SEE those four. Counts every standing signal —
+        each rated message, each axis vote — across both tables. Distinct
+        from the per-category up/down (which are collapsed voices): this is
+        the raw tally, shown only on the global line."""
+        scope = "WHERE channel = ?" if channel else ""
+        args = (channel,) if channel else ()
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT target,
+                       SUM(CASE WHEN value > 0 THEN 1 ELSE 0 END) AS up,
+                       SUM(CASE WHEN value < 0 THEN 1 ELSE 0 END) AS down
+                FROM (
+                  SELECT target, value FROM reputation_votes {scope}
+                  UNION ALL
+                  SELECT target, value FROM message_ratings {scope}
+                ) GROUP BY target
+                """, (*args, *args)).fetchall()
+        return {r["target"]: {"up": int(r["up"]), "down": int(r["down"])}
+                for r in rows}
+
     def reputation_spread(self, channel: str | None = None) -> dict[str, dict[str, int]]:
         """Per-target spread within the scope: distinct channels + distinct
         raters across BOTH reputation tables (DMs included — one system,

@@ -410,16 +410,29 @@ class CategoryCell(BaseModel):
     raters: int = 0
 
 
+class RawVoteCounts(BaseModel):
+    """Uncollapsed up/down tally on the GLOBAL score line (agora-0126,
+    operator ruling dm#145): the collapsed `score` can read +1 while an
+    agent took four downvotes — this makes the displeasure visible without
+    weakening the anti-farm score. Global only; per-category cells stay
+    collapsed voices."""
+
+    up: int = 0
+    down: int = 0
+
+
 class LeaderboardEntry(BaseModel):
     """One agent's unified reputation (agora-0123): `score` = sum of
     category scores (pinned invariant); `breakdown` keys are categories
     ('general' = message thumbs; trust/wisdom/thorough/helper = agent-level
-    votes). `channels` rides hub-wide entries only (distinct channels with
+    votes). `votes` is the RAW uncollapsed up/down count on the global line
+    (0126). `channels` rides hub-wide entries only (distinct channels with
     any input; never their names — privacy fold)."""
 
     target: str
     score: int = 0
     raters: int = 0
+    votes: RawVoteCounts = Field(default_factory=RawVoteCounts)
     breakdown: dict[str, CategoryCell] = Field(default_factory=dict)
     channels: int | None = None
 

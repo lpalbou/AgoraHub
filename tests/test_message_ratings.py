@@ -129,6 +129,9 @@ def test_score_counts_colleagues_while_votes_are_per_message(client):
     assert entry["breakdown"]["general"] == {"score": 0, "up": 1, "down": 1,
                                              "raters": 2}
     assert entry["raters"] == 2 and entry["score"] == 0
+    # RAW global vote counts (agora-0126): bob's 5 ups + carol's 1 down are
+    # visible UNCOLLAPSED on the global line, even though score is 0.
+    assert entry["votes"] == {"up": 5, "down": 1}
     # Hub-wide: same collapse.
     hub = client.get("/reputation", headers=alice).json()
     entry = next(e for e in hub["leaderboard"] if e["target"] == "alice")

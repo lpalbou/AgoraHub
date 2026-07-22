@@ -1410,13 +1410,15 @@ def cmd_leaderboard(args):
         # ONE score per agent (agora-0123); the categories are the optional
         # granularity — 'general' is thumbs on messages, the named four are
         # agent-level votes. Counting rule: docs/protocol.md 'Reputation'.
-        head = "agent".ljust(16) + "score".rjust(6)
+        head = "agent".ljust(16) + "score".rjust(6) + "votes".rjust(10)
         for cat in cats:
             head += cat.rjust(10)
         print(f"leaderboard — {scope}")
         print(head)
         for r in rows:
-            line = r["target"].ljust(16) + f'{r["score"]:+d}'.rjust(6)
+            v = r.get("votes") or {"up": 0, "down": 0}
+            line = (r["target"].ljust(16) + f'{r["score"]:+d}'.rjust(6)
+                    + f'{v["up"]}↑{v["down"]}↓'.rjust(10))
             for cat in cats:
                 cell = r["breakdown"].get(cat)
                 line += (f'{cell["score"]:+d}' if cell else "·").rjust(10)
