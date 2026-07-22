@@ -272,6 +272,16 @@ class Envelope(BaseModel):
     created_at: float = 0.0
 
 
+class RatingTally(BaseModel):
+    """Per-message rating tally served on rows (agora-0122): counts of
+    standing ±1 ratings plus the VIEWER's own standing rating (0 = none) —
+    what a thumbs UI renders without a single extra read."""
+
+    up: int = 0
+    down: int = 0
+    mine: int = 0   # -1 | 0 | +1
+
+
 class MessageRow(Message):
     """A history-page row (`GET /channels/{c}/messages`): the immutable
     Message plus the two thread-derived facts every client was re-deriving
@@ -279,7 +289,7 @@ class MessageRow(Message):
     computes both for envelopes and digests; serving them here deletes
     continuum's `replied_ids` walk and chat's `_pending_ask_ids`.
 
-    Both decorations are OPTIONAL with null meaning "the hub made no
+    All decorations are OPTIONAL with null meaning "the hub made no
     statement" (adversary P2-3/P2-5): a retracted tombstone carries no
     thread state, and a new client parsing an OLD hub's rows must be able
     to represent "not served" instead of misreading absence as "nothing
@@ -291,6 +301,9 @@ class MessageRow(Message):
     has_resolved_reply: bool | None = None
     # ^ an authoritative closure exists downthread — render the thread as
     #   settled without fetching the replies. Null = no statement.
+    ratings: RatingTally | None = None
+    # ^ standing ±1 tally + the viewer's own rating (agora-0122). Null = no
+    #   statement (retracted row, or a pre-0.12.31 hub).
 
 
 class ObligationRow(BaseModel):

@@ -238,6 +238,29 @@ CREATE TABLE IF NOT EXISTS reputation_votes (
     PRIMARY KEY (channel, target, rater, axis)
 );
 CREATE INDEX IF NOT EXISTS idx_reputation_target ON reputation_votes (target);
+-- One-reputation unification (agora-0122, operator ruling dm#111: "giving
+-- +/- points IS defining reputation"): a ± on a MESSAGE is reputation input
+-- about its sender, held as ONE standing rating per (message, rater) —
+-- PUT replaces, DELETE withdraws, exactly the toggle semantics the web UI
+-- already speaks. All columns NOT NULL and message_id in the PRIMARY KEY:
+-- SQLite treats NULLs in unique indexes as pairwise DISTINCT, so a nullable
+-- evidence column would let unlimited duplicate rows past the idempotency
+-- key (adversary-reproduced, 54 dupes). Direct agent votes stay in
+-- reputation_votes — the two natural keys are incompatible (also
+-- adversary-reproduced); the SYSTEM is unified at the aggregation layer.
+CREATE TABLE IF NOT EXISTS message_ratings (
+    channel     TEXT NOT NULL,
+    message_id  TEXT NOT NULL,
+    rater       TEXT NOT NULL,
+    target      TEXT NOT NULL,          -- message sender at cast time
+    value       INTEGER NOT NULL,       -- +1 | -1
+    note        TEXT NOT NULL DEFAULT '',
+    created_at  REAL NOT NULL,
+    updated_at  REAL NOT NULL,
+    PRIMARY KEY (message_id, rater)
+);
+CREATE INDEX IF NOT EXISTS idx_message_ratings_target ON message_ratings (target);
+CREATE INDEX IF NOT EXISTS idx_message_ratings_channel ON message_ratings (channel, rater);
 -- Hub-level metadata (0.12.20): tiny key/value row set, currently the
 -- directive-debt epoch (semantics changes must not rewrite history — a
 -- message posted under old rules must not become a debt retroactively).
@@ -309,6 +332,73 @@ class Database:
             if "retired_reason" not in agent_cols:
                 self._conn.execute(
                     "ALTER TABLE agents ADD COLUMN retired_reason TEXT NOT NULL DEFAULT ''")
+            self._conn.commit()
+        self._migrate_operator_reactions()
+
+    def _migrate_operator_reactions(self) -> None:
+        """One-time conversion of OPERATOR-cast reaction rows into message
+        ratings (agora-0122). The operator's thumbs clicks landed in the web
+        UI's `reactions:<message-id>` store convention while he believed he
+        was rating agents; his ruling (dm#111: 'giving +/- points IS
+        defining reputation') attests what those clicks MEANT, so his — and
+        ONLY his class of — rows migrate. Agent-cast reactions are NOT
+        converted (adversary P0: store rows are member-writable data;
+        converting them would mint identity-bound attestations nobody made
+        — as it happens, zero agent reactions exist, but the guard is the
+        principle, not the census).
+
+        Skips, per the design review: all-empty rows (withdrawn is a
+        statement), missing/retracted/system-authored target messages,
+        self-reactions, unregistered senders. Guarded by a meta key so a
+        later withdrawal is never resurrected by re-running; INSERT OR
+        IGNORE keeps it idempotent within the run."""
+        with self._lock:
+            done = self._conn.execute(
+                "SELECT value FROM meta WHERE key = 'reactions_migrated'"
+            ).fetchone()
+            if done:
+                return
+            operators = {r["id"] for r in self._conn.execute(
+                "SELECT id FROM agents WHERE operator = 1")}
+            registered = {r["id"] for r in self._conn.execute(
+                "SELECT id FROM agents")}
+            rows = self._conn.execute(
+                "SELECT channel, key, value FROM store"
+                " WHERE key LIKE 'reactions:%'").fetchall()
+            now = time.time()
+            migrated = 0
+            for row in rows:
+                try:
+                    value = json.loads(row["value"])
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(value, dict):
+                    continue
+                message_id = row["key"][len("reactions:"):]
+                m = self._conn.execute(
+                    "SELECT sender, kind, retracted_at FROM messages"
+                    " WHERE id = ? AND channel = ?",
+                    (message_id, row["channel"])).fetchone()
+                if (m is None or m["kind"] != "message"
+                        or m["retracted_at"] is not None
+                        or m["sender"] not in registered):
+                    continue
+                for sign, names in ((1, value.get("up")), (-1, value.get("down"))):
+                    for rater in (names or []):
+                        if rater not in operators or rater == m["sender"]:
+                            continue
+                        self._conn.execute(
+                            "INSERT OR IGNORE INTO message_ratings"
+                            " (channel, message_id, rater, target, value,"
+                            "  note, created_at, updated_at)"
+                            " VALUES (?,?,?,?,?,?,?,?)",
+                            (row["channel"], message_id, rater, m["sender"],
+                             sign, "migrated from reaction (agora-0122)",
+                             now, now))
+                        migrated += 1
+            self._conn.execute(
+                "INSERT OR IGNORE INTO meta (key, value) VALUES"
+                " ('reactions_migrated', ?)", (f"{migrated} at {now}",))
             self._conn.commit()
 
     # -- agents ------------------------------------------------------------
@@ -402,6 +492,11 @@ class Database:
                 "retired_reason = ? WHERE id = ?", (now, reason, agent_id))
             self._conn.execute("DELETE FROM members WHERE agent_id = ?", (agent_id,))
             self._conn.execute("DELETE FROM reputation_votes WHERE rater = ?",
+                               (agent_id,))
+            # Same F2 hardening for message ratings (agora-0122): a
+            # decommissioned seat's ± weight retires with it; ratings ABOUT
+            # its messages (cast by others) stay, like votes about it.
+            self._conn.execute("DELETE FROM message_ratings WHERE rater = ?",
                                (agent_id,))
             self._conn.commit()
         return channels
@@ -1523,6 +1618,98 @@ class Database:
                 "SELECT * FROM reputation_votes WHERE channel = ? AND"
                 " target = ? ORDER BY updated_at DESC", (channel, target),
             ).fetchall()
+        return [dict(r) for r in rows]
+
+    # -- message ratings (agora-0122: one reputation system) ---------------------
+
+    def rating_cast(self, channel: str, message_id: str, rater: str,
+                    target: str, value: int, note: str) -> dict[str, Any]:
+        """Upsert the rater's ONE standing rating of a message (PK
+        message_id+rater): re-rating replaces (flip), never stacks — the
+        same anti-ballot-stuffing-by-key property as reputation_cast."""
+        now = time.time()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO message_ratings"
+                " (channel, message_id, rater, target, value, note,"
+                "  created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)"
+                " ON CONFLICT(message_id, rater) DO UPDATE SET"
+                " value = excluded.value, note = excluded.note,"
+                " updated_at = excluded.updated_at",
+                (channel, message_id, rater, target, value, note, now, now))
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT * FROM message_ratings WHERE message_id = ? AND rater = ?",
+                (message_id, rater)).fetchone()
+        return dict(row)
+
+    def rating_clear(self, message_id: str, rater: str) -> int:
+        """Withdraw the rater's rating of a message (toggle-off). Returns
+        rows removed (0 = nothing standing)."""
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM message_ratings WHERE message_id = ? AND rater = ?",
+                (message_id, rater))
+            self._conn.commit()
+        return cur.rowcount
+
+    def rating_clear_rater(self, channel: str, rater: str) -> int:
+        """Withdraw ALL of one rater's message ratings in a channel — the
+        same F2 hardening as reputation_clear_rater (leave/kick/retire must
+        clear BOTH tables or the drive-by-downvote hole reopens through
+        whichever door forgot)."""
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM message_ratings WHERE channel = ? AND rater = ?",
+                (channel, rater))
+            self._conn.commit()
+        return cur.rowcount
+
+    def ratings_for_messages(self, message_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+        """All standing ratings of the given messages, grouped by message id —
+        one chunked query per history page (same batching discipline as
+        replies_map) so tally decorations cost O(pages), not O(rows)."""
+        out: dict[str, list[dict[str, Any]]] = {}
+        for i in range(0, len(message_ids), 500):
+            chunk = message_ids[i:i + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            with self._lock:
+                rows = self._conn.execute(
+                    f"SELECT * FROM message_ratings WHERE message_id IN"
+                    f" ({placeholders})", (*chunk,)).fetchall()
+            for r in rows:
+                out.setdefault(r["message_id"], []).append(dict(r))
+        return out
+
+    def rating_signs_channel(self, channel: str) -> list[dict[str, Any]]:
+        """Per (target, rater) net SIGN of message ratings in one channel —
+        the collapse that makes message ratings farming-proof: N ratings of
+        one agent's messages by one rater still weigh ONE unit (0094's
+        hardening applied to the new surface from birth)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT target, rater,"
+                " CASE WHEN SUM(value) > 0 THEN 1"
+                "      WHEN SUM(value) < 0 THEN -1 ELSE 0 END AS sign,"
+                " COUNT(*) AS rated_messages"
+                " FROM message_ratings WHERE channel = ?"
+                " GROUP BY target, rater", (channel,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def rating_signs_hub(self, include_dms: bool) -> list[dict[str, Any]]:
+        """Per (target, rater) net sign across channels for the hub-wide
+        fold. `include_dms` is the operator's ruling switch (dm#114): when
+        False, dm:* channels are excluded with the same case-SENSITIVE GLOB
+        as reputation_hub (F1: a public 'DM:x' channel must still count)."""
+        where = "" if include_dms else " WHERE channel NOT GLOB 'dm:*'"
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT target, rater,"
+                " CASE WHEN SUM(value) > 0 THEN 1"
+                "      WHEN SUM(value) < 0 THEN -1 ELSE 0 END AS sign,"
+                " COUNT(*) AS rated_messages"
+                f" FROM message_ratings{where}"
+                " GROUP BY target, rater").fetchall()
         return [dict(r) for r in rows]
 
     # -- virtual filesystem storage (monotonic version, tombstone delete) --------

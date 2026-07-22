@@ -48,6 +48,7 @@ from ..models import (
     OwedCounts,
     OwedReport,
     PostMessage,
+    RatingTally,
     Status,
     StoreEntry,
     Urgency,
@@ -150,6 +151,10 @@ class HubService:
         self.attention = AttentionPolicy()
         self.interrupt_budget = SlidingWindowBudget(interrupts_per_hour)
         self.critical_budget = SlidingWindowBudget(criticals_per_hour)
+        # Rating-write budget (agora-0122): reputation writes were the one
+        # unmetered class. 30/min per rater — humans never notice, loops do.
+        self._rating_budget = SlidingWindowBudget(
+            self.RATING_BURST, window_seconds=self.RATING_WINDOW_SECONDS)
         # Hub-written notify files (see hub/notify_sink.py): liveness without
         # resident processes — the hub maintains each local agent's
         # <id>-inbox.log itself, the way the file mailbox's filesystem did.
@@ -585,8 +590,11 @@ class HubService:
         # not be able to drive-by downvote then leave, stranding the vote
         # where neither they (membership gate) nor the target can remove it.
         # Votes ABOUT the leaver stay — colleagues' judgment outlives a
-        # target's exit, exactly as with retirement.
+        # target's exit, exactly as with retirement. Message ratings clear
+        # under the same rule (agora-0122): both tables or the hole reopens
+        # through whichever door forgot.
         self.db.reputation_clear_rater(channel, agent.id)
+        self.db.rating_clear_rater(channel, agent.id)
         self.db.remove_member(channel, agent.id)
         self._post_system(channel, f"{agent.id} left")
 
@@ -1135,7 +1143,7 @@ class HubService:
         same thread."""
         self.require_membership(channel, agent.id)
         messages = self.db.get_messages(channel, since_seq, limit)
-        return self._decorate_rows(messages)
+        return self._decorate_rows(messages, agent.id)
 
     def get_message_by_seq(self, agent: AgentInfo, channel: str,
                            seq: int) -> MessageRow:
@@ -1146,14 +1154,19 @@ class HubService:
         m = self.db.get_message_by_seq(channel, seq)
         if m is None:
             raise HubError(404, f"no message #{seq} in '{channel}'")
-        return self._decorate_rows([m])[0]
+        return self._decorate_rows([m], agent.id)[0]
 
-    def _decorate_rows(self, messages: list[Message]) -> list[MessageRow]:
+    def _decorate_rows(self, messages: list[Message],
+                       viewer_id: str = "") -> list[MessageRow]:
         """Message -> MessageRow: attach pending_asks / has_resolved_reply
-        from ONE batched reply scan. Retracted rows keep empty decorations —
-        their obligations are already cleared everywhere else."""
+        from ONE batched reply scan, and the rating tally (+ the viewer's own
+        standing rating) from ONE batched rating scan (agora-0122). Retracted
+        rows keep null decorations — their obligations are already cleared
+        everywhere else, and a tombstone carries no rateable content."""
         ops = self.operator_ids()
-        by_parent = self.db.replies_map([m.id for m in messages])
+        ids = [m.id for m in messages]
+        by_parent = self.db.replies_map(ids)
+        by_rated = self.db.ratings_for_messages(ids)
         out: list[MessageRow] = []
         for m in messages:
             row = MessageRow(**m.model_dump())
@@ -1161,6 +1174,12 @@ class HubService:
                 ds = discharge_state(m, by_parent.get(m.id, []), ops)
                 row.pending_asks = [] if ds.closed else list(ds.pending)
                 row.has_resolved_reply = ds.has_resolved_reply
+                ratings = by_rated.get(m.id, [])
+                row.ratings = RatingTally(
+                    up=sum(1 for r in ratings if r["value"] > 0),
+                    down=sum(1 for r in ratings if r["value"] < 0),
+                    mine=next((r["value"] for r in ratings
+                               if r["rater"] == viewer_id), 0))
             out.append(row)
         return out
 
@@ -2039,23 +2058,137 @@ class HubService:
                                 f"{'|'.join(self.REPUTATION_AXES)}")
         return self.db.reputation_clear(channel, target, agent.id, axis)
 
+    #: DM ratings -> public standing (agora-0122, operator ruling pending
+    #: dm#114/116). False preserves today's behavior (dm:* excluded from the
+    #: hub-wide board); flip to True on an 'include' ruling. Channel-local
+    #: views always show their own channel's ratings, DM or not.
+    RATINGS_DM_PUBLIC = False
+
     def reputation_leaderboard(self, agent: AgentInfo,
                                channel: str | None = None) -> dict[str, Any]:
         """Channel leaderboard (members only) or hub-wide (any registered
         agent: the hub score is the sum of channel scores, already an
-        aggregate that leaks no private-channel specifics)."""
+        aggregate that leaks no private-channel specifics).
+
+        Since agora-0122 each entry ALSO carries `messages`: the per-rater
+        SIGN-collapsed tally of message ratings ({up, down, raters} — one
+        unit of weight per rater per target, farming-proof like the axis
+        votes). Additive: `total`/`axes` keep meaning axis votes only, so
+        pre-0122 renderers survive byte-compatible."""
         if channel is not None:
             self.require_membership(channel, agent.id)
-            return {"channel": channel, "axes": list(self.REPUTATION_AXES),
-                    "leaderboard": self.db.reputation_channel(channel)}
-        return {"channel": None, "axes": list(self.REPUTATION_AXES),
-                "leaderboard": self.db.reputation_hub()}
+            board = self.db.reputation_channel(channel)
+            signs = self.db.rating_signs_channel(channel)
+        else:
+            board = self.db.reputation_hub()
+            signs = self.db.rating_signs_hub(self.RATINGS_DM_PUBLIC)
+        by_target: dict[str, dict[str, int]] = {}
+        for s in signs:
+            t = by_target.setdefault(s["target"], {"up": 0, "down": 0, "raters": 0})
+            if s["sign"] > 0:
+                t["up"] += 1
+            elif s["sign"] < 0:
+                t["down"] += 1
+            if s["sign"] != 0:
+                t["raters"] += 1
+        rows_by_target = {row["target"]: row for row in board}
+        for target, tally in by_target.items():
+            row = rows_by_target.get(target)
+            if row is None:
+                # Message-rated but never axis-voted: the target still
+                # belongs on the board (a thumbs-only world must not render
+                # empty).
+                row = {"target": target, "total": 0, "axes": {}, "raters": 0}
+                if channel is None:
+                    row["channels"] = 0
+                board.append(row)
+                rows_by_target[target] = row
+            row["messages"] = tally
+        for row in board:
+            row.setdefault("messages", {"up": 0, "down": 0, "raters": 0})
+        board.sort(key=lambda t: (-(t["total"]
+                                    + t["messages"]["up"]
+                                    - t["messages"]["down"]), t["target"]))
+        return {"channel": channel, "axes": list(self.REPUTATION_AXES),
+                "leaderboard": board}
 
     def reputation_votes(self, agent: AgentInfo, channel: str,
                          target: str) -> list[dict[str, Any]]:
         """The attributed votes behind one score (the WHY surface)."""
         self.require_membership(channel, agent.id)
         return self.db.reputation_votes_for(channel, target)
+
+    # -- message ratings (agora-0122: one reputation system) ---------------------
+
+    #: Rating writes were the one unmetered write class (adversary P1: 100
+    #: casts in 1.8s, zero 429s, while posts on the same hub throttle).
+    #: One standing row per (message, rater) bounds STATE, but not write
+    #: churn — this budget bounds the churn. Generous for humans, hostile
+    #: to loops.
+    RATING_BURST = 30
+    RATING_WINDOW_SECONDS = 60.0
+
+    def rate_message(self, agent: AgentInfo, channel: str, message_id: str,
+                     value: int, note: str = "") -> dict[str, Any]:
+        """One standing ±1 on a message, counting toward its SENDER's
+        reputation (agora-0122, operator ruling dm#111: 'giving +/- points
+        IS defining reputation'). PUT replaces (flip), DELETE withdraws —
+        the toggle semantics the web UI already speaks. Farming-proof at
+        the aggregation layer (per-rater sign collapse), so casting many
+        ratings buys visibility of judgment, never weight."""
+        self._require_unpaused(agent, channel)
+        self.require_membership(channel, agent.id)
+        self._require_not_archived(channel)
+        if value not in (1, -1):
+            raise HubError(400, "value must be +1 or -1 (rate again to flip;"
+                                " DELETE to withdraw — ratings never stack)")
+        m = self.db.get_message(message_id)
+        # Channel binding: the path channel must be the message's own channel
+        # (adversary trap: a synthetic/foreign id must not be ratable through
+        # an unrelated room the rater is a member of).
+        if m is None or m.channel != channel:
+            raise HubError(404, f"message '{sanitize_text(message_id, 40)}' "
+                                f"not found in '{channel}'")
+        if m.kind != Kind.message:
+            raise HubError(400, "only agent messages carry reputation — "
+                                "system/fs rows have no accountable author")
+        if m.retracted:
+            raise HubError(409, "the message was retracted — a tombstone "
+                                "carries no rateable content")
+        if m.sender == agent.id:
+            raise HubError(400, "self-ratings are refused: reputation is "
+                                "what COLLEAGUES observe about you")
+        if not self.db.agent_exists(m.sender):
+            raise HubError(404, f"sender '{m.sender}' is not a registered "
+                                "agent (system authors are unrated)")
+        if not self._rating_budget.allow(agent.id):
+            raise HubError(429, "rating budget exhausted (30/min) — "
+                                "judgments are few; loops are not judgment")
+        note = sanitize_text(note, 280)
+        return self.db.rating_cast(channel, message_id, agent.id, m.sender,
+                                   value, note)
+
+    def unrate_message(self, agent: AgentInfo, channel: str,
+                       message_id: str) -> int:
+        """Withdraw the caller's standing rating of a message (toggle-off).
+        Pause-gated like casting; NOT archive-gated (retracting a judgment
+        stays possible on a frozen room, matching unrate_agent)."""
+        self._require_unpaused(agent, channel)
+        self.require_membership(channel, agent.id)
+        return self.db.rating_clear(message_id, agent.id)
+
+    def message_ratings(self, agent: AgentInfo, channel: str,
+                        message_id: str) -> list[dict[str, Any]]:
+        """The attributed ratings on one message (the WHY surface, matching
+        reputation_votes)."""
+        self.require_membership(channel, agent.id)
+        m = self.db.get_message(message_id)
+        if m is None or m.channel != channel:
+            raise HubError(404, f"message '{sanitize_text(message_id, 40)}' "
+                                f"not found in '{channel}'")
+        rows = self.db.ratings_for_messages([message_id]).get(message_id, [])
+        rows.sort(key=lambda r: -r["updated_at"])
+        return rows
 
     # -- per-channel virtual filesystem ------------------------------------------
     #
@@ -2497,6 +2630,13 @@ class HubService:
         else:
             if self.db.is_member(scope, agent_id):
                 self.db.remove_member(scope, agent_id)
+            # A channel kick/ban evicts the member — clear their votes and
+            # ratings in that room like any other departure (adversary P1,
+            # agora-0122: `leave` cleared but the moderation door did not,
+            # so a drive-by downvoter who got kicked kept their -1 standing
+            # while the membership gate blocked everyone's recourse).
+            self.db.reputation_clear_rater(scope, agent_id)
+            self.db.rating_clear_rater(scope, agent_id)
             self._post_system(scope, f"{agent_id} {phrase}"
                               + (f" — {block['reason']}" if block["reason"] else ""))
         return block

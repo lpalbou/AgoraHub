@@ -106,6 +106,19 @@ class VectorWorld:
             assert r.status_code == 200, r.text
             if "ref" in step:
                 self.refs[step["ref"]] = r.json()
+        elif op == "rate":
+            r = self.client.put(
+                f"/channels/{step['channel']}/messages/"
+                f"{self.resolve(step['message'])}/rating",
+                json={"value": step["value"]},
+                headers=self.keys[step["as"]])
+            assert r.status_code == 200, f"{step}: {r.text}"
+        elif op == "unrate":
+            r = self.client.delete(
+                f"/channels/{step['channel']}/messages/"
+                f"{self.resolve(step['message'])}/rating",
+                headers=self.keys[step["as"]])
+            assert r.status_code == 200, f"{step}: {r.text}"
         elif op == "join_via_invite_dm":
             dm = self.client.get(f"/channels/{step['dm']}/messages",
                                  headers=self.keys[step["as"]]).json()
@@ -132,6 +145,10 @@ class VectorWorld:
                 headers=self.keys[step["as"]]).json()
             # System rows (channel-created etc.) are hub chatter, not contract.
             served = [m for m in served if m.get("kind") == "message"]
+        elif call == "leaderboard":
+            path = (f"/channels/{step['channel']}/reputation"
+                    if step.get("channel") else "/reputation")
+            served = self.client.get(path, headers=self.keys[step["as"]]).json()
         elif call == "group_result":
             served = self.refs[step["ref"]]
         else:

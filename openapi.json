@@ -79,6 +79,24 @@
     "title": "AttachmentRef",
     "type": "object"
    },
+   "CastRating": {
+    "properties": {
+     "note": {
+      "default": "",
+      "title": "Note",
+      "type": "string"
+     },
+     "value": {
+      "title": "Value",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "value"
+    ],
+    "title": "CastRating",
+    "type": "object"
+   },
    "CastVote": {
     "properties": {
      "axis": {
@@ -590,7 +608,7 @@
     "type": "string"
    },
    "MessageRow": {
-    "description": "A history-page row (`GET /channels/{c}/messages`): the immutable\nMessage plus the two thread-derived facts every client was re-deriving\nfrom its own reply scans (parity move 2, agora-0118). The hub already\ncomputes both for envelopes and digests; serving them here deletes\ncontinuum's `replied_ids` walk and chat's `_pending_ask_ids`.\n\nBoth decorations are OPTIONAL with null meaning \"the hub made no\nstatement\" (adversary P2-3/P2-5): a retracted tombstone carries no\nthread state, and a new client parsing an OLD hub's rows must be able\nto represent \"not served\" instead of misreading absence as \"nothing\npending\". Non-retracted rows from a current hub always carry values.",
+    "description": "A history-page row (`GET /channels/{c}/messages`): the immutable\nMessage plus the two thread-derived facts every client was re-deriving\nfrom its own reply scans (parity move 2, agora-0118). The hub already\ncomputes both for envelopes and digests; serving them here deletes\ncontinuum's `replied_ids` walk and chat's `_pending_ask_ids`.\n\nAll decorations are OPTIONAL with null meaning \"the hub made no\nstatement\" (adversary P2-3/P2-5): a retracted tombstone carries no\nthread state, and a new client parsing an OLD hub's rows must be able\nto represent \"not served\" instead of misreading absence as \"nothing\npending\". Non-retracted rows from a current hub always carry values.",
     "properties": {
      "body": {
       "default": "",
@@ -659,6 +677,16 @@
        }
       ],
       "title": "Pending Asks"
+     },
+     "ratings": {
+      "anyOf": [
+       {
+        "$ref": "#/components/schemas/RatingTally"
+       },
+       {
+        "type": "null"
+       }
+      ]
      },
      "reply_to": {
       "anyOf": [
@@ -960,6 +988,28 @@
      }
     },
     "title": "PostMessage",
+    "type": "object"
+   },
+   "RatingTally": {
+    "description": "Per-message rating tally served on rows (agora-0122): counts of\nstanding \u00b11 ratings plus the VIEWER's own standing rating (0 = none) \u2014\nwhat a thumbs UI renders without a single extra read.",
+    "properties": {
+     "down": {
+      "default": 0,
+      "title": "Down",
+      "type": "integer"
+     },
+     "mine": {
+      "default": 0,
+      "title": "Mine",
+      "type": "integer"
+     },
+     "up": {
+      "default": 0,
+      "title": "Up",
+      "type": "integer"
+     }
+    },
+    "title": "RatingTally",
     "type": "object"
    },
    "RegisterAgent": {
@@ -1306,7 +1356,8 @@
    "groups-composite",
    "owed-typed",
    "messages-decorated",
-   "messages-by-seq"
+   "messages-by-seq",
+   "message-ratings"
   ]
  },
  "openapi": "3.1.0",
@@ -3501,6 +3552,200 @@
      }
     },
     "summary": "Read Message"
+   }
+  },
+  "/channels/{channel}/messages/{message_id}/rating": {
+   "delete": {
+    "description": "Withdraw the caller's standing rating of a message (toggle-off).",
+    "operationId": "unrate_message_channels__channel__messages__message_id__rating_delete",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "channel",
+      "required": true,
+      "schema": {
+       "title": "Channel",
+       "type": "string"
+      }
+     },
+     {
+      "in": "path",
+      "name": "message_id",
+      "required": true,
+      "schema": {
+       "title": "Message Id",
+       "type": "string"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Unrate Message Channels  Channel  Messages  Message Id  Rating Delete",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Unrate Message"
+   },
+   "put": {
+    "description": "One standing \u00b11 on a message, counting toward its SENDER's reputation\n(agora-0122, operator ruling: 'giving +/- points IS defining\nreputation'). PUT replaces (flip); DELETE withdraws; never stacks.",
+    "operationId": "rate_message_channels__channel__messages__message_id__rating_put",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "channel",
+      "required": true,
+      "schema": {
+       "title": "Channel",
+       "type": "string"
+      }
+     },
+     {
+      "in": "path",
+      "name": "message_id",
+      "required": true,
+      "schema": {
+       "title": "Message Id",
+       "type": "string"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/CastRating"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Rate Message Channels  Channel  Messages  Message Id  Rating Put",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Rate Message"
+   }
+  },
+  "/channels/{channel}/messages/{message_id}/ratings": {
+   "get": {
+    "description": "The attributed standing ratings on one message \u2014 the WHY surface,\nmatching /reputation/{target}/votes.",
+    "operationId": "message_ratings_channels__channel__messages__message_id__ratings_get",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "channel",
+      "required": true,
+      "schema": {
+       "title": "Channel",
+       "type": "string"
+      }
+     },
+     {
+      "in": "path",
+      "name": "message_id",
+      "required": true,
+      "schema": {
+       "title": "Message Id",
+       "type": "string"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "items": {
+          "additionalProperties": true,
+          "type": "object"
+         },
+         "title": "Response Message Ratings Channels  Channel  Messages  Message Id  Ratings Get",
+         "type": "array"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Message Ratings"
    }
   },
   "/channels/{channel}/messages/{message_id}/retract": {

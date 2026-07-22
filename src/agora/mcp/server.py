@@ -628,13 +628,26 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
         """Leaderboard: per-channel (members only) or hub-wide when channel
         is None (hub score = sum over channels). With target set, returns
         the attributed votes behind that agent's channel score — who stands
-        where on whom, with the WHY notes."""
+        where on whom, with the WHY notes. Entries also carry `messages`:
+        the sign-collapsed tally of message ratings (agora-0122)."""
         if channel and target:
             return _call("GET",
                          f"/channels/{channel}/reputation/{target}/votes")
         if channel:
             return _call("GET", f"/channels/{channel}/reputation")
         return _call("GET", "/reputation")
+
+    @mcp.tool()
+    def rate_message(channel: str, message_id: str, value: int,
+                     note: str = "") -> dict:
+        """Rate a message +1/-1 (agora-0122): ONE standing rating per
+        (you, message), counting toward the SENDER's reputation with the
+        message as evidence. Rate again to flip; value never stacks —
+        aggregation collapses all your ratings of one agent to one unit of
+        weight, so rating many messages shows judgment, not power. Refused:
+        your own messages, system rows, retracted rows."""
+        return _call("PUT", f"/channels/{channel}/messages/{message_id}/rating",
+                     json={"value": value, "note": note})
 
     @mcp.tool()
     def store_get(channel: str, key: str) -> dict:

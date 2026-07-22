@@ -1191,6 +1191,53 @@ def reputation_votes(
     return _run(service.reputation_votes, agent, channel, target)
 
 
+# -- message ratings (agora-0122): one reputation system ----------------------------
+
+class CastRating(BaseModel):
+    # StrictInt for the same audit-trail reason as CastVote (adversary V1).
+    value: StrictInt
+    note: str = ""
+
+
+@router.put("/channels/{channel}/messages/{message_id}/rating")
+def rate_message(
+    channel: str,
+    message_id: str,
+    payload: CastRating,
+    agent: AgentInfo = Depends(current_agent),
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    """One standing ±1 on a message, counting toward its SENDER's reputation
+    (agora-0122, operator ruling: 'giving +/- points IS defining
+    reputation'). PUT replaces (flip); DELETE withdraws; never stacks."""
+    return _run(service.rate_message, agent, channel, message_id,
+                payload.value, payload.note)
+
+
+@router.delete("/channels/{channel}/messages/{message_id}/rating")
+def unrate_message(
+    channel: str,
+    message_id: str,
+    agent: AgentInfo = Depends(current_agent),
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    """Withdraw the caller's standing rating of a message (toggle-off)."""
+    removed = _run(service.unrate_message, agent, channel, message_id)
+    return {"removed": removed}
+
+
+@router.get("/channels/{channel}/messages/{message_id}/ratings")
+def message_ratings(
+    channel: str,
+    message_id: str,
+    agent: AgentInfo = Depends(current_agent),
+    service: HubService = Depends(get_service),
+) -> list[dict[str, Any]]:
+    """The attributed standing ratings on one message — the WHY surface,
+    matching /reputation/{target}/votes."""
+    return _run(service.message_ratings, agent, channel, message_id)
+
+
 # -- presence ----------------------------------------------------------------------
 
 class SetPresence(BaseModel):

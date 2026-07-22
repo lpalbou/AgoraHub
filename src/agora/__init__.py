@@ -6,7 +6,7 @@ protocol are the stable integration surface and keep the `agora` name. Refer
 to the system as "Agora" for short.
 """
 
-__version__ = "0.12.30"
+__version__ = "0.12.31"
 
 PROTOCOL_VERSION = "agora/0.3"
 
@@ -24,4 +24,5 @@ PROTOCOL_SEMANTICS = [
     "owed-typed",             # /owed serves OwedReport (typed OpenAPI)
     "messages-decorated",     # history rows carry pending_asks/has_resolved_reply
     "messages-by-seq",        # GET .../messages/by-seq/{n}
+    "message-ratings",        # PUT .../messages/{id}/rating -> sender reputation (0122)
 ]

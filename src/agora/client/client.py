@@ -254,6 +254,25 @@ class AgoraClient:
         path = f"/channels/{channel}/reputation" if channel else "/reputation"
         return self._json(await self._http.get(path))
 
+    async def rate_message(self, channel: str, message_id: str, value: int,
+                           note: str = "") -> dict[str, Any]:
+        """One standing ±1 on a message, counting toward its sender's
+        reputation (agora-0122). Re-rating flips; unrate_message withdraws;
+        never stacks. The row tally rides history() decorations."""
+        return self._json(await self._http.put(
+            f"/channels/{channel}/messages/{message_id}/rating",
+            json={"value": value, "note": note}))
+
+    async def unrate_message(self, channel: str, message_id: str) -> dict[str, Any]:
+        """Withdraw your standing rating of a message (toggle-off)."""
+        return self._json(await self._http.delete(
+            f"/channels/{channel}/messages/{message_id}/rating"))
+
+    async def message_ratings(self, channel: str, message_id: str) -> list[dict[str, Any]]:
+        """The attributed standing ratings on one message (the WHY surface)."""
+        return self._json(await self._http.get(
+            f"/channels/{channel}/messages/{message_id}/ratings"))
+
     async def ack(self, cursors: dict[str, int]) -> None:
         """Advance read cursors for exactly what you HANDLED.
 
