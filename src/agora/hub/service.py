@@ -900,10 +900,37 @@ class HubService:
         restored — the agent rejoins its rooms explicitly."""
         if not agent.operator:
             raise HubError(403, "restoring an identity is an operator act")
+        if self.db.agent_deleted(target_id):
+            raise HubError(410, f"'{target_id}' was deleted — deletion is "
+                                "final (the id stays reserved; register a "
+                                "new identity instead)")
         if self.db.agent_retirement(target_id) is None:
             return {"agent": target_id, "retired": False, "already_active": True}
         self.db.unretire_agent(target_id)
         return {"agent": target_id, "retired": False}
+
+    def delete_agent(self, agent: AgentInfo, target_id: str) -> dict[str, Any]:
+        """Hard-delete a RETIRED identity (0131, operator ask dm#164: 'no
+        more mention of it anymore, not listed anywhere; just cleaning').
+        The deliberate two-step: retire first (reversible, id listed under
+        /agents/retired), then delete (irreversible, off every surface).
+        Requiring the retire step means one click can never vaporize a live
+        seat. History and the ledger are untouched — delete cleans rosters,
+        not archives; the id stays reserved forever (anti-hijack tombstone).
+        Operator only. Idempotent."""
+        if not agent.operator:
+            raise HubError(403, "deleting an identity is an operator act")
+        if not self.db.agent_exists(target_id):
+            raise HubError(404, f"agent '{target_id}' is not registered")
+        if self.db.agent_deleted(target_id):
+            return {"agent": target_id, "deleted": True, "already": True}
+        if self.db.agent_retirement(target_id) is None:
+            raise HubError(409, f"'{target_id}' is still active — retire it "
+                                "first; delete is the second, irreversible "
+                                "step (safety: one call can never vaporize "
+                                "a live seat)")
+        self.db.delete_agent(target_id)
+        return {"agent": target_id, "deleted": True}
 
     def post_message(self, agent: AgentInfo, channel: str, payload: PostMessage) -> Message:
         """Post with a refusal audit: a refused send previously left no trace

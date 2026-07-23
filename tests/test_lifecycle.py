@@ -242,6 +242,58 @@ def test_retire_accepts_the_admin_key_not_only_an_operator_agent():
     assert client.delete("/agents/bob/retire", headers=ADMIN).status_code == 200
 
 
+def test_delete_is_the_final_step_off_every_surface():
+    """0131 (operator dm#164: 'no more mention of it anymore, not listed
+    anywhere; just cleaning'): delete is the irreversible second lifecycle
+    step. Refused while active (retire first — one call can never vaporize
+    a live seat); after it, the id leaves EVERY list including
+    /agents/retired and the reputation boards, auth is dead forever,
+    unretire answers 410, re-registration stays refused (anti-hijack
+    tombstone), and channel HISTORY keeps honest sender attribution."""
+    client = make_client()
+    op = register(client, "op", operator=True)
+    bob = register(client, "bob")
+    owner = register(client, "owner")
+    make_channel(client, owner, "room", bob, private=False)
+    m = client.post("/channels/room/messages", json={"body": "bob's mark"},
+                    headers=bob).json()
+    client.put("/channels/room/reputation/bob",
+               json={"category": "helper", "value": 1}, headers=owner)
+
+    # Active seat: delete refused, retire-first taught in the error.
+    r = client.delete("/agents/bob", headers=op)
+    assert r.status_code == 409 and "retire" in r.json()["detail"].lower()
+
+    client.post("/agents/bob/retire", json={"reason": "done"}, headers=op)
+    assert "bob" in [x["id"] for x in
+                     client.get("/agents/retired", headers=op).json()]
+    r = client.delete("/agents/bob", headers=op)
+    assert r.status_code == 200 and r.json()["deleted"] is True
+    # Idempotent second call.
+    assert client.delete("/agents/bob", headers=op).json().get("already") is True
+
+    # Off EVERY surface: retired list, reputation board.
+    assert "bob" not in [x["id"] for x in
+                         client.get("/agents/retired", headers=op).json()]
+    board = client.get("/reputation", headers=op).json()
+    assert all(e["agent"] != "bob" for e in board.get("leaderboard", []))
+    # Auth is dead — the scrambled key hash makes it a plain 401 "invalid
+    # api key": a deleted identity is not even acknowledged as retired
+    # (stronger than retire's neutral 403, and exactly "no more mention").
+    assert client.get("/whoami", headers=bob).status_code == 401
+    assert client.delete("/agents/bob/retire", headers=op).status_code == 410
+    dup = client.post("/agents", json={"id": "bob"}, headers=ADMIN)
+    assert dup.status_code != 200          # tombstone blocks re-registration
+    # History keeps attribution (archives are not cleaned, rosters are).
+    rows = client.get("/channels/room/messages", headers=owner).json()
+    kept = next(x for x in rows if x["id"] == m["id"])
+    assert kept["sender"] == "bob" and kept["body"] == "bob's mark"
+    # Admin key works for delete too (same operator_or_admin gate).
+    register(client, "carl")
+    client.post("/agents/carl/retire", json={}, headers=ADMIN)
+    assert client.delete("/agents/carl", headers=ADMIN).status_code == 200
+
+
 def test_retired_seat_never_trips_the_watchdog_or_overview():
     """M2 (hub-alerts#224): the dark watchdog alerted 'agency is offline
     holding 33 SLA-breached obligations' six hours AFTER agency was retired

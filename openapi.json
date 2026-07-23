@@ -1492,7 +1492,8 @@
    "message-ratings",
    "reputation-unified-score",
    "reputation-raw-net",
-   "messages-read-state"
+   "messages-read-state",
+   "agent-delete"
   ]
  },
  "openapi": "3.1.0",
@@ -1996,6 +1997,58 @@
      }
     },
     "summary": "List Retired Agents"
+   }
+  },
+  "/agents/{agent_id}": {
+   "delete": {
+    "description": "Hard-delete a RETIRED identity (0131): off every surface including\n/agents/retired \u2014 'just cleaning'. Requires the retire step first (409),\nis irreversible (unretire answers 410), keeps history attribution and\nreserves the id forever. Operator bearer or admin key.",
+    "operationId": "delete_agent_agents__agent_id__delete",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "agent_id",
+      "required": true,
+      "schema": {
+       "title": "Agent Id",
+       "type": "string"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Delete Agent Agents  Agent Id  Delete",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Delete Agent"
    }
   },
   "/agents/{agent_id}/retire": {

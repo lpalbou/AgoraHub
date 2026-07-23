@@ -34,7 +34,12 @@ CREATE TABLE IF NOT EXISTS agents (
     created_at  REAL NOT NULL,
     retired_at  REAL,             -- NULL = active; set = retired (0089): auth
                                   -- refused neutrally, off rosters, id reserved
-    retired_reason TEXT NOT NULL DEFAULT ''
+    retired_reason TEXT NOT NULL DEFAULT '',
+    deleted_at  REAL              -- NULL = normal; set = hard-deleted (0131):
+                                  -- purged from EVERY live surface incl. the
+                                  -- retired list; row kept only as the
+                                  -- anti-hijack tombstone (id unregistrable,
+                                  -- history attribution intact)
 );
 CREATE TABLE IF NOT EXISTS channels (
     name        TEXT PRIMARY KEY,
@@ -332,6 +337,8 @@ class Database:
             if "retired_reason" not in agent_cols:
                 self._conn.execute(
                     "ALTER TABLE agents ADD COLUMN retired_reason TEXT NOT NULL DEFAULT ''")
+            if "deleted_at" not in agent_cols:
+                self._conn.execute("ALTER TABLE agents ADD COLUMN deleted_at REAL")
             self._conn.commit()
         self._migrate_operator_reactions()
         # Reconcile runs on EVERY startup (agora-0125), independently of the
@@ -555,7 +562,10 @@ class Database:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT id, retired_reason, retired_at FROM agents "
-                "WHERE retired_at IS NOT NULL ORDER BY retired_at DESC").fetchall()
+                "WHERE retired_at IS NOT NULL AND deleted_at IS NULL "
+                "ORDER BY retired_at DESC").fetchall()
+        # deleted_at filter (0131): a hard-deleted id leaves EVERY surface,
+        # including this one — the whole point of delete over retire.
         return [{"id": r["id"], "reason": r["retired_reason"],
                  "retired_at": r["retired_at"]} for r in rows]
 
@@ -597,6 +607,53 @@ class Database:
                 "UPDATE agents SET retired_at = NULL, retired_reason = '' WHERE id = ?",
                 (agent_id,))
             self._conn.commit()
+
+    def delete_agent(self, agent_id: str) -> None:
+        """Hard-delete a RETIRED agent (0131, operator ask dm#164: 'no more
+        mention of it anymore, not listed anywhere; just cleaning'). The
+        second, irreversible lifecycle step after retire:
+
+        - Purged from every live surface: memberships (idempotent — retire
+          already evicted), reputation votes BOTH directions and message
+          ratings both directions (its leaderboard row vanishes; ratings on
+          its messages fed only its own standing), its cursors and read
+          receipts, its delegations.
+        - Its key hash is scrambled to an unusable value, so nothing can
+          ever authenticate as the id again.
+        - The agents row is KEPT as a tombstone (deleted_at set, about/name
+          blanked): the id stays unregistrable forever — same anti-hijack
+          doctrine as retire ('message attribution can never be hijacked by
+          re-registration') — and channel HISTORY keeps honest sender
+          attribution. History and the hash-chained ledger are never touched:
+          delete cleans the ROSTERS, not the archives.
+        - The retirement record stays set underneath, so the DM post guard
+          (409 'has been retired') keeps refusing new traffic without a
+          special deleted case."""
+        now = time.time()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE agents SET deleted_at = COALESCE(deleted_at, ?), "
+                "key_hash = 'deleted:' || id || ':' || ?, name = '', "
+                "about = '' WHERE id = ?", (now, now, agent_id))
+            self._conn.execute("DELETE FROM members WHERE agent_id = ?", (agent_id,))
+            self._conn.execute(
+                "DELETE FROM reputation_votes WHERE rater = ? OR target = ?",
+                (agent_id, agent_id))
+            self._conn.execute(
+                "DELETE FROM message_ratings WHERE rater = ? OR message_id IN "
+                "(SELECT id FROM messages WHERE sender = ?)",
+                (agent_id, agent_id))
+            self._conn.execute("DELETE FROM cursors WHERE agent_id = ?", (agent_id,))
+            self._conn.execute("DELETE FROM reads WHERE agent_id = ?", (agent_id,))
+            self._conn.execute("DELETE FROM delegations WHERE agent_id = ?",
+                               (agent_id,))
+            self._conn.commit()
+
+    def agent_deleted(self, agent_id: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT deleted_at FROM agents WHERE id = ?", (agent_id,)).fetchone()
+        return bool(row is not None and row["deleted_at"] is not None)
 
     def list_agent_ids(self, *, include_retired: bool = False) -> list[str]:
         """Registered agent ids (operator-scope surface only). Retired seats

@@ -182,6 +182,19 @@ def unretire_agent(
     return _run(service.unretire_agent, agent, agent_id)
 
 
+@router.delete("/agents/{agent_id}")
+def delete_agent(
+    agent_id: str,
+    agent: AgentInfo = Depends(operator_or_admin),
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    """Hard-delete a RETIRED identity (0131): off every surface including
+    /agents/retired — 'just cleaning'. Requires the retire step first (409),
+    is irreversible (unretire answers 410), keeps history attribution and
+    reserves the id forever. Operator bearer or admin key."""
+    return _run(service.delete_agent, agent, agent_id)
+
+
 # -- join tokens (scoped onboarding; the admin key never leaves the hub) --------
 
 class CreateJoinToken(BaseModel):

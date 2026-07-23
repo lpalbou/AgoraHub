@@ -978,6 +978,17 @@ def cmd_retire(args: argparse.Namespace) -> None:
             sys.exit(f"restore failed: {r.status_code} {r.text}")
         print(f"restored '{args.agent}' — it must rejoin its channels")
         return
+    if args.delete:
+        # 0131: the irreversible second step — requires the retire step
+        # first (the hub answers 409 otherwise), so one command can never
+        # vaporize a live seat.
+        r = httpx.delete(f"{url}/agents/{args.agent}", headers=headers,
+                         timeout=10.0)
+        if r.status_code != 200:
+            sys.exit(f"delete failed: {r.status_code} {r.text}")
+        print(f"deleted '{args.agent}' — off every surface (history keeps "
+              "its name; the id stays reserved). This is final.")
+        return
     r = httpx.post(path, headers=headers, json={"reason": args.reason or ""},
                    timeout=10.0)
     if r.status_code != 200:
@@ -986,7 +997,8 @@ def cmd_retire(args: argparse.Namespace) -> None:
     print(f"retired '{args.agent}'"
           + (f" ({args.reason})" if args.reason else "")
           + f" — evicted from {len(out.get('evicted_from', []))} channel(s); "
-            "id reserved, not a block")
+            "id reserved, not a block (`--delete` removes it from the "
+            "retired list too)")
 
 
 def cmd_attachment(args):
@@ -2140,6 +2152,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="act as this operator agent id (else the admin key is used)")
     rt.add_argument("--reason", default=None, help="neutral reason (stored, never 'banned')")
     rt.add_argument("--undo", action="store_true", help="restore a retired agent")
+    rt.add_argument("--delete", action="store_true",
+                    help="hard-delete a RETIRED agent: off every list, final "
+                         "(history keeps attribution; id stays reserved)")
     rt.add_argument("--list", action="store_true", help="list retired agents (operator)")
     rt.add_argument("--url", default=None)
     rt.add_argument("--admin-key", dest="admin_key", default=None,
