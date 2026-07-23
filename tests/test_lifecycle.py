@@ -294,6 +294,34 @@ def test_delete_is_the_final_step_off_every_surface():
     assert client.delete("/agents/carl", headers=ADMIN).status_code == 200
 
 
+def test_delete_purges_notes_and_refuses_new_mentions():
+    """P2 (2026-07-24 search review): colleague notes survived hard-delete
+    in both directions, and NEW notes about a tombstoned id could still be
+    created (agent_exists is deliberately tombstone-true for the id-hijack
+    guard — the deleted check is the surgical gate, never a narrowing of
+    agent_exists)."""
+    client = make_client()
+    op = register(client, "op", operator=True)
+    bob = register(client, "bob")
+    carol = register(client, "carol")
+    # carol notes bob; bob notes carol (both directions exist).
+    assert client.put("/colleagues/bob", json={"note": "solid work"},
+                      headers=carol).status_code == 200
+    assert client.put("/colleagues/carol", json={"note": "fast reviewer"},
+                      headers=bob).status_code == 200
+
+    client.post("/agents/bob/retire", json={}, headers=op)
+    client.delete("/agents/bob", headers=op)
+
+    # carol's note ABOUT bob is gone (purged both directions at delete).
+    assert client.get("/colleagues", params={"subject": "bob"},
+                      headers=carol).json() == []
+    # And no NEW mention of the deleted id can be created.
+    r = client.put("/colleagues/bob", json={"note": "posthumous"},
+                   headers=carol)
+    assert r.status_code == 410 and "deleted" in r.json()["detail"].lower()
+
+
 def test_retired_seat_never_trips_the_watchdog_or_overview():
     """M2 (hub-alerts#224): the dark watchdog alerted 'agency is offline
     holding 33 SLA-breached obligations' six hours AFTER agency was retired

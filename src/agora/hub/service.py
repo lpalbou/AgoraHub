@@ -2016,6 +2016,12 @@ class HubService:
     def set_note(self, agent: AgentInfo, subject: str, note: str) -> ColleagueNote:
         if not self.db.agent_exists(subject):
             raise HubError(404, f"agent '{subject}' is not registered")
+        # agent_exists is deliberately tombstone-true (it guards id hijack
+        # on the register path — never narrow it); the deleted check is the
+        # surgical gate here: no NEW mentions of a hard-deleted id (P2).
+        if self.db.agent_deleted(subject):
+            raise HubError(410, f"'{subject}' was deleted — notes about a "
+                                "deleted identity cannot be created")
         if len(note) > 2000:
             raise HubError(413, "note exceeds 2000 characters")
         self.db.set_note(agent.id, subject, note)

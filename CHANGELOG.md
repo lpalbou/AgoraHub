@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.12.43 — 2026-07-24
+
+**Two retraction/deletion promise gaps closed (found by the hub-search
+design review, cycles 1-2).**
+
+- **`work_activity` no longer finds retracted messages** (P1): the
+  work-id index LIKE-matched raw title/body/data with no retraction
+  filter and served raw titles — words from a retracted message stayed
+  discoverable. The law this writes: content-derived DISCOVERY surfaces
+  exclude retracted rows at the predicate; only position-addressed
+  reads serve tombstones (absence there would lie).
+- **Hard-delete purges colleague notes both directions and refuses new
+  ones** (P2): notes about a deleted id lingered (5 live instances) and
+  new notes about a tombstoned id could still be created. `delete_agent`
+  now purges `notes` where the deleted id is subject or observer;
+  `set_note` answers 410 for deleted subjects. `agent_exists` stays
+  tombstone-true by design (it guards id re-registration hijack — never
+  narrowed).
+
 ## 0.12.42 — 2026-07-23
 
 **Delegation endpoints accept the operator bearer (c4924, laurent

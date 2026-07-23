@@ -81,6 +81,33 @@ def test_work_index_gathers_claims_decisions_messages():
     assert len(out["messages"]) == 2
 
 
+def test_work_index_never_finds_retracted_mentions():
+    """P1 (2026-07-24 search review): work_activity is a content-derived
+    DISCOVERY surface and it LIKE-matched raw columns with no retraction
+    filter — a retracted message's words stayed findable (and its raw
+    title was served). The law: discovery surfaces EXCLUDE retracted rows
+    at the predicate; only position-addressed reads serve tombstones."""
+    client = make_client()
+    ka, kb = register(client, "alpha"), register(client, "beta")
+    client.post("/channels", json={"name": "room", "private": False},
+                headers=ka)
+    client.post("/channels/room/join", json={}, headers=kb)
+    m = client.post("/channels/room/messages", headers=ka,
+                    json={"title": "secret plan for agora-0093",
+                          "body": "agora-0093 hides a silly mistake",
+                          "status": "fyi"}).json()
+    out = client.get("/work/agora-0093", headers=kb).json()
+    assert len(out["messages"]) == 1              # findable before retraction
+
+    client.post(f"/channels/room/messages/{m['id']}/retract", headers=ka)
+    out = client.get("/work/agora-0093", headers=kb).json()
+    assert out["messages"] == []                  # gone from discovery
+    # The tombstone still exists on the position-addressed read path.
+    rows = client.get("/channels/room/messages", headers=kb).json()
+    kept = next(x for x in rows if x["id"] == m["id"])
+    assert kept["retracted"] is True and "silly" not in kept["body"]
+
+
 def test_work_index_is_membership_gated():
     client = make_client()
     ka, kout = register(client, "alpha"), register(client, "outsider")

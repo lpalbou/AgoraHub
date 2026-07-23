@@ -647,6 +647,12 @@ class Database:
             self._conn.execute("DELETE FROM reads WHERE agent_id = ?", (agent_id,))
             self._conn.execute("DELETE FROM delegations WHERE agent_id = ?",
                                (agent_id,))
+            # Colleague notes purge BOTH directions (P2, 2026-07-24 review:
+            # 5 notes about deleted ids lingered — "no more mention of it
+            # anymore" must include private judgments about the deleted id,
+            # and a deleted observer's notes have no reader left).
+            self._conn.execute("DELETE FROM notes WHERE observer = ? OR subject = ?",
+                               (agent_id, agent_id))
             self._conn.commit()
 
     def agent_deleted(self, agent_id: str) -> bool:
@@ -1605,10 +1611,18 @@ class Database:
                 f" AND key LIKE 'decision:%' AND value LIKE ?",
                 (*channels, needle),
             ).fetchall()
+            # retracted_at IS NULL (P1, 2026-07-24 search review): this is a
+            # content-derived DISCOVERY surface, and it LIKE-matched raw
+            # columns with no retraction filter — a query containing words
+            # from a retracted message would still find it (and served its
+            # raw title). The law this fix writes: discovery surfaces
+            # EXCLUDE retracted rows at the predicate; only position-
+            # addressed reads serve tombstones (absence there would lie).
             messages = self._conn.execute(
                 f"SELECT id, channel, seq, sender, status, title, body, data,"
                 f" reply_to, created_at FROM messages"
                 f" WHERE channel IN ({ph})"
+                f" AND retracted_at IS NULL"
                 f" AND (data LIKE ? OR body LIKE ? OR title LIKE ?)"
                 f" ORDER BY created_at",
                 (*channels, needle, needle, needle),
