@@ -130,9 +130,16 @@ matrices; per-debtor escalation pausing; a deferral queue or flush event
 type (the store is the queue; the owedsig is the flush); hook
 regeneration; letting `escalated` or plain `open` pierce.
 
-## Operator rulings (dm#159 + dm#161, 2026-07-23) — design SETTLED
+## Operator rulings (dm#159 + dm#161 + dm#163, 2026-07-23) — design SETTLED
 
-- Grant paths: Team-page selector + one-line chat command — AGREED.
+- PROTOCOL FIRST (dm#163): the lease is an agora primitive — hub API
+  (`PUT /agents/{id}/focus` or equivalent) + `agora focus <seat> --for 1h
+  [--until-done]` CLI + agora-chat `/focus` + MCP tool are the
+  first-class grant paths. Continuum's Team-page selector and banner are
+  ONE CLIENT rendering the same state ("continuum is just the webui to
+  help control it"). Every capability must work from the protocol/CLI
+  alone.
+- Grant paths: CLI/chat one-liner + Team-page selector — AGREED.
 - Three message lanes (plain=after, critical=now,
   reply-into-the-work=now) — AGREED.
 - Default lease 1h (his call); until-done caps at 4h with renewal.
