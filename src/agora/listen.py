@@ -251,12 +251,30 @@ def wake_line(events: list[dict[str, Any]], agent_id: str, *, preview: bool = Fa
     return " ".join(parts)
 
 
+REWAKE_BAND_SECONDS = 4 * 3600.0
+# ^ Re-ring cadence for ESCALATED debts (see _owed_snapshot). 4h keeps
+#   pressure on a rotting obligation (6 re-rings/day worst case) without
+#   the wake-per-window storm the signature gate exists to prevent.
+
+
 def _owed_snapshot(hub: str, agent_id: str) -> tuple[tuple[int, int] | None, str | None]:
     """One GET /owed -> (counts, signature). counts feed the wake surfaces
     (0079: the woken turn must start knowing what it OWES); the signature is
     the debt as a comparable string (sorted message ids — None when nothing
     is owed or the hub is unknowable). Never raises, never blocks a wake:
-    cached key only, short timeout, any failure -> (None, None)."""
+    cached key only, short timeout, any failure -> (None, None).
+
+    ESCALATION RE-RING (0106; the 2026-07-23 forensics class): the id-only
+    signature made the backlog gate's own doctrine — "unchanged debt waits
+    for the hub's escalation" — unreachable: escalation changed no id, so a
+    debt the woken turn failed to settle NEVER rang again (an operator order
+    rotted 50+ minutes beside a live, listening seat; the stop-hook backstop
+    was dead session-side, so nothing else re-raised it either). Escalated
+    rows therefore contribute `id!band` where band is the debt's age in
+    4-hour steps: the signature flips once when the hub escalates (the
+    first, decisive re-ring) and again every band thereafter while the debt
+    rots. Un-escalated debt keeps the bare id — no churn, no storm; hubs too
+    old to serve `escalated` degrade to exactly the pre-0106 behavior."""
     try:
         key = _config.get_cached_key(hub, agent_id)
         if not key:
@@ -276,11 +294,28 @@ def _owed_snapshot(hub: str, agent_id: str) -> tuple[tuple[int, int] | None, str
                   int(counts_raw.get("to_consume", 0)))
         if not (counts[0] or counts[1]):
             return counts, None
-        ids = sorted([row.get("id", "") for row in owed.get("to_answer", [])]
+        now = time.time()
+        ids = sorted([_debt_token(row, now) for row in owed.get("to_answer", [])]
                      + [row.get("answer_id", "") for row in owed.get("to_consume", [])])
         return counts, ",".join(ids)
     except Exception:
         return None, None
+
+
+def _debt_token(row: dict[str, Any], now: float) -> str:
+    """One to_answer row -> its signature token. Escalated debts carry an
+    age band so their token keeps changing while they rot (re-ring); fresh
+    debts are the bare id. Missing/zero created_at degrades to band 0 — a
+    constant, i.e. the single escalation-flip re-ring and nothing more."""
+    token = str(row.get("id", ""))
+    if not row.get("escalated"):
+        return token
+    try:
+        created = float(row.get("created_at") or 0.0)
+    except (TypeError, ValueError):
+        created = 0.0
+    band = int(max(now - created, 0.0) // REWAKE_BAND_SECONDS) if created > 0 else 0
+    return f"{token}!{band}"
 
 
 def _owed_counts(hub: str, agent_id: str) -> tuple[int, int] | None:
@@ -364,8 +399,12 @@ def _backlog_wake_at_arm(hub: str, agent_id: str, *, once: bool) -> int | None:
     Signature gating (same doctrine as agora drive's sweep): unchanged debt
     never re-wakes — a turn that ran and failed to settle waits for the hub's
     escalation instead of burning a wake per window; settled debt clears the
-    signature; any new obligation changes it and wakes. Costs one local HTTP
-    GET per arm; any failure means 'no backlog wake', never a blocked arm."""
+    signature; any new obligation changes it and wakes. Since 0106 the
+    escalation wait is real, not aspirational: an escalating debt changes
+    its signature token (see _owed_snapshot), so the flip re-rings here and
+    keeps re-ringing once per age band while the debt rots. Costs one local
+    HTTP GET per arm; any failure means 'no backlog wake', never a blocked
+    arm."""
     if not once:
         return None                      # streaming mode delivers live events
     counts, sig = _owed_snapshot(hub, agent_id)

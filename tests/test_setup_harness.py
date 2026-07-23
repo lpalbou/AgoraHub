@@ -116,13 +116,18 @@ def _shift_last_prompt(home, seconds, agent="runtime"):
 
 
 def test_hook_obligations_prompt_and_seed_ledger(tmp_path, inbox_stub):
+    # REAL /inbox wire shape (Envelope): `sender` + BOOLEAN reply_to_me /
+    # critical / escalated. The fixtures once used `from`/`flags` — the
+    # listener's notify-FILE grammar, which /inbox never serves — and the
+    # hook's filter written against them silently matched nothing
+    # (2026-07-23 audit).
     inbox_stub.messages = [
-        {"channel": "commons", "seq": 4, "from": "memory", "status": "open",
+        {"channel": "commons", "seq": 4, "sender": "memory", "status": "open",
          "id": "m4"},
-        {"channel": "commons", "seq": 5, "from": "memory", "status": "fyi",
+        {"channel": "commons", "seq": 5, "sender": "memory", "status": "fyi",
          "id": "m5"},
-        {"channel": "dm:runtime--memory", "seq": 2, "from": "memory",
-         "status": "reply", "flags": "reply-to-me", "id": "m2"},
+        {"channel": "dm:runtime--memory", "seq": 2, "sender": "memory",
+         "status": "reply", "reply_to_me": True, "id": "m2"},
     ]
     inbox_stub.owed = {"to_answer": [{"id": "a1"}], "to_consume": [],
                        "waiting_on": []}
@@ -153,7 +158,7 @@ def test_hook_obligations_prompt_and_seed_ledger(tmp_path, inbox_stub):
 def test_hook_prompts_decision_block_contract(tmp_path, inbox_stub):
     """The Claude/Codex re-prompt contract, EXECUTED: stdout must be exactly
     one {"decision": "block", "reason": ...} object."""
-    inbox_stub.messages = [{"channel": "commons", "seq": 7, "from": "memory",
+    inbox_stub.messages = [{"channel": "commons", "seq": 7, "sender": "memory",
                             "status": "open", "id": "m7"}]
     for name, kw in [("claude", {}), ("codex", {"noop_output": '""'})]:
         sub = tmp_path / name
@@ -171,9 +176,9 @@ def test_hook_fyi_never_prompts(tmp_path, inbox_stub):
     """fyi unread — including the hub's synthetic notices — must never cost
     a turn: it waits for the next organic check_inbox."""
     inbox_stub.messages = [
-        {"channel": "commons", "seq": 5, "from": "memory", "status": "fyi"},
-        {"channel": "commons", "seq": 6, "from": "hub", "status": "fyi",
-         "flags": "to-you"},  # hub notices ride from=hub: never a turn
+        {"channel": "commons", "seq": 5, "sender": "memory", "status": "fyi"},
+        {"channel": "commons", "seq": 6, "sender": "hub", "status": "fyi",
+         "to_me": True},  # hub notices ride sender=hub + to_me: never a turn
     ]
     script, home = _hook_env(tmp_path, inbox_stub.url,
                              reprompt_key="followup_message")
@@ -648,7 +653,7 @@ def test_setup_cursor_uses_the_shared_generators(tmp_path):
 
     hooks = json.loads((tmp_path / ".cursor" / "hooks.json").read_text())
     [entry] = hooks["hooks"]["stop"]
-    assert entry["loop_limit"] == 3 and entry["timeout"] == 10
+    assert entry["loop_limit"] == 3 and entry["timeout"] == 30
     # ABSOLUTE command path: hook commands resolve against the launch dir,
     # not the hooks file (the deployed-fleet relative-path trap).
     script_path = (tmp_path / ".cursor" / "hooks" / "agora_wait.sh").resolve()
@@ -686,7 +691,7 @@ def test_cursor_hooks_json_merge_preserves_foreign_hooks(tmp_path):
     agora = [e for e in stop if "agora_wait" in e["command"]]
     assert len(agora) == 1                             # replaced, not stacked
     assert agora[0]["command"].startswith("/")         # absolute now
-    assert agora[0]["timeout"] == 10 and agora[0]["loop_limit"] == 3
+    assert agora[0]["timeout"] == 30 and agora[0]["loop_limit"] == 3
 
 
 # ---------------------------------------------------------------------------
@@ -820,7 +825,7 @@ def test_setup_codex_with_hook_writes_stop_hook(tmp_path):
     assert {"type": "command", "command": "other.py"} in entries  # foreign kept
     agora = [e for e in entries if "agora_stop" in e["command"]]
     assert len(agora) == 1
-    assert agora[0]["command"].startswith("/") and agora[0]["timeout"] == 10
+    assert agora[0]["command"].startswith("/") and agora[0]["timeout"] == 30
     script = (tmp_path / ".codex" / "hooks" / "agora_stop.py").read_text()
     # Codex no-op contract: NO stdout (Claude's variant prints "{}").
     assert 'NOOP = ""' in script

@@ -279,6 +279,61 @@ def test_backlog_wake_fires_at_arm_for_missed_debt(tmp_path, monkeypatch,
     assert "backlog owed=2" in capsys.readouterr().out
 
 
+def test_escalated_debt_re_rings_per_age_band(tmp_path, monkeypatch, capsys,
+                                              keep_signal_handlers):
+    """0106, the 'messages are forgotten' class (2026-07-23 forensics: an
+    operator order rotted for an hour beside a LIVE seat whose one wake had
+    already been spent, and whose stop hook was dead session-side). The
+    signature must flip when the hub escalates a debt — same id, nothing
+    new landed — so the arm gate re-rings instead of waiting on a backstop
+    that may not exist. And it must keep flipping once per age band while
+    the debt rots, never per window."""
+    import agora.listen as listen_mod
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("AGORA_HOME", str(home))
+    (home / "bob-inbox.log").write_text("")
+
+    t0 = time.time() - 30 * 60                          # debt born 30m ago
+    row = {"id": "id-a", "created_at": t0}
+    escalated = {"id": "id-a", "created_at": t0, "escalated": True}
+
+    def snap_for(r):
+        now = time.time()
+        return (1, 0), listen_mod._debt_token(dict(r), now)
+
+    seq = iter([snap_for(row),         # arm 1: fresh debt -> wake, sig recorded
+                snap_for(row),         # arm 2: unchanged -> quiet
+                snap_for(escalated),   # arm 3: hub escalated, SAME id -> re-ring
+                snap_for(escalated)])  # arm 4: same band -> quiet again
+    monkeypatch.setattr("agora.listen._owed_snapshot",
+                        lambda hub, aid: next(seq, ((0, 0), None)))
+    common = dict(agent_id="bob", url="http://127.0.0.1:1", source="file",
+                  once=True, max_wait=0.1, debounce=0.01, heartbeat=0,
+                  poll=0.01, cwd=tmp_path)
+
+    assert run_listen(**common) == 2                    # fresh debt rings
+    capsys.readouterr()
+    assert run_listen(**common) == 0                    # unchanged: quiet
+    capsys.readouterr()
+    assert run_listen(**common) == 2                    # escalation flip re-rings
+    assert "backlog owed=1" in capsys.readouterr().out
+    assert run_listen(**common) == 0                    # same band: no storm
+    capsys.readouterr()
+
+    # Band arithmetic itself: crossing a 4h boundary changes the token; the
+    # bare id never carries a band; a missing created_at pins band 0 so a
+    # hub that omits it still gets the one escalation-flip re-ring.
+    now = time.time()
+    young = listen_mod._debt_token({"id": "x", "escalated": True,
+                                    "created_at": now - 3600}, now)
+    old = listen_mod._debt_token({"id": "x", "escalated": True,
+                                  "created_at": now - 5 * 3600}, now)
+    assert young == "x!0" and old == "x!1"
+    assert listen_mod._debt_token({"id": "x", "created_at": now}, now) == "x"
+    assert listen_mod._debt_token({"id": "x", "escalated": True}, now) == "x!0"
+
+
 def test_offset_resume_replays_the_between_instance_gap(tmp_path, monkeypatch):
     """0086: an event landing BETWEEN two --once instances (the ~2%
     per-cycle blind spot) is lost by tail-from-END. With offset

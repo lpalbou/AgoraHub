@@ -543,7 +543,7 @@ def stop_hook_script(url: str, agent_id: str, noop_output: str = '"{}"',
         'ledger_path = os.path.join(home, f"hook-attempts-{AGENT}.json")\n'
         'def _fresh_ledger():\n'
         '    return {"v": 4, "last_prompt": 0.0, "sig": "", "attempts": 0,\n'
-        '            "dead_streak": 0}\n'
+        '            "dead_streak": 0, "last_run": 0.0}\n'
         'try:\n'
         '    led = json.load(open(ledger_path))\n'
         '    if not (isinstance(led, dict) and led.get("v") == 4):\n'
@@ -558,6 +558,12 @@ def stop_hook_script(url: str, agent_id: str, noop_output: str = '"{}"',
         '        pass  # best-effort throttle: prompting matters more than state\n'
         '\n'
         'now = time.time()\n'
+        '# Liveness heartbeat, written BEFORE any network call: the 2026-07-23\n'
+        '# fleet forensics could not tell "hook never fires" from "hook dies\n'
+        '# mid-run" because the only ledger write sat after the HTTP fetches.\n'
+        '# last_run answers that at a glance next time.\n'
+        'led["last_run"] = now\n'
+        '_save()\n'
         'last = led.get("last_prompt", 0.0)\n'
         'try:\n'
         '    last = float(last)\n'
@@ -579,7 +585,9 @@ def stop_hook_script(url: str, agent_id: str, noop_output: str = '"{}"',
         '    req = urllib.request.Request(\n'
         '        f"{URL}{path}", headers={"Authorization": f"Bearer {key}",\n'
         '                                 "X-Agora-Client": CLIENT})\n'
-        '    with urllib.request.urlopen(req, timeout=5) as r:\n'
+        '    # 4s, not 5: two calls must fit any harness kill budget with\n'
+        '    # room for interpreter start (the Jul-23 hook-death class).\n'
+        '    with urllib.request.urlopen(req, timeout=4) as r:\n'
         '        return json.load(r)\n'
         '\n'
         'try:\n'
@@ -596,17 +604,22 @@ def stop_hook_script(url: str, agent_id: str, noop_output: str = '"{}"',
         '    unread = []\n'
         'if not isinstance(unread, list):\n'
         '    unread = []\n'
-        '# Obligation-shaped unread only: open/blocked status, or flags that\n'
-        '# mark a debt (an answer to YOUR ask, critical, escalated). Bare\n'
+        '# Obligation-shaped unread only: open/blocked status, or the hub\'s\n'
+        '# own debt markers (an answer to YOUR ask, critical, escalated). Bare\n'
         '# to-you fyi — including the hub\'s synthetic notices, which ride\n'
-        '# fyi+to-you — waits for an organic turn; fyi never costs one.\n'
-        'IMPORTANT = {"reply-to-me", "critical", "escalated"}\n'
+        '# fyi+to_me — waits for an organic turn; fyi never costs one.\n'
+        '# Envelope fields, not the listener\'s notify-file grammar (the 2026-07-23\n'
+        '# audit found this filter reading `from`/`flags` — keys the /inbox wire\n'
+        '# has NEVER carried, so critical/escalated unread outside /owed never\n'
+        '# reached the backstop): sender is `sender`, and critical/escalated/\n'
+        '# reply_to_me are BOOLEANS on the envelope.\n'
         'oblig_unread = []\n'
         'for e in unread:\n'
-        '    if not isinstance(e, dict) or str(e.get("from", "")) == AGENT:\n'
+        '    if not isinstance(e, dict) or str(e.get("sender", "")) == AGENT:\n'
         '        continue\n'
-        '    flags = {t for t in str(e.get("flags", "")).split(",") if t}\n'
-        '    if str(e.get("status", "")) in ("open", "blocked") or flags & IMPORTANT:\n'
+        '    if (str(e.get("status", "")) in ("open", "blocked")\n'
+        '            or e.get("critical") or e.get("escalated")\n'
+        '            or e.get("reply_to_me")):\n'
         '        oblig_unread.append(e)\n'
         '\n'
         'def _mid(m):\n'
@@ -772,9 +785,16 @@ def install_cursor_stop_hook(workspace: Path, url: str, agent_id: str) -> list[P
     stop_entries = _hook_entry_list(config, "hooks", "stop")
     stop_entries[:] = _strip_agora_entries(stop_entries, "agora_wait")
     # loop_limit bounded (not null) so a backlog drains a few turns then
-    # yields to the human; short timeout because the check is instant.
+    # yields to the human. timeout was 10s and that killed the fleet's
+    # backstop (2026-07-23 forensics): the script makes two HTTP calls
+    # whose timeouts alone could exceed the budget while the hub was under
+    # load, the harness killed the hook mid-run, and the affected sessions
+    # never fired it again — every seat's ledger froze Jul 21-22 and
+    # "messages were forgotten" with no re-prompt. 30s absorbs worst-case
+    # network stalls plus interpreter start; the script's own HTTP
+    # timeouts (4s each) keep the healthy path instant.
     stop_entries.append({"command": str(script.resolve()),
-                         "timeout": 10, "loop_limit": 3})
+                         "timeout": 30, "loop_limit": 3})
     hooks_path.write_text(json.dumps(config, indent=2) + "\n")
     return [hooks_path, script]
 
@@ -891,8 +911,10 @@ def install_codex_stop_hook(workspace: Path, url: str, agent_id: str) -> list[Pa
     config = json.loads(hooks_path.read_text()) if hooks_path.exists() else {}
     stop_entries = _hook_entry_list(config, "hooks", "Stop")
     stop_entries[:] = _strip_agora_entries(stop_entries, "agora_stop")
+    # 30s, matching the Cursor entry: the script's two 4s HTTP timeouts fit
+    # a 10s budget only when nothing else stalls (see install_cursor_stop_hook).
     stop_entries.append({"type": "command", "command": str(script.resolve()),
-                         "timeout": 10})
+                         "timeout": 30})
     hooks_path.write_text(json.dumps(config, indent=2) + "\n")
     return [script, hooks_path]
 
