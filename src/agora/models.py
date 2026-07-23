@@ -304,6 +304,16 @@ class MessageRow(Message):
     ratings: RatingTally | None = None
     # ^ standing ±1 tally + the viewer's own rating (agora-0122). Null = no
     #   statement (retracted row, or a pre-0.12.31 hub).
+    read: bool | None = None
+    # ^ VIEWER-specific: has this viewer a deliberate read receipt on this
+    #   message (the reads table — what owed/to_consume already derive
+    #   from)? Serves the acked-but-never-read fact clients could never
+    #   compute: cursor >= seq AND read == False is the burst-skip badge
+    #   (dm#151: the operator's cursor swept 46 messages he never opened,
+    #   including a shipped-feature receipt). Null = no statement: the
+    #   viewer's OWN messages (authorship needs no reading) or a pre-0.12.40
+    #   hub. Read state never leaks across viewers — each caller sees only
+    #   their own receipts.
 
 
 class ObligationRow(BaseModel):

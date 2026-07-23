@@ -583,6 +583,44 @@ def test_deaf_sweep_alerts_when_present_seat_stops_arming():
     assert "uic" not in service._deaf_since
 
 
+def test_history_rows_carry_viewer_read_state():
+    """agora-0130 (the dm#151 burst-skip class): the operator's cursor swept
+    46 messages he never opened — including a shipped-feature receipt — and
+    no client could tell, because the hub stored reads but served them
+    nowhere. History rows now carry the VIEWER's own read receipt:
+    `cursor >= seq AND read == False` is the acked-but-never-read badge.
+    Read state is viewer-scoped (never leaks) and null on own messages."""
+    client = make_client()
+    flow, memory = register(client, "flow"), register(client, "memory")
+    make_channel(client, flow, "room", memory)
+    m1 = post(client, flow, body="receipt you never opened", title="r1")
+    m2 = post(client, flow, body="the one you actually read", title="r2")
+
+    # memory deliberately reads ONLY m2, then acks past BOTH (the sweep).
+    client.get(f"/channels/room/messages/{m2['id']}", headers=memory)
+    client.post("/inbox/ack", json={"cursors": {"room": m2["seq"]}},
+                headers=memory)
+
+    rows = {r["seq"]: r for r in
+            client.get("/channels/room/messages", headers=memory).json()}
+    assert rows[m1["seq"]]["read"] is False      # acked past, never opened
+    assert rows[m2["seq"]]["read"] is True       # deliberate read receipt
+    # The author's own view: null on own messages (authorship needs no
+    # reading), and flow has read nothing of memory's — nothing leaks.
+    frows = {r["seq"]: r for r in
+             client.get("/channels/room/messages", headers=flow).json()}
+    assert frows[m1["seq"]]["read"] is None and frows[m2["seq"]]["read"] is None
+    # Viewer isolation: memory's receipts are invisible to a third seat.
+    uic = register(client, "uic")
+    make_channel(client, flow, "room2")  # uic not in room: fetch as member instead
+    invite = client.post("/channels/room/invites", json={},
+                         headers=flow).json()["invite_token"]
+    client.post("/channels/room/join", json={"invite_token": invite}, headers=uic)
+    urows = {r["seq"]: r for r in
+             client.get("/channels/room/messages", headers=uic).json()}
+    assert urows[m2["seq"]]["read"] is False     # memory's read is not uic's
+
+
 def test_lurk_sweep_alerts_when_armed_seat_never_triages():
     """RC-3 (2026-07-23 fleet blackout): reception ARMED and heartbeating,
     yet the model never triages — obligations rot UNREAD far past SLA while

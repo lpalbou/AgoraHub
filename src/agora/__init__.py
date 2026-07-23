@@ -6,7 +6,7 @@ protocol are the stable integration surface and keep the `agora` name. Refer
 to the system as "Agora" for short.
 """
 
-__version__ = "0.12.39"
+__version__ = "0.12.40"
 
 PROTOCOL_VERSION = "agora/0.3"
 
@@ -27,4 +27,5 @@ PROTOCOL_SEMANTICS = [
     "message-ratings",        # PUT .../messages/{id}/rating -> sender reputation (0122)
     "reputation-unified-score",  # boards serve ONE score + per-category breakdown (0123)
     "reputation-raw-net",        # score = raw sum of all votes; anti-farm at cast time (0127)
+    "messages-read-state",       # history rows carry viewer's read receipt (0130)
 ]

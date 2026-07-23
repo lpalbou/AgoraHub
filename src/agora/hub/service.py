@@ -1184,14 +1184,20 @@ class HubService:
     def _decorate_rows(self, messages: list[Message],
                        viewer_id: str = "") -> list[MessageRow]:
         """Message -> MessageRow: attach pending_asks / has_resolved_reply
-        from ONE batched reply scan, and the rating tally (+ the viewer's own
-        standing rating) from ONE batched rating scan (agora-0122). Retracted
-        rows keep null decorations — their obligations are already cleared
-        everywhere else, and a tombstone carries no rateable content."""
+        from ONE batched reply scan, the rating tally (+ the viewer's own
+        standing rating) from ONE batched rating scan (agora-0122), and the
+        viewer's own read receipts from ONE batched reads scan (agora-0130:
+        with the channel cursor, `cursor >= seq AND NOT read` is the
+        acked-but-never-read badge — the burst-skip fact clients could not
+        compute). Retracted rows keep null decorations — their obligations
+        are already cleared everywhere else, and a tombstone carries no
+        rateable content."""
         ops = self.operator_ids()
         ids = [m.id for m in messages]
         by_parent = self.db.replies_map(ids)
         by_rated = self.db.ratings_for_messages(ids)
+        read_ids = (self.db.reads_for_messages(ids, viewer_id)
+                    if viewer_id else set())
         out: list[MessageRow] = []
         for m in messages:
             row = MessageRow(**m.model_dump())
@@ -1205,6 +1211,10 @@ class HubService:
                     down=sum(1 for r in ratings if r["value"] < 0),
                     mine=next((r["value"] for r in ratings
                                if r["rater"] == viewer_id), 0))
+                if viewer_id and m.sender != viewer_id:
+                    # Own messages stay null: authorship needs no reading,
+                    # and a false "unread" on your own post would badge it.
+                    row.read = m.id in read_ids
             out.append(row)
         return out
 

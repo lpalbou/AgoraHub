@@ -1822,6 +1822,26 @@ class Database:
     # folds, were absorbed into reputation_signs above — one query, one
     # collapse rule for every reputation input; agora-0123.)
 
+    def reads_for_messages(self, message_ids: list[str],
+                           agent_id: str) -> set[str]:
+        """The subset of the given message ids this agent has a deliberate
+        read receipt on (the reads table — the same fact owed/to_consume
+        already derive from, now servable per row). One chunked query per
+        history page, same batching discipline as replies_map. Viewer-scoped
+        by construction: only agent_id's own receipts are consulted, so read
+        state never leaks across viewers (agora-0130)."""
+        out: set[str] = set()
+        for i in range(0, len(message_ids), 500):
+            chunk = message_ids[i:i + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            with self._lock:
+                rows = self._conn.execute(
+                    f"SELECT message_id FROM reads WHERE agent_id = ? AND "
+                    f"message_id IN ({placeholders})",
+                    (agent_id, *chunk)).fetchall()
+            out.update(r["message_id"] for r in rows)
+        return out
+
     # -- virtual filesystem storage (monotonic version, tombstone delete) --------
     #
     # Files reuse the `store` table but need a version that is monotonic across

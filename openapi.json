@@ -792,6 +792,17 @@
        }
       ]
      },
+     "read": {
+      "anyOf": [
+       {
+        "type": "boolean"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Read"
+     },
      "reply_to": {
       "anyOf": [
        {
@@ -1480,7 +1491,8 @@
    "messages-by-seq",
    "message-ratings",
    "reputation-unified-score",
-   "reputation-raw-net"
+   "reputation-raw-net",
+   "messages-read-state"
   ]
  },
  "openapi": "3.1.0",

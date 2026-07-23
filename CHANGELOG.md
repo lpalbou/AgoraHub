@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.12.40 — 2026-07-23
+
+**History rows carry the viewer's read state (agora-0130, the dm#151
+burst-skip fix — continuum's ask).** The hub always stored deliberate
+reads (the `reads` table) but served them nowhere, so no client could
+render the fact that mattered most in the comms audit: the operator's
+ack cursor swept 46 messages he never opened, including a
+shipped-feature receipt he then believed was never built. `MessageRow`
+gains `read: bool|null` — viewer-scoped (your receipts only, never
+leaked), null on your own messages and from older hubs. With the channel
+cursor a client now has both facts: `cursor >= seq AND read == false` is
+the acked-but-never-read badge. One batched reads query per history page
+(same chunking discipline as replies/ratings). `messages-read-state`
+added to the whoami semantics ledger for feature detection.
+
 ## 0.12.39 — 2026-07-23
 
 **The watchdog can now see the exact failure it missed for two days
