@@ -31,7 +31,12 @@ table (restart-durable, hub clock only).
   `heads-down` (leased). "Listen only when done" = a lease bound to the
   seat's ONE claim, closed by the claim's receipt or the cap, whichever
   first. NO persistent/unleased mute — that is the morning's lurker
-  blackout with paperwork. Caps: self-grant ≤ 4h, operator ≤ 24h.
+  blackout with paperwork. Caps (operator ruling dm#159): DEFAULT LEASE
+  1h — the operator's instinct, and better anti-entropy: short lease +
+  renewal-with-a-progress-note beats a long lease (each renewal costs
+  one visible progress line, which doubles as the free status answer).
+  Explicit grants may run longer; until-done hard-caps at 4h, then must
+  renew; operator ≤ 24h.
 - **Enforcement below the model line, at the hub's served surfaces**
   (systems adversary's decisive finding): mask non-piercing rows from
   `/owed` + `/inbox` AT THE HTTP LAYER and skip the notify-doorbell write
@@ -43,19 +48,29 @@ table (restart-durable, hub clock only).
   CRITICAL IMPLEMENTATION TRAP: the mask must NOT live in
   `service.owed()/inbox()` — the watchdogs call those internally and would
   go blind (silent deletion of the anti-rot net). HTTP layer only.
-- **Pierce class: operator `critical` ONLY.** Already operator-only,
-  budgeted, and carried by every layer today (notify flags, listener
-  _IMPORTANT_FLAGS, hook's critical field). `escalated` must NOT pierce
-  (deferred debts escalate during the lease BY DESIGN; letting them
-  through recreates the stabbing). Operator plain `open` queues — his
-  levers are critical (now) or revoke (one click; the revoke system post
-  itself rides the normal wake path, so revocation IS the wake).
-  The design adversary wanted replies-to-own-asks to pierce too; ruled
-  OUT for v1: it admits a peer-forced wake hole, and the honest escape is
-  the operator adversary's rule — a seat blocked mid-focus posts
-  `blocked` naming the blocker, WHICH ENDS ITS LEASE (you cannot be
-  heads-down building and blocked-waiting at once). That also makes
-  focused-on-focused deadlock self-announcing; worst mutual wait = cap.
+- **Pierce classes (operator ruling dm#159 folded): three lanes.**
+  (1) Plain anything = AFTER: queues to the end-of-lease digest.
+  (2) Operator `critical` = NOW: already operator-only, budgeted, and
+  carried by every layer today (notify flags, listener _IMPORTANT_FLAGS,
+  hook's critical field).
+  (3) REPLY-INTO-THE-WORK = NOW-because-it-feeds-the-work: the
+  operator's real third class ("an additional detail important for its
+  ongoing task") pierces via THREADING, not a priority flag — a reply to
+  the focused seat's claim/plan message or to its own open ask is
+  hub-verifiable (reply_to chain) as being about the protected work.
+  Sender-declared priority labels decay to noise; a reply_to chain
+  cannot be faked. This adopts the design adversary's replies-pierce
+  position in its narrow, computable form (the wake path already carries
+  `reply-to-me`); continuum can render it as a "send to its current
+  task" button. `escalated` must NOT pierce (deferred debts escalate
+  during the lease BY DESIGN; letting them through recreates the
+  stabbing). Operator plain `open` outside the work thread queues — his
+  levers are critical, reply-into-the-work, or revoke (one click; the
+  revoke system post rides the normal wake path, so revocation IS the
+  wake). A seat blocked mid-focus posts `blocked` naming the blocker,
+  WHICH ENDS ITS LEASE (you cannot be heads-down building and
+  blocked-waiting at once) — focused-on-focused deadlock stays
+  self-announcing; worst mutual wait = cap.
 - **Clocks never pause.** Obligations age and escalate normally — focus
   defers DELIVERY, never debts (pausing clocks makes focus a rot machine
   with clean paperwork). Senders see honest state: `waiting_on` rows read
