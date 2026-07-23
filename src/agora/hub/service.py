@@ -81,6 +81,10 @@ _CHANNEL_STATES = {"open", "closed"}
 _META_LANGUAGES = {"plain", "terse", "structured"}
 MAX_READ_ANCESTORS = 5
 DARK_REALERT_SECONDS = 6 * 3600.0   # flap guard: max one alert per agent per window
+LURK_SLA_MULTIPLE = 2.0             # lurk = escalated unread PAST 2x the channel SLA
+LURK_CONFIRM_SECONDS = 600.0        # candidate must persist a full listener cycle+turn
+#                                     before the alert: a seat that JUST re-armed (or
+#                                     is mid-recovery) gets its chance to catch up
 
 # Attachment serve hardening (0091): content types a browser could execute
 # as active content are stored verbatim but SERVED as octet-stream, so the
@@ -173,6 +177,15 @@ class HubService:
         self._dark_since: dict[str, float] = {}
         # Deaf-seat episodes (0098): present-looking but reception-stale.
         self._deaf_since: dict[str, float] = {}
+        # Lurking-seat episodes (RC-3, 2026-07-23 forensics): reception ARMED
+        # and heartbeating, yet the model behind it never triages — debts rot
+        # far past SLA unread while the watchdog sees a healthy pulse. The
+        # exact state that hid a two-day fleet blackout from every sweep.
+        # _lurk_since = when the candidate state was first observed (alert
+        # only after it persists LURK_CONFIRM_SECONDS); _lurk_alerted =
+        # episode dedupe, both torn down when the seat reads/answers.
+        self._lurk_since: dict[str, float] = {}
+        self._lurk_alerted: set[str] = set()
         # DARK/DEAF re-alert cooldown (c3436, HOLE 3): PERSISTED, not
         # in-memory. The old in-memory flap guard reset on every restart,
         # so each hub bounce re-fired the whole DARK/DEAF wave off the same
@@ -3175,6 +3188,10 @@ class HubService:
         hub restart re-alerts once, which is honest. Returns newly-alerted ids."""
         alerted: list[str] = []
         dark_now: set[str] = set()
+        lurk_now: set[str] = set()   # lurk has its OWN live-set: a seat can
+        #                              legally transition deaf -> lurk-candidate
+        #                              in one pass, and sharing dark_now would
+        #                              keep the ended deaf episode alive
         if self.db.get_channel(self.DARK_ALERTS_CHANNEL) is not None:
             self._ensure_alerts_channel()  # keep late-registered operators subscribed
         # Forgotten-pause reminder (0069): a pause has no TTL by design, so
@@ -3202,6 +3219,7 @@ class HubService:
                 # never 'unknown' — absence of the heartbeat is not death).
                 if agent_id not in hub_blocked:
                     self._deaf_sweep_one(agent_id, dark_now, alerted)
+                    self._lurk_sweep_one(agent_id, lurk_now, alerted)
                 continue
             # A hub-blocked seat is offline BY DESIGN — the operator locked it
             # out. Alerting "only the operator can start it" is a standing
@@ -3261,6 +3279,11 @@ class HubService:
         for agent_id in list(self._deaf_since):
             if agent_id not in dark_now:
                 del self._deaf_since[agent_id]
+        # Lurk episodes too: the seat read/answered, or the debt cleared.
+        for agent_id in list(self._lurk_since):
+            if agent_id not in lurk_now:
+                del self._lurk_since[agent_id]
+                self._lurk_alerted.discard(agent_id)
         alerted.extend(self._steward_sweep())
         return alerted
 
@@ -3315,6 +3338,64 @@ class HubService:
             "Its listener is almost certainly dead — the seat wakes for "
             "nothing. Re-arm it (restart the reception loop / the session); "
             "escalation cannot reach a deaf seat. One alert per deaf episode.")
+        alerted.append(agent_id)
+
+    def _lurk_sweep_one(self, agent_id: str, lurk_now: set[str],
+                        alerted: list[str]) -> None:
+        """LURK leg of the watchdog (RC-3, the 2026-07-23 fleet blackout):
+        reception ARMED — the listener heartbeats /owed every arm — while the
+        model behind it never triages, so addressed obligations rot UNREAD
+        far past their SLA. The DEAF leg cannot see this (the pulse it
+        measures is the listener's, and the listener is fine); for two days
+        the fleet was in exactly this state and every sweep stayed silent.
+
+        Predicate, deliberately conservative: reception 'armed' AND at least
+        one escalated unread obligation older than LURK_SLA_MULTIPLE x its
+        channel SLA, AND the state persisted LURK_CONFIRM_SECONDS since first
+        observed (a seat that just re-armed after a DEAF episode gets one
+        full listener-cycle-plus-turn to catch up before being named).
+        Escalation alone is the DEAF/DARK bar; lurk waits for WELL past
+        breach so a busy-but-alive seat that answers late is never smeared.
+        Unread is the discriminator from 'read but ignoring' —
+        acked_unanswered already names that on the board."""
+        state, _age = self.presence.reception(agent_id)
+        if state != "armed":
+            return
+        envelopes = self.inbox(AgentInfo(id=agent_id, name=agent_id))
+        now = time.time()
+        rotting = [
+            e for e in envelopes
+            if e.escalated
+            and not e.redelivery        # redelivery = the seat DID read it once
+            and (now - e.created_at) / 60.0
+                >= LURK_SLA_MULTIPLE * self.channel_sla(e.channel)]
+        if not rotting:
+            return
+        lurk_now.add(agent_id)          # lurk's own episode-teardown live-set
+        since = self._lurk_since.setdefault(agent_id, now)
+        if now - since < LURK_CONFIRM_SECONDS:
+            return                      # candidate: give the armed loop its chance
+        if agent_id in self._lurk_alerted:
+            return                      # already alerted this lurk episode
+        self._lurk_alerted.add(agent_id)
+        if now - self._alerted_at("lurk", agent_id) < DARK_REALERT_SECONDS:
+            return
+        self._mark_alerted("lurk", agent_id, now)
+        oldest = min(e.created_at for e in rotting)
+        example = "a private thread"
+        ch = self.db.get_channel(rotting[0].channel)
+        if ch is not None and not ch.private:
+            example = f"{rotting[0].channel}#{rotting[0].seq}"
+        self._ensure_alerts_channel()
+        self._post_system(
+            self.DARK_ALERTS_CHANNEL,
+            f"AGENT LURKING: {agent_id}'s reception is armed and heartbeating,"
+            f" but {len(rotting)} obligation(s) addressed to it have rotted "
+            f"UNREAD well past SLA (oldest ~{(now - oldest) / 60:.0f} min, "
+            f"e.g. {example}). The doorbell rings; nobody comes: its session "
+            "is likely stuck in a follow-up-only loop where wakes and stop-"
+            "hook prompts no longer reach the model. Reprompt or relaunch "
+            "that session. One alert per lurk episode.")
         alerted.append(agent_id)
 
     def _steward_sweep(self) -> list[str]:

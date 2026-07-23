@@ -264,25 +264,53 @@ def test_hook_cleared_debt_silent_then_new_debt_prompts(tmp_path, inbox_stub):
 
 
 def test_hook_payload_guards_completed_and_loop_count(tmp_path, inbox_stub):
-    """Cursor guards: an aborted/errored turn must not breed a follow-up
-    (the human just cancelled, or the provider just failed), and loop_count
-    >= 2 caps the chain script-side. Both fire BEFORE any hub contact.
+    """Cursor guards, DEFERRED since the 2026-07-23 fleet blackout (RC-1):
+    an aborted/errored turn or loop_count >= 2 suppresses CHATTER — but a
+    session living on harness-generated turns presents exactly these
+    payloads at every turn-end forever, so the guards must not silence an
+    ESCALATED debt: that rings through (floor/backoff still bound it).
+    stop_hook_active stays absolute (a turn the hook itself started).
     Claude/Codex payloads lack the fields: same script still prompts."""
     inbox_stub.owed = {"to_answer": [{"id": "a1"}], "to_consume": [],
                        "waiting_on": []}
     script, home = _hook_env(tmp_path, inbox_stub.url,
                              reprompt_key="followup_message")
 
+    # Non-escalated debt: guarded turn-ends stay silent (chatter suppressed)
+    # — but they now run far enough to heartbeat the ledger (the frozen-mtime
+    # forensics gap: 'never fires' vs 'fires and noops' must be tellable).
     for payload in ({"status": "aborted"}, {"status": "error"},
-                    {"loop_count": 2}, {"loop_count": 7},
-                    {"stop_hook_active": True}):
+                    {"loop_count": 2}, {"loop_count": 7}):
         out = _run_hook(script, home, payload=json.dumps(payload))
         assert json.loads(out.stdout) == {}, payload
-    assert inbox_stub.requests == []            # guards fire BEFORE any GET
-    assert not _ledger_path(home).exists()
+    assert _ledger(home)["last_run"] > 0            # heartbeat proves the run
+    assert _ledger(home)["last_prompt"] == 0.0      # but nothing prompted
+
+    # stop_hook_active is the one ABSOLUTE guard: pre-network, no state.
+    sub0 = tmp_path / "active"
+    sub0.mkdir()
+    script0, home0 = _hook_env(sub0, inbox_stub.url,
+                               reprompt_key="followup_message")
+    out = _run_hook(script0, home0,
+                    payload=json.dumps({"stop_hook_active": True}))
+    assert json.loads(out.stdout) == {}
+    assert not _ledger_path(home0).exists()
+
+    # ESCALATED debt rings THROUGH the guards (the fleet-blackout fix).
+    inbox_stub.owed = {"to_answer": [{"id": "a1", "escalated": True}],
+                       "to_consume": [], "waiting_on": []}
+    out = _run_hook(script, home, payload=json.dumps({"status": "aborted",
+                                                      "loop_count": 7}))
+    assert "followup_message" in out.stdout
 
     # A completed turn under the cap prompts normally.
-    out = _run_hook(script, home,
+    sub1 = tmp_path / "completed"
+    sub1.mkdir()
+    inbox_stub.owed = {"to_answer": [{"id": "a1"}], "to_consume": [],
+                       "waiting_on": []}
+    script1, home1 = _hook_env(sub1, inbox_stub.url,
+                               reprompt_key="followup_message")
+    out = _run_hook(script1, home1,
                     payload=json.dumps({"status": "completed",
                                         "loop_count": 1}))
     assert "followup_message" in out.stdout

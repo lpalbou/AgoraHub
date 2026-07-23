@@ -571,7 +571,8 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
         if not (counts.get("to_answer") or counts.get("to_consume")):
             return ""
         lines = ["YOU OWE (settle these before new work; ack clears none of it):"]
-        for row in owed.get("to_answer", [])[:10]:
+        to_answer = owed.get("to_answer", [])
+        for row in to_answer[:10]:
             naming = (f" asks naming you: {row['asks_naming_you']}"
                       if row.get("asks_naming_you") else "")
             lines.append(f"- ANSWER {row['channel']}#{row['seq']} from "
@@ -580,12 +581,22 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
                          f"{', ESCALATED' if row.get('escalated') else ''}) — "
                          f"read_message id={row['id']}, then reply with answers=[...]"
                          " and DO or claim any work it assigns")
-        for row in owed.get("to_consume", [])[:10]:
+        if len(to_answer) > 10:
+            # Silent truncation taught seats their debt list was complete when
+            # it was not (2026-07-23 audit RC-4): an 11th rotting row simply
+            # never appeared anywhere. Say what is cut.
+            lines.append(f"  … +{len(to_answer) - 10} more to answer — "
+                         "GET /owed for the full list")
+        to_consume = owed.get("to_consume", [])
+        for row in to_consume[:10]:
             lines.append(f"- CONSUME {row['channel']}#{row['answer_seq']}: "
                          f"{row['answered_by']} answered YOUR ask "
                          f"{row['your_asks']} ({row['age_minutes']}m ago) — "
                          f"read_message id={row['answer_id']} and use it "
                          "(adopt/reject on the record, or close your thread)")
+        if len(to_consume) > 10:
+            lines.append(f"  … +{len(to_consume) - 10} more to consume — "
+                         "GET /owed for the full list")
         return "\n".join(lines) + "\n\n"
 
     @mcp.tool()

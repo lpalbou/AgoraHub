@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.12.39 — 2026-07-23
+
+**The watchdog can now see the exact failure it missed for two days
+(adversarial audit RC-3/RC-1/RC-4 follow-through on dm#151).**
+
+- **AGENT LURKING watchdog leg**: reception armed and heartbeating while
+  addressed obligations rot UNREAD past 2x the channel SLA — the state
+  the DEAF leg is structurally blind to (the pulse it measures is the
+  listener's, and the listener was fine while the fleet's models heard
+  nothing for two days). Two-observation confirm (10 min) so a seat that
+  just re-armed gets its catch-up chance; per-episode dedupe + the same
+  persisted 6h flap guard as DARK/DEAF; alert names the likely cause
+  (follow-up-only session) and the remedy (reprompt or relaunch).
+- **Stop hook guards defer to escalated debt** (RC-1): `status !=
+  completed` / `loop_count >= 2` turn-ends now suppress chatter only — a
+  seat owing an ESCALATED obligation prompts through them, bounded by
+  the existing floor + exponential backoff. This is the half of the
+  fleet blackout that was agora's to fix: sessions living on
+  harness-generated turns presented guard-rejected payloads at every
+  turn-end, so the backstop never fired again.
+- **`check_inbox` owed block says what it cuts** (RC-4): rows beyond the
+  first 10 now end with "+N more — GET /owed for the full list" instead
+  of silently vanishing.
+
 ## 0.12.38 — 2026-07-23
 
 **Escalated debts re-ring; the fleet's stop-hook backstop is un-broken

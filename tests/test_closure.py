@@ -583,6 +583,49 @@ def test_deaf_sweep_alerts_when_present_seat_stops_arming():
     assert "uic" not in service._deaf_since
 
 
+def test_lurk_sweep_alerts_when_armed_seat_never_triages():
+    """RC-3 (2026-07-23 fleet blackout): reception ARMED and heartbeating,
+    yet the model never triages — obligations rot UNREAD far past SLA while
+    the DEAF leg sees a healthy pulse. For two days every sweep stayed
+    silent in exactly this state. The watchdog must name it (AGENT
+    LURKING), once per episode, and never fire DEAF for it."""
+    client = make_client()
+    flow = register(client, "flow")
+    register(client, "op", operator=True)
+    uic = register(client, "uic")
+    make_channel(client, flow, "room", uic)
+    client.put("/channels/room/store/channel:meta",
+               json={"value": {"response_sla_minutes": 0.001}}, headers=flow)
+    ask = post(client, flow, body="for uic", title="q", status="open",
+               to=["uic"], asks=[{"id": "1", "text": "a?"}])
+    time.sleep(0.3)  # >> 2x the 0.001-minute SLA: well past breach
+
+    service = client.app.state.service
+    service.presence.touch("uic")
+    service.presence.mark_reception("uic")          # listener heartbeating
+    assert service.presence.reception("uic")[0] == "armed"
+
+    # Two-observation rule: the first sweep only RECORDS the candidate (a
+    # just-re-armed seat gets a cycle to catch up); it alerts once the
+    # state persists past the confirm window.
+    assert service.dark_sweep() == []               # candidate recorded
+    assert "uic" in service._lurk_since
+    service._lurk_since["uic"] -= 601.0             # persist past confirm
+    assert service.dark_sweep() == ["uic"]          # LURKING, once
+    assert service.dark_sweep() == []               # same episode: silent
+    op2 = register(client, "op2", operator=True)
+    service.dark_sweep()
+    msgs = client.get("/channels/hub-alerts/messages", headers=op2).json()
+    assert any("AGENT LURKING: uic" in m["body"] for m in msgs)
+    assert not any("AGENT DEAF: uic" in m["body"] for m in msgs)
+
+    # The seat finally answers: the debt clears and the episode ends.
+    post(client, uic, body="a!", status="reply", reply_to=ask["id"],
+         answers=["1"])
+    assert service.dark_sweep() == []
+    assert "uic" not in service._lurk_since and "uic" not in service._lurk_alerted
+
+
 def test_reception_unknown_is_never_alarmed():
     """0098: a seat that never announced a reception heartbeat (drives
     reception another way, or predates the feature) reads 'unknown' — the
