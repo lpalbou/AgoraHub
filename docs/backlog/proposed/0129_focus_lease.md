@@ -130,11 +130,25 @@ matrices; per-debtor escalation pausing; a deferral queue or flush event
 type (the store is the queue; the owedsig is the flush); hook
 regeneration; letting `escalated` or plain `open` pierce.
 
+## Operator rulings (dm#159 + dm#161, 2026-07-23) — design SETTLED
+
+- Grant paths: Team-page selector + one-line chat command — AGREED.
+- Three message lanes (plain=after, critical=now,
+  reply-into-the-work=now) — AGREED.
+- Default lease 1h (his call); until-done caps at 4h with renewal.
+- Seat SELF-GRANT: REJECTED for now ("i am unsure if the agent should
+  be able to request it, i don't think so"). Leases are OPERATOR-GRANTED
+  ONLY — which was the adversaries' recommended v1 anyway. Revisit only
+  with field evidence of seats drowned mid-build.
+- "If not working, it should listen and answer his messages": enforced
+  by the claim-binding — no live claim, no lease, seat stays LIVE. A
+  lease protects named work, never a posture.
+
 ## Sequencing + success metrics
 
 v1 hub-side in one release (lease row + HTTP mask + doorbell filter +
 LURK skip + focus-overrun + visibility fields + void-on-stale), operator
-grants only. Then continuum surfaces. Then self-grant + renewal
-discipline after field data. Success is measurable in the ledger:
+grants only per the ruling. Then continuum surfaces (selector, banner,
+"send to its current task" button). Success is measurable in the ledger:
 operator status checks that cost a seat turn → ~0 (roster answers them);
 turns spent narrating silence → 0; zero focus-overrun alerts ignored.
