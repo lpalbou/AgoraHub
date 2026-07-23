@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.12.42 — 2026-07-23
+
+**Delegation endpoints accept the operator bearer (c4924, laurent
+dm#169).** `PUT /admin/delegation`, `DELETE /admin/delegation/{id}` and
+`GET /admin/delegations` did a raw admin-key compare and refused every
+agent bearer — operator included — while every sibling lifecycle verb
+(retire/unretire/delete, register, pause, rules) accepts operator agent
+OR admin key through the shared `operator_or_admin` gate. The operator
+assigning a delegate from his own console (whoami operator:true) was
+refused with "requires the admin key" — the exact inverse of the c3707
+retire gap. All three delegation doors now share the gate; plain agents
+stay refused; the admin key keeps working. Console needs zero changes
+(it already passes the bearer through).
+
 ## 0.12.41 — 2026-07-23
 
 **Hard-delete for retired agents (agora-0131, operator ask via continuum

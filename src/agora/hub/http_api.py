@@ -382,26 +382,29 @@ def list_delegations(
 
 @router.get("/admin/delegations")
 def admin_list_delegations(
-    token: str = Depends(bearer_token),
+    agent: AgentInfo = Depends(operator_or_admin),
     service: HubService = Depends(get_service),
-    admin_key: str = Depends(get_admin_key),
 ) -> list[dict[str, Any]]:
-    """Same list as GET /delegations, admin-key-authenticated — the operator's
-    CLI holds the admin key, not an agent key."""
-    if not hmac.compare_digest(token, admin_key):
-        raise HTTPException(403, "listing delegations via admin requires the admin key")
+    """Same list as GET /delegations, operator-authenticated (agent bearer
+    or admin key) — kept for symmetry with the grant/revoke pair."""
+    if not agent.operator:
+        raise HTTPException(403, "listing delegations here is an operator view")
     return service.active_delegations()
 
 
 @router.put("/admin/delegation")
 def set_delegation(
     payload: SetDelegation,
-    token: str = Depends(bearer_token),
+    agent: AgentInfo = Depends(operator_or_admin),
     service: HubService = Depends(get_service),
-    admin_key: str = Depends(get_admin_key),
 ) -> dict[str, Any]:
-    if not hmac.compare_digest(token, admin_key):
-        raise HTTPException(403, "granting delegation requires the admin key")
+    """Grant delegated powers — an OPERATOR act (agent bearer or admin key,
+    the shared lifecycle gate). Was admin-key-only by raw compare (the
+    inverse of the c3707 retire gap): the operator's own console bearer —
+    whoami operator:true — was refused with 'requires the admin key'
+    (continuum c4924, laurent dm#169)."""
+    if not agent.operator:
+        raise HTTPException(403, "granting delegation is an operator act")
     return _run(service.set_delegation, payload.agent_id, payload.powers,
                 payload.ttl_seconds, payload.note)
 
@@ -409,12 +412,12 @@ def set_delegation(
 @router.delete("/admin/delegation/{agent_id}")
 def revoke_delegation(
     agent_id: str,
-    token: str = Depends(bearer_token),
+    agent: AgentInfo = Depends(operator_or_admin),
     service: HubService = Depends(get_service),
-    admin_key: str = Depends(get_admin_key),
 ) -> dict[str, Any]:
-    if not hmac.compare_digest(token, admin_key):
-        raise HTTPException(403, "revoking delegation requires the admin key")
+    """Revoke delegated powers — same operator gate as the grant."""
+    if not agent.operator:
+        raise HTTPException(403, "revoking delegation is an operator act")
     return {"agent_id": agent_id, "revoked": _run(service.revoke_delegation, agent_id)}
 
 

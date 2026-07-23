@@ -1522,6 +1522,7 @@
   },
   "/admin/delegation": {
    "put": {
+    "description": "Grant delegated powers \u2014 an OPERATOR act (agent bearer or admin key,\nthe shared lifecycle gate). Was admin-key-only by raw compare (the\ninverse of the c3707 retire gap): the operator's own console bearer \u2014\nwhoami operator:true \u2014 was refused with 'requires the admin key'\n(continuum c4924, laurent dm#169).",
     "operationId": "set_delegation_admin_delegation_put",
     "parameters": [
      {
@@ -1574,6 +1575,7 @@
   },
   "/admin/delegation/{agent_id}": {
    "delete": {
+    "description": "Revoke delegated powers \u2014 same operator gate as the grant.",
     "operationId": "revoke_delegation_admin_delegation__agent_id__delete",
     "parameters": [
      {
@@ -1625,7 +1627,7 @@
   },
   "/admin/delegations": {
    "get": {
-    "description": "Same list as GET /delegations, admin-key-authenticated \u2014 the operator's\nCLI holds the admin key, not an agent key.",
+    "description": "Same list as GET /delegations, operator-authenticated (agent bearer\nor admin key) \u2014 kept for symmetry with the grant/revoke pair.",
     "operationId": "admin_list_delegations_admin_delegations_get",
     "parameters": [
      {

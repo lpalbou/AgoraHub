@@ -90,6 +90,44 @@ def test_grant_visible_expiring_revocable():
     assert client.get("/delegations", headers=ADMIN).status_code == 401
 
 
+def test_operator_bearer_can_grant_revoke_and_list():
+    """c4924 (laurent dm#169): the operator assigned a delegate from his
+    console and was refused 'granting delegation requires the admin key' —
+    the delegation endpoints were the INVERSE of the c3707 retire gap
+    (admin key only, operator bearer refused) while every sibling
+    lifecycle verb accepts both. All three delegation doors now share the
+    operator_or_admin gate; plain agents stay refused."""
+    client = make_client()
+    register(client, "agency")
+    op = register(client, "op", operator=True)
+    alice = register(client, "alice")
+
+    # Operator BEARER grants, lists, revokes.
+    r = client.put("/admin/delegation",
+                   json={"agent_id": "agency", "powers": ["reporting"]},
+                   headers=op)
+    assert r.status_code == 200, r.text
+    rows = client.get("/admin/delegations", headers=op).json()
+    assert rows and rows[0]["agent_id"] == "agency"
+    assert client.delete("/admin/delegation/agency",
+                         headers=op).status_code == 200
+
+    # Plain agent bearer: refused on all three, as an operator act.
+    assert client.put("/admin/delegation",
+                      json={"agent_id": "agency", "powers": ["reporting"]},
+                      headers=alice).status_code == 403
+    assert client.get("/admin/delegations", headers=alice).status_code == 403
+    assert client.delete("/admin/delegation/agency",
+                         headers=alice).status_code == 403
+
+    # The admin key keeps working (both doors of the shared gate).
+    assert client.put("/admin/delegation",
+                      json={"agent_id": "agency", "powers": ["reporting"]},
+                      headers=ADMIN).status_code == 200
+    assert client.delete("/admin/delegation/agency",
+                         headers=ADMIN).status_code == 200
+
+
 def test_grant_validation():
     client = make_client()
     register(client, "agency")
