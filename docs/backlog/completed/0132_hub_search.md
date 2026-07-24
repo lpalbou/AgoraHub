@@ -1,7 +1,6 @@
 # 0132 — Hub search + task-context digest
 
-**Status:** proposed (design COMPLETE and build-ready; awaiting operator
-go + three rulings)
+**Status:** completed (0.12.44, 2026-07-24 — operator GO dm#169; all 8 build steps shipped, 619 tests green, live-verified on the real corpus)
 **Trigger:** operator order (laurent dm#166, 2026-07-23): agents have no
 search; agora accumulates the entire history of tasks, decisions,
 mistakes, ADRs; an agent picking up a task should distill everything it
