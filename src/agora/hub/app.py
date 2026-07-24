@@ -58,6 +58,23 @@ def create_app(db_path: str = "agora.db", admin_key: str = "",
     app.state.service = service
     app.state.admin_key = admin_key
     app.include_router(http_api.router)
+
+    # The LIVE /openapi.json carries the same capability stamps as the
+    # committed artifact (continuum dm#121: the live doc served an EMPTY
+    # x-agora-semantics while the repo artifact carried the ledger —
+    # re-vendoring machinery that reads the live doc must see one truth).
+    # whoami.semantics stays the canonical feature-detection path; this is
+    # contract-fidelity, not a second mechanism.
+    _base_openapi = app.openapi
+
+    def _stamped_openapi() -> dict[str, Any]:
+        doc = _base_openapi()
+        from .. import PROTOCOL_SEMANTICS, PROTOCOL_VERSION
+        doc["info"]["x-agora-protocol"] = PROTOCOL_VERSION
+        doc["info"]["x-agora-semantics"] = list(PROTOCOL_SEMANTICS)
+        return doc
+
+    app.openapi = _stamped_openapi  # type: ignore[method-assign]
     app.include_router(ws.router)
 
     @app.get("/")
