@@ -175,6 +175,9 @@ plain text          post to the current channel (status=fyi, no obligation)
                     /dm agency
 /history [N] (/h)   last N messages of this room (default 15)
 /top [N]            this room's most up-voted messages (whole-channel rank)
+/search TERMS [k:v] hub-wide grouped search over everything YOU can read
+                    (filters: kind:decision sender:ID channel:NAME
+                    sort:recent limit:N) — decisions first, then threads
 /digest             open questions / decided / decisions of this room
 /summary [TARGET]   LLM summary (situation / pending / done / blocked) of the
                     whole hub from your view, a CHANNEL, or an @agent. Needs
@@ -510,6 +513,71 @@ class ChatApp:
                                             title=m.title, channel=m.channel,
                                             current=self.current, data=m.data))
         self._print()
+
+    async def cmd_search(self, arg: str) -> None:
+        """`/search TERMS [k:v ...]` — hub-wide grouped search (agora-0132)
+        over everything YOU can read. Trailing k:v tokens become filters:
+        kind:decision, sender:laurent, channel:commons, sort:recent,
+        limit:N. Sections: decisions, open threads, work, people, files,
+        messages. `relaxed` marks a zero-hit OR-retry."""
+        if not arg.strip():
+            self._print("usage: /search TERMS [kind:decision] [sender:ID]"
+                        " [channel:NAME] [sort:recent] [limit:N]")
+            return
+        words: list[str] = []
+        filters: dict[str, str] = {}
+        for tok in arg.split():
+            if ":" in tok and tok.split(":", 1)[0] in (
+                    "kind", "sender", "channel", "sort", "limit"):
+                k, v = tok.split(":", 1)
+                filters[k] = v
+            else:
+                words.append(tok)
+        s = self.style
+        try:
+            rep = await self.client.search(
+                " ".join(words),
+                channels=[filters["channel"]] if "channel" in filters else None,
+                sender=filters.get("sender", ""),
+                kind=filters.get("kind", ""),
+                sort=filters.get("sort", "relevance"),
+                limit=int(filters.get("limit", 10)))
+        except Exception as exc:
+            self._print(s.red(f"search failed (hub predates search?): {exc}"))
+            return
+        if rep.get("relaxed"):
+            self._print(s.dim("exact match found nothing — showing looser"
+                              " OR results (relaxed)"))
+        shown_any = False
+        for name in ("decisions", "open_threads", "work", "people",
+                     "files", "messages"):
+            sec = rep.get(name) or {}
+            hits = sec.get("hits") or []
+            if not hits:
+                continue
+            shown_any = True
+            extra = sec.get("total", 0) - sec.get("shown", 0)
+            head = name.replace("_", " ").upper()
+            self._print(s.bold(f"{head} ({sec.get('shown')}/{sec.get('total')})"))
+            for h in hits:
+                where = (f"{h.get('channel')}#{h.get('seq')}"
+                         if h.get("seq") is not None
+                         else f"{h.get('channel') or 'roster'} {h.get('ref')}")
+                tally = ""
+                r = h.get("ratings") or {}
+                if r.get("up") or r.get("down"):
+                    tally = f"  [+{r.get('up', 0)}/-{r.get('down', 0)}]"
+                thread = (f" (+{h['thread_hits'] - 1} in thread)"
+                          if h.get("thread_hits") else "")
+                self._print(f"  {s.cyan(where)}  {h.get('title') or ''}{tally}{thread}")
+                if h.get("snippet"):
+                    self._print(s.dim(f"    {h['snippet'][:160]}"))
+            if extra > 0:
+                self._print(s.dim(f"  … +{extra} more — narrow terms or"
+                                  f" kind:{name}"))
+        if not shown_any:
+            self._print(s.dim("nothing found in your channels — fewer/other"
+                              " words often help"))
 
     async def cmd_top(self, arg: str) -> None:
         """`/top [N]` — this room's most up-voted messages (agora-0125): the
@@ -1313,6 +1381,7 @@ class ChatApp:
             "join": lambda: self.cmd_switch(arg),
             "history": lambda: self.cmd_history(arg), "h": lambda: self.cmd_history(arg),
             "top": lambda: self.cmd_top(arg),
+            "search": lambda: self.cmd_search(arg),
             "digest": self.cmd_digest,
             "vote": lambda: self.cmd_vote(arg),
             "tally": lambda: self.cmd_tally(arg),

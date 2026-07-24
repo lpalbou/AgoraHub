@@ -1378,6 +1378,45 @@ def cmd_retract(args):
     _run_agent_cmd(args, go)
 
 
+def cmd_search(args):
+    """`agora search TERMS...` — the hub-wide grouped report (agora-0132)
+    over everything this agent can read: decisions, open threads, work,
+    people, files, messages. --json serves the raw typed report."""
+    async def go(c, a):
+        rep = await c.search(" ".join(a.terms),
+                             channels=[a.channel] if a.channel else None,
+                             sender=a.sender or "", kind=a.kind or "",
+                             sort=a.sort, limit=a.limit)
+        if a.json:
+            print(json.dumps(rep, indent=1))
+            return
+        if rep.get("relaxed"):
+            print("(exact match found nothing — looser OR results below)")
+        empty = True
+        for name in ("decisions", "open_threads", "work", "people",
+                     "files", "messages"):
+            sec = rep.get(name) or {}
+            hits = sec.get("hits") or []
+            if not hits:
+                continue
+            empty = False
+            print(f"{name.replace('_', ' ').upper()}"
+                  f" ({sec.get('shown')}/{sec.get('total')})")
+            for h in hits:
+                where = (f"{h.get('channel')}#{h.get('seq')}"
+                         if h.get("seq") is not None
+                         else f"{h.get('channel') or 'roster'} {h.get('ref')}")
+                r = h.get("ratings") or {}
+                tally = (f"  [+{r.get('up', 0)}/-{r.get('down', 0)}]"
+                         if (r.get("up") or r.get("down")) else "")
+                print(f"  {where}  {h.get('title') or ''}{tally}")
+                if h.get("snippet"):
+                    print(f"    {h['snippet'][:160]}")
+        if empty:
+            print("nothing found in your channels — fewer/other words often help")
+    _run_agent_cmd(args, go)
+
+
 def cmd_work(args):
     """`agora work <item_id>` — the stitch, readable from a terminal: who
     claims the item, what was decided about it, and every message citing it
@@ -2273,6 +2312,17 @@ def build_parser() -> argparse.ArgumentParser:
                                "decisions, messages (the Option-A stitch)")
     wk.add_argument("item_id", help="ruled work id, e.g. agora-0093")
     wk.set_defaults(func=cmd_work)
+
+    sr = _agent_parser("search", "hub-wide grouped search over everything "
+                                 "you can read (the task-context digest)")
+    sr.add_argument("terms", nargs="+", help="free words; quoting not needed")
+    sr.add_argument("--kind", default="", help="message|decision|claim|work|file|agent")
+    sr.add_argument("--channel", default="", help="narrow to one channel")
+    sr.add_argument("--sender", default="", help="narrow to one sender")
+    sr.add_argument("--sort", default="relevance", choices=["relevance", "recent"])
+    sr.add_argument("--limit", type=int, default=10)
+    sr.add_argument("--json", action="store_true", help="raw typed report")
+    sr.set_defaults(func=cmd_search)
 
     rc = _agent_parser("retract", "unsay your own message: redact it "
                                   "everywhere + clear its obligation")

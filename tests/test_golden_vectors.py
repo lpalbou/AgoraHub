@@ -119,6 +119,18 @@ class VectorWorld:
                 f"{self.resolve(step['message'])}/rating",
                 headers=self.keys[step["as"]])
             assert r.status_code == 200, f"{step}: {r.text}"
+        elif op == "store":
+            r = self.client.put(
+                f"/channels/{step['channel']}/store/{step['key']}",
+                json={"value": self.resolve(step["value"])},
+                headers=self.keys[step["as"]])
+            assert r.status_code == 200, f"{step}: {r.text}"
+        elif op == "retract":
+            r = self.client.post(
+                f"/channels/{step['channel']}/messages/"
+                f"{self.resolve(step['message'])}/retract",
+                headers=self.keys[step["as"]])
+            assert r.status_code == 200, f"{step}: {r.text}"
         elif op == "join_via_invite_dm":
             dm = self.client.get(f"/channels/{step['dm']}/messages",
                                  headers=self.keys[step["as"]]).json()
@@ -151,11 +163,21 @@ class VectorWorld:
             served = self.client.get(path, headers=self.keys[step["as"]]).json()
         elif call == "group_result":
             served = self.refs[step["ref"]]
+        elif call == "search":
+            params: dict[str, Any] = {"q": step["q"]}
+            for k in ("kind", "sort", "limit", "sender"):
+                if k in step:
+                    params[k] = step[k]
+            if "channel_filter" in step:
+                params["channel"] = step["channel_filter"]
+            served = self.client.get("/search", params=params,
+                                     headers=self.keys[step["as"]]).json()
         else:
             raise AssertionError(f"unknown call {call!r}")
         # A typo'd assertion key must FAIL, not silently assert nothing
         # (impl adversary P2-5: an expect step with 'mtach' went green).
-        known = {"call", "as", "channel", "since", "ref", "match", "match_subset"}
+        known = {"call", "as", "channel", "since", "ref", "match", "match_subset",
+                 "q", "kind", "sort", "limit", "sender", "channel_filter"}
         unknown = set(step) - known
         assert not unknown, f"unknown expect keys {sorted(unknown)} in {step}"
         assert "match" in step or "match_subset" in step, \
@@ -207,6 +229,15 @@ def test_golden_vector(vector_path: Path) -> None:
     for step in vector["setup"]:
         world.run_op(step)
     for step in vector["expect"]:
+        if "op" in step:
+            world.run_op(step)
+        else:
+            world.run_expect(step)
+    # Optional second act: mutate the world, assert again (retraction and
+    # other lifecycle re-checks ride here — 06_search_grouped).
+    for step in vector.get("post_setup", []):
+        world.run_op(step)
+    for step in vector.get("post_expect", []):
         if "op" in step:
             world.run_op(step)
         else:

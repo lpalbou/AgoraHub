@@ -24,6 +24,7 @@ from ..models import (
     MessageRow,
     OwedReport,
     PostMessage,
+    SearchReport,
     WhoamiReport,
 )
 from .service import HubError, HubService, safe_serve_content_type
@@ -508,6 +509,33 @@ def admin_status(
     if not hmac.compare_digest(token, admin_key):
         raise HTTPException(403, "status overview requires the admin key")
     return service.agent_status_overview()
+
+
+@router.post("/admin/search/rebuild")
+def search_rebuild(
+    agent: AgentInfo = Depends(operator_or_admin),
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    """Deterministic search-index rebuild (agora-0132): the drift eraser +
+    FTS optimize, DML-only in one writer transaction — WAL readers keep
+    their snapshot; in-flight searches never error. Operator or admin."""
+    if not agent.operator:
+        raise HTTPException(403, "search rebuild is an operator act")
+    counts = service.db.rebuild_search_index()
+    return {"rebuilt": True, "docs": counts}
+
+
+@router.get("/admin/search/drift")
+def search_drift(
+    agent: AgentInfo = Depends(operator_or_admin),
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    """Sync-health probe: doc counts vs source-of-truth counts. A nonzero
+    message_drift means a choke point was missed — rebuild erases it and
+    the test suite should gain the missing site."""
+    if not agent.operator:
+        raise HTTPException(403, "search drift is an operator view")
+    return service.db.search_drift()
 
 
 class SetAbout(BaseModel):
@@ -1129,6 +1157,33 @@ def desk(
     """The operator's desk (0111): everything waiting on the human, derived
     at read time — STATE not log. Operator or reporting delegate."""
     return _run(service.desk, agent)
+
+
+@router.get("/search")
+def search(
+    q: str = Query(min_length=1, max_length=256),
+    channel: list[str] = Query(default=[]),
+    sender: str = Query(default=""),
+    kind: str = Query(default=""),
+    since: float | None = Query(default=None),
+    until: float | None = Query(default=None),
+    ref: str = Query(default=""),
+    sort: str = Query(default="relevance"),
+    limit: int = Query(default=10, ge=1, le=50),
+    cursor: str = Query(default=""),
+    agent: AgentInfo = Depends(current_agent),
+    service: HubService = Depends(get_service),
+) -> SearchReport:
+    """Hub search (agora-0132): one grouped report over everything the
+    CALLER can read — decisions, open threads, work, people, files,
+    messages; the grouping is the task-context digest. Membership-scoped
+    inside one snapshot; results are quoted DATA; no scores on the wire;
+    `relaxed=true` marks a zero-hit OR-retry. The route stays sync: the
+    executor's one-transaction-per-report invariant rides the threadpool
+    worker (cycle-3A)."""
+    return _run(service.search, agent, q, channels=channel, sender=sender,
+                kind=kind, since=since, until=until, ref=ref, sort=sort,
+                limit=limit, cursor=cursor)
 
 
 @router.get("/work/{item_id}")

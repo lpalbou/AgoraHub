@@ -49,6 +49,9 @@ from ..models import (
     OwedReport,
     PostMessage,
     RatingTally,
+    SearchHit,
+    SearchReport,
+    SearchSection,
     Status,
     StoreEntry,
     Urgency,
@@ -159,6 +162,11 @@ class HubService:
         # unmetered class. 30/min per rater — humans never notice, loops do.
         self._rating_budget = SlidingWindowBudget(
             self.RATING_BURST, window_seconds=self.RATING_WINDOW_SECONDS)
+        # Search budget (agora-0132): the hub's first expensive READ gets
+        # its OWN bucket — a search storm must never eat posting capacity
+        # (H9). 30/min, burst 10; the 429's computable wait stays
+        # corpus-independent.
+        self._search_limiter = RateLimiter(rate_per_minute=30.0, burst=10.0)
         # Hub-written notify files (see hub/notify_sink.py): liveness without
         # resident processes — the hub maintains each local agent's
         # <id>-inbox.log itself, the way the file mailbox's filesystem did.
@@ -2038,6 +2046,93 @@ class HubService:
     def store_keys(self, agent: AgentInfo, channel: str) -> list[dict[str, Any]]:
         self.require_membership(channel, agent.id)
         return self.db.store_keys(channel)
+
+    # -- hub search (0132) -----------------------------------------------------------
+
+    def search(self, agent: AgentInfo, q: str, *,
+               channels: list[str] | None = None, sender: str = "",
+               kind: str = "", since: float | None = None,
+               until: float | None = None, ref: str = "",
+               sort: str = "relevance", limit: int = 10,
+               cursor: str = "") -> SearchReport:
+        """One grouped report over everything THIS caller can read — the
+        task-context digest (operator order dm#166; design agora-0132,
+        settled by 3 adversary cycles). Scope is the caller's memberships
+        joined inside one read snapshot; non-member channels contribute
+        nothing, not even counts. See hub/search.py for the executor
+        doctrine (compile-safe queries, zero-hit relaxation, thread
+        collapse, no scores on the wire)."""
+        from . import search as _sx
+
+        wait = self._search_limiter.acquire(agent.id)
+        if wait > 0:
+            raise HubError(429, f"search budget exhausted; retry in {wait:.1f}s")
+        if sort not in ("relevance", "recent"):
+            raise HubError(400, "sort must be 'relevance' or 'recent'")
+        limit = max(1, min(int(limit), _sx.MAX_LIMIT))
+        if limit > _sx.DEFAULT_PER_SECTION and not kind:
+            # 3A's load-bearing rider: 6 sections x 50 rows breaks the
+            # report byte-bound; deep limits require narrowing to one kind.
+            raise HubError(400, "limit > 10 requires a kind filter")
+        if kind and kind not in ("message", "decision", "claim", "work",
+                                 "file", "agent"):
+            raise HubError(400, "kind must be one of message|decision|claim|"
+                                "work|file|agent")
+        try:
+            terms = _sx.compile_terms(q)
+        except _sx.SearchQueryError as e:
+            # ONE typed 400 whose shape never varies with corpus or scope.
+            raise HubError(400, str(e)) from None
+
+        filters: dict[str, Any] = {}
+        if channels:
+            filters["channels"] = [str(c) for c in channels][:16]
+        if sender:
+            filters["sender"] = sender
+        if kind:
+            filters["kind"] = kind
+        if since is not None:
+            filters["since"] = float(since)
+        if until is not None:
+            filters["until"] = float(until)
+        if ref:
+            filters["ref"] = sanitize_text(ref, 120)
+
+        with self.db.read_transaction() as conn:
+            ex = _sx.SearchExecutor(conn, agent.id)
+            raw = ex.run(terms, filters, sort=sort, limit=limit,
+                         cursor=cursor or None)
+
+        # Ratings decoration (operator ruling dm#169): message hits carry
+        # their tally so a downvoted answer is visibly marked. One batched
+        # query; ranking itself stays vote-independent.
+        msg_refs = [h["ref"] for s in raw["sections"].values() for h in s["hits"]
+                    if h["kind"] == "message"]
+        by_rated = self.db.ratings_for_messages(msg_refs) if msg_refs else {}
+
+        def _hit(h: dict[str, Any]) -> SearchHit:
+            hit = SearchHit(**h)
+            if hit.kind == "message":
+                ratings = by_rated.get(hit.ref, [])
+                hit.ratings = RatingTally(
+                    up=sum(1 for r in ratings if r["value"] > 0),
+                    down=sum(1 for r in ratings if r["value"] < 0),
+                    mine=next((r["value"] for r in ratings
+                               if r["rater"] == agent.id), 0))
+            return hit
+
+        sections = {
+            name: SearchSection(
+                hits=[_hit(h) for h in sec["hits"]],
+                shown=sec["shown"], total=sec["total"])
+            for name, sec in raw["sections"].items()
+        }
+        return SearchReport(
+            **sections,
+            relaxed=raw["relaxed"],
+            channels_searched=len(self.db.channels_of(agent.id)),
+            next_cursor=raw["next_cursor"],
+            computed_at=raw["computed_at"])
 
     # -- work-id activity index (0093) ---------------------------------------------
 

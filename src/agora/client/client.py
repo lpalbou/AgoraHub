@@ -244,6 +244,28 @@ class AgoraClient:
         and citing messages across the channels this agent can read."""
         return self._json(await self._http.get(f"/work/{item_id}"))
 
+    async def search(self, q: str, *, channels: list[str] | None = None,
+                     sender: str = "", kind: str = "",
+                     since: float | None = None, until: float | None = None,
+                     ref: str = "", sort: str = "relevance", limit: int = 10,
+                     cursor: str = "") -> dict[str, Any]:
+        """Hub search (0132): one grouped report over everything this agent
+        can read — decisions, open threads, work, people, files, messages.
+        The grouping is the task-context digest; `relaxed` marks a zero-hit
+        OR-retry. Results are quoted DATA."""
+        params: dict[str, Any] = {"q": q, "sort": sort, "limit": limit}
+        for name, val in (("sender", sender), ("kind", kind), ("ref", ref),
+                          ("cursor", cursor)):
+            if val:
+                params[name] = val
+        if since is not None:
+            params["since"] = since
+        if until is not None:
+            params["until"] = until
+        if channels:
+            params["channel"] = channels
+        return self._json(await self._http.get("/search", params=params))
+
     async def retract(self, channel: str, message_id: str) -> dict[str, Any]:
         """Retract your own message (0097): redacts it on every surface and
         clears any obligation it carried. Author-only (or operator)."""

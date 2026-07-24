@@ -1,0 +1,84 @@
+{
+ "name": "hub search (0132): membership-scoped grouped report — six fixed sections, non-member filter behaves like nonexistent, retraction is unfindable, zero-hit relaxation is loud. Deliberately NOT pinned: ranks, snippet text, scores (score ABSENCE is pinned by the OpenAPI artifact).",
+ "setup": [
+  {"op": "register", "id": "alice"},
+  {"op": "register", "id": "bob"},
+  {"op": "register", "id": "carol"},
+  {"op": "channel", "name": "room", "owner": "alice", "members": ["bob"]},
+  {"op": "channel", "name": "vault", "owner": "carol", "members": []},
+  {"op": "post", "as": "alice", "channel": "room", "ref": "m1",
+   "body": "the kelp rollout question", "status": "open",
+   "data": {"asks": [{"id": "1", "text": "approve the kelp shape?"}]}},
+  {"op": "post", "as": "bob", "channel": "room", "ref": "m2",
+   "body": "kelp context for the record", "status": "fyi"},
+  {"op": "store", "as": "alice", "channel": "room", "key": "decision:kelp-shape",
+   "value": {"summary": "kelp rules the rollout"}},
+  {"op": "post", "as": "carol", "channel": "vault", "ref": "mv",
+   "body": "vault kelp secret words", "status": "fyi"}
+ ],
+ "expect": [
+  {
+   "call": "search", "as": "bob", "q": "kelp",
+   "match": {
+    "relaxed": false,
+    "channels_searched": 1,
+    "decisions": {"shown": 1, "total": 1},
+    "open_threads": {"shown": 1, "total": 1},
+    "work": {"shown": 0, "total": 0},
+    "people": {"shown": 0, "total": 0},
+    "files": {"shown": 0, "total": 0},
+    "messages": {"shown": 1, "total": 1}
+   }
+  },
+  {
+   "call": "search", "as": "bob", "q": "kelp",
+   "match": {
+    "open_threads": {"hits": [
+     {"kind": "message", "channel": "room", "ref": "$m1.id",
+      "seq": "$m1.seq", "sender": "alice", "status": "open",
+      "ratings": {"up": 0, "down": 0, "mine": 0}}
+    ]},
+    "decisions": {"hits": [
+     {"kind": "decision", "channel": "room", "ref": "decision:kelp-shape"}
+    ]}
+   }
+  },
+  {
+   "call": "search", "as": "carol", "q": "kelp",
+   "match": {
+    "decisions": {"total": 0},
+    "open_threads": {"total": 0},
+    "messages": {"shown": 1, "total": 1}
+   }
+  },
+  {
+   "call": "search", "as": "bob", "q": "kelp", "channel_filter": ["vault"],
+   "match": {
+    "decisions": {"shown": 0, "total": 0},
+    "open_threads": {"shown": 0, "total": 0},
+    "messages": {"shown": 0, "total": 0}
+   }
+  },
+  {
+   "call": "search", "as": "bob", "q": "kelp", "channel_filter": ["no-such-channel"],
+   "match": {
+    "decisions": {"shown": 0, "total": 0},
+    "open_threads": {"shown": 0, "total": 0},
+    "messages": {"shown": 0, "total": 0}
+   }
+  },
+  {
+   "call": "search", "as": "bob", "q": "who approved the kelp anyway",
+   "match": {"relaxed": true}
+  }
+ ],
+ "post_setup": [
+  {"op": "retract", "as": "carol", "channel": "vault", "message": "$mv.id"}
+ ],
+ "post_expect": [
+  {
+   "call": "search", "as": "carol", "q": "kelp",
+   "match": {"messages": {"shown": 0, "total": 0}}
+  }
+ ]
+}

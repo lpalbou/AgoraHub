@@ -1183,6 +1183,190 @@
     "title": "RetireAgent",
     "type": "object"
    },
+   "SearchHit": {
+    "description": "One search result (agora-0132). A SIBLING of MessageRow, never a\nsubclass: identical field names and types for everything shared\n(channel, seq, sender, status, created_at \u2014 clients that key renderers\non field names get badges and thread-jump for free), with the\nkind-discriminated null-field-group rule: message hits carry\nseq/sender/status; store/file/agent hits leave them null. NO body\n(fetch through the read path \u2014 no stale copies), NO score (bm25 is a\nmeasured cross-tenant side channel; order is advisory).",
+    "properties": {
+     "channel": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Channel"
+     },
+     "created_at": {
+      "default": 0.0,
+      "title": "Created At",
+      "type": "number"
+     },
+     "highlights": {
+      "items": {
+       "items": {
+        "type": "integer"
+       },
+       "type": "array"
+      },
+      "title": "Highlights",
+      "type": "array"
+     },
+     "kind": {
+      "title": "Kind",
+      "type": "string"
+     },
+     "ratings": {
+      "anyOf": [
+       {
+        "$ref": "#/components/schemas/RatingTally"
+       },
+       {
+        "type": "null"
+       }
+      ]
+     },
+     "ref": {
+      "title": "Ref",
+      "type": "string"
+     },
+     "sender": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Sender"
+     },
+     "seq": {
+      "anyOf": [
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Seq"
+     },
+     "snippet": {
+      "default": "",
+      "title": "Snippet",
+      "type": "string"
+     },
+     "status": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Status"
+     },
+     "thread_hits": {
+      "anyOf": [
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Thread Hits"
+     },
+     "title": {
+      "default": "",
+      "title": "Title",
+      "type": "string"
+     }
+    },
+    "required": [
+     "kind",
+     "ref"
+    ],
+    "title": "SearchHit",
+    "type": "object"
+   },
+   "SearchReport": {
+    "description": "The `GET /search` response (agora-0132): six FIXED sections, always\nserved \u2014 the grouping IS the task-context digest. Structural sections\n(decisions, open_threads, work, files) order newest-first; messages\nand people ride advisory relevance order. `relaxed` is the loud flag\nthat the strict query found nothing and the terms were re-run as OR\n(F1: natural questions returned zero under implicit AND).",
+    "properties": {
+     "channels_searched": {
+      "default": 0,
+      "title": "Channels Searched",
+      "type": "integer"
+     },
+     "computed_at": {
+      "default": 0.0,
+      "title": "Computed At",
+      "type": "number"
+     },
+     "decisions": {
+      "$ref": "#/components/schemas/SearchSection"
+     },
+     "files": {
+      "$ref": "#/components/schemas/SearchSection"
+     },
+     "messages": {
+      "$ref": "#/components/schemas/SearchSection"
+     },
+     "next_cursor": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Next Cursor"
+     },
+     "open_threads": {
+      "$ref": "#/components/schemas/SearchSection"
+     },
+     "people": {
+      "$ref": "#/components/schemas/SearchSection"
+     },
+     "relaxed": {
+      "default": false,
+      "title": "Relaxed",
+      "type": "boolean"
+     },
+     "work": {
+      "$ref": "#/components/schemas/SearchSection"
+     }
+    },
+    "title": "SearchReport",
+    "type": "object"
+   },
+   "SearchSection": {
+    "description": "One section of the grouped report, with LOUD truncation (the\ncheck_inbox RC-4 lesson: silent cuts teach seats their list was\ncomplete when it was not).",
+    "properties": {
+     "hits": {
+      "items": {
+       "$ref": "#/components/schemas/SearchHit"
+      },
+      "title": "Hits",
+      "type": "array"
+     },
+     "shown": {
+      "default": 0,
+      "title": "Shown",
+      "type": "integer"
+     },
+     "total": {
+      "default": 0,
+      "title": "Total",
+      "type": "integer"
+     }
+    },
+    "title": "SearchSection",
+    "type": "object"
+   },
    "SetAbout": {
     "properties": {
      "about": {
@@ -1493,7 +1677,8 @@
    "reputation-unified-score",
    "reputation-raw-net",
    "messages-read-state",
-   "agent-delete"
+   "agent-delete",
+   "search-grouped"
   ]
  },
  "openapi": "3.1.0",
@@ -1855,6 +2040,92 @@
      }
     },
     "summary": "Set Hub Rules"
+   }
+  },
+  "/admin/search/drift": {
+   "get": {
+    "description": "Sync-health probe: doc counts vs source-of-truth counts. A nonzero\nmessage_drift means a choke point was missed \u2014 rebuild erases it and\nthe test suite should gain the missing site.",
+    "operationId": "search_drift_admin_search_drift_get",
+    "parameters": [
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Search Drift Admin Search Drift Get",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Search Drift"
+   }
+  },
+  "/admin/search/rebuild": {
+   "post": {
+    "description": "Deterministic search-index rebuild (agora-0132): the drift eraser +\nFTS optimize, DML-only in one writer transaction \u2014 WAL readers keep\ntheir snapshot; in-flight searches never error. Operator or admin.",
+    "operationId": "search_rebuild_admin_search_rebuild_post",
+    "parameters": [
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Search Rebuild Admin Search Rebuild Post",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Search Rebuild"
    }
   },
   "/admin/status": {
@@ -5594,6 +5865,165 @@
      }
     },
     "summary": "Hub Leaderboard"
+   }
+  },
+  "/search": {
+   "get": {
+    "description": "Hub search (agora-0132): one grouped report over everything the\nCALLER can read \u2014 decisions, open threads, work, people, files,\nmessages; the grouping is the task-context digest. Membership-scoped\ninside one snapshot; results are quoted DATA; no scores on the wire;\n`relaxed=true` marks a zero-hit OR-retry. The route stays sync: the\nexecutor's one-transaction-per-report invariant rides the threadpool\nworker (cycle-3A).",
+    "operationId": "search_search_get",
+    "parameters": [
+     {
+      "in": "query",
+      "name": "q",
+      "required": true,
+      "schema": {
+       "maxLength": 256,
+       "minLength": 1,
+       "title": "Q",
+       "type": "string"
+      }
+     },
+     {
+      "in": "query",
+      "name": "channel",
+      "required": false,
+      "schema": {
+       "default": [],
+       "items": {
+        "type": "string"
+       },
+       "title": "Channel",
+       "type": "array"
+      }
+     },
+     {
+      "in": "query",
+      "name": "sender",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Sender",
+       "type": "string"
+      }
+     },
+     {
+      "in": "query",
+      "name": "kind",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Kind",
+       "type": "string"
+      }
+     },
+     {
+      "in": "query",
+      "name": "since",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "number"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Since"
+      }
+     },
+     {
+      "in": "query",
+      "name": "until",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "number"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Until"
+      }
+     },
+     {
+      "in": "query",
+      "name": "ref",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Ref",
+       "type": "string"
+      }
+     },
+     {
+      "in": "query",
+      "name": "sort",
+      "required": false,
+      "schema": {
+       "default": "relevance",
+       "title": "Sort",
+       "type": "string"
+      }
+     },
+     {
+      "in": "query",
+      "name": "limit",
+      "required": false,
+      "schema": {
+       "default": 10,
+       "maximum": 50,
+       "minimum": 1,
+       "title": "Limit",
+       "type": "integer"
+      }
+     },
+     {
+      "in": "query",
+      "name": "cursor",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Cursor",
+       "type": "string"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/SearchReport"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Search"
    }
   },
   "/status": {

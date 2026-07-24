@@ -458,6 +458,65 @@ class LeaderboardReport(BaseModel):
     leaderboard: list[LeaderboardEntry] = Field(default_factory=list)
 
 
+class SearchHit(BaseModel):
+    """One search result (agora-0132). A SIBLING of MessageRow, never a
+    subclass: identical field names and types for everything shared
+    (channel, seq, sender, status, created_at — clients that key renderers
+    on field names get badges and thread-jump for free), with the
+    kind-discriminated null-field-group rule: message hits carry
+    seq/sender/status; store/file/agent hits leave them null. NO body
+    (fetch through the read path — no stale copies), NO score (bm25 is a
+    measured cross-tenant side channel; order is advisory)."""
+
+    kind: str                      # message|decision|claim|work|file|agent
+    channel: str | None = None     # null only for kind=agent (roster scope)
+    ref: str                       # message id | store key | fs path | agent id
+    title: str = ""
+    created_at: float = 0.0
+    snippet: str = ""
+    highlights: list[list[int]] = Field(default_factory=list)
+    # ^ code-point [start, len] offsets into `snippet` as served — never
+    #   markup, never sentinel bytes (those are model-render-only).
+    seq: int | None = None         # message kinds only
+    sender: str | None = None
+    status: str | None = None
+    thread_hits: int | None = None  # >1 when a thread collapsed into this row
+    ratings: RatingTally | None = None
+    # ^ operator ruling dm#169 ("remember we have also the downvotes"): a
+    #   downvoted answer is visibly marked when it surfaces. Ranking stays
+    #   vote-independent — coordinated downvoting must not bury content.
+
+
+class SearchSection(BaseModel):
+    """One section of the grouped report, with LOUD truncation (the
+    check_inbox RC-4 lesson: silent cuts teach seats their list was
+    complete when it was not)."""
+
+    hits: list[SearchHit] = Field(default_factory=list)
+    shown: int = 0
+    total: int = 0
+
+
+class SearchReport(BaseModel):
+    """The `GET /search` response (agora-0132): six FIXED sections, always
+    served — the grouping IS the task-context digest. Structural sections
+    (decisions, open_threads, work, files) order newest-first; messages
+    and people ride advisory relevance order. `relaxed` is the loud flag
+    that the strict query found nothing and the terms were re-run as OR
+    (F1: natural questions returned zero under implicit AND)."""
+
+    decisions: SearchSection = Field(default_factory=SearchSection)
+    open_threads: SearchSection = Field(default_factory=SearchSection)
+    work: SearchSection = Field(default_factory=SearchSection)
+    people: SearchSection = Field(default_factory=SearchSection)
+    files: SearchSection = Field(default_factory=SearchSection)
+    messages: SearchSection = Field(default_factory=SearchSection)
+    relaxed: bool = False
+    channels_searched: int = 0
+    next_cursor: str | None = None
+    computed_at: float = 0.0
+
+
 class WhoamiReport(BaseModel):
     """The `/whoami` response, typed (parity move 1, agora-0118). The
     capability ledger `semantics` MUST live in the typed contract — feature
