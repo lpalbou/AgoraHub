@@ -2053,6 +2053,7 @@ class HubService:
                channels: list[str] | None = None, sender: str = "",
                kind: str = "", since: float | None = None,
                until: float | None = None, ref: str = "",
+               rated: str = "", min_votes: int = 0,
                sort: str = "relevance", limit: int = 10,
                cursor: str = "") -> SearchReport:
         """One grouped report over everything THIS caller can read — the
@@ -2067,8 +2068,10 @@ class HubService:
         wait = self._search_limiter.acquire(agent.id)
         if wait > 0:
             raise HubError(429, f"search budget exhausted; retry in {wait:.1f}s")
-        if sort not in ("relevance", "recent"):
-            raise HubError(400, "sort must be 'relevance' or 'recent'")
+        if sort not in ("relevance", "recent", "votes"):
+            raise HubError(400, "sort must be 'relevance', 'recent' or 'votes'")
+        if rated and rated not in ("up", "down", "any"):
+            raise HubError(400, "rated must be 'up', 'down' or 'any'")
         limit = max(1, min(int(limit), _sx.MAX_LIMIT))
         if limit > _sx.DEFAULT_PER_SECTION and not kind:
             # 3A's load-bearing rider: 6 sections x 50 rows breaks the
@@ -2078,11 +2081,21 @@ class HubService:
                                  "file", "agent"):
             raise HubError(400, "kind must be one of message|decision|claim|"
                                 "work|file|agent")
-        try:
-            terms = _sx.compile_terms(q)
-        except _sx.SearchQueryError as e:
-            # ONE typed 400 whose shape never varies with corpus or scope.
-            raise HubError(400, str(e)) from None
+        if not (q or "").strip():
+            # Browse mode (operator dm#174: "see the most up/down votes"):
+            # q is optional ONLY with a rated filter — otherwise an empty
+            # query is the usual typed 400.
+            if not rated:
+                raise HubError(400, "query must contain at least one word"
+                                    " (or set rated=up|down|any to browse"
+                                    " by votes)")
+            terms: list[str] = []
+        else:
+            try:
+                terms = _sx.compile_terms(q)
+            except _sx.SearchQueryError as e:
+                # ONE typed 400 whose shape never varies with corpus/scope.
+                raise HubError(400, str(e)) from None
 
         filters: dict[str, Any] = {}
         if channels:
@@ -2097,6 +2110,10 @@ class HubService:
             filters["until"] = float(until)
         if ref:
             filters["ref"] = sanitize_text(ref, 120)
+        if rated:
+            filters["rated"] = rated
+        if min_votes:
+            filters["min_votes"] = max(0, int(min_votes))
 
         with self.db.read_transaction() as conn:
             ex = _sx.SearchExecutor(conn, agent.id)

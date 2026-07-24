@@ -30,9 +30,22 @@ def test_compiler_drops_punctuation_and_caps_terms():
         sx.compile_terms("x" * 300)
 
 
-def test_compiler_hyphen_terms_expand_to_or():
-    m = sx.compile_match(sx.compile_terms("thumbs-down"))
-    assert '"thumbs-down"' in m and '"thumbs down"' in m and " OR " in m
+def test_hyphen_compounds_match_across_forms():
+    """Tokenizer v2 (0134): compounds split at INDEX time, so 'thumbs down'
+    finds 'thumbs-down' docs and vice versa — no query-side expansion
+    tricks (the v1 tokenchars made 70% of live vocabulary reachable only
+    by the exact joined form)."""
+    db = Database(":memory:")
+    db.create_channel("room", private=True, created_by="a")
+    db.add_member("room", "a")
+    db.insert_message("room", "a", kind="message", status="fyi",
+                      urgency="inbox", title="t", body="that was a thumbs-down moment",
+                      data=None, reply_to=None)
+    with db.read_transaction() as conn:
+        ex = sx.SearchExecutor(conn, "a")
+        for q in ("thumbs down", "thumbs-down"):
+            rep = ex.run(sx.compile_terms(q), {})
+            assert rep["sections"]["messages"]["total"] == 1, q
 
 
 def test_compiler_fuzz_property_never_raw_fts_semantics():
@@ -171,6 +184,55 @@ def test_snippets_carry_offsets_never_sentinels():
     assert hit["highlights"], "highlight offsets expected"
     s, l = hit["highlights"][0]
     assert hit["snippet"][s:s + l].lower().startswith("zebra")
+
+
+def test_votes_dimension_filter_sort_and_browse(tmp_path):
+    """Operator dm#174: 'see the most up/down votes to see good/bad work
+    and draw lessons.' rated=down filters to downvoted hits; sort=votes
+    orders by net; with rated set, q may be EMPTY (browse mode). Default
+    ranking stays vote-free."""
+    import sys
+    from fastapi.testclient import TestClient
+    from agora.hub.app import create_app
+    client = TestClient(create_app(db_path=":memory:", admin_key="k",
+                                   rate_per_minute=600.0))
+    A = {"Authorization": "Bearer k"}
+    def reg(aid):
+        return {"Authorization":
+                f"Bearer {client.post('/agents', json={'id': aid}, headers=A).json()['api_key']}"}
+    ka, kb = reg("alice"), reg("bob")
+    client.post("/channels", json={"name": "room"}, headers=ka)
+    t = client.post("/channels/room/invites", json={}, headers=ka).json()["invite_token"]
+    client.post("/channels/room/join", json={"invite_token": t}, headers=kb)
+    good = client.post("/channels/room/messages",
+                       json={"body": "the good gizmo work"}, headers=ka).json()
+    bad = client.post("/channels/room/messages",
+                      json={"body": "the bad gizmo work"}, headers=ka).json()
+    client.put(f"/channels/room/messages/{good['id']}/rating",
+               json={"value": 1}, headers=kb)
+    client.put(f"/channels/room/messages/{bad['id']}/rating",
+               json={"value": -1}, headers=kb)
+
+    # rated=down narrows to the downvoted hit.
+    r = client.get("/search", params={"q": "gizmo", "rated": "down"},
+                   headers=kb).json()
+    refs = [h["ref"] for h in r["messages"]["hits"]]
+    assert refs == [bad["id"]]
+    # sort=votes = net DESC (the /top precedent): best-rated leads; the
+    # worst-work lens is rated=down.
+    r = client.get("/search", params={"q": "gizmo", "sort": "votes"},
+                   headers=kb).json()
+    refs = [h["ref"] for h in r["messages"]["hits"]]
+    assert refs[0] == good["id"] and bad["id"] in refs
+    # Browse mode: no q at all, rated=any — both rated messages, votes on hits.
+    r = client.get("/search", params={"rated": "any", "sort": "votes"},
+                   headers=kb)
+    assert r.status_code == 200
+    hits = r.json()["messages"]["hits"]
+    assert {h["ref"] for h in hits} == {good["id"], bad["id"]}
+    assert all(h["ratings"]["up"] or h["ratings"]["down"] for h in hits)
+    # Empty q WITHOUT rated stays the typed 400.
+    assert client.get("/search", params={"q": ""}, headers=kb).status_code == 400
 
 
 def test_kind_filter_keeps_fixed_shape_and_recent_cursor_pages():

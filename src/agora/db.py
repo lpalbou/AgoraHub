@@ -353,13 +353,26 @@ class Database:
             # blocking on purpose (a hub serving un-indexed search would
             # look broken in a subtler way).
             self._conn.executescript(_si.SCHEMA)
+            # Tokenizer migration (0134): a tokenizer change means the FTS
+            # shadow is tokenized wrong — drop, re-create, rebuild (182ms
+            # measured). Version rides the meta table (in _SCHEMA above).
+            row = self._conn.execute(
+                "SELECT value FROM meta WHERE key = 'search_tokenizer'"
+            ).fetchone()
+            retokenize = (row["value"] if row else None) != _si.TOKENIZER_VERSION
+            if retokenize:
+                self._conn.execute("DROP TABLE IF EXISTS search_fts")
             _si.ensure_fts(self._conn)
             have_docs = self._conn.execute(
                 "SELECT COUNT(*) AS n FROM search_docs").fetchone()["n"]
             have_msgs = self._conn.execute(
                 "SELECT COUNT(*) AS n FROM messages").fetchone()["n"]
-            if have_docs == 0 and have_msgs > 0:
+            if have_msgs > 0 and (have_docs == 0 or retokenize):
                 _si.rebuild(self._conn)
+            self._conn.execute(
+                "INSERT INTO meta (key, value) VALUES ('search_tokenizer', ?)"
+                " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (_si.TOKENIZER_VERSION,))
             self._conn.commit()
         self._migrate_operator_reactions()
         # Reconcile runs on EVERY startup (agora-0125), independently of the

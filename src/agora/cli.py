@@ -1386,6 +1386,7 @@ def cmd_search(args):
         rep = await c.search(" ".join(a.terms),
                              channels=[a.channel] if a.channel else None,
                              sender=a.sender or "", kind=a.kind or "",
+                             rated=a.rated or "", min_votes=a.min_votes,
                              sort=a.sort, limit=a.limit)
         if a.json:
             print(json.dumps(rep, indent=1))
@@ -1413,7 +1414,10 @@ def cmd_search(args):
                 if h.get("snippet"):
                     print(f"    {h['snippet'][:160]}")
         if empty:
-            print("nothing found in your channels — fewer/other words often help")
+            n = rep.get("channels_searched", 0)
+            print(f"searched everything you can read ({n} channel(s):"
+                  " messages, decisions, work, people, files) — no matches;"
+                  " fewer or different words often help")
     _run_agent_cmd(args, go)
 
 
@@ -2315,11 +2319,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     sr = _agent_parser("search", "hub-wide grouped search over everything "
                                  "you can read (the task-context digest)")
-    sr.add_argument("terms", nargs="+", help="free words; quoting not needed")
+    sr.add_argument("terms", nargs="*", default=[],
+                    help="free words; optional with --rated (browse by votes)")
     sr.add_argument("--kind", default="", help="message|decision|claim|work|file|agent")
     sr.add_argument("--channel", default="", help="narrow to one channel")
     sr.add_argument("--sender", default="", help="narrow to one sender")
-    sr.add_argument("--sort", default="relevance", choices=["relevance", "recent"])
+    sr.add_argument("--rated", default="", choices=["", "up", "down", "any"],
+                    help="only hits with standing votes (lessons mining)")
+    sr.add_argument("--min-votes", dest="min_votes", type=int, default=0)
+    sr.add_argument("--sort", default="relevance",
+                    choices=["relevance", "recent", "votes"])
     sr.add_argument("--limit", type=int, default=10)
     sr.add_argument("--json", action="store_true", help="raw typed report")
     sr.set_defaults(func=cmd_search)

@@ -6,18 +6,28 @@ untracked/search-spec-v2.md + cycle-3 amendments):
 
 - COMPILER: caller text never reaches FTS5 raw (column filters, NEAR,
   wildcards and unbalanced quotes all have live semantics or raise —
-  measured). Terms become quote-escaped phrases joined by implicit AND;
-  bare-punctuation tokens are dropped (a lone `-` matched 2,619 docs of
-  markdown bullets); hyphenated terms expand to OR with their split
-  phrase so "thumbs down" finds "thumbs-down" (9/11 docs missed
-  otherwise). Any byte string compiles to a valid MATCH or raises
-  SearchQueryError — one typed 400 whose shape never depends on corpus
-  or scope.
-- ZERO-HIT RELAXATION (F1): strict AND returns 0 for natural questions
-  ("who broke the reputation score" = 0 hits while "reputation bug" =
-  15, measured). On a zero-hit strict pass the executor re-runs the same
-  terms joined by OR and the report carries relaxed=true — loud, never
-  silent.
+  measured). Terms become quote-escaped phrases; bare-punctuation tokens
+  are dropped (a lone `-` matched 2,619 docs of markdown bullets). Any
+  byte string compiles to valid FTS atoms or raises SearchQueryError —
+  one typed 400 whose shape never depends on corpus or scope.
+- BLENDED RETRIEVAL (0134, the recall adversary's measured redesign —
+  recall@10 0.24 -> 0.41, recall@25 0.24 -> 0.54 on an 18-query topical
+  failure set): strict-AND + a zero-hit gate behaved anti-RAG (the
+  strict set exhausts; one stray file hit closed the relaxation gate).
+  Now ONE grouped union query: a branch per kept term weighted by
+  BM25-idf, a NEAR(a b, 10) branch per adjacent pair, soft-stop for
+  terms matching >25% of the corpus (keep all if all would drop),
+  GROUP BY rowid, ordered by matched-term mass then summed bm25.
+  Docs matching ALL terms keep maximal mass and rank first — strict
+  winners are unchanged; everything below is graceful OR fill.
+  `relaxed: true` when the best hit's term mass < the full query mass.
+- VOTES DIMENSION (operator dm#174): `rated=up|down|any` filters
+  message hits by their standing tally; `min_votes=N` needs that many
+  total votes; `sort=votes` orders the message sections by net rating.
+  With `rated` set, `q` may be EMPTY (browse mode: "most downvoted
+  work" without knowing its words). Default ranking stays vote-free —
+  measured 0.46% of messages carry votes, and agents can rate, so
+  vote-weighted default rank would be a burying surface, not a signal.
 - ACL: one membership JOIN inside ONE read-snapshot transaction per
   report (R1). Channel-bearing kinds join `members` for the caller;
   kind=agent joins the live roster. Non-member channels contribute
@@ -90,19 +100,22 @@ def compile_terms(q: str) -> list[str]:
 
 
 def _phrase(term: str) -> str:
-    """One term -> a safe FTS5 atom. Quote-escaped phrase; hyphen/underscore
-    terms additionally OR their split-phrase form (F3)."""
-    quoted = '"' + term.replace('"', '""') + '"'
-    parts = [p for p in term.replace("_", "-").split("-") if p]
-    if len(parts) > 1:
-        split_phrase = '"' + " ".join(p.replace('"', '""') for p in parts) + '"'
-        return f"({quoted} OR {split_phrase})"
-    return quoted
+    """One term -> a safe FTS5 atom: a quote-escaped phrase. Under the v2
+    tokenizer (no tokenchars) a hyphenated term tokenizes into adjacent
+    tokens on BOTH sides, so 'agora-0132' and 'stale-claims' match their
+    split forms with no expansion tricks."""
+    return '"' + term.replace('"', '""') + '"'
 
 
 def compile_match(terms: list[str], *, operator: str = "AND") -> str:
     joiner = " AND " if operator == "AND" else " OR "
     return joiner.join(_phrase(t) for t in terms)
+
+
+def near_pair(a: str, b: str) -> str:
+    """Adjacent-pair proximity branch: NEAR(a b, 10) — measured pure
+    recall@25 gain at zero precision cost (fix c in the recall report)."""
+    return f'NEAR({_phrase(a)} {_phrase(b)}, 10)'
 
 
 def encode_cursor(kind: str, created_at: float, doc_id: int) -> str:
@@ -261,23 +274,239 @@ class SearchExecutor:
             out[r["rowid"]] = _strip_sentinels(r["snip"])
         return out
 
+    # -- the blended one-pass retrieval (0134) ----------------------------
+
+    def _term_weights(self, terms: list[str]) -> list[tuple[str, float]]:
+        """BM25-idf weight per term, with the soft-stop: terms matching
+        >25% of the corpus carry no signal and drop from the branch set —
+        unless ALL would drop (never an empty query). The absolute floor
+        (df > 10) keeps the stop from inverting on tiny corpora, where a
+        single occurrence exceeds 25% and the MEANINGFUL terms would drop.
+        A df=0 term keeps its (maximal) idf: a query word absent from the
+        corpus is exactly an unmet expectation, and the relaxed flag must
+        see its weight in the full-query mass."""
+        import math
+        n = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM search_docs").fetchone()["n"] or 1
+        weighted: list[tuple[str, float, int]] = []
+        for t in terms:
+            df = self.conn.execute(
+                "SELECT COUNT(*) AS d FROM search_fts WHERE search_fts MATCH ?",
+                (_phrase(t),)).fetchone()["d"]
+            w = math.log(1.0 + (n - df + 0.5) / (df + 0.5))
+            weighted.append((t, max(w, 0.0), df))
+        kept = [(t, w) for t, w, df in weighted
+                if not (df > 0.25 * n and df > 10)]
+        if not kept:
+            kept = [(t, w) for t, w, _ in weighted]
+        return kept
+
+    def _blend(self, terms: list[str], filters: dict[str, Any],
+               per: int, sort: str) -> tuple[dict[str, dict[str, Any]], bool, str]:
+        """ONE grouped union pass over all kinds: term branches weighted by
+        idf + adjacent NEAR-pair branches, ordered by matched-term mass
+        then summed bm25. Strict-AND winners keep maximal mass and rank
+        first; below them is graceful OR fill. Returns (sections, relaxed,
+        or_match_for_snippets)."""
+        kept = self._term_weights(terms)
+        full_mass = sum(w for _, w in kept)
+        branches: list[str] = []
+        named: dict[str, Any] = {"caller": self.caller}
+        for i, (t, w) in enumerate(kept):
+            named[f"m{i}"] = _phrase(t)
+            named[f"w{i}"] = w
+            branches.append(
+                f"SELECT rowid AS rid, bm25(search_fts) AS r, :w{i} AS w,"
+                f" 1 AS is_term FROM search_fts WHERE search_fts MATCH :m{i}")
+        for i in range(len(kept) - 1):
+            a, wa = kept[i]
+            b, wb = kept[i + 1]
+            j = len(branches)
+            named[f"m{j}"] = near_pair(a, b)
+            named[f"w{j}"] = (wa + wb) / 2.0
+            branches.append(
+                f"SELECT rowid, bm25(search_fts), :w{j}, 0"
+                f" FROM search_fts WHERE search_fts MATCH :m{j}")
+        if len(branches) == 1:
+            # Keep the compound-select shape: a lone branch gets
+            # query-flattened and bm25() loses its FTS context (measured
+            # OperationalError — recall report §2.1). The dummy branch
+            # yields no rows and preserves the shape.
+            branches.append("SELECT 0, 0.0, 0.0, 0 WHERE 0")
+        union = " UNION ALL ".join(branches)
+
+        where, extra = self._filter_sql(filters, named)
+        sql = (
+            "WITH grouped AS ("
+            f"  SELECT rid, SUM(CASE WHEN is_term=1 THEN w ELSE 0 END) AS tmass,"
+            f"         SUM(w) AS mass, SUM(r) AS rsum FROM ({union})"
+            "   GROUP BY rid)"
+            " SELECT sd.doc_id, sd.kind, sd.channel, sd.ref, sd.title,"
+            "        sd.created_at, g.tmass, g.mass, g.rsum,"
+            "        msg.seq AS seq, msg.sender AS sender, msg.status AS status,"
+            "        COALESCE(rt.up,0) AS up, COALESCE(rt.down,0) AS down"
+            " FROM grouped g"
+            " JOIN search_docs sd ON sd.doc_id = g.rid"
+            " LEFT JOIN messages msg ON sd.kind = 'message' AND msg.id = sd.ref"
+            " LEFT JOIN (SELECT message_id,"
+            "              SUM(CASE WHEN value>0 THEN 1 ELSE 0 END) AS up,"
+            "              SUM(CASE WHEN value<0 THEN 1 ELSE 0 END) AS down"
+            "            FROM message_ratings GROUP BY message_id) rt"
+            "   ON sd.kind = 'message' AND rt.message_id = sd.ref"
+            " WHERE (sd.kind != 'message' OR (msg.id IS NOT NULL"
+            "        AND msg.retracted_at IS NULL))"
+            f" AND (CASE WHEN sd.kind = 'agent' THEN {self._AGENT_SCOPE}"
+            f"      ELSE {self._CH_SCOPE} END)"
+            f" {where}"
+            " ORDER BY g.mass DESC, g.rsum ASC"
+            " LIMIT 400")
+        rows = self.conn.execute(sql, named).fetchall()
+
+        kind_filter = filters.get("kind")
+        secs: dict[str, dict[str, Any]] = {
+            name: {"rows": [], "total": 0} for name in SECTIONS}
+
+        def bucket(r: sqlite3.Row) -> str | None:
+            k = r["kind"]
+            if k == "decision":
+                return "decisions"
+            if k in ("claim", "work"):
+                return "work"
+            if k == "agent":
+                return "people"
+            if k == "file":
+                return "files"
+            if k == "message":
+                return ("open_threads" if r["status"] in ("open", "blocked")
+                        else "messages")
+            return None
+
+        for r in rows:
+            name = bucket(r)
+            if name is None:
+                continue
+            if kind_filter and kind_filter not in (
+                    _KINDS_FOR.get(name) or ("message",)):
+                continue
+            sec = secs[name]
+            sec["total"] += 1
+            if len(sec["rows"]) < per:
+                sec["rows"].append(r)
+
+        # Display-order rulings survive the blend: structural sections
+        # newest-first; message sections optionally by net votes.
+        for name in _STRUCTURAL:
+            secs[name]["rows"].sort(key=lambda r: -r["created_at"])
+        if sort == "votes":
+            # Net DESC — the /top (agora-0125) precedent: best first; the
+            # worst-work lens is rated=down (+ this order within it).
+            for name in ("open_threads", "messages"):
+                secs[name]["rows"].sort(
+                    key=lambda r: (-(r["up"] - r["down"]), -r["created_at"]))
+
+        best_tmass = rows[0]["tmass"] if rows else 0.0
+        relaxed = bool(rows) and len(kept) > 1 and \
+            best_tmass < full_mass - 1e-9
+        or_match = compile_match([t for t, _ in kept], operator="OR")
+        return secs, relaxed, or_match
+
+    def _filter_sql(self, filters: dict[str, Any],
+                    named: dict[str, Any]) -> tuple[str, None]:
+        """Shared caller-filter fragment for the blend query (channels,
+        sender, since/until, ref, rated, min_votes)."""
+        parts: list[str] = []
+        if filters.get("channels"):
+            keys = []
+            for i, ch in enumerate(filters["channels"]):
+                named[f"fc{i}"] = ch
+                keys.append(f":fc{i}")
+            parts.append(f"AND sd.channel IN ({','.join(keys)})")
+        if filters.get("sender"):
+            named["fsender"] = filters["sender"]
+            parts.append("AND (sd.kind != 'message' OR msg.sender = :fsender)")
+        if filters.get("since") is not None:
+            named["fsince"] = filters["since"]
+            parts.append("AND sd.created_at >= :fsince")
+        if filters.get("until") is not None:
+            named["funtil"] = filters["until"]
+            parts.append("AND sd.created_at <= :funtil")
+        if filters.get("ref"):
+            named["frefpat"] = f"%{filters['ref']}%"
+            parts.append("AND (sd.ref LIKE :frefpat OR sd.title LIKE :frefpat"
+                         " OR sd.text LIKE :frefpat)")
+        rated = filters.get("rated")
+        if rated == "up":
+            parts.append("AND COALESCE(rt.up,0) > 0")
+        elif rated == "down":
+            parts.append("AND COALESCE(rt.down,0) > 0")
+        elif rated == "any":
+            parts.append("AND (COALESCE(rt.up,0) + COALESCE(rt.down,0)) > 0")
+        if filters.get("min_votes"):
+            named["fmv"] = int(filters["min_votes"])
+            parts.append("AND (COALESCE(rt.up,0) + COALESCE(rt.down,0)) >= :fmv")
+        return " ".join(parts), None
+
+    def _browse(self, filters: dict[str, Any], per: int,
+                sort: str) -> dict[str, dict[str, Any]]:
+        """No-query browse mode (rated filter required by the service):
+        'most downvoted work' without knowing its words. Message kinds
+        only — ratings exist nowhere else."""
+        named: dict[str, Any] = {"caller": self.caller}
+        where, _ = self._filter_sql(filters, named)
+        order = ("(COALESCE(rt.up,0) - COALESCE(rt.down,0)) DESC,"
+                 " sd.created_at DESC" if sort == "votes"
+                 else "sd.created_at DESC")
+        sql = (
+            "SELECT sd.doc_id, sd.kind, sd.channel, sd.ref, sd.title,"
+            "       sd.created_at, msg.seq AS seq, msg.sender AS sender,"
+            "       msg.status AS status,"
+            "       COALESCE(rt.up,0) AS up, COALESCE(rt.down,0) AS down"
+            " FROM search_docs sd"
+            " JOIN messages msg ON msg.id = sd.ref AND msg.retracted_at IS NULL"
+            " LEFT JOIN (SELECT message_id,"
+            "              SUM(CASE WHEN value>0 THEN 1 ELSE 0 END) AS up,"
+            "              SUM(CASE WHEN value<0 THEN 1 ELSE 0 END) AS down"
+            "            FROM message_ratings GROUP BY message_id) rt"
+            "   ON rt.message_id = sd.ref"
+            f" WHERE sd.kind = 'message' AND {self._CH_SCOPE}"
+            f" {where}"
+            f" ORDER BY {order}"
+            " LIMIT 400")
+        rows = self.conn.execute(sql, named).fetchall()
+        secs: dict[str, dict[str, Any]] = {
+            name: {"rows": [], "total": 0} for name in SECTIONS}
+        for r in rows:
+            name = ("open_threads" if r["status"] in ("open", "blocked")
+                    else "messages")
+            secs[name]["total"] += 1
+            if len(secs[name]["rows"]) < per:
+                secs[name]["rows"].append(r)
+        return secs
+
     def run(self, terms: list[str], filters: dict[str, Any], *,
             sort: str = "relevance", limit: int = DEFAULT_PER_SECTION,
             cursor: str | None = None) -> dict[str, Any]:
-        """The grouped report as plain dicts (typed models wrap in step 4)."""
-        match = compile_match(terms, operator="AND")
-        relaxed = False
-
+        """The grouped report as plain dicts (typed models wrap in the
+        service). Three paths: blended one-pass (relevance, the default),
+        per-section recent (keyset-pageable), and no-query browse."""
+        per = min(limit, MAX_LIMIT)
         kind_filter = filters.get("kind")
+        relaxed = False
+        or_match: str | None = None
 
-        def sections_for(m: str) -> dict[str, dict[str, Any]]:
-            per = min(limit, MAX_LIMIT)
-            secs: dict[str, dict[str, Any]] = {}
+        if not terms:
+            secs = self._browse(filters, per, sort)
+        elif sort == "relevance" or sort == "votes":
+            secs, relaxed, or_match = self._blend(terms, filters, per, sort)
+        else:
+            # sort=recent: the per-section path (keyset cursor contract).
+            match = compile_match(terms, operator="AND")
+            or_match = match
             anchor = None
             if cursor:
                 decoded = decode_cursor(cursor)
                 # Malformed/foreign cursor = start over (never an oracle).
-                if decoded and decoded["k"] == kind_filter and sort == "recent":
+                if decoded and decoded["k"] == kind_filter:
                     anchor = decoded
             spec: list[tuple[str, tuple[str, ...], dict[str, Any]]] = [
                 ("decisions", ("decision",), {}),
@@ -289,26 +518,16 @@ class SearchExecutor:
                 ("messages", ("message",),
                  {"exclude_statuses": ("open", "blocked")}),
             ]
+            secs = {}
             for name, kinds, kw in spec:
-                # kind filter gates WHICH sections carry content; the six
-                # sections are always served (fixed shape, 3A ruling).
                 if kind_filter and kind_filter not in kinds:
                     secs[name] = {"rows": [], "total": 0}
                     continue
-                order = ("recent" if (name in _STRUCTURAL or sort == "recent")
-                         else "relevance")
-                rows = self._hits(m, kinds, filters=filters, order=order,
-                                  quota=per, anchor=anchor, **kw)
-                total = self._count(m, kinds, filters=filters, **kw)
+                rows = self._hits(match, kinds, filters=filters,
+                                  order="recent", quota=per, anchor=anchor,
+                                  **kw)
+                total = self._count(match, kinds, filters=filters, **kw)
                 secs[name] = {"rows": rows, "total": total}
-            return secs
-
-        secs = sections_for(match)
-        if all(s["total"] == 0 for s in secs.values()) and len(terms) > 1:
-            # F1: strict AND found nothing anywhere — relax to OR, loudly.
-            match = compile_match(terms, operator="OR")
-            secs = sections_for(match)
-            relaxed = True
 
         # Thread collapse (messages section only): one row per root.
         msg_rows = secs["messages"]["rows"]
@@ -325,9 +544,10 @@ class SearchExecutor:
                 collapsed.append(r)
         secs["messages"]["rows"] = collapsed
 
-        # Snippets: two-phase, winners only.
+        # Snippets: two-phase, winners only. Browse mode has no matched
+        # terms — hits ride on titles alone there.
         all_ids = [r["doc_id"] for s in secs.values() for r in s["rows"]]
-        snips = self._snippets(match, all_ids)
+        snips = self._snippets(or_match, all_ids) if or_match else {}
 
         report: dict[str, Any] = {"relaxed": relaxed, "sections": {},
                                   "computed_at": time.time()}

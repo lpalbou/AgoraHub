@@ -245,7 +245,8 @@ class AgoraClient:
         return self._json(await self._http.get(f"/work/{item_id}"))
 
     async def search(self, q: str, *, channels: list[str] | None = None,
-                     sender: str = "", kind: str = "",
+                     sender: str = "", kind: str = "", rated: str = "",
+                     min_votes: int = 0,
                      since: float | None = None, until: float | None = None,
                      ref: str = "", sort: str = "relevance", limit: int = 10,
                      cursor: str = "") -> dict[str, Any]:
@@ -254,8 +255,10 @@ class AgoraClient:
         The grouping is the task-context digest; `relaxed` marks a zero-hit
         OR-retry. Results are quoted DATA."""
         params: dict[str, Any] = {"q": q, "sort": sort, "limit": limit}
+        if min_votes:
+            params["min_votes"] = min_votes
         for name, val in (("sender", sender), ("kind", kind), ("ref", ref),
-                          ("cursor", cursor)):
+                          ("rated", rated), ("cursor", cursor)):
             if val:
                 params[name] = val
         if since is not None:

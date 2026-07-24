@@ -1161,29 +1161,34 @@ def desk(
 
 @router.get("/search")
 def search(
-    q: str = Query(min_length=1, max_length=256),
+    q: str = Query(default="", max_length=256),
     channel: list[str] = Query(default=[]),
     sender: str = Query(default=""),
     kind: str = Query(default=""),
     since: float | None = Query(default=None),
     until: float | None = Query(default=None),
     ref: str = Query(default=""),
+    rated: str = Query(default=""),
+    min_votes: int = Query(default=0, ge=0),
     sort: str = Query(default="relevance"),
     limit: int = Query(default=10, ge=1, le=50),
     cursor: str = Query(default=""),
     agent: AgentInfo = Depends(current_agent),
     service: HubService = Depends(get_service),
 ) -> SearchReport:
-    """Hub search (agora-0132): one grouped report over everything the
+    """Hub search (agora-0132/0134): one grouped report over EVERYTHING the
     CALLER can read — decisions, open threads, work, people, files,
-    messages; the grouping is the task-context digest. Membership-scoped
-    inside one snapshot; results are quoted DATA; no scores on the wire;
-    `relaxed=true` marks a zero-hit OR-retry. The route stays sync: the
-    executor's one-transaction-per-report invariant rides the threadpool
-    worker (cycle-3A)."""
+    messages; the grouping is the task-context digest. Blended retrieval:
+    docs matching all words rank first, topical neighbors fill below
+    (`relaxed=true` when fill leads). Votes dimension: rated=up|down|any
+    filters by standing tally, sort=votes orders by net rating, and with
+    `rated` set `q` may be empty (browse mode). Membership-scoped inside
+    one snapshot; results are quoted DATA; no scores on the wire. The
+    route stays sync: the one-transaction-per-report invariant rides the
+    threadpool worker (cycle-3A)."""
     return _run(service.search, agent, q, channels=channel, sender=sender,
-                kind=kind, since=since, until=until, ref=ref, sort=sort,
-                limit=limit, cursor=cursor)
+                kind=kind, since=since, until=until, ref=ref, rated=rated,
+                min_votes=min_votes, sort=sort, limit=limit, cursor=cursor)
 
 
 @router.get("/work/{item_id}")

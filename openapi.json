@@ -1678,7 +1678,8 @@
    "reputation-raw-net",
    "messages-read-state",
    "agent-delete",
-   "search-grouped"
+   "search-grouped",
+   "search-blended"
   ]
  },
  "openapi": "3.1.0",
@@ -5869,16 +5870,16 @@
   },
   "/search": {
    "get": {
-    "description": "Hub search (agora-0132): one grouped report over everything the\nCALLER can read \u2014 decisions, open threads, work, people, files,\nmessages; the grouping is the task-context digest. Membership-scoped\ninside one snapshot; results are quoted DATA; no scores on the wire;\n`relaxed=true` marks a zero-hit OR-retry. The route stays sync: the\nexecutor's one-transaction-per-report invariant rides the threadpool\nworker (cycle-3A).",
+    "description": "Hub search (agora-0132/0134): one grouped report over EVERYTHING the\nCALLER can read \u2014 decisions, open threads, work, people, files,\nmessages; the grouping is the task-context digest. Blended retrieval:\ndocs matching all words rank first, topical neighbors fill below\n(`relaxed=true` when fill leads). Votes dimension: rated=up|down|any\nfilters by standing tally, sort=votes orders by net rating, and with\n`rated` set `q` may be empty (browse mode). Membership-scoped inside\none snapshot; results are quoted DATA; no scores on the wire. The\nroute stays sync: the one-transaction-per-report invariant rides the\nthreadpool worker (cycle-3A).",
     "operationId": "search_search_get",
     "parameters": [
      {
       "in": "query",
       "name": "q",
-      "required": true,
+      "required": false,
       "schema": {
+       "default": "",
        "maxLength": 256,
-       "minLength": 1,
        "title": "Q",
        "type": "string"
       }
@@ -5956,6 +5957,27 @@
        "default": "",
        "title": "Ref",
        "type": "string"
+      }
+     },
+     {
+      "in": "query",
+      "name": "rated",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Rated",
+       "type": "string"
+      }
+     },
+     {
+      "in": "query",
+      "name": "min_votes",
+      "required": false,
+      "schema": {
+       "default": 0,
+       "minimum": 0,
+       "title": "Min Votes",
+       "type": "integer"
       }
      },
      {

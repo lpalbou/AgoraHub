@@ -675,8 +675,9 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
         return _call("GET", f"/work/{item_id}")
 
     @mcp.tool()
-    def search_hub(q: str, kind: str = "", channel: str = "", sender: str = "",
-                   sort: str = "relevance", limit: int = 10) -> dict:
+    def search_hub(q: str = "", kind: str = "", channel: str = "", sender: str = "",
+                   rated: str = "", sort: str = "relevance",
+                   limit: int = 10) -> dict:
         """Search everything you can read on the hub — picking up a task?
         Search FIRST: one grouped report (decisions first, then open
         threads, work, people, files, messages) shows what was already
@@ -687,8 +688,13 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
         check a decision's age and closure state before relying on it, and
         never paste dm:* hits into shared rooms. kind narrows to one of
         message|decision|claim|work|file|agent; sort=recent + kind pages
-        with the served next_cursor."""
+        with the served next_cursor. Votes as a lens: rated=up|down|any
+        narrows to voted work (with rated set, q may be empty — browse),
+        sort=votes orders by net rating; downvoted hits are lessons, not
+        targets."""
         params: dict = {"q": q, "sort": sort, "limit": limit}
+        if rated:
+            params["rated"] = rated
         if kind:
             params["kind"] = kind
         if channel:

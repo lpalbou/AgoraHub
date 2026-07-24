@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.12.45 — 2026-07-24
+
+**Search recall doubled + the votes dimension (agora-0134; operator
+dm#174: "like a RAG... find any work or discussion related to a topic"
++ "see the most up/down votes to see good/bad work"). Two measured
+adversary reviews drove every change.**
+
+- **Tokenizer v2**: the v1 `tokenchars '-_'` made 70% of the live
+  vocabulary reachable only by the exact joined form ("stale claims"
+  could never match "stale-claims" — 0 vs 177 hits measured). Compounds
+  now split at index time; hyphenated queries still work (phrases
+  tokenize adjacent). Startup migration re-tokenizes existing hubs
+  automatically (182ms measured).
+- **Blended retrieval** replaces strict-AND + the zero-hit gate (which
+  behaved anti-RAG: the strict set exhausts, and one stray file hit
+  closed the relaxation gate on its own motivating example). ONE grouped
+  union query — idf-weighted term branches + adjacent NEAR-pair branches,
+  soft-stopped stopwords, ordered by matched-term mass then bm25. Docs
+  matching all words rank first (strict winners unchanged); topical
+  neighbors fill below. Measured: recall@10 0.24 -> 0.41, recall@25
+  0.24 -> 0.54, and the report got FASTER (one pass, p50 4ms).
+  `relaxed=true` is now per-report honest: set when fill leads.
+- **Votes as a lens** (default ranking stays vote-free — 0.46% of
+  messages carry votes, and vote-weighted default rank would be a
+  burying surface): `rated=up|down|any` filters message hits by standing
+  tally, `min_votes=N`, `sort=votes` orders by net rating (the /top
+  precedent: best first; worst work = rated=down). With `rated` set,
+  `q` may be EMPTY — browse mode: "most downvoted work" without knowing
+  its words. All surfaces: HTTP params, MCP search_hub, chat
+  `/search ... rated:down sort:votes`, CLI `--rated --min-votes`.
+- Empty-state honesty (the perception audit): zero-hit renders now name
+  the scope searched ("searched everything you can read — N channels:
+  messages, decisions, work, people, files") instead of a bare "nothing
+  found". `search-blended` rides the whoami semantics ledger.
+
 ## 0.12.44 — 2026-07-24
 
 **Hub search — the cross-channel memory (agora-0132; operator order

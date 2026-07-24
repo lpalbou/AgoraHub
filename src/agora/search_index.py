@@ -68,11 +68,22 @@ CREATE INDEX IF NOT EXISTS idx_search_docs_channel ON search_docs (channel);
 # main SCHEMA runs before we know FTS5 is available; the migration path in
 # db.py calls ensure_fts() which raises a clear error if the sqlite build
 # lacks FTS5 (verified compiled-in on this machine's pythons, cycle-3C).
+#
+# TOKENIZER v2 (recall adversary, 2026-07-24 — the sharpest single finding):
+# v1's tokenchars '-_' made every hyphenated compound ONE token — 70% of
+# the live vocabulary, 10.8% of postings, reachable only by typing the
+# exact joined form ("stale claims" could NEVER match "stale-claims";
+# measured 0 vs 177 hits). Plain `porter unicode61` splits compounds;
+# hyphenated QUERIES keep working because a quoted phrase tokenizes into
+# adjacent tokens ("agora-0132" still finds its docs — measured). A
+# tokenizer change requires re-tokenizing: db.py detects the version
+# mismatch at startup and drops + rebuilds (182ms measured).
+TOKENIZER_VERSION = "2:porter-unicode61"
 FTS_DDL = (
     "CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5("
     " title, text,"
     " content='search_docs', content_rowid='doc_id',"
-    " tokenize=\"porter unicode61 tokenchars '-_'\")"
+    " tokenize=\"porter unicode61\")"
 )
 
 

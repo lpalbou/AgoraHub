@@ -520,19 +520,20 @@ class ChatApp:
         kind:decision, sender:laurent, channel:commons, sort:recent,
         limit:N. Sections: decisions, open threads, work, people, files,
         messages. `relaxed` marks a zero-hit OR-retry."""
-        if not arg.strip():
-            self._print("usage: /search TERMS [kind:decision] [sender:ID]"
-                        " [channel:NAME] [sort:recent] [limit:N]")
-            return
         words: list[str] = []
         filters: dict[str, str] = {}
         for tok in arg.split():
             if ":" in tok and tok.split(":", 1)[0] in (
-                    "kind", "sender", "channel", "sort", "limit"):
+                    "kind", "sender", "channel", "sort", "limit", "rated"):
                 k, v = tok.split(":", 1)
                 filters[k] = v
             else:
                 words.append(tok)
+        if not words and not filters.get("rated"):
+            self._print("usage: /search TERMS [kind:decision] [sender:ID]"
+                        " [channel:NAME] [sort:recent|votes] [rated:up|down|any]"
+                        " [limit:N] — searches EVERYTHING you can read")
+            return
         s = self.style
         try:
             rep = await self.client.search(
@@ -540,14 +541,15 @@ class ChatApp:
                 channels=[filters["channel"]] if "channel" in filters else None,
                 sender=filters.get("sender", ""),
                 kind=filters.get("kind", ""),
+                rated=filters.get("rated", ""),
                 sort=filters.get("sort", "relevance"),
                 limit=int(filters.get("limit", 10)))
         except Exception as exc:
             self._print(s.red(f"search failed (hub predates search?): {exc}"))
             return
         if rep.get("relaxed"):
-            self._print(s.dim("exact match found nothing — showing looser"
-                              " OR results (relaxed)"))
+            self._print(s.dim("not everything you typed matches together — "
+                              "top hits match the most words; narrow if loose"))
         shown_any = False
         for name in ("decisions", "open_threads", "work", "people",
                      "files", "messages"):
@@ -576,8 +578,11 @@ class ChatApp:
                 self._print(s.dim(f"  … +{extra} more — narrow terms or"
                                   f" kind:{name}"))
         if not shown_any:
-            self._print(s.dim("nothing found in your channels — fewer/other"
-                              " words often help"))
+            n = rep.get("channels_searched", 0)
+            self._print(s.dim(f"searched everything you can read ({n} "
+                              "channel(s): messages, decisions, work, people,"
+                              " files) — no matches; fewer or different words"
+                              " often help"))
 
     async def cmd_top(self, arg: str) -> None:
         """`/top [N]` — this room's most up-voted messages (agora-0125): the
