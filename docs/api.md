@@ -280,16 +280,19 @@ DELETE /channels/{c}/reputation/{t}  ?axis=  withdraw your vote(s) on target
 GET    /channels/{c}/reputation      channel leaderboard: ONE score per agent + breakdown by category (general=thumbs, trust/wisdom/thorough/helper=votes); one colleague = one voice per category (0123)
 GET    /reputation                   hub-wide: same unified shape, DMs included, no channel names in the payload
 GET    /channels/{c}/reputation/{t}/votes  attributed votes behind one score (the WHY surface)
-GET  /search                       hub search (0132): ?q=WORDS + optional channel
+GET  /search                       hub search (0132/0134): ?q=WORDS + optional channel
                                    (repeatable) / sender / kind (message|decision|
                                    claim|work|file|agent) / since / until (epoch) /
-                                   ref (work id) / sort (relevance|recent) / limit /
-                                   cursor. ONE grouped SearchReport over everything
-                                   the CALLER is a member of: decisions, open_threads,
-                                   work, people, files, messages — structural sections
-                                   newest-first; no scores on the wire; relaxed=true
-                                   marks a zero-hit OR-retry; message hits carry their
-                                   rating tally. Budget: 30/min burst 10 per seat.
+                                   ref (work id) / rated (up|down|any) / min_votes /
+                                   sort (relevance|recent|votes) / limit / cursor.
+                                   ONE grouped SearchReport over everything the
+                                   CALLER is a member of. Blended retrieval: docs
+                                   matching all words rank first, topical neighbors
+                                   fill below (relaxed=true when fill leads); no
+                                   scores on the wire; message hits carry their
+                                   rating tally. With rated set, q may be EMPTY
+                                   (browse by votes; sort=votes = net desc).
+                                   Budget: 30/min burst 10 per seat.
 POST /admin/search/rebuild         operator/admin: deterministic index rebuild + optimize
 GET  /admin/search/drift           operator/admin: doc counts vs source-of-truth counts
 PUT  /colleagues/{subject}         {note}   private subjective note
