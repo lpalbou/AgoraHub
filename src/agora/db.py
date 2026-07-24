@@ -13,6 +13,7 @@ database file never contains usable bearer secrets.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import hmac
 import json
@@ -21,6 +22,7 @@ import threading
 import time
 from typing import Any
 
+from . import search_index as _si
 from .ids import new_ulid
 from .models import AgentInfo, Channel, Member, Message, StoreEntry
 
@@ -310,6 +312,12 @@ class Database:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._lock = threading.Lock()
+        # Read-only pool for ms-class reads (search, agora-0132). Lazy:
+        # opened at first use, which is guaranteed to be AFTER this writer
+        # connection established WAL (R2: mode=ro cannot open a WAL db whose
+        # sidecars are absent). :memory: has no shareable file — the pool is
+        # None there and read_transaction() degrades to the writer lock.
+        self._read_pool = _si.ReadPool(path) if path != ":memory:" else None
         with self._lock:
             self._conn.executescript(_SCHEMA)
             # Migration: add the ledger hash column to a pre-existing messages
@@ -339,6 +347,19 @@ class Database:
                     "ALTER TABLE agents ADD COLUMN retired_reason TEXT NOT NULL DEFAULT ''")
             if "deleted_at" not in agent_cols:
                 self._conn.execute("ALTER TABLE agents ADD COLUMN deleted_at REAL")
+            # Hub search (0132): shadow corpus + FTS5. DDL is idempotent;
+            # on a pre-existing hub whose corpus is nonempty but whose index
+            # is empty, build it now — measured 354ms on the live corpus,
+            # blocking on purpose (a hub serving un-indexed search would
+            # look broken in a subtler way).
+            self._conn.executescript(_si.SCHEMA)
+            _si.ensure_fts(self._conn)
+            have_docs = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM search_docs").fetchone()["n"]
+            have_msgs = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM messages").fetchone()["n"]
+            if have_docs == 0 and have_msgs > 0:
+                _si.rebuild(self._conn)
             self._conn.commit()
         self._migrate_operator_reactions()
         # Reconcile runs on EVERY startup (agora-0125), independently of the
@@ -503,11 +524,17 @@ class Database:
         """The one agents INSERT, shared by plain registration and join-token
         redemption (which must run it inside ITS transaction). Caller holds
         self._lock and commits."""
+        now = time.time()
         self._conn.execute(
             "INSERT INTO agents (id, name, about, operator, key_hash, created_at)"
             " VALUES (?,?,?,?,?,?)",
-            (agent_id, name, about, int(operator), hash_secret(api_key), time.time()),
+            (agent_id, name, about, int(operator), hash_secret(api_key), now),
         )
+        # Search sync (0132): the ONE agents INSERT is the one about-doc
+        # choke point (register and token-redemption both land here).
+        if about:
+            s_title, s_text = _si.agent_doc(agent_id, name, about)
+            _si.put_doc(self._conn, "agent", None, agent_id, s_title, s_text, now)
         return AgentInfo(id=agent_id, name=name, about=about, operator=operator)
 
     def register_agent(self, agent_id: str, name: str, api_key: str,
@@ -530,6 +557,15 @@ class Database:
     def set_about(self, agent_id: str, about: str) -> None:
         with self._lock:
             self._conn.execute("UPDATE agents SET about = ? WHERE id = ?", (about, agent_id))
+            row = self._conn.execute(
+                "SELECT name FROM agents WHERE id = ?", (agent_id,)).fetchone()
+            if about:
+                s_title, s_text = _si.agent_doc(
+                    agent_id, row["name"] if row else agent_id, about)
+                _si.put_doc(self._conn, "agent", None, agent_id, s_title, s_text,
+                            time.time())
+            else:
+                _si.del_doc(self._conn, "agent", None, agent_id)
             self._conn.commit()
 
     def get_about(self, agent_id: str) -> str:
@@ -596,6 +632,10 @@ class Database:
             # its messages (cast by others) stay, like votes about it.
             self._conn.execute("DELETE FROM message_ratings WHERE rater = ?",
                                (agent_id,))
+            # Search sync (0132): retired seats are off every roster; a
+            # searchable about would be the one surface still advertising
+            # the seat (choke-point audit, 2A).
+            _si.del_doc(self._conn, "agent", None, agent_id)
             self._conn.commit()
         return channels
 
@@ -606,6 +646,14 @@ class Database:
             self._conn.execute(
                 "UPDATE agents SET retired_at = NULL, retired_reason = '' WHERE id = ?",
                 (agent_id,))
+            # Search sync (0132): restore the about-doc retire removed.
+            row = self._conn.execute(
+                "SELECT name, about, created_at FROM agents WHERE id = ?",
+                (agent_id,)).fetchone()
+            if row is not None and row["about"]:
+                s_title, s_text = _si.agent_doc(agent_id, row["name"], row["about"])
+                _si.put_doc(self._conn, "agent", None, agent_id, s_title, s_text,
+                            row["created_at"])
             self._conn.commit()
 
     def delete_agent(self, agent_id: str) -> None:
@@ -653,6 +701,9 @@ class Database:
             # and a deleted observer's notes have no reader left).
             self._conn.execute("DELETE FROM notes WHERE observer = ? OR subject = ?",
                                (agent_id, agent_id))
+            # Search sync (0132): the row-blanking alone would leave a
+            # stale about-doc (belt over the retire-time removal).
+            _si.del_doc(self._conn, "agent", None, agent_id)
             self._conn.commit()
 
     def agent_deleted(self, agent_id: str) -> bool:
@@ -1078,6 +1129,9 @@ class Database:
                  int(downgraded), json.dumps(to), title, body,
                  json.dumps(data) if data is not None else None, reply_to, now, msg_hash),
             )
+            # Search sync (0132), same transaction as the source write.
+            s_title, s_text = _si.message_doc(channel, msg_id, title, body, data)
+            _si.put_doc(self._conn, "message", channel, msg_id, s_title, s_text, now)
             self._conn.commit()
         return Message(
             id=msg_id, channel=channel, seq=seq, sender=sender, kind=kind, status=status,
@@ -1185,6 +1239,13 @@ class Database:
                 "UPDATE messages SET retracted_at = COALESCE(retracted_at, ?), "
                 "retracted_by = COALESCE(retracted_by, ?) WHERE id = ?",
                 (time.time(), by, message_id))
+            # Search purge (0132), same transaction: match-then-redact is
+            # forbidden — the FTS row must die WITH the retraction, or the
+            # match itself becomes an oracle for the retracted words.
+            row = self._conn.execute(
+                "SELECT channel FROM messages WHERE id = ?", (message_id,)).fetchone()
+            if row is not None:
+                _si.del_doc(self._conn, "message", row["channel"], message_id)
             self._conn.commit()
 
     def last_seq(self, channel: str) -> int:
@@ -1509,6 +1570,11 @@ class Database:
                 " updated_by=excluded.updated_by, updated_at=excluded.updated_at",
                 (channel, key, json.dumps(value), new_version, updated_by, now),
             )
+            # Search sync (0132): whitelisted prefixes only, default-closed.
+            kind = _si.store_kind(key)
+            if kind is not None:
+                s_title, s_text = _si.store_doc(key, value)
+                _si.put_doc(self._conn, kind, channel, key, s_title, s_text, now)
             self._conn.commit()
         return StoreEntry(channel=channel, key=key, value=value, version=new_version,
                           updated_by=updated_by, updated_at=now)
@@ -1977,6 +2043,10 @@ class Database:
                 " VALUES (?,?,?,?,?,?)",
                 (channel, key, new_version, json.dumps(value), updated_by, now),
             )
+            # Search sync (0132): HEAD only (history versions never indexed);
+            # a put on a tombstoned path re-creates the doc.
+            s_title, s_text = _si.fs_doc(key, value)
+            _si.put_doc(self._conn, "file", channel, key, s_title, s_text, now)
             self._conn.commit()
         return StoreEntry(channel=channel, key=key, value=value, version=new_version,
                           updated_by=updated_by, updated_at=now)
@@ -2010,6 +2080,9 @@ class Database:
                 " VALUES (?,?,?,NULL,?,?)",
                 (channel, key, new_version, updated_by, now),
             )
+            # Search purge (0132): a tombstoned head must be unmatchable
+            # immediately (H2 — same oracle class as message retraction).
+            _si.del_doc(self._conn, "file", channel, key)
             self._conn.commit()
         return new_version
 
@@ -2317,7 +2390,47 @@ class Database:
             self._conn.execute("SELECT 1")
         return True
 
+    @contextlib.contextmanager
+    def read_transaction(self) -> Any:
+        """One consistent read snapshot for ms-class reads (search, 0132).
+
+        On a file-backed hub this checks a connection out of the read-only
+        pool and wraps it in ONE explicit BEGIN DEFERRED..COMMIT — the R1
+        invariant: every section, count and snippet of a report reads the
+        SAME snapshot (bare SELECTs in Python autocommit each see their
+        own). Readers never block the writer and vice versa (WAL).
+        On :memory: (tests) there is no shareable file: degrade to the
+        writer connection under the writer lock — serialized, therefore
+        trivially snapshot-consistent."""
+        if self._read_pool is None:
+            with self._lock:
+                yield self._conn
+            return
+        with self._read_pool.connection() as conn:
+            conn.execute("BEGIN DEFERRED")
+            try:
+                yield conn
+            finally:
+                with contextlib.suppress(sqlite3.Error):
+                    conn.commit()
+
+    def rebuild_search_index(self) -> dict[str, int]:
+        """Deterministic full rebuild (drift eraser + FTS optimize), one
+        writer transaction, DML-only — WAL readers keep their snapshot."""
+        with self._lock:
+            counts = _si.rebuild(self._conn)
+            self._conn.commit()
+        return counts
+
+    def search_drift(self) -> dict[str, Any]:
+        with self._lock:
+            return _si.drift_counts(self._conn)
+
     def close(self) -> None:
+        # Pool first (R3): an open read transaction pins WAL frames and
+        # would make the TRUNCATE checkpoint below return busy.
+        if self._read_pool is not None:
+            self._read_pool.close()
         with self._lock:
             self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             self._conn.close()
