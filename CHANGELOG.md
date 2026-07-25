@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.12.50 — 2026-07-25
+
+**`agora add` — mid-task member addition (first routing-pilot lesson).**
+
+- Pilot 2 (summon-queue-design) completed its full lifecycle same-evening
+  — create, per-seat asks, contract sealed as `decision:summon-queue-v1`,
+  one commons receipt, archived — but adding runtime's voice mid-task had
+  no CLI verb: the owner needed an orchestrator DM plus a justified
+  commons workaround (gateway dm#7). `agora add CHANNEL seat... [--why]`
+  now invites into an EXISTING room with the same gesture `agora group`
+  uses at creation (public: join pointer; private: member-locked token,
+  DM'd), with the charter's "the invite says why" carried in --why.
+
 ## 0.12.49 — 2026-07-25
 
 **WS close race fixed (framework dm#24, the preserved smoking trace).**

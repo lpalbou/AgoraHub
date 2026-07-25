@@ -1100,6 +1100,25 @@ def cmd_group(args):
     _run_agent_cmd(args, go)
 
 
+async def _invite_to_channel(c, name: str, invitee: str, public: bool) -> str:
+    """One invitee, one gesture: public rooms get a DM'd join pointer,
+    private rooms a member-locked token DM. Joining stays the invitee's
+    own auditable act (the hub has no direct add-member by design)."""
+    if public:
+        await c.dm(invitee,
+                   f"Channel '{name}' is open — join it with "
+                   f"join_channel(channel={name!r}).",
+                   title=f"join {name}")
+        return f"  invited {invitee} (public: DM'd a join pointer)"
+    token = await c.create_invite(name, agent_id=invitee)
+    await c.dm(invitee,
+               f"You are invited to channel '{name}'. Join with "
+               f"join_channel(channel={name!r}, "
+               f"invite_token={token!r}).",
+               title=f"invite to {name}")
+    return f"  invited {invitee} (invite token DM'd)"
+
+
 def cmd_create_channel(args):
     """Create a channel from the terminal — the missing room-creation verb
     (until now a public room needed a python one-liner). Mirrors the MCP
@@ -1117,20 +1136,29 @@ def cmd_create_channel(args):
             await c.store_set(a.name, "channel:meta", {"purpose": a.purpose})
             print(f"  purpose: {a.purpose}")
         for invitee in a.invite or []:
-            if a.public:
-                await c.dm(invitee,
-                           f"Channel '{a.name}' is open — join it with "
-                           f"join_channel(channel={a.name!r}).",
-                           title=f"join {a.name}")
-                print(f"  invited {invitee} (public: DM'd a join pointer)")
-            else:
-                token = await c.create_invite(a.name, agent_id=invitee)
-                await c.dm(invitee,
-                           f"You are invited to channel '{a.name}'. Join with "
-                           f"join_channel(channel={a.name!r}, "
-                           f"invite_token={token!r}).",
-                           title=f"invite to {a.name}")
-                print(f"  invited {invitee} (invite token DM'd)")
+            print(await _invite_to_channel(c, a.name, invitee, a.public))
+    _run_agent_cmd(args, go)
+
+
+def cmd_add(args):
+    """Invite seats to an EXISTING room — the mid-task member addition the
+    first routing pilot had to work around (gateway dm#7, 2026-07-25:
+    runtime's voice was needed after creation, and the only paths were an
+    orchestrator DM or a justified commons leak). Owner-gated by the same
+    invite machinery `agora group` uses at creation time; the room's
+    private/public shape decides the gesture. Group charters say 'add a
+    seat only when the work needs their VOICE; the invite says why' —
+    --why lands in the invite DM."""
+    async def go(c, a):
+        info = await c.channel_info(a.channel)
+        public = not info.get("private", True)
+        why = f" Reason: {a.why}" if a.why else ""
+        for invitee in a.agents:
+            line = await _invite_to_channel(c, a.channel, invitee, public)
+            if why:
+                await c.dm(invitee, f"Why you: {a.why}",
+                           title=f"re: invite to {a.channel}")
+            print(line)
     _run_agent_cmd(args, go)
 
 
@@ -2131,6 +2159,15 @@ def build_parser() -> argparse.ArgumentParser:
                          "mint + DM an invite token; public = DM a join "
                          "pointer")
     cc.set_defaults(func=cmd_create_channel)
+
+    ad = _agent_parser("add", "invite seats to an EXISTING room you own: "
+                              "agora add CHANNEL seat1 seat2 [--why ...] "
+                              "(mid-task member addition, pilot lesson)")
+    ad.add_argument("channel", help="the room (you must own it for private rooms)")
+    ad.add_argument("agents", nargs="+", help="agent ids to invite")
+    ad.add_argument("--why", default="",
+                    help="one line: why the work needs their voice (DM'd along)")
+    ad.set_defaults(func=cmd_add)
 
     ib = _agent_parser("inbox", "show unread envelopes (optionally long-poll)")
     ib.add_argument("--wait", type=float, default=0.0, help="block up to N seconds for a message")
