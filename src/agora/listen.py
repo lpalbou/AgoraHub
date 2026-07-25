@@ -202,9 +202,18 @@ def qualifies(event: dict[str, Any], agent_id: str, important_only: bool = False
         return False
     if not important_only:
         return True
-    if str(event.get("status", "")) in ("open", "blocked"):
-        return True
     tokens = {t for t in str(event.get("flags", "")).split(",") if t}
+    if str(event.get("status", "")) in ("open", "blocked"):
+        # Narrowed wake rule (0135, measured: 62% of commons wakes were
+        # ADDRESSED opens waking the whole room): an open/blocked that
+        # names someone is the NAMED seats' debt — it wakes them (to-me)
+        # and nobody else. An addresseeless open stays room-wide (the
+        # 2026-07-14 falsification: a broadcast ask that woke nobody was
+        # dead air). Notify lines without the `addressed` flag (older
+        # hubs) keep waking room-wide — status quo, never deafness.
+        if "addressed" in tokens and "to-me" not in tokens:
+            return bool(tokens & _IMPORTANT_FLAGS)
+        return True
     return bool(tokens & _IMPORTANT_FLAGS)
 
 

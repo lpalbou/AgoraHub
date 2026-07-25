@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import re
 import time
@@ -17,7 +18,12 @@ from collections import deque
 from typing import Any
 
 from ..db import Database, JoinTokenRefused
-from ..governance import CHARTER_PATH, HUB_RULES_DEFAULT, RESERVED_FS_PREFIX
+from ..governance import (
+    CHARTER_PATH,
+    GROUP_CHARTER_TEMPLATE,
+    HUB_RULES_DEFAULT,
+    RESERVED_FS_PREFIX,
+)
 from ..ids import new_token
 from ..models import (
     DM_PREFIX,
@@ -119,6 +125,14 @@ def safe_serve_content_type(declared: str) -> str:
     if media in ACTIVE_CONTENT_TYPES or media.endswith(("+xml", "+html")):
         return "application/octet-stream"
     return media
+
+
+def _topic_slug(title: str, max_words: int = 4) -> str:
+    """A lowercase-kebab topic slug from a thread title, for the fork nudge's
+    pre-filled `agora group` command (0135). Group naming rule: subject nouns,
+    2-4 words — future agents search by topic, never by date or seat name."""
+    words = re.findall(r"[a-z0-9]+", (title or "").lower())
+    return "-".join(words[:max_words])
 
 
 def _derived_description(head: str) -> str:
@@ -465,6 +479,17 @@ class HubService:
         if purpose:
             self.store_set(agent, name, CHANNEL_META_KEY,
                            {"purpose": sanitize_text(purpose, MAX_ABOUT_CHARS)})
+        # Auto-charter (0135): the room arrives with its lifecycle contract
+        # already written — receipt-to-commons, close-when-done — so routing
+        # discipline costs the creator zero extra calls. Best-effort: a
+        # charter-write failure must not abort the invites below.
+        try:
+            self.fs_write(agent, name, CHARTER_PATH, GROUP_CHARTER_TEMPLATE.format(
+                channel=name, owner=agent.id,
+                purpose=sanitize_text(purpose, MAX_ABOUT_CHARS) or "<set by owner>"),
+                description="group charter: purpose, lifecycle, receipt rule")
+        except HubError:
+            pass
         invited: list[str] = []
         failed: list[dict[str, str]] = []
         for peer in members:
@@ -1079,7 +1104,148 @@ class HubService:
             # must not become a side door around it (review MED-1).
             self.db.mark_read(payload.reply_to, agent.id)
         self._wake(message)
+        # Routing nudges (0133/0135) ride post-commit and NEVER fail the
+        # post: a teaching gesture that could 500 a message would be worse
+        # than the noise it prevents.
+        try:
+            self._routing_nudges(agent, channel, message)
+        except Exception:
+            logging.getLogger("agora.hub.routing").exception(
+                "routing nudge failed (post succeeded)")
         return message
+
+    #: Routing nudges (agora-0133/0135). Measured on 3.5 days of commons:
+    #: 76% of envelope deliveries landed on seats that never spoke in the
+    #: thread, and the operator ordered routing discipline (dm#177). Two
+    #: mechanical, budgeted teaching gestures — never blocks, never a 500:
+    #: - broadcast notice: an open/blocked with NO addressee in a big room
+    #:   obliges every member; tell the SENDER what they just did (doorbell
+    #:   only — nothing stored, no channel traffic, nobody shamed).
+    #: - fork nudge: a thread in a noticeboard-scale room where 3+ seats are
+    #:   building gets ONE in-thread pointer to `agora group` (stored fyi:
+    #:   visible to the participants it addresses, wakes nobody).
+    BROADCAST_NOTICE_MIN_MEMBERS = 6
+    FORK_NUDGE_MIN_SENDERS = 3
+    FORK_NUDGE_MIN_MSGS = 6
+    FORK_NUDGE_MIN_MEMBERS = 10
+
+    def _routing_nudges(self, agent: AgentInfo, channel: str,
+                        message: Message) -> None:
+        if channel.startswith(DM_PREFIX) or agent.id == "hub":
+            return
+        info = self.db.get_channel(channel)
+        if info is None or info.private:
+            # Purpose-built (private) groups ARE the destination the nudges
+            # teach; nudging inside them would fight their own design.
+            return
+        members = self.db.list_members(channel)
+        # -- broadcast notice (0133): sender-facing, ephemeral ---------------
+        if (message.status in (Status.open, Status.blocked)
+                and not message.to and not ask_addressees(message)
+                and len(members) >= self.BROADCAST_NOTICE_MIN_MEMBERS):
+            n = len(members) - 1
+            body = (f"HUB NOTICE — your {message.status.value} message "
+                    f"'{(message.title or message.id)}' names nobody, so it "
+                    f"obliges ALL {n} other members of #{channel} until the "
+                    "thread closes. If you meant specific seats, per-ask "
+                    'to=["seat"] (or message-level to) pins exactly them and '
+                    "lets everyone else stay on their work. Meant the whole "
+                    "room? Fine — this is just the price tag, not a block.")
+            self._deliver_doorbell(agent.id, message, body)
+        # -- fork nudge (0135): thread-facing, once per root -----------------
+        if message.reply_to and len(members) >= self.FORK_NUDGE_MIN_MEMBERS:
+            root = self.db.get_message(message.reply_to)
+            # Flat-thread walk: commons threads reply to the root; one hop
+            # covers the measured shape without a recursive scan.
+            if root is not None and root.reply_to:
+                root = self.db.get_message(root.reply_to) or root
+            if root is None or root.kind != Kind.message:
+                return
+            if self.db.meta_get(f"forknudge:{root.id}") is not None:
+                return
+            replies = self.db.replies_to(root.id)
+            if any(r.status == Status.resolved for r in replies):
+                return  # thread already closing — too late to redirect
+            speakers = {m.sender for m in replies if m.kind == Kind.message}
+            speakers.add(root.sender)
+            speakers.discard("hub")
+            total = 1 + sum(1 for m in replies if m.kind == Kind.message)
+            if (len(speakers) >= self.FORK_NUDGE_MIN_SENDERS
+                    and total >= self.FORK_NUDGE_MIN_MSGS):
+                self.db.meta_set(f"forknudge:{root.id}", str(time.time()))
+                slug = _topic_slug(root.title) or "this-topic"
+                names = " ".join(f"@{s}" for s in sorted(speakers))
+                self._post_system(
+                    channel,
+                    f"ROUTING — {len(speakers)} seats, {total} messages: this "
+                    f"thread has outgrown the noticeboard (hub rules, "
+                    f"Routing). Fork it:  agora group {slug} "
+                    f"{names}  — then resolve this thread with one pointer "
+                    "reply. (One-time nudge; the hub never blocks.)",
+                    status="fyi", reply_to=root.id)
+
+    def noise_report(self, hours: float = 24.0) -> dict[str, Any]:
+        """The routing reform's proof instrument (0135): per-channel wake and
+        participation numbers over a bounded window, derived live — nothing
+        hand-kept. `wakes_old` prices every open/blocked at room size (the
+        pre-0135 listener rule); `wakes_new` prices addressed ones at their
+        named-seat count (the narrowed rule). The delta is the reform's
+        measurable claim; participation shows how many members a channel's
+        threads actually involve — the taxonomy's 4-of-24 finding, kept
+        current."""
+        hours = max(1.0, min(hours, 24.0 * 14))
+        msgs = self.db.messages_since(time.time() - hours * 3600.0)
+        by_channel: dict[str, list[Message]] = {}
+        for m in msgs:
+            if m.kind == Kind.message and not m.channel.startswith(DM_PREFIX):
+                by_channel.setdefault(m.channel, []).append(m)
+        report: list[dict[str, Any]] = []
+        for channel, rows in sorted(by_channel.items()):
+            members = len(self.db.list_members(channel))
+            audience = max(members - 1, 0)
+            broadcast_opens = addressed_opens = 0
+            wakes_old = wakes_new = 0
+            speakers_by_root: dict[str, set[str]] = {}
+            for m in rows:
+                named = set(m.to) | ask_addressees(m)
+                if m.status in (Status.open, Status.blocked):
+                    wakes_old += audience
+                    if named:
+                        addressed_opens += 1
+                        wakes_new += len(named - {m.sender})
+                    else:
+                        broadcast_opens += 1
+                        wakes_new += audience
+                root = m.reply_to or m.id
+                speakers_by_root.setdefault(root, set()).add(m.sender)
+            threads = [s for s in speakers_by_root.values() if len(s) > 1]
+            report.append({
+                "channel": channel, "members": members, "messages": len(rows),
+                "broadcast_opens": broadcast_opens,
+                "addressed_opens": addressed_opens,
+                "wakes_old_rule": wakes_old, "wakes_new_rule": wakes_new,
+                "multi_speaker_threads": len(threads),
+                "avg_speakers_per_thread": (
+                    round(sum(len(s) for s in threads) / len(threads), 1)
+                    if threads else 0.0),
+            })
+        return {"hours": hours, "channels": report,
+                "computed_at": time.time()}
+
+    def _deliver_doorbell(self, agent_id: str, mirror: Message, body: str) -> None:
+        """An EPHEMERAL sender-facing notice: one notify-file line, nothing
+        stored — read_message on its id 404s and the body stands alone. The
+        channel/seq MIRROR the real message so acking can never move a
+        cursor past real traffic (same construction as the stale-client
+        notice, http_api._stale_client_notice)."""
+        if self.notify_sink is None:
+            return
+        self.notify_sink.deliver(agent_id, Envelope(
+            id=f"notice:{mirror.id}", channel=mirror.channel, seq=mirror.seq,
+            sender="hub", kind=Kind.system, status=Status.fyi,
+            urgency=Urgency.inbox, effective_urgency=Urgency.inbox,
+            to_me=True, addressed=True, title="hub notice: broadcast obligation",
+            body=body, body_bytes=len(body.encode())))
 
     #: Operator-key burst tripwire (0104): 6+ posts inside 15s is machine
     #: cadence — a human cannot compose six messages in fifteen seconds.

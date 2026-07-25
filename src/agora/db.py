@@ -1316,6 +1316,18 @@ class Database:
             ).fetchone()
         return row is not None
 
+    def messages_since(self, since: float) -> list[Message]:
+        """All non-retracted messages newer than `since`, hub-wide — the noise
+        report's raw material (0135). Time-bounded (the report caps its
+        window), read-only, DM channels included so the report can EXCLUDE
+        them by name without a second query shape."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM messages WHERE created_at > ? "
+                "AND retracted_at IS NULL ORDER BY created_at",
+                (since,)).fetchall()
+        return [self._row_to_message(r) for r in rows]
+
     def unread_criticals(self, agent_id: str, channels: list[str]) -> list[Message]:
         """Critical messages stay pinned until the agent actually reads the body."""
         if not channels:

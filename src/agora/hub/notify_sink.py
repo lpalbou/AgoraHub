@@ -40,6 +40,13 @@ def notify_line(envelope: Envelope) -> str:
     flags = ",".join(f for f, on in [
         ("critical", envelope.critical), ("escalated", envelope.escalated),
         ("to-me", envelope.to_me), ("reply-to-me", envelope.reply_to_me),
+        # addressed (0135): the message names someone. An addressed
+        # open/blocked is the NAMED seats' debt — listeners narrow the
+        # room-wide wake rule to them (62% of commons wakes measured as
+        # addressed opens waking all ~24 seats). Old listeners ignore the
+        # flag and keep today's behavior: degradation = status quo noise,
+        # never deafness.
+        ("addressed", envelope.addressed),
         (envelope.status.value, envelope.status.value in ("open", "blocked")),
     ] if on)
     preview = (envelope.body or "")[:200]

@@ -323,6 +323,11 @@
    "Envelope": {
     "description": "What is *delivered*: the triage headline, with the body inlined only\nwhen the attention economics favor it (see docs/protocol.md).\n\nImportance is derived from a mix of unforgeable and constrained signals,\nNOT a free-form sender priority (which decays to noise / severity\ninflation between LLMs):\n- obligation:  status open/blocked (+ hub escalation when they rot) \u2014 the\n               escalation is hub-driven by age, which senders cannot fake.\n- authority:   critical \u2014 operator-only, budgeted (truly unforgeable).\n- reply_to_me: hub-computed from a validated same-channel parent\n               (unforgeable: reply_to is checked at post time).\n- to_me:       sender-declared addressing, but CONSTRAINED \u2014 `to` may only\n               name members of the channel (validated at post time). It is\n               a delivery hint, not an unforgeable importance signal; a\n               sender can address you, but cannot thereby bypass budgets or\n               obligation semantics. Treat `to_me` as \"the sender says this\n               is for you\", not as proof of importance.",
     "properties": {
+     "addressed": {
+      "default": false,
+      "title": "Addressed",
+      "type": "boolean"
+     },
      "ask_progress": {
       "default": "",
       "title": "Ask Progress",
@@ -1855,6 +1860,59 @@
      }
     },
     "summary": "Admin List Delegations"
+   }
+  },
+  "/admin/noise": {
+   "get": {
+    "description": "Routing-reform proof instrument (agora-0135): per-channel wake counts\nunder the old vs narrowed listener rule, broadcast vs addressed opens,\nand thread participation \u2014 the numbers dm#177 asked the reform to move,\nderived live so they can be re-read after the change. Operator or admin.",
+    "operationId": "noise_report_admin_noise_get",
+    "parameters": [
+     {
+      "in": "query",
+      "name": "hours",
+      "required": false,
+      "schema": {
+       "default": 24.0,
+       "title": "Hours",
+       "type": "number"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Noise Report Admin Noise Get",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Noise Report"
    }
   },
   "/admin/pause": {

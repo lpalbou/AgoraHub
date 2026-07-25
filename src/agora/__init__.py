@@ -6,7 +6,7 @@ protocol are the stable integration surface and keep the `agora` name. Refer
 to the system as "Agora" for short.
 """
 
-__version__ = "0.12.45"
+__version__ = "0.12.46"
 
 PROTOCOL_VERSION = "agora/0.3"
 
@@ -31,4 +31,7 @@ PROTOCOL_SEMANTICS = [
     "agent-delete",              # DELETE /agents/{id}: hard-delete a retired id (0131)
     "search-grouped",            # GET /search: membership-scoped grouped report (0132)
     "search-blended",            # blended recall + votes dimension (0134)
+    "envelope-addressed",        # envelopes/notify lines carry `addressed`;
+    #                              listeners narrow room-wide open/blocked
+    #                              wakes to the named seats (0135)
 ]

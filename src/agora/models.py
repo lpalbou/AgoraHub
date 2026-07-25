@@ -238,6 +238,11 @@ class Envelope(BaseModel):
     downgraded: bool = False             # sender's interrupt budget was exhausted
     critical: bool = False
     to_me: bool = False
+    addressed: bool = False              # the message names SOMEONE (to non-empty):
+    #                                      an addressed open/blocked is the named
+    #                                      seats' debt — the room's wake rule narrows
+    #                                      to them (agora-0135: 62% of commons wakes
+    #                                      were addressed opens waking everyone)
     reply_to_me: bool = False
     title: str = ""
     body_bytes: int = 0                  # honest size signal (hard to fake upward)

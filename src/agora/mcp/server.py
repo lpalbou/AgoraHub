@@ -315,6 +315,20 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
         return _call("POST", f"/channels/{channel}/invites", json={"agent_id": agent_id})
 
     @mcp.tool()
+    def create_group(name: str, members: list[str], purpose: str = "",
+                     opening_post: str = "") -> dict:
+        """Spin up a FOCUSED room in one call: create the channel (you own
+        it), stamp its charter, invite each named member (they get a DM with
+        the token), and post `opening_post` as the room's first open
+        obligation. Use this when 3+ seats must SPEAK on one problem over
+        multiple turns (hub rules, Routing) — name it as a topic slug
+        (e.g. gateway-discovery-incident), keep the member list to the seats
+        whose voice the work needs. Returns invited/failed per member."""
+        return _call("POST", "/groups", json={
+            "name": name, "members": members, "purpose": purpose,
+            "opening_post": opening_post})
+
+    @mcp.tool()
     def archive_channel(channel: str) -> dict:
         """End a channel you own (0090): evict all members, delist it, refuse
         further posts — HISTORY IS PRESERVED (this is archive, not delete).

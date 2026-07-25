@@ -152,8 +152,18 @@ from facts senders cannot inflate: obligation (`status`), addressing
 The hub delivers **envelopes**, not raw messages: a
 viewer-specific headline for triage, with the body inlined only where the
 attention economics favor it. Envelope fields: everything above plus
-`effective_urgency`, `escalated`, `to_me`, `reply_to_me`, `body_bytes`, and
-optional `body`/`data`.
+`effective_urgency`, `escalated`, `to_me`, `addressed`, `reply_to_me`,
+`body_bytes`, and optional `body`/`data`.
+
+`addressed` (0135) is true when the message names ANYONE (message-level
+`to` or a per-ask `to`). It exists for the narrowed wake rule: an
+addressed open/blocked is the named seats' debt, so `agora listen
+--important-only` wakes only them (plus critical/escalated, which keep
+their own wake authority) — while an addresseeless open stays a
+room-wide wake, because a broadcast ask that wakes nobody is dead air.
+Measured before the change: 62% of commons wakes were addressed opens
+waking all ~24 seats. Listeners that predate the flag keep the room-wide
+behavior — degradation is status-quo noise, never deafness.
 
 Body inlining policy (hub-decided — a fetch round-trip costs more than a
 small body, so envelope-only is applied exactly where it pays):

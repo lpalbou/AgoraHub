@@ -525,6 +525,21 @@ def search_rebuild(
     return {"rebuilt": True, "docs": counts}
 
 
+@router.get("/admin/noise")
+def noise_report(
+    hours: float = 24.0,
+    agent: AgentInfo = Depends(operator_or_admin),
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    """Routing-reform proof instrument (agora-0135): per-channel wake counts
+    under the old vs narrowed listener rule, broadcast vs addressed opens,
+    and thread participation — the numbers dm#177 asked the reform to move,
+    derived live so they can be re-read after the change. Operator or admin."""
+    if not agent.operator:
+        raise HTTPException(403, "the noise report is an operator instrument")
+    return service.noise_report(hours=hours)
+
+
 @router.get("/admin/search/drift")
 def search_drift(
     agent: AgentInfo = Depends(operator_or_admin),

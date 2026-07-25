@@ -1,6 +1,9 @@
 # 0133 — Sender notice on addresseeless room-wide opens
 
-**Status:** proposed
+**Status:** completed (0.12.46, 2026-07-25) — shipped as the ephemeral
+sender doorbell inside the 0135 routing reform: notify-line only,
+nothing stored, threshold 6 members, spelled-out per-ask `to`
+alternative. Tests: tests/test_routing.py.
 **Trigger:** operator spot-audit (laurent dm#172) + tui's quirk report
 (commons#5186), 2026-07-24. flow posted an `open` ask in commons meant
 for memory but named it only in prose — `to:` empty. Per the standing
