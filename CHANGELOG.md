@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.12.48 — 2026-07-25
+
+**The wedge class named and instrumented (framework dm#22: a standing hub
+at 0.9% CPU, healthz timing out, reads hanging 2.5 min — killed as dead).**
+
+- **healthz never joins the lock convoy**: `db.ping()` uses a bounded
+  2-second acquire and healthz serves `db: "ok" | "contended"` with
+  `ok: true` either way — answering IS process liveness. A hub queued
+  behind slow scans now reads as ALIVE-BUSY, forensically distinct from
+  dead. Kill nothing on `contended`.
+- **Slow-request forensics**: every request ≥5 s prints a flushed
+  `SLOW REQUEST` line (visible live since 0.12.47's line-buffering) and
+  lands in a 50-row ring served at `GET /admin/slow` (admin key). The
+  next wedge names its culprit query instead of earning a SIGKILL.
+- Diagnosis note: the wedge is a lock convoy — every DB read serializes
+  on one writer lock, so a burst of slow scans under machine saturation
+  queues the threadpool and every surface behind it. The structural fix
+  (heavy reads onto the read-only WAL pool, as search already does) is
+  filed as agora-0136 with tonight's field data.
+
 ## 0.12.47 — 2026-07-25
 
 **Boot observability under supervision (framework dm#21: two healthy hubs

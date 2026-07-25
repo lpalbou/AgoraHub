@@ -159,7 +159,41 @@ def test_healthz(client):
     (the root `/` was the only introspection before)."""
     response = client.get("/healthz")
     assert response.status_code == 200
-    assert response.json()["ok"] is True
+    body = response.json()
+    assert body["ok"] is True
+    assert body["db"] == "ok"
+
+
+def test_healthz_answers_contended_instead_of_hanging(client):
+    """The wedge-vs-dead distinction (framework dm#22, 2026-07-25): a hub
+    whose writer lock is held by a slow scan must still ANSWER healthz —
+    'contended' — instead of joining the lock convoy and reading as dead.
+    Two healthy hubs were SIGKILLed in one evening for exactly that."""
+    import threading
+
+    service = client.app.state.service
+    release = threading.Event()
+    acquired = threading.Event()
+
+    def hold_lock():
+        with service.db._lock:
+            acquired.set()
+            release.wait(timeout=10)
+
+    holder = threading.Thread(target=hold_lock, daemon=True)
+    holder.start()
+    assert acquired.wait(timeout=5)
+    try:
+        # Bounded probe: returns promptly with the honest state.
+        assert service.db.ping(timeout=0.2) == "contended"
+        response = client.get("/healthz")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["ok"] is True          # answering IS process liveness
+    finally:
+        release.set()
+        holder.join(timeout=5)
+    assert service.db.ping() == "ok"       # convoy cleared, db reachable
 
 
 def test_root_and_healthz_report_the_package_version(client):

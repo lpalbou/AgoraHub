@@ -2409,11 +2409,23 @@ class Database:
                 " WHERE ended_at IS NULL OR ended_at > ?", (since,)).fetchall()
         return [(r["started_at"], r["ended_at"]) for r in rows]
 
-    def ping(self) -> bool:
-        """Cheap liveness probe for /healthz."""
-        with self._lock:
+    def ping(self, timeout: float = 2.0) -> str:
+        """Liveness probe for /healthz that NEVER joins the lock convoy.
+
+        Field incident (framework dm#22, 2026-07-25): under fleet load the
+        writer lock backs up (each reader queues behind slow scans), the
+        anyio threadpool fills with waiters, and a healthz that blocks on
+        the same lock times out — a STANDING hub reads as dead, and it got
+        SIGKILLed for it. A bounded acquire answers honestly instead:
+        'ok' (lock acquired, db reachable) or 'contended' (alive, busy —
+        forensically distinct from dead). Never hangs."""
+        if not self._lock.acquire(timeout=timeout):
+            return "contended"
+        try:
             self._conn.execute("SELECT 1")
-        return True
+            return "ok"
+        finally:
+            self._lock.release()
 
     @contextlib.contextmanager
     def read_transaction(self) -> Any:

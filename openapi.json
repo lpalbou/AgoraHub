@@ -1684,7 +1684,8 @@
    "messages-read-state",
    "agent-delete",
    "search-grouped",
-   "search-blended"
+   "search-blended",
+   "envelope-addressed"
   ]
  },
  "openapi": "3.1.0",
@@ -2185,6 +2186,29 @@
      }
     },
     "summary": "Search Rebuild"
+   }
+  },
+  "/admin/slow": {
+   "get": {
+    "operationId": "admin_slow_admin_slow_get",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "items": {
+          "additionalProperties": true,
+          "type": "object"
+         },
+         "title": "Response Admin Slow Admin Slow Get",
+         "type": "array"
+        }
+       }
+      },
+      "description": "Successful Response"
+     }
+    },
+    "summary": "Admin Slow"
    }
   },
   "/admin/status": {

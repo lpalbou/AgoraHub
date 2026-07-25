@@ -6,7 +6,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 
 from .. import PROTOCOL_VERSION, __version__
 from ..db import Database
@@ -65,6 +65,39 @@ def create_app(db_path: str = "agora.db", admin_key: str = "",
     app = FastAPI(title="agora hub", version=__version__, lifespan=lifespan)
     app.state.service = service
     app.state.admin_key = admin_key
+
+    # Slow-request forensics (framework dm#22: a standing hub wedged for 28
+    # minutes and nothing named the culprit). Any request over the threshold
+    # is printed (line-buffered since 0.12.47 — it lands in the log live)
+    # and kept in a small ring served at /admin/slow. This is the instrument
+    # that turns the NEXT "wedge" from a kill into a named query.
+    import collections
+    import time as _time
+    slow_ring: collections.deque = collections.deque(maxlen=50)
+    SLOW_SECONDS = 5.0
+
+    @app.middleware("http")
+    async def _slow_request_log(request, call_next):  # type: ignore[no-untyped-def]
+        t0 = _time.time()
+        response = await call_next(request)
+        elapsed = _time.time() - t0
+        if elapsed >= SLOW_SECONDS:
+            row = {"method": request.method, "path": request.url.path,
+                   "seconds": round(elapsed, 1), "at": t0}
+            slow_ring.append(row)
+            print(f"SLOW REQUEST {row['seconds']}s {row['method']} "
+                  f"{row['path']}", flush=True)
+        return response
+
+    @app.get("/admin/slow")
+    def admin_slow(request: Request) -> list[dict[str, Any]]:
+        import hmac as _hmac
+        auth = request.headers.get("authorization", "")
+        token = auth.removeprefix("Bearer ").strip()
+        if not _hmac.compare_digest(token, admin_key):
+            raise HTTPException(403, "the slow-request ring requires the admin key")
+        return list(slow_ring)
+
     app.include_router(http_api.router)
 
     # The LIVE /openapi.json carries the same capability stamps as the
@@ -95,7 +128,12 @@ def create_app(db_path: str = "agora.db", admin_key: str = "",
         # hub. `paused` rides here unauthenticated so a supervisor can tell a
         # stood-down hub from a dead one; `protocol` so an unauthenticated
         # probe can also tell WHAT the hub speaks (docs/protocol.md, Scope).
-        return {"ok": service.db.ping(), "version": __version__,
+        # `db` is three-valued (framework dm#22): "ok" | "contended" — a
+        # contended db means ALIVE but queued behind slow reads; kill
+        # nothing, read /admin/slow for the culprit. `ok` is process
+        # liveness and stays true either way (answering IS the proof).
+        db_state = service.db.ping()
+        return {"ok": True, "db": db_state, "version": __version__,
                 "protocol": PROTOCOL_VERSION,
                 "paused": service.hub_paused() is not None}
 
