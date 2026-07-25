@@ -31,6 +31,7 @@ import asyncio
 import json
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from starlette.websockets import WebSocketState
 
 from ..models import Message, PostMessage
 from .service import HubError, HubService
@@ -38,6 +39,31 @@ from .service import HubError, HubService
 router = APIRouter()
 
 _QUEUE_SIZE = 1000
+
+
+async def _safe_close(websocket: WebSocket, code: int, reason: str = "") -> None:
+    """Close a socket that may ALREADY be closed — and never raise.
+
+    The reconnect storm after every hub restart (all seats' listeners
+    re-dial at once) races the three closers of one socket: the client's
+    own disconnect, the pump-death callback, and the hub-blocked control
+    frame. The loser used to raise `Cannot call "send" once a close
+    message has been sent` inside a fire-and-forget task ("Task exception
+    was never retrieved") and page-long ASGI tracebacks read like hub
+    crashes (framework dm#24, /tmp/agora_hub.log, 2026-07-25). An
+    already-closed socket IS the goal state — arriving second is success,
+    not an exception.
+
+    The guard skips only DISCONNECTED: a CONNECTING socket (pre-accept)
+    must still be closable — that IS the auth-refusal rejection path, and
+    guarding it away left unauthenticated connects hanging forever
+    (caught live: the WS test suite deadlocked on exactly that)."""
+    if websocket.application_state is WebSocketState.DISCONNECTED:
+        return
+    try:
+        await websocket.close(code=code, reason=reason)
+    except RuntimeError:
+        pass  # closed under us between the check and the call — fine
 
 
 @router.websocket("/ws")
@@ -55,7 +81,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         # otherwise a well-behaved client discards good credentials. 4401 for
         # a genuine auth failure, 4403 for a block/authorization refusal.
         code = 4403 if e.status_code == 403 else 4401
-        await websocket.close(code=code, reason=e.detail[:120])
+        await _safe_close(websocket, code, e.detail[:120])
         return
 
     await websocket.accept()
@@ -81,7 +107,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 # socket opened BEFORE the block must not keep delivering.
                 # Closing here converts it into a disconnect; any reconnect
                 # is refused by the authenticate gate at accept time.
-                await websocket.close(code=4403, reason="hub-blocked")
+                await _safe_close(websocket, 4403, "hub-blocked")
                 return
             if payload.get("type") == "message":
                 # Fan-out carries the raw message; the envelope is computed
@@ -116,7 +142,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         # the socket converts it into a disconnect, which the client's
         # reconnect + catch-up machinery already handles (review F4).
         pump.add_done_callback(
-            lambda t: asyncio.ensure_future(websocket.close(code=1011))
+            lambda t: asyncio.ensure_future(_safe_close(websocket, 1011))
             if not t.cancelled() and t.exception() is not None else None)
         while True:
             raw = await websocket.receive_text()
@@ -129,6 +155,14 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 continue
             await _handle_frame(service, agent, frame, queue)
     except WebSocketDisconnect:
+        pass
+    except RuntimeError:
+        # The pump-death callback (or hub-blocked frame) closed this socket
+        # while receive_text() was parked on it: starlette then raises
+        # RuntimeError('WebSocket is not connected...') instead of
+        # WebSocketDisconnect (framework dm#24 trace, ws.py:122). An
+        # app-side close is a normal end of connection — same exit as a
+        # client disconnect; the finally below runs the one cleanup path.
         pass
     finally:
         if pump is not None:

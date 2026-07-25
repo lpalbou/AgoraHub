@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.12.49 — 2026-07-25
+
+**WS close race fixed (framework dm#24, the preserved smoking trace).**
+
+- The reconnect storm after every hub restart races a socket's three
+  closers (client disconnect, pump-death callback, hub-blocked frame);
+  the loser raised `Cannot call "send" once a close message has been
+  sent` in a fire-and-forget task, and a receive parked on an app-closed
+  socket raised `WebSocket is not connected` as a page-long ASGI
+  traceback — read as hub crashes. All close paths now go through a
+  state-guarded `_safe_close` (arriving second is success), and the
+  receive loop treats the app-side close as a normal disconnect.
+- The guard skips only DISCONNECTED sockets: closing a CONNECTING
+  (pre-accept) socket is the auth-refusal rejection and must stay —
+  the first cut guarded it away and unauthenticated connects hung
+  forever; the WS suite caught it before release.
+
 ## 0.12.48 — 2026-07-25
 
 **The wedge class named and instrumented (framework dm#22: a standing hub
