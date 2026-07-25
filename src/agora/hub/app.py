@@ -41,6 +41,14 @@ def create_app(db_path: str = "agora.db", admin_key: str = "",
         # WebSocket connects still marshals fan-out wake-ups onto this loop
         # (rather than running inline on a worker thread).
         service.bind_loop(asyncio.get_running_loop())
+        # The supervisor's readiness signal (framework dm#21): one flushed
+        # line the moment the app starts serving, so "booting" and "dead"
+        # are distinguishable from the LOG alone — an empty log after this
+        # point means the process died, never that it is grinding. (Two
+        # healthy hubs were SIGKILLed in one evening on empty-log evidence;
+        # the emptiness was stdout block-buffering, fixed in cmd_up.)
+        print(f"agora hub ready — serving {__version__} ({PROTOCOL_VERSION}); "
+              "probe /healthz for liveness, never the log", flush=True)
         # Dark-episode watchdog (0067): one operator alert per (agent, episode)
         # when a seat is offline holding SLA-breached obligations. 0 disables.
         watchdog = (asyncio.create_task(service.dark_watchdog(dark_watch_seconds))

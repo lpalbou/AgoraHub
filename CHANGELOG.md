@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.12.47 — 2026-07-25
+
+**Boot observability under supervision (framework dm#21: two healthy hubs
+SIGKILLed in one evening on empty-log evidence).**
+
+- `agora up` line-buffers stdout/stderr: when piped (supervisor, `| tee`),
+  Python block-buffered the boot banner into invisibility — the hub served
+  while its log read EMPTY, and the operator's delegate killed it as
+  wedged. Every print now lands the moment it happens.
+- A flushed **"agora hub ready"** line prints from lifespan the moment the
+  app starts serving: an empty log after boot now means DEAD, never
+  "grinding". Measured on a copy of the live 108 MB hub db: boot-to-healthz
+  ~24 s under heavy machine load, `Database.__init__` <100 ms — there is no
+  per-boot index grind (the tokenizer migration stamps once); the observed
+  ~9-minute "grind" was machine saturation plus the invisible banner.
+
 ## 0.12.46 — 2026-07-25
 
 **Communication topology reform, v1 (agora-0133/0135; operator order

@@ -173,6 +173,18 @@ def cmd_up(args: argparse.Namespace) -> None:
 
     from .hub.app import create_app
 
+    # Observability under supervision (framework dm#21, 2026-07-25): when
+    # stdout is a PIPE (supervisor, `| tee log`), Python block-buffers it —
+    # the banner below sat invisible in the buffer while the hub served,
+    # the log read EMPTY, and two healthy hubs were SIGKILLed as "wedged"
+    # the same evening. Line-buffer both streams so every print lands the
+    # moment it happens; the post-bind "ready" line comes from lifespan.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(line_buffering=True)
+        except (AttributeError, ValueError):
+            pass  # non-reconfigurable stream (tests, exotic wrappers)
+
     home = _config.home()
     cfg = _config.load_config()
     db_path = args.db or cfg.get("db_path") or str(home / "agora.db")
