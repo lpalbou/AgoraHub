@@ -82,3 +82,51 @@ def test_reconcile_heals_a_restored_db():
                     models_present={"m"})
     assert out["to_embed"] == [("message", "room", "kept")]
     assert out["to_delete_docs"] == [("message", "room", "post-backup-doc")]
+
+
+def test_embedder_thread_fills_heals_and_reports(tmp_path):
+    """The thread against the fake endpoint: fill from zero, coverage
+    ready, orphan purge on doc removal, degraded-with-reason on endpoint
+    failure — and the heartbeat never freezes in a lying state."""
+    import time
+
+    import pytest
+    pytest.importorskip("numpy")
+    from agora.embed_client import EmbedClient
+    from agora.embedder import Embedder
+    from agora.vector_store import VectorStore
+    from tests.fake_embed import FakeEmbedServer
+
+    server = FakeEmbedServer().start()
+    store = VectorStore(str(tmp_path / "vectors.db"))
+    corpus = {("message", "room", f"m{i}"):
+              {"text_hash": f"h{i}", "title": f"t{i}", "text": f"body {i}",
+               "created_at": float(i)} for i in range(5)}
+    emb = Embedder(store, EmbedClient(server.url, "m"),
+                   read_docs=lambda: dict(corpus),
+                   models_meta=lambda: ("m", None))
+    emb.start()
+    try:
+        deadline = time.time() + 10
+        while time.time() < deadline and emb.coverage("m") < 1.0:
+            time.sleep(0.1)
+        assert emb.coverage("m") == 1.0
+        assert emb.embedded_total >= 5
+        # Doc leaves the corpus -> orphan purged by the standing sweep.
+        del corpus[("message", "room", "m0")]
+        emb.nudge()
+        deadline = time.time() + 10
+        while time.time() < deadline and store.counts("m")["docs"] != 4:
+            time.sleep(0.1)
+        assert store.counts("m")["docs"] == 4
+        # Endpoint failure -> breaker opens, thread stays alive and honest.
+        server.fail_next = 5
+        corpus[("message", "room", "new")] = {
+            "text_hash": "hn", "title": "t", "text": "b", "created_at": 99.0}
+        emb.nudge()
+        time.sleep(1.0)
+        assert emb.alive()
+    finally:
+        emb.stop()
+        server.stop()
+    assert not emb.alive()

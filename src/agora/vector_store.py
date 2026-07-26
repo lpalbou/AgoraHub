@@ -172,6 +172,11 @@ class VectorStore:
 
     # -- reads ----------------------------------------------------------------
 
+    def models_present(self) -> set[str]:
+        with self._lock:
+            return {r["model"] for r in self._conn.execute(
+                "SELECT DISTINCT model FROM vectors")}
+
     def counts(self, model: str) -> dict[str, int]:
         with self._lock:
             docs = self._conn.execute(
