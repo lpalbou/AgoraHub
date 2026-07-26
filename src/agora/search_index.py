@@ -33,6 +33,7 @@ cycle-3 amendments; measured findings in untracked/adversary-search-c2-data.md):
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import queue
 import sqlite3
@@ -57,12 +58,30 @@ CREATE TABLE IF NOT EXISTS search_docs (
     ref        TEXT NOT NULL,      -- message id | store key | fs key | agent id
     title      TEXT NOT NULL DEFAULT '',
     text       TEXT NOT NULL DEFAULT '',
+    text_hash  TEXT NOT NULL DEFAULT '',  -- doc_hash(title,text): the semantic
+    --  layer's change detector (agora-0137). Vectors carry the hash they were
+    --  embedded from; the serving join requires EQUALITY, so an edited or
+    --  re-worded doc can never serve its stale vector (ops c3 R3 named the
+    --  missing column; retrieval c2 named the redaction oracle it closes).
     created_at REAL NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_search_docs_key
     ON search_docs (kind, COALESCE(channel,''), ref);
 CREATE INDEX IF NOT EXISTS idx_search_docs_channel ON search_docs (channel);
 """
+
+
+def doc_hash(title: str, text: str) -> str:
+    """The WHOLE-input content hash for one doc — title and text together,
+    because both are embedded (362 title-only docs measured). Chunk rows all
+    carry THIS hash, never per-chunk hashes: an edit must invalidate a doc's
+    vector set atomically or a query could rank old and new prose of the
+    same doc side by side (retrieval c3)."""
+    h = hashlib.sha256()
+    h.update((title or "").encode())
+    h.update(b"\x00")
+    h.update((text or "").encode())
+    return h.hexdigest()[:32]
 
 # The FTS virtual table is created separately because executescript on the
 # main SCHEMA runs before we know FTS5 is available; the migration path in
@@ -159,8 +178,9 @@ def put_doc(conn: sqlite3.Connection, kind: str, channel: str | None,
     the OLD values on delete, so upsert = delete-old + insert-new."""
     del_doc(conn, kind, channel, ref)
     cur = conn.execute(
-        "INSERT INTO search_docs (kind, channel, ref, title, text, created_at)"
-        " VALUES (?,?,?,?,?,?)", (kind, channel, ref, title, text, created_at))
+        "INSERT INTO search_docs (kind, channel, ref, title, text, text_hash,"
+        " created_at) VALUES (?,?,?,?,?,?,?)",
+        (kind, channel, ref, title, text, doc_hash(title, text), created_at))
     conn.execute(
         "INSERT INTO search_fts(rowid, title, text) VALUES (?,?,?)",
         (cur.lastrowid, title, text))
@@ -209,9 +229,10 @@ def rebuild(conn: sqlite3.Connection) -> dict[str, int]:
         data = json.loads(r["data"]) if r["data"] else None
         title, text = message_doc(r["channel"], r["id"], r["title"], r["body"], data)
         conn.execute(
-            "INSERT INTO search_docs (kind, channel, ref, title, text, created_at)"
-            " VALUES ('message',?,?,?,?,?)",
-            (r["channel"], r["id"], title, text, r["created_at"]))
+            "INSERT INTO search_docs (kind, channel, ref, title, text,"
+            " text_hash, created_at) VALUES ('message',?,?,?,?,?,?)",
+            (r["channel"], r["id"], title, text, doc_hash(title, text),
+             r["created_at"]))
         counts["message"] += 1
 
     for r in conn.execute("SELECT channel, key, value, updated_at FROM store"):
@@ -222,9 +243,10 @@ def rebuild(conn: sqlite3.Connection) -> dict[str, int]:
                 continue  # tombstoned head: out of the corpus
             title, text = fs_doc(key, value)
             conn.execute(
-                "INSERT INTO search_docs (kind, channel, ref, title, text, created_at)"
-                " VALUES ('file',?,?,?,?,?)",
-                (r["channel"], key, title, text, r["updated_at"]))
+                "INSERT INTO search_docs (kind, channel, ref, title, text,"
+                " text_hash, created_at) VALUES ('file',?,?,?,?,?,?)",
+                (r["channel"], key, title, text, doc_hash(title, text),
+                 r["updated_at"]))
             counts["file"] += 1
             continue
         kind = store_kind(key)
@@ -232,9 +254,10 @@ def rebuild(conn: sqlite3.Connection) -> dict[str, int]:
             continue
         title, text = store_doc(key, json.loads(r["value"]))
         conn.execute(
-            "INSERT INTO search_docs (kind, channel, ref, title, text, created_at)"
-            " VALUES (?,?,?,?,?,?)",
-            (kind, r["channel"], key, title, text, r["updated_at"]))
+            "INSERT INTO search_docs (kind, channel, ref, title, text,"
+            " text_hash, created_at) VALUES (?,?,?,?,?,?,?)",
+            (kind, r["channel"], key, title, text, doc_hash(title, text),
+             r["updated_at"]))
         counts[kind] += 1
 
     for r in conn.execute(
@@ -242,9 +265,9 @@ def rebuild(conn: sqlite3.Connection) -> dict[str, int]:
             " WHERE retired_at IS NULL AND deleted_at IS NULL AND about != ''"):
         title, text = agent_doc(r["id"], r["name"], r["about"])
         conn.execute(
-            "INSERT INTO search_docs (kind, channel, ref, title, text, created_at)"
-            " VALUES ('agent',NULL,?,?,?,?)",
-            (r["id"], title, text, r["created_at"]))
+            "INSERT INTO search_docs (kind, channel, ref, title, text,"
+            " text_hash, created_at) VALUES ('agent',NULL,?,?,?,?,?)",
+            (r["id"], title, text, doc_hash(title, text), r["created_at"]))
         counts["agent"] += 1
 
     conn.execute("INSERT INTO search_fts(search_fts) VALUES ('rebuild')")

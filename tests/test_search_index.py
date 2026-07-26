@@ -163,3 +163,30 @@ def test_read_transaction_pool_on_file_backed_db(tmp_path):
     with db.read_transaction() as conn:
         assert conn.execute("SELECT COUNT(*) AS n FROM search_docs").fetchone()["n"] == 2
     db.close()
+
+
+def test_text_hash_rides_every_doc_and_migration_backfills(tmp_path):
+    """agora-0137 build step 1: every indexed doc carries doc_hash(title,
+    text) — the semantic layer's change detector — and a pre-0137 hub
+    (rows with empty hashes) is backfilled at boot. An edit CHANGES the
+    hash: that inequality is what stops a stale vector from serving."""
+    path = str(tmp_path / "hub.db")
+    db = Database(path)
+    db.insert_message("room", "alice", kind="message", status="fyi",
+                      urgency="inbox", title="t", body="the first prose",
+                      data=None, reply_to=None)
+    row = db._conn.execute(
+        "SELECT title, text, text_hash FROM search_docs").fetchone()
+    assert row["text_hash"] == si.doc_hash(row["title"], row["text"])
+    first_hash = row["text_hash"]
+    # Simulate a pre-0137 hub: blank the hashes, close, re-open.
+    db._conn.execute("UPDATE search_docs SET text_hash = ''")
+    db._conn.commit()
+    db.close()
+    db2 = Database(path)
+    row2 = db2._conn.execute(
+        "SELECT text_hash FROM search_docs").fetchone()
+    assert row2["text_hash"] == first_hash          # backfill, same content
+    # Different content = different hash (the whole point).
+    assert si.doc_hash("t", "edited prose") != first_hash
+    db2.close()

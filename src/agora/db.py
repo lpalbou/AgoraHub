@@ -353,6 +353,21 @@ class Database:
             # blocking on purpose (a hub serving un-indexed search would
             # look broken in a subtler way).
             self._conn.executescript(_si.SCHEMA)
+            # text_hash migration (0137 build step 1): pre-0137 hubs carry
+            # search_docs without the semantic layer's change detector.
+            # ALTER + Python backfill in this same boot transaction (~10k
+            # rows; the hash is cheap). Idempotent by column presence.
+            doc_cols = {r["name"] for r in self._conn.execute(
+                "PRAGMA table_info(search_docs)")}
+            if "text_hash" not in doc_cols:
+                self._conn.execute("ALTER TABLE search_docs ADD COLUMN"
+                                   " text_hash TEXT NOT NULL DEFAULT ''")
+            for r in self._conn.execute(
+                    "SELECT doc_id, title, text FROM search_docs"
+                    " WHERE text_hash = ''").fetchall():
+                self._conn.execute(
+                    "UPDATE search_docs SET text_hash = ? WHERE doc_id = ?",
+                    (_si.doc_hash(r["title"], r["text"]), r["doc_id"]))
             # Tokenizer migration (0134): a tokenizer change means the FTS
             # shadow is tokenized wrong — drop, re-create, rebuild (182ms
             # measured). Version rides the meta table (in _SCHEMA above).
