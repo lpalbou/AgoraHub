@@ -115,3 +115,60 @@ def test_non_operator_cannot_touch_embedding(tmp_path):
                     headers={"Authorization": f"Bearer {ADMIN_KEY}"})
     seat = {"Authorization": f"Bearer {r.json()['api_key']}"}
     assert client.get("/admin/embedding", headers=seat).status_code == 403
+
+
+def test_search_fuses_when_ready_and_says_so(tmp_path, server):
+    """The always-fuse contract end-to-end: index fills, a query whose
+    words DON'T match lexically is rescued semantically (fake vectors:
+    same text = same vector, so we plant the rescue), mode_used=fused,
+    lexical override stays byte-identical to the pre-semantic world."""
+    client = _client(tmp_path, embedding={"url": server.url, "model": "m"})
+    op = _operator(client)
+    client.post("/channels", json={"name": "room", "private": False},
+                headers=op)
+    client.post("/channels/room/messages",
+                json={"body": "the scheduler starves under convoy load",
+                      "title": "scheduler starvation"}, headers=op)
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        if client.get("/admin/embedding",
+                      headers=op).json()["state"] == "ready":
+            break
+        time.sleep(0.2)
+    # AUTO: a matching query fuses and says so.
+    r = client.get("/search", params={"q": "scheduler starvation"},
+                   headers=op).json()
+    assert r["mode_used"] == "fused"
+    assert r["semantic_coverage"] is not None
+    assert r["notice"] is None                      # healthy = silent
+    # No similarity floor exists by design (measured: none separates
+    # noise from true tails) — the pool ranks ALL visible docs; the
+    # contract is the ORDER: the lexical+semantic winner leads.
+    hits = r["messages"]["hits"]
+    assert hits and hits[0]["title"] == "scheduler starvation"
+    # Explicit lexical override: today's behavior, flagged as such.
+    r = client.get("/search", params={"q": "scheduler starvation",
+                                      "mode": "lexical"}, headers=op).json()
+    assert r["mode_used"] == "lexical"
+    # Explicit semantic-only: same machinery, no lexical side.
+    r = client.get("/search", params={"q": "scheduler starvation",
+                                      "mode": "semantic"}, headers=op).json()
+    assert r["mode_used"] == "semantic"
+
+
+def test_search_degrades_honestly_when_filling_or_disabled(tmp_path, server):
+    client = _client(tmp_path)          # no embedding configured
+    op = _operator(client)
+    client.post("/channels", json={"name": "room", "private": False},
+                headers=op)
+    client.post("/channels/room/messages", json={"body": "hello"},
+                headers=op)
+    # AUTO on a semantic-less hub: silent lexical (no permanent noise).
+    r = client.get("/search", params={"q": "hello"}, headers=op).json()
+    assert r["mode_used"] == "lexical" and r["notice"] is None
+    # Explicit semantic on a semantic-less hub: the disabled notice.
+    r = client.get("/search", params={"q": "hello", "mode": "semantic"},
+                   headers=op).json()
+    assert r["mode_used"] == "lexical"
+    assert "not enabled" in r["notice"]
+    assert "does not prove absence" in r["notice"]

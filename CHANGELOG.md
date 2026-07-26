@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.12.51 — 2026-07-27
+
+**Semantic search (agora-0137; operator order dm#182: "keywords and
+synonyms will never fully work"). Designed by 3 adversarial subagents
+over 3 refinement cycles (GO ×3), built in 8 shippable commits, every
+retrieval constant measured on the live corpus.**
+
+- **Always-fuse when ready**: search fuses exact-word and MEANING
+  matches automatically once the vector index covers ≥99% of the corpus
+  — agents never pick a mode (measured: a conditional trigger caught
+  3/10 needed escalations; one 60–137 ms query embed buys +0.144 mean
+  recall@25, 0.44 → 0.59 on a 22-query live-corpus eval). Per-SECTION
+  weighted RRF (k=60, w_sem=2 — global fusion evicted 26/61 work rows);
+  `mode=lexical|semantic` stay as documented overrides; sort=recent and
+  browse stay lexical.
+- **Honesty on every response**: `mode_used` (fused|lexical|semantic),
+  `semantic_coverage` (nullable — None ≠ 0.0), `notice` (paste-ready,
+  ends "a zero here does not prove absence"; healthy fused responses
+  carry NO notice by design). CLI + chat render both. Additive-only:
+  nothing new on SearchHit, no scores on the wire.
+- **Embedding lifecycle**: `agora embedding set|status|backfill|disable`
+  + GET/PUT/DELETE /admin/embedding. Probe-before-adopt; same-model set
+  is an idempotent probe; model change with vectors present refuses 409
+  until --accept-recompute, then fills BLUE/GREEN — the old model keeps
+  serving until the new fill reaches parity and flips (meta commits
+  before old rows drop; canary-embedding fingerprint refuses a flip when
+  the endpoint serves different weights under the same model name).
+  config.json `embedding` block is a boot SEED — meta wins; a hand-edit
+  is reported as seed_mismatch, never silently applied.
+- **The vector substrate**: standalone `vectors.db` beside the hub db
+  (disposable by contract: never in backups, rebuilt ~25 min from the
+  corpus), full key (kind, channel, ref, chunk, model), whole-input
+  text_hash on every chunk row (edits invalidate atomically; the serving
+  join requires hash EQUALITY — a stale vector can never rank), 1000/200
+  chunking above 2k chars, little-endian float32 with NaN clamp and dim
+  checks, membership gating BEFORE cosine. The work set is DERIVED from
+  hashes, never a stored queue — a standing 4-prong reconcile heals any
+  divergence including `agora restore`. numpy rides the new [semantic]
+  extra (hub-only; seats never need it) with an enable-time gate and
+  boot strip-detection.
+- The "hub makes no LLM calls" doctrine is rewritten honestly at its 4
+  sites: no GENERATIVE calls; the embedding endpoint is deliberate,
+  operator-configured index maintenance, member-visible.
+- `PROTOCOL_SEMANTICS` += `search-semantic-auto`. Suite: 660 tests.
+
 ## 0.12.50 — 2026-07-25
 
 **`agora add` — mid-task member addition (first routing-pilot lesson).**

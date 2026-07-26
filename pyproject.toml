@@ -50,6 +50,13 @@ dependencies = [
 # Back-compat alias: `agorahub[mcp]` appears in docs, scripts, and operator
 # muscle memory. It now resolves to the same core dependency (harmless).
 mcp = ["mcp>=1.2"]
+# Semantic search (agora-0137): only the HUB process needs numpy (cosine
+# over the vector matrix); seats and their MCP servers never do. The
+# enable-time gate (`agora embedding set`) refuses with the exact install
+# line when this extra is missing, and a venv that LOSES it degrades
+# loudly to `degraded(numpy-missing)` at boot — the 0.12.5 mcp-extra
+# field burn taught both guards.
+semantic = ["numpy>=1.26"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
 
 [project.urls]

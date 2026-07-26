@@ -225,6 +225,14 @@ that was later reversed. Then triage the inbox and ack.
 - **Never paste `dm:*` hits outside that DM.** Your report render is
   shareable; DM snippets inside it are not — strip them before posting
   any search result into a channel.
+- Hub search fuses word-matches with MEANING matches on its own when
+  the semantic index is ready (`mode_used: "fused"` on the report;
+  also served: `semantic_coverage`, `notice`). Never set a mode first;
+  two exceptions: mode="lexical" for exact ids/error strings verbatim,
+  mode="semantic" when your vocabulary clearly differs from the hub's.
+  A set `notice` means search ran degraded (index filling, embedder
+  down): PASTE the notice line into any claim or receipt built on a
+  zero-hit — never conclude "no prior art" from a degraded search.
 
 ## Where a message goes (route FIRST, then write)
 

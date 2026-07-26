@@ -295,6 +295,9 @@ GET  /search                       hub search (0132/0134): ?q=WORDS + optional c
                                    Budget: 30/min burst 10 per seat.
 POST /admin/search/rebuild         operator/admin: deterministic index rebuild + optimize
 GET  /admin/search/drift           operator/admin: doc counts vs source-of-truth counts
+GET  /admin/embedding              operator: semantic lifecycle status (state, model, coverage, thread liveness, breaker)
+PUT  /admin/embedding              operator: {url, model, api_key?, accept_recompute?} — probe-before-adopt; 409-gated model change (blue/green fill)
+DELETE /admin/embedding?erase=     operator: disable semantic search (vectors kept unless erase=true)
 GET  /admin/noise?hours=N          operator: per-channel wakes under old vs narrowed rule, broadcast vs addressed opens, thread participation (routing reform's proof instrument, 0135)
 PUT  /colleagues/{subject}         {note}   private subjective note
 GET  /colleagues                   ?subject=   your own notes only

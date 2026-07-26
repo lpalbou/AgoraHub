@@ -2237,7 +2237,7 @@ class HubService:
                until: float | None = None, ref: str = "",
                rated: str = "", min_votes: int = 0,
                sort: str = "relevance", limit: int = 10,
-               cursor: str = "") -> SearchReport:
+               cursor: str = "", mode: str = "") -> SearchReport:
         """One grouped report over everything THIS caller can read — the
         task-context digest (operator order dm#166; design agora-0132,
         settled by 3 adversary cycles). Scope is the caller's memberships
@@ -2252,6 +2252,10 @@ class HubService:
             raise HubError(429, f"search budget exhausted; retry in {wait:.1f}s")
         if sort not in ("relevance", "recent", "votes"):
             raise HubError(400, "sort must be 'relevance', 'recent' or 'votes'")
+        if mode and mode not in ("lexical", "semantic"):
+            raise HubError(400, "mode must be 'lexical' or 'semantic'"
+                                " (unset = auto: the hub fuses when its"
+                                " semantic index is ready)")
         if rated and rated not in ("up", "down", "any"):
             raise HubError(400, "rated must be 'up', 'down' or 'any'")
         limit = max(1, min(int(limit), _sx.MAX_LIMIT))
@@ -2297,10 +2301,56 @@ class HubService:
         if min_votes:
             filters["min_votes"] = max(0, int(min_votes))
 
+        # Semantic side (agora-0137): ALWAYS-FUSE when ready — the measured
+        # ruling (a conditional trigger caught 3/10 needed escalations;
+        # one 60-137ms query embed buys +0.144 mean recall@25). Fusion
+        # rides the blend path only; sort=recent and browse stay lexical.
+        mode_used = "lexical"
+        notice: str | None = None
+        coverage: float | None = None
+        semantic_keys: list[tuple[str, str, str]] | None = None
+        emb_state = self.embedding.state()
+        if emb_state != "disabled":
+            coverage = None  # filled below when status computes cheaply
+        want_semantic = (mode != "lexical" and terms
+                         and sort in ("relevance", "votes"))
+        if want_semantic and emb_state == "ready":
+            snapshot = self.embedding.query_snapshot()
+            qvec = self.embedding.embed_query(q) if snapshot else None
+            if snapshot and qvec:
+                from .semantic import semantic_candidates
+                visible = self._visible_docs(agent.id, filters)
+                semantic_keys = semantic_candidates(snapshot, qvec, visible)
+                mode_used = "semantic" if mode == "semantic" else "fused"
+            else:
+                notice = ("search degraded: embedding endpoint unreachable"
+                          " — served lexical only; a zero here does not"
+                          " prove absence.")
+        elif want_semantic and emb_state.startswith("filling"):
+            st = self.embedding.status()
+            pct = int(round((st.get("coverage") or 0.0) * 100))
+            notice = (f"search lexical-only: semantic index still filling"
+                      f" ({pct}%) — a zero here does not prove absence.")
+        elif want_semantic and emb_state.startswith("degraded"):
+            notice = (f"search degraded: {emb_state[9:-1]} — served lexical"
+                      " only; a zero here does not prove absence.")
+        elif mode == "semantic" and emb_state == "disabled":
+            # ONLY the explicit override earns the disabled notice — AUTO
+            # on a semantic-less hub stays silent (no permanent noise).
+            notice = ("search lexical-only: semantic is not enabled on this"
+                      " hub — a zero here does not prove absence.")
+        if mode == "semantic" and mode_used != "semantic":
+            mode_used = "lexical"
+
         with self.db.read_transaction() as conn:
             ex = _sx.SearchExecutor(conn, agent.id)
             raw = ex.run(terms, filters, sort=sort, limit=limit,
-                         cursor=cursor or None)
+                         cursor=cursor or None,
+                         semantic_keys=semantic_keys,
+                         semantic_only=(mode == "semantic"
+                                        and semantic_keys is not None))
+        if emb_state not in ("disabled",):
+            coverage = self.embedding.status().get("coverage")
 
         # Ratings decoration (operator ruling dm#169): message hits carry
         # their tally so a downvoted answer is visibly marked. One batched
@@ -2331,7 +2381,28 @@ class HubService:
             relaxed=raw["relaxed"],
             channels_searched=len(self.db.channels_of(agent.id)),
             next_cursor=raw["next_cursor"],
-            computed_at=raw["computed_at"])
+            computed_at=raw["computed_at"],
+            mode_used=mode_used,
+            semantic_coverage=coverage,
+            notice=notice)
+
+    def _visible_docs(self, agent_id: str,
+                      filters: dict[str, Any]) -> dict[tuple[str, str, str], str]:
+        """{(kind, channel, ref): text_hash} for everything THIS caller may
+        see — the gate that runs BEFORE cosine (vectors carry no ACL; this
+        set is the ACL, same doctrine as the FTS membership JOIN). Honors
+        the channels narrowing filter when present."""
+        member = {m for m in self.db.channels_of(agent_id)}
+        if filters.get("channels"):
+            member &= set(filters["channels"])
+        out: dict[tuple[str, str, str], str] = {}
+        with self.db.read_transaction() as conn:
+            for r in conn.execute(
+                    "SELECT kind, channel, ref, text_hash FROM search_docs"):
+                if r["kind"] == "agent" or (r["channel"] or "") in member:
+                    out[(r["kind"], r["channel"] or "", r["ref"])] = \
+                        r["text_hash"]
+        return out
 
     # -- work-id activity index (0093) ---------------------------------------------
 

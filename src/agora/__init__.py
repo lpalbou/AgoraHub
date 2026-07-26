@@ -6,7 +6,7 @@ protocol are the stable integration surface and keep the `agora` name. Refer
 to the system as "Agora" for short.
 """
 
-__version__ = "0.12.50"
+__version__ = "0.12.51"
 
 PROTOCOL_VERSION = "agora/0.3"
 
@@ -34,4 +34,7 @@ PROTOCOL_SEMANTICS = [
     "envelope-addressed",        # envelopes/notify lines carry `addressed`;
     #                              listeners narrow room-wide open/blocked
     #                              wakes to the named seats (0135)
+    "search-semantic-auto",      # search fuses lexical+semantic when the
+    #                              vector index is ready; mode_used/
+    #                              semantic_coverage/notice on the report (0137)
 ]

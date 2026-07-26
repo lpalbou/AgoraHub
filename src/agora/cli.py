@@ -949,7 +949,9 @@ def cmd_board(args):
 def cmd_llm(args):
     """Configure (or show) the OpenAI-compatible endpoint the summarizer uses.
     Local operator convenience: stored 0600 in ~/.agora/config.json, never
-    sent to the hub (the hub makes no LLM calls)."""
+    sent to the hub (the hub makes no GENERATIVE LLM calls; since
+    agora-0137 it MAY call a configured EMBEDDING endpoint as index
+    maintenance — `agora embedding status` names it)."""
     if not (args.base_url or args.model or args.api_key):
         llm = _config.load_llm()
         if not llm:
@@ -1536,7 +1538,18 @@ def cmd_search(args):
         if a.json:
             print(json.dumps(rep, indent=1))
             return
-        if rep.get("relaxed"):
+        # Semantic honesty (agora-0137, UX P1-3: the operator must SEE
+        # semantic working). The relaxed banner renders only under
+        # mode_used=lexical — a fused response already compensated, and
+        # double-speaking a warning teaches readers to skip both.
+        mode_used = rep.get("mode_used") or "lexical"
+        if mode_used != "lexical":
+            cov = rep.get("semantic_coverage")
+            cov_s = f", coverage {cov * 100:.0f}%" if cov is not None else ""
+            print(f"(mode: {mode_used}{cov_s})")
+        if rep.get("notice"):
+            print(f"NOTICE: {rep['notice']}")
+        if rep.get("relaxed") and mode_used == "lexical":
             print("(exact match found nothing — looser OR results below)")
         empty = True
         for name in ("decisions", "open_threads", "work", "people",

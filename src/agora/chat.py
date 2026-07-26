@@ -547,7 +547,14 @@ class ChatApp:
         except Exception as exc:
             self._print(s.red(f"search failed (hub predates search?): {exc}"))
             return
-        if rep.get("relaxed"):
+        mode_used = rep.get("mode_used") or "lexical"
+        if mode_used != "lexical":
+            cov = rep.get("semantic_coverage")
+            cov_s = f", coverage {cov * 100:.0f}%" if cov is not None else ""
+            self._print(s.dim(f"mode: {mode_used}{cov_s}"))
+        if rep.get("notice"):
+            self._print(s.yellow(f"NOTICE: {rep['notice']}"))
+        if rep.get("relaxed") and mode_used == "lexical":
             self._print(s.dim("not everything you typed matches together — "
                               "top hits match the most words; narrow if loose"))
         shown_any = False

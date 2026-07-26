@@ -520,6 +520,14 @@ class SearchReport(BaseModel):
     channels_searched: int = 0
     next_cursor: str | None = None
     computed_at: float = 0.0
+    # Semantic honesty fields (agora-0137) — ADDITIVE ONLY (continuum pins
+    # undeclared-field absence on SearchHit; the top level takes the new
+    # facts). `mode_used` is an OPEN string, not an enum: policy evolves
+    # hub-side without re-vendoring clients. None ≠ 0.0 on coverage: None
+    # means "no semantic layer", 0.0 means "enabled, nothing embedded yet".
+    mode_used: str = "lexical"       # fused | lexical | semantic
+    semantic_coverage: float | None = None
+    notice: str | None = None
 
 
 class WhoamiReport(BaseModel):

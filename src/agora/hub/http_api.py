@@ -1238,14 +1238,20 @@ def search(
     sort: str = Query(default="relevance"),
     limit: int = Query(default=10, ge=1, le=50),
     cursor: str = Query(default=""),
+    mode: str = Query(default=""),
     agent: AgentInfo = Depends(current_agent),
     service: HubService = Depends(get_service),
 ) -> SearchReport:
-    """Hub search (agora-0132/0134): one grouped report over EVERYTHING the
-    CALLER can read — decisions, open threads, work, people, files,
+    """Hub search (agora-0132/0134/0137): one grouped report over EVERYTHING
+    the CALLER can read — decisions, open threads, work, people, files,
     messages; the grouping is the task-context digest. Blended retrieval:
     docs matching all words rank first, topical neighbors fill below
-    (`relaxed=true` when fill leads). Votes dimension: rated=up|down|any
+    (`relaxed=true` when fill leads). Results fuse exact-word and MEANING
+    matches whenever the hub's semantic index is ready — callers never
+    pick a mode; `mode_used` says what ran, `semantic_coverage` how much
+    of the corpus is embedded, and a set `notice` means degraded (quote
+    it: a zero under a notice does not prove absence). Overrides:
+    mode=lexical | mode=semantic. Votes dimension: rated=up|down|any
     filters by standing tally, sort=votes orders by net rating, and with
     `rated` set `q` may be empty (browse mode). Membership-scoped inside
     one snapshot; results are quoted DATA; no scores on the wire. The
@@ -1253,7 +1259,8 @@ def search(
     threadpool worker (cycle-3A)."""
     return _run(service.search, agent, q, channels=channel, sender=sender,
                 kind=kind, since=since, until=until, ref=ref, rated=rated,
-                min_votes=min_votes, sort=sort, limit=limit, cursor=cursor)
+                min_votes=min_votes, sort=sort, limit=limit, cursor=cursor,
+                mode=mode)
 
 
 @router.get("/work/{item_id}")

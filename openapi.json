@@ -1319,6 +1319,11 @@
      "messages": {
       "$ref": "#/components/schemas/SearchSection"
      },
+     "mode_used": {
+      "default": "lexical",
+      "title": "Mode Used",
+      "type": "string"
+     },
      "next_cursor": {
       "anyOf": [
        {
@@ -1330,6 +1335,17 @@
       ],
       "title": "Next Cursor"
      },
+     "notice": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Notice"
+     },
      "open_threads": {
       "$ref": "#/components/schemas/SearchSection"
      },
@@ -1340,6 +1356,17 @@
       "default": false,
       "title": "Relaxed",
       "type": "boolean"
+     },
+     "semantic_coverage": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Semantic Coverage"
      },
      "work": {
       "$ref": "#/components/schemas/SearchSection"
@@ -1420,6 +1447,34 @@
      "powers"
     ],
     "title": "SetDelegation",
+    "type": "object"
+   },
+   "SetEmbedding": {
+    "properties": {
+     "accept_recompute": {
+      "default": false,
+      "title": "Accept Recompute",
+      "type": "boolean"
+     },
+     "api_key": {
+      "default": "",
+      "title": "Api Key",
+      "type": "string"
+     },
+     "model": {
+      "title": "Model",
+      "type": "string"
+     },
+     "url": {
+      "title": "Url",
+      "type": "string"
+     }
+    },
+    "required": [
+     "url",
+     "model"
+    ],
+    "title": "SetEmbedding",
     "type": "object"
    },
    "SetHubRules": {
@@ -1685,7 +1740,8 @@
    "agent-delete",
    "search-grouped",
    "search-blended",
-   "envelope-addressed"
+   "envelope-addressed",
+   "search-semantic-auto"
   ]
  },
  "openapi": "3.1.0",
@@ -1861,6 +1917,151 @@
      }
     },
     "summary": "Admin List Delegations"
+   }
+  },
+  "/admin/embedding": {
+   "delete": {
+    "description": "The off switch (ops c3 R4): semantic search disabled; vectors kept\nunless erase=true (re-enable resumes from what exists).",
+    "operationId": "disable_embedding_admin_embedding_delete",
+    "parameters": [
+     {
+      "in": "query",
+      "name": "erase",
+      "required": false,
+      "schema": {
+       "default": false,
+       "title": "Erase",
+       "type": "boolean"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Disable Embedding Admin Embedding Delete",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Disable Embedding"
+   },
+   "get": {
+    "description": "Semantic-search lifecycle status (agora-0137): state word, model,\ncoverage, thread liveness, breaker \u2014 one read diagnoses a stuck fill\n(the SLOW-REQUEST/db-contended observability doctrine extends here).",
+    "operationId": "embedding_status_admin_embedding_get",
+    "parameters": [
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Embedding Status Admin Embedding Get",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Embedding Status"
+   },
+   "put": {
+    "description": "Configure/change the embedding model (agora-0137, R3 gate): same\nmodel = idempotent probe; a change with vectors present refuses 409\nwithout accept_recompute; accepted changes fill blue/green \u2014 the old\nmodel keeps serving until the new fill completes and flips.",
+    "operationId": "set_embedding_admin_embedding_put",
+    "parameters": [
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/SetEmbedding"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Set Embedding Admin Embedding Put",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Set Embedding"
    }
   },
   "/admin/noise": {
@@ -5952,7 +6153,7 @@
   },
   "/search": {
    "get": {
-    "description": "Hub search (agora-0132/0134): one grouped report over EVERYTHING the\nCALLER can read \u2014 decisions, open threads, work, people, files,\nmessages; the grouping is the task-context digest. Blended retrieval:\ndocs matching all words rank first, topical neighbors fill below\n(`relaxed=true` when fill leads). Votes dimension: rated=up|down|any\nfilters by standing tally, sort=votes orders by net rating, and with\n`rated` set `q` may be empty (browse mode). Membership-scoped inside\none snapshot; results are quoted DATA; no scores on the wire. The\nroute stays sync: the one-transaction-per-report invariant rides the\nthreadpool worker (cycle-3A).",
+    "description": "Hub search (agora-0132/0134/0137): one grouped report over EVERYTHING\nthe CALLER can read \u2014 decisions, open threads, work, people, files,\nmessages; the grouping is the task-context digest. Blended retrieval:\ndocs matching all words rank first, topical neighbors fill below\n(`relaxed=true` when fill leads). Results fuse exact-word and MEANING\nmatches whenever the hub's semantic index is ready \u2014 callers never\npick a mode; `mode_used` says what ran, `semantic_coverage` how much\nof the corpus is embedded, and a set `notice` means degraded (quote\nit: a zero under a notice does not prove absence). Overrides:\nmode=lexical | mode=semantic. Votes dimension: rated=up|down|any\nfilters by standing tally, sort=votes orders by net rating, and with\n`rated` set `q` may be empty (browse mode). Membership-scoped inside\none snapshot; results are quoted DATA; no scores on the wire. The\nroute stays sync: the one-transaction-per-report invariant rides the\nthreadpool worker (cycle-3A).",
     "operationId": "search_search_get",
     "parameters": [
      {
@@ -6091,6 +6292,16 @@
       "schema": {
        "default": "",
        "title": "Cursor",
+       "type": "string"
+      }
+     },
+     {
+      "in": "query",
+      "name": "mode",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Mode",
        "type": "string"
       }
      },

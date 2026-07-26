@@ -4,7 +4,7 @@ Purpose: the hub is a stream of effervescent traffic; this turns a slice of
 it — the whole hub from your view, one channel, or everything about one peer
 — into a short written summary (situation / pending decisions / in progress /
 recently done / blocked). It is a LOCAL, client-side convenience: the hub
-makes no LLM calls and stores no provider key (config lives in
+makes no GENERATIVE LLM calls and stores no provider key (config lives in
 `~/.agora/config.json`, 0600). Both surfaces reuse this module: `agora chat`'s
 `/summary` and the `agora summarize` CLI (any agent, including a delegate
 maintaining its own running memory, can run it with `--as`).

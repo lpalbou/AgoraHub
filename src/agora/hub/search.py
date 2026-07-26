@@ -390,6 +390,11 @@ class SearchExecutor:
                 continue
             sec = secs[name]
             sec["total"] += 1
+            # The FULL bucketed pool rides along for fusion (agora-0137):
+            # fusing only the per-section head would strand semantic
+            # rescues below lexical noise — the measured design fuses the
+            # pools, then caps.
+            sec.setdefault("pool", []).append(r)
             if len(sec["rows"]) < per:
                 sec["rows"].append(r)
 
@@ -409,6 +414,105 @@ class SearchExecutor:
             best_tmass < full_mass - 1e-9
         or_match = compile_match([t for t, _ in kept], operator="OR")
         return secs, relaxed, or_match
+
+    def _fuse_semantic(self, secs: dict[str, dict[str, Any]],
+                       semantic_keys: list[tuple[str, str, str]],
+                       per: int, kind_filter: str | None,
+                       sort: str) -> dict[str, dict[str, Any]]:
+        """Per-SECTION weighted RRF of the lexical pools with the ranked
+        semantic keys (agora-0137; k=60, w_sem=2 — the measured winners).
+        Semantic-only docs are hydrated to the blend's row shape; display
+        rulings re-apply after fusion (structural newest-first, votes)."""
+        from .semantic import rrf_fuse
+
+        hydrated = self._hydrate(semantic_keys)
+        # Route each semantic key to its section (message status decides
+        # open_threads vs messages — the key alone cannot).
+        sem_by_section: dict[str, list[tuple[str, str, str]]] = {}
+        for key in semantic_keys:
+            row = hydrated.get(key)
+            if row is None:
+                continue                      # retracted/imposter: not served
+            k = row["kind"]
+            if k == "decision":
+                name = "decisions"
+            elif k in ("claim", "work"):
+                name = "work"
+            elif k == "agent":
+                name = "people"
+            elif k == "file":
+                name = "files"
+            elif k == "message":
+                name = ("open_threads"
+                        if row["status"] in ("open", "blocked") else "messages")
+            else:
+                continue
+            if kind_filter and kind_filter not in (
+                    _KINDS_FOR.get(name) or ("message",)):
+                continue
+            sem_by_section.setdefault(name, []).append(key)
+
+        def rkey(r) -> tuple[str, str, str]:
+            return (r["kind"], r["channel"] or "", r["ref"])
+
+        for name in SECTIONS:
+            sec = secs[name]
+            pool = sec.get("pool", sec["rows"])
+            lex_keys = [rkey(r) for r in pool]
+            sem_keys = sem_by_section.get(name, [])
+            if not sem_keys and not lex_keys:
+                continue
+            fused = rrf_fuse(lex_keys, sem_keys)
+            by_key = {rkey(r): r for r in pool}
+            rows = [by_key.get(k) or hydrated[k] for k in fused[:per]]
+            sec["rows"] = rows
+            sec["total"] = max(sec["total"], len(fused))
+        for name in _STRUCTURAL:
+            secs[name]["rows"].sort(key=lambda r: -r["created_at"])
+        if sort == "votes":
+            for name in ("open_threads", "messages"):
+                secs[name]["rows"].sort(
+                    key=lambda r: (-(r["up"] - r["down"]), -r["created_at"]))
+        return secs
+
+    def _hydrate(self, keys: list[tuple[str, str, str]]) -> dict[
+            tuple[str, str, str], Any]:
+        """The blend's row shape for semantic-only docs — same joins, same
+        retraction guard, CHUNKED to stay under sqlite's bound-var
+        ceiling. Membership is already enforced upstream (the visible-set
+        gate before cosine); this re-checks nothing it shouldn't."""
+        out: dict[tuple[str, str, str], Any] = {}
+        for i in range(0, len(keys), 120):
+            chunk = keys[i:i + 120]
+            preds = []
+            named: dict[str, Any] = {}
+            for j, (kind, channel, ref) in enumerate(chunk):
+                preds.append(f"(sd.kind = :k{j} AND COALESCE(sd.channel,'')"
+                             f" = :c{j} AND sd.ref = :r{j})")
+                named[f"k{j}"] = kind
+                named[f"c{j}"] = channel
+                named[f"r{j}"] = ref
+            sql = (
+                "SELECT sd.doc_id, sd.kind, sd.channel, sd.ref, sd.title,"
+                "       sd.text, sd.created_at, 0.0 AS tmass, 0.0 AS mass,"
+                "       0.0 AS rsum,"
+                "       msg.seq AS seq, msg.sender AS sender,"
+                "       msg.status AS status,"
+                "       COALESCE(rt.up,0) AS up, COALESCE(rt.down,0) AS down"
+                " FROM search_docs sd"
+                " LEFT JOIN messages msg ON sd.kind = 'message'"
+                "   AND msg.id = sd.ref"
+                " LEFT JOIN (SELECT message_id,"
+                "     SUM(CASE WHEN value>0 THEN 1 ELSE 0 END) AS up,"
+                "     SUM(CASE WHEN value<0 THEN 1 ELSE 0 END) AS down"
+                "   FROM message_ratings GROUP BY message_id) rt"
+                "   ON sd.kind = 'message' AND rt.message_id = sd.ref"
+                " WHERE (sd.kind != 'message' OR (msg.id IS NOT NULL"
+                "        AND msg.retracted_at IS NULL))"
+                f" AND ({' OR '.join(preds)})")
+            for r in self.conn.execute(sql, named):
+                out[(r["kind"], r["channel"] or "", r["ref"])] = r
+        return out
 
     def _filter_sql(self, filters: dict[str, Any],
                     named: dict[str, Any]) -> tuple[str, None]:
@@ -485,19 +589,35 @@ class SearchExecutor:
 
     def run(self, terms: list[str], filters: dict[str, Any], *,
             sort: str = "relevance", limit: int = DEFAULT_PER_SECTION,
-            cursor: str | None = None) -> dict[str, Any]:
+            cursor: str | None = None,
+            semantic_keys: list[tuple[str, str, str]] | None = None,
+            semantic_only: bool = False) -> dict[str, Any]:
         """The grouped report as plain dicts (typed models wrap in the
         service). Three paths: blended one-pass (relevance, the default),
-        per-section recent (keyset-pageable), and no-query browse."""
+        per-section recent (keyset-pageable), and no-query browse.
+
+        `semantic_keys` (agora-0137): a ranked (kind, channel, ref) list
+        already membership- and hash-gated by the caller; fused per
+        SECTION with the lexical pools (weighted RRF — global fusion
+        evicted 26/61 work rows, measured). `semantic_only` serves the
+        explicit mode=semantic override: same machinery, empty lexical
+        side. Fusion applies to the blend path only; sort=recent and
+        browse stay lexical by ruling."""
         per = min(limit, MAX_LIMIT)
         kind_filter = filters.get("kind")
         relaxed = False
         or_match: str | None = None
 
-        if not terms:
+        if not terms and not semantic_only:
             secs = self._browse(filters, per, sort)
         elif sort == "relevance" or sort == "votes":
-            secs, relaxed, or_match = self._blend(terms, filters, per, sort)
+            if semantic_only:
+                secs = {name: {"rows": [], "total": 0} for name in SECTIONS}
+            else:
+                secs, relaxed, or_match = self._blend(terms, filters, per, sort)
+            if semantic_keys:
+                secs = self._fuse_semantic(secs, semantic_keys, per,
+                                           kind_filter, sort)
         else:
             # sort=recent: the per-section path (keyset cursor contract).
             match = compile_match(terms, operator="AND")
@@ -556,6 +676,12 @@ class SearchExecutor:
             hits = []
             for r in rows:
                 snippet, highlights = snips.get(r["doc_id"], ("", []))
+                if not snippet and "text" in r.keys():
+                    # Semantic-only hit (agora-0137): no FTS offsets exist —
+                    # serve the doc's head, plain, NO fake highlights
+                    # (retrieval P3's snippet rule).
+                    head = (r["text"] or "").strip().replace("\n", " ")
+                    snippet = head[:160]
                 hit = {
                     "kind": r["kind"], "channel": r["channel"], "ref": r["ref"],
                     "title": r["title"], "created_at": r["created_at"],

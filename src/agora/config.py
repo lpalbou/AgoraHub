@@ -97,7 +97,10 @@ def load_llm() -> dict[str, Any]:
     """The operator's OpenAI-compatible summarizer endpoint, or {}. Shape:
     {"base_url": "...", "api_key": "...", "model": "..."}. Lives in
     config.json (0600) — this is a LOCAL operator convenience, never sent to
-    the hub (the hub makes no LLM calls and holds no provider keys)."""
+    the hub (the hub makes no GENERATIVE LLM calls and holds no provider
+    keys for text generation; the agora-0137 EMBEDDING endpoint is the
+    one deliberate exception — index maintenance, member-visible in
+    `agora embedding status`)."""
     llm = load_config().get("llm")
     return llm if isinstance(llm, dict) else {}
 
