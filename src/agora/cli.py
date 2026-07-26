@@ -227,7 +227,11 @@ def cmd_up(args: argparse.Namespace) -> None:
                      max_attachment_bytes=int(args.max_attachment_mb * 1024 * 1024)
                      if args.max_attachment_mb else None,
                      max_channel_attachment_bytes=int(args.max_channel_attachment_mb * 1024 * 1024)
-                     if args.max_channel_attachment_mb else None)
+                     if args.max_channel_attachment_mb else None,
+                     # Boot SEED only (meta wins; agora-0137): first enable
+                     # adopts it, a live hub's durable choice never yields
+                     # to a hand-edited file.
+                     embedding=cfg.get("embedding"))
     # Pin WS keepalive explicitly: connection-derived presence relies on dead
     # sockets being detected within a bounded window (audit M4). Defaults can
     # differ per uvicorn/ws backend; make the bound deliberate.
@@ -516,6 +520,107 @@ def _admin_key_or_exit(args: argparse.Namespace, url: str) -> str:
                  "AGORA_ADMIN_KEY, or run this on the hub machine "
                  "(where `agora up` saved ~/.agora/config.json).")
     return admin
+
+
+def _admin_request(method: str, path: str, payload: dict | None = None,
+                   params: dict | None = None) -> tuple[int, dict]:
+    """One admin-key HTTP call to the local hub; (0, {}) when the hub is
+    down (callers decide what down means for their verb)."""
+    import httpx
+    cfg = _config.load_config()
+    url = cfg.get("url", "http://127.0.0.1:8765")
+    key = os.environ.get("AGORA_ADMIN_KEY") or cfg.get("admin_key", "")
+    try:
+        resp = httpx.request(method, f"{url.rstrip('/')}{path}",
+                             json=payload, params=params,
+                             headers={"Authorization": f"Bearer {key}"},
+                             timeout=15.0)
+        try:
+            return resp.status_code, resp.json()
+        except ValueError:
+            return resp.status_code, {"detail": resp.text[:200]}
+    except httpx.HTTPError:
+        return 0, {}
+
+
+def cmd_embedding(args: argparse.Namespace) -> None:
+    """Semantic-search lifecycle (agora-0137): set | status | backfill |
+    disable. One verb family on purpose — the near-twin `agora embed`
+    was a named UX trap. All prints are the adversary-cycle texts."""
+    action = args.action
+    if action == "set":
+        if not args.url or not args.model:
+            sys.exit("usage: agora embedding set --url URL --model MODEL"
+                     " [--api-key K] [--accept-recompute]")
+        _config.save_embedding(args.url, args.model, args.api_key or "")
+        code, body = _admin_request("PUT", "/admin/embedding", {
+            "url": args.url, "model": args.model,
+            "api_key": args.api_key or "",
+            "accept_recompute": bool(args.accept_recompute)})
+        if code == 0:
+            print("hub not running — saved as boot seed"
+                  f" ({_config.home() / 'config.json'}, 0600);"
+                  " applies at next `agora up`.")
+            return
+        if code == 409:
+            sys.stderr.write(body.get("detail", "refused") + "\n")
+            raise SystemExit(3)
+        if code != 200:
+            sys.stderr.write(f"refused ({code}): {body.get('detail')}\n")
+            raise SystemExit(3)
+        probe = body.get("probe") or {}
+        if not body.get("changed"):
+            print(f"unchanged (already {body.get('model')}) — probe ok:"
+                  f" {probe.get('dim')} dims")
+            return
+        print(f"probe ok: {probe.get('dim')} dims")
+        print("saved to hub (live) + boot seed"
+              f" ({_config.home() / 'config.json'}, 0600)")
+        n = body.get("docs_to_embed")
+        if body.get("pending"):
+            print(f"filling the NEW model alongside the old ({n} docs);"
+                  " the old model keeps serving until the fill flips")
+        else:
+            print(f"found {n} docs to embed — filling (~25 min on a local"
+                  " 0.6b model)")
+        print("follow: agora embedding status")
+        return
+    if action == "status":
+        code, body = _admin_request("GET", "/admin/embedding")
+        if code == 0:
+            seed = _config.load_config().get("embedding") or {}
+            print("hub not running. boot seed:",
+                  json.dumps(seed) if seed else "(none)")
+            return
+        for k in ("state", "model", "pending_model", "url", "coverage",
+                  "pending_coverage", "rows", "thread_alive",
+                  "last_beat_age_s", "last_error", "breaker",
+                  "seed_mismatch", "vectors_db"):
+            if body.get(k) is not None:
+                print(f"  {k}: {body[k]}")
+        return
+    if action == "backfill":
+        # Repair-only (UX c2 P1-2): the derived work set fills by
+        # construction; this verb just nudges the sweep and reports.
+        code, body = _admin_request("GET", "/admin/embedding")
+        if code == 0:
+            sys.exit("hub not running")
+        print(f"state: {body.get('state')} — the standing reconcile derives"
+              " all missing/stale vectors itself; nothing to enqueue."
+              " Watch: agora embedding status")
+        return
+    if action == "disable":
+        code, body = _admin_request("DELETE", "/admin/embedding",
+                                    params={"erase": str(bool(args.erase)).lower()})
+        if code == 0:
+            sys.exit("hub not running")
+        if code != 200:
+            sys.exit(f"refused ({code}): {body.get('detail')}")
+        print("semantic search disabled"
+              + (f" — {body.get('erased_rows')} vector rows erased"
+                 if args.erase else " (vectors kept; re-enable resumes)"))
+        return
+    sys.exit(f"unknown action '{action}' (set|status|backfill|disable)")
 
 
 def cmd_backup(args: argparse.Namespace) -> None:
@@ -1976,6 +2081,24 @@ def build_parser() -> argparse.ArgumentParser:
     rs.add_argument("--url", default=None)
     rs.add_argument("--admin-key", dest="admin_key", default=None)
     rs.set_defaults(func=cmd_pause, pause_action="resume")
+
+    emb = sub.add_parser("embedding",
+                         help="semantic search lifecycle (agora-0137): "
+                              "set | status | backfill | disable")
+    emb.add_argument("action", choices=["set", "status", "backfill",
+                                        "disable"])
+    emb.add_argument("--url", default=None,
+                     help="OpenAI-compatible endpoint base (e.g. "
+                          "http://127.0.0.1:1234/v1)")
+    emb.add_argument("--model", default=None,
+                     help="embedding model id as the endpoint names it")
+    emb.add_argument("--api-key", dest="api_key", default=None)
+    emb.add_argument("--accept-recompute", action="store_true",
+                     help="accept the model-change cost: all vectors "
+                          "recompute (old model serves until the flip)")
+    emb.add_argument("--erase", action="store_true",
+                     help="with disable: also drop all stored vectors")
+    emb.set_defaults(func=cmd_embedding)
 
     bk = sub.add_parser("backup", help="verified point-in-time snapshot of the "
                                        "whole hub db (safe while the hub runs)")

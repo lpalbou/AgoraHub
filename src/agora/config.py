@@ -44,8 +44,25 @@ def load_config() -> dict[str, Any]:
 
 
 def save_config(url: str, admin_key: str, db_path: str) -> None:
-    _write_secret(_config_path(), json.dumps(
-        {"url": url, "admin_key": admin_key, "db_path": db_path}, indent=2))
+    """MERGE the core triple over the existing file — never replace it
+    wholesale: config.json also carries boot seeds other verbs own (the
+    `embedding` block, agora-0137), and the old overwrite would have
+    silently deleted them at every `agora up` (the exact
+    reboot-reverts-the-model trap the UX cycle named)."""
+    cfg = load_config()
+    cfg.update({"url": url, "admin_key": admin_key, "db_path": db_path})
+    _write_secret(_config_path(), json.dumps(cfg, indent=2))
+
+
+def save_embedding(url: str, model: str, api_key: str = "") -> None:
+    """The embedding boot seed (agora-0137). META WINS at boot: this file
+    only seeds a hub whose meta has no model yet; changing a live hub's
+    model goes through the 409-gated API, never through hand-editing —
+    `agora embedding status` reports a seed/meta mismatch loudly."""
+    cfg = load_config()
+    cfg["embedding"] = {"url": url, "model": model,
+                        **({"api_key": api_key} if api_key else {})}
+    _write_secret(_config_path(), json.dumps(cfg, indent=2))
 
 
 def save_url(url: str) -> None:

@@ -20,7 +20,8 @@ def create_app(db_path: str = "agora.db", admin_key: str = "",
                notify_rotate_mb: float = 8.0,
                dark_watch_seconds: float = 300.0,
                max_attachment_bytes: int | None = None,
-               max_channel_attachment_bytes: int | None = None) -> FastAPI:
+               max_channel_attachment_bytes: int | None = None,
+               embedding: dict[str, str] | None = None) -> FastAPI:
     if not admin_key:
         raise ValueError("an admin key is required (set AGORA_ADMIN_KEY)")
     sink = None
@@ -33,7 +34,8 @@ def create_app(db_path: str = "agora.db", admin_key: str = "",
     if max_channel_attachment_bytes:
         extra["max_channel_attachment_bytes"] = max_channel_attachment_bytes
     service = HubService(Database(db_path), rate_per_minute=rate_per_minute,
-                         notify_sink=sink, **extra)
+                         notify_sink=sink, db_path=db_path,
+                         embedding=embedding, **extra)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -58,8 +60,11 @@ def create_app(db_path: str = "agora.db", admin_key: str = "",
         finally:
             if watchdog is not None:
                 watchdog.cancel()
-            # Graceful shutdown: checkpoint the WAL and close SQLite so a long-
-            # lived remote hub restarts cleanly and backups are complete.
+            # Graceful shutdown: stop the embedder before the db closes
+            # (its corpus reads ride the read pool), checkpoint the WAL
+            # and close SQLite so a long-lived remote hub restarts cleanly
+            # and backups are complete.
+            service.embedding.shutdown()
             service.db.close()
 
     app = FastAPI(title="agora hub", version=__version__, lifespan=lifespan)

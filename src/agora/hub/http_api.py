@@ -525,6 +525,56 @@ def search_rebuild(
     return {"rebuilt": True, "docs": counts}
 
 
+class SetEmbedding(BaseModel):
+    url: str
+    model: str
+    api_key: str = ""
+    accept_recompute: bool = False
+
+
+@router.get("/admin/embedding")
+def embedding_status(
+    agent: AgentInfo = Depends(operator_or_admin),
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    """Semantic-search lifecycle status (agora-0137): state word, model,
+    coverage, thread liveness, breaker — one read diagnoses a stuck fill
+    (the SLOW-REQUEST/db-contended observability doctrine extends here)."""
+    if not agent.operator:
+        raise HTTPException(403, "embedding status is an operator surface")
+    return service.embedding.status()
+
+
+@router.put("/admin/embedding")
+def set_embedding(
+    payload: SetEmbedding,
+    agent: AgentInfo = Depends(operator_or_admin),
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    """Configure/change the embedding model (agora-0137, R3 gate): same
+    model = idempotent probe; a change with vectors present refuses 409
+    without accept_recompute; accepted changes fill blue/green — the old
+    model keeps serving until the new fill completes and flips."""
+    if not agent.operator:
+        raise HTTPException(403, "embedding config is an operator act")
+    return _run(service.embedding.set_model,
+                payload.url, payload.model, payload.api_key,
+                accept_recompute=payload.accept_recompute)
+
+
+@router.delete("/admin/embedding")
+def disable_embedding(
+    erase: bool = False,
+    agent: AgentInfo = Depends(operator_or_admin),
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    """The off switch (ops c3 R4): semantic search disabled; vectors kept
+    unless erase=true (re-enable resumes from what exists)."""
+    if not agent.operator:
+        raise HTTPException(403, "embedding config is an operator act")
+    return service.embedding.disable(erase=erase)
+
+
 @router.get("/admin/noise")
 def noise_report(
     hours: float = 24.0,

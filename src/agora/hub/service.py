@@ -158,7 +158,9 @@ class HubService:
                  interrupts_per_hour: int = 6, criticals_per_hour: int = 5,
                  notify_sink=None,
                  max_attachment_bytes: int = MAX_ATTACHMENT_BYTES,
-                 max_channel_attachment_bytes: int = MAX_CHANNEL_ATTACHMENT_BYTES) -> None:
+                 max_channel_attachment_bytes: int = MAX_CHANNEL_ATTACHMENT_BYTES,
+                 db_path: str = "",
+                 embedding: dict[str, str] | None = None) -> None:
         self.db = db
         self.max_attachment_bytes = max_attachment_bytes
         self.max_channel_attachment_bytes = max_channel_attachment_bytes
@@ -185,6 +187,16 @@ class HubService:
         # resident processes — the hub maintains each local agent's
         # <id>-inbox.log itself, the way the file mailbox's filesystem did.
         self.notify_sink = notify_sink
+        # Semantic search lifecycle (agora-0137): the manager owns the
+        # vector store, the embedder thread, and the model-change state
+        # machine. Constructed always (it reads durable meta and reports
+        # `disabled` honestly when nothing is configured); the embedder
+        # thread only starts when a model is actually set.
+        from .embedding_service import EmbeddingManager
+        emb = embedding or {}
+        self.embedding = EmbeddingManager(
+            db, db_path=db_path, url=emb.get("url", ""),
+            model=emb.get("model", ""), api_key=emb.get("api_key", ""))
         # Refused sends, per agent (ring buffer): makes "can this agent send?"
         # verifiable by the operator instead of assumed.
         self.refusals: dict[str, deque] = {}
@@ -1325,6 +1337,10 @@ class HubService:
 
     def _wake(self, message: Message) -> None:
         payload = {"type": "message", "message": message.model_dump()}
+        # New corpus content: shorten the embedder's idle sleep (the work
+        # set is DERIVED, this is purely a latency nudge — fs/store writes
+        # ride the ≤20s standing sweep, message traffic is the hot class).
+        self.embedding.nudge()
         self.fanout.publish(message.channel, payload)
         # Membership-keyed fan-out: reaches connected members whose channel
         # subscription predates this channel's existence (e.g. a DM opened

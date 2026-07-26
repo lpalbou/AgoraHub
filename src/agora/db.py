@@ -2478,6 +2478,22 @@ class Database:
         with self._lock:
             return _si.drift_counts(self._conn)
 
+    def search_docs_snapshot(self) -> dict[tuple[str, str, str], dict[str, Any]]:
+        """The embedder's corpus view (agora-0137): every indexed doc's
+        key, hash, and text — off the read-only pool, so the standing
+        reconcile never touches the writer lock (the 0136 convoy class).
+        The key uses channel '' for NULL (kind=agent), matching the
+        vector store's key normalization."""
+        out: dict[tuple[str, str, str], dict[str, Any]] = {}
+        with self.read_transaction() as conn:
+            for r in conn.execute(
+                    "SELECT kind, channel, ref, title, text, text_hash,"
+                    " created_at FROM search_docs"):
+                out[(r["kind"], r["channel"] or "", r["ref"])] = {
+                    "text_hash": r["text_hash"], "title": r["title"],
+                    "text": r["text"], "created_at": r["created_at"]}
+        return out
+
     def close(self) -> None:
         # Pool first (R3): an open read transaction pins WAL frames and
         # would make the TRUNCATE checkpoint below return busy.
