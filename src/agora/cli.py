@@ -543,6 +543,40 @@ def _admin_request(method: str, path: str, payload: dict | None = None,
         return 0, {}
 
 
+def cmd_store(args: argparse.Namespace) -> None:
+    """`agora store get|set|list` — the CLI store verb (field gap
+    2026-07-27, framework dm#32: with the MCP bridge flaky, at least two
+    seats had ZERO store write path — claims/decisions/work rows are
+    coordination-critical state and the terminal must be able to carry
+    them). Same hub rules apply: CAS via --expect-version, claim/work
+    key validation happens hub-side."""
+    async def go(c, a):
+        if a.store_action == "get":
+            row = await c.store_get(a.channel, a.key)
+            print(json.dumps(row, indent=1))
+            return
+        if a.store_action == "list":
+            rows = await c.store_keys(a.channel)
+            for r in rows:
+                if a.prefix and not str(r.get("key", "")).startswith(a.prefix):
+                    continue
+                print(f"{r.get('key')}  v{r.get('version')}"
+                      f"  by {r.get('updated_by')}")
+            return
+        # set
+        try:
+            value = json.loads(a.value)
+        except ValueError:
+            sys.exit("store set: VALUE must be JSON (quote it; strings"
+                     " need embedded quotes: '\"text\"')")
+        kwargs = {}
+        if a.expect_version is not None:
+            kwargs["expect_version"] = a.expect_version
+        row = await c.store_set(a.channel, a.key, value, **kwargs)
+        print(f"ok: {a.key} v{row.get('version')} in {a.channel}")
+    _run_agent_cmd(args, go)
+
+
 def cmd_embedding(args: argparse.Namespace) -> None:
     """Semantic-search lifecycle (agora-0137): set | status | backfill |
     disable. One verb family on purpose — the near-twin `agora embed`
@@ -2296,6 +2330,20 @@ def build_parser() -> argparse.ArgumentParser:
                          "mint + DM an invite token; public = DM a join "
                          "pointer")
     cc.set_defaults(func=cmd_create_channel)
+
+    st = _agent_parser("store", "channel store from the terminal: "
+                                "agora store get|set|list ... (the write "
+                                "path that survives a flaky MCP bridge)")
+    st.add_argument("store_action", choices=["get", "set", "list"])
+    st.add_argument("channel", help="channel name")
+    st.add_argument("key", nargs="?", default=None,
+                    help="store key (get/set)")
+    st.add_argument("value", nargs="?", default=None,
+                    help="JSON value (set)")
+    st.add_argument("--expect-version", dest="expect_version", type=int,
+                    default=None, help="CAS guard (0 = must not exist)")
+    st.add_argument("--prefix", default="", help="filter for list")
+    st.set_defaults(func=cmd_store)
 
     ad = _agent_parser("add", "invite seats to an EXISTING room you own: "
                               "agora add CHANNEL seat1 seat2 [--why ...] "
