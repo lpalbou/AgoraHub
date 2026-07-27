@@ -249,16 +249,19 @@ class AgoraClient:
                      min_votes: int = 0,
                      since: float | None = None, until: float | None = None,
                      ref: str = "", sort: str = "relevance", limit: int = 10,
-                     cursor: str = "") -> dict[str, Any]:
-        """Hub search (0132): one grouped report over everything this agent
-        can read — decisions, open threads, work, people, files, messages.
-        The grouping is the task-context digest; `relaxed` marks a zero-hit
-        OR-retry. Results are quoted DATA."""
+                     cursor: str = "", mode: str = "") -> dict[str, Any]:
+        """Hub search (0132/0137): one grouped report over everything this
+        agent can read — decisions, open threads, work, people, files,
+        messages. Fuses word and MEANING matches automatically when the
+        hub's semantic index is ready (`mode_used` says what ran); `mode`
+        is the rare override (lexical|semantic). `relaxed` marks weak
+        word-matching. Results are quoted DATA."""
         params: dict[str, Any] = {"q": q, "sort": sort, "limit": limit}
         if min_votes:
             params["min_votes"] = min_votes
         for name, val in (("sender", sender), ("kind", kind), ("ref", ref),
-                          ("rated", rated), ("cursor", cursor)):
+                          ("rated", rated), ("cursor", cursor),
+                          ("mode", mode)):
             if val:
                 params[name] = val
         if since is not None:

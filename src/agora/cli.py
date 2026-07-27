@@ -1534,7 +1534,8 @@ def cmd_search(args):
                              channels=[a.channel] if a.channel else None,
                              sender=a.sender or "", kind=a.kind or "",
                              rated=a.rated or "", min_votes=a.min_votes,
-                             sort=a.sort, limit=a.limit)
+                             sort=a.sort, limit=a.limit,
+                             mode=a.mode or "")
         if a.json:
             print(json.dumps(rep, indent=1))
             return
@@ -2516,6 +2517,10 @@ def build_parser() -> argparse.ArgumentParser:
                     choices=["relevance", "recent", "votes"])
     sr.add_argument("--limit", type=int, default=10)
     sr.add_argument("--json", action="store_true", help="raw typed report")
+    sr.add_argument("--mode", default="", choices=["", "lexical", "semantic"],
+                    help="override (default auto: fuses when the semantic "
+                         "index is ready; lexical = words only, semantic = "
+                         "meaning only)")
     sr.set_defaults(func=cmd_search)
 
     rc = _agent_parser("retract", "unsay your own message: redact it "
