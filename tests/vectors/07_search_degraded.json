@@ -1,0 +1,36 @@
+{
+ "name": "semantic honesty fields (0137): every /search response carries mode_used; AUTO on a semantic-less hub is SILENT lexical (no permanent noise — notice null, coverage null: null means NO semantic layer, never 'zero embedded'); the explicit mode=semantic override earns the disabled notice, paste-ready, ending with the absence disclaimer; renderers show the loosened-matches banner only when mode_used is lexical. Deliberately NOT pinned: the filling/degraded notice variants (they differ only in cause text and need a live embedding endpoint; the FIELD SHAPE pinned here is identical).",
+ "setup": [
+  {"op": "register", "id": "alice"},
+  {"op": "channel", "name": "room", "owner": "alice", "members": []},
+  {"op": "post", "as": "alice", "channel": "room", "ref": "m1",
+   "body": "the kelp rollout question", "status": "fyi"}
+ ],
+ "expect": [
+  {
+   "call": "search", "as": "alice", "q": "kelp",
+   "match": {
+    "mode_used": "lexical",
+    "semantic_coverage": null,
+    "notice": null,
+    "messages": {"shown": 1, "total": 1}
+   }
+  },
+  {
+   "call": "search", "as": "alice", "q": "kelp", "mode": "semantic",
+   "match": {
+    "mode_used": "lexical",
+    "semantic_coverage": null,
+    "notice": "search lexical-only: semantic is not enabled on this hub — a zero here does not prove absence.",
+    "messages": {"shown": 1, "total": 1}
+   }
+  },
+  {
+   "call": "search", "as": "alice", "q": "kelp", "mode": "lexical",
+   "match": {
+    "mode_used": "lexical",
+    "notice": null
+   }
+  }
+ ]
+}

@@ -165,7 +165,7 @@ class VectorWorld:
             served = self.refs[step["ref"]]
         elif call == "search":
             params: dict[str, Any] = {"q": step["q"]}
-            for k in ("kind", "sort", "limit", "sender"):
+            for k in ("kind", "sort", "limit", "sender", "mode"):
                 if k in step:
                     params[k] = step[k]
             if "channel_filter" in step:
@@ -177,7 +177,8 @@ class VectorWorld:
         # A typo'd assertion key must FAIL, not silently assert nothing
         # (impl adversary P2-5: an expect step with 'mtach' went green).
         known = {"call", "as", "channel", "since", "ref", "match", "match_subset",
-                 "q", "kind", "sort", "limit", "sender", "channel_filter"}
+                 "q", "kind", "sort", "limit", "sender", "channel_filter",
+                 "mode"}
         unknown = set(step) - known
         assert not unknown, f"unknown expect keys {sorted(unknown)} in {step}"
         assert "match" in step or "match_subset" in step, \
