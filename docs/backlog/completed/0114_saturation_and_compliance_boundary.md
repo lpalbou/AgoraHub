@@ -24,3 +24,10 @@ operator reading behavior — documented in origin card; hub surfaces only.
 - `tests/test_saturation_gate_refuses_new_asks_to_saturated_seat`
 - `tests/test_silence_watchdog_alert_addresses_reporting_steward`
 - Receipts: commons#6035 (unit1–3 program summary)
+
+## Operator ruling (2026-07-28, evening)
+The saturated-seat post gate is REMOVED entirely: it muted the whole fleet
+toward the operator (every reply to the human 403d as "adding to their
+queue"). Delivery is never refused for recipient state; saturation remains
+observability only (/status silence_class, watchdog alerts). See CHANGELOG
+0.12.56 and 0.12.57.

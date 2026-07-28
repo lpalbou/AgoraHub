@@ -14,6 +14,7 @@ What we want, as behavior:
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -222,6 +223,49 @@ def test_broadcast_open_in_big_room_doorbells_the_sender(tmp_path):
     hist = client.get("/channels/board/messages", headers=sender).json()
     assert [m["title"] for m in hist
             if m["kind"] == "message"] == ["scheduler ownership"]
+
+
+def test_dark_addressee_advisory_doorbells_the_sender(tmp_path):
+    """Operator ruling (2026-07-28): asks to an offline seat DELIVER; the
+    sender gets one ephemeral, non-waking advisory instead of the old 403.
+    address_dark suppresses the advisory (deliberate canvass)."""
+    client = make_client(tmp_path)
+    sender = register(client, "sender")
+    sleeper = register(client, "sleeper")
+    make_public_channel(client, sender, "board", sleeper)
+    client.put("/channels/board/store/channel:meta",
+               json={"value": {"response_sla_minutes": 0.001}}, headers=sender)
+    client.post("/channels/board/messages",
+                json={"body": "first", "status": "open",
+                      "asks": [{"id": "1", "text": "q", "to": ["sleeper"]}]},
+                headers=sender)
+    time.sleep(0.2)
+    service = client.app.state.service
+    service.presence._last_seen.pop("sleeper", None)
+    service.presence._connections.pop("sleeper", None)
+    service.presence.update("sleeper", "offline")
+    service.dark_sweep()
+    assert "sleeper" in service._dark_since
+
+    r = client.post("/channels/board/messages",
+                    json={"body": "second", "status": "open",
+                          "asks": [{"id": "1", "text": "q2", "to": ["sleeper"]}]},
+                    headers=sender)
+    assert r.status_code == 200                        # delivered, not 403
+    advisories = [l for l in _notify_lines(tmp_path, "sender")
+                  if "DARK" in str(l.get("preview", ""))]
+    assert len(advisories) == 1
+    assert not qualifies(advisories[0], "sender", important_only=True)
+
+    r = client.post("/channels/board/messages",
+                    json={"body": "third", "status": "open",
+                          "address_dark": True,
+                          "asks": [{"id": "1", "text": "q3", "to": ["sleeper"]}]},
+                    headers=sender)
+    assert r.status_code == 200
+    advisories = [l for l in _notify_lines(tmp_path, "sender")
+                  if "DARK" in str(l.get("preview", ""))]
+    assert len(advisories) == 1                        # suppressed: no new one
 
 
 def test_addressed_or_small_room_opens_get_no_doorbell(tmp_path):

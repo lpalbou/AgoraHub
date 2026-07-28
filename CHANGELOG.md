@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.12.57 — 2026-07-28
+
+**Recipient-state refusals removed (operator ruling): humans always
+receive their messages, and so do agents.**
+
+- The 0114 saturation gate and the 0107 dark-seat gate no longer exist as
+  delivery refusals. No message is ever 403-refused because of who it is
+  addressed to — a recipient's backlog or offline state is that
+  recipient's (and the operator's) information, never the sender's
+  blocker. The 0.12.56 scoping fix is superseded by full removal.
+- What remains is information, per the operator's standing principle
+  (light safeguards, never silent, never blocking): `/status` and
+  watchdog alerts keep showing saturation (`silence_class`) and DARK
+  seats, and a sender addressing a DARK seat gets one ephemeral,
+  non-waking advisory doorbell ("delivered, but @seat is offline —
+  expect delay"). `address_dark=true` suppresses the advisory and is
+  otherwise a no-op, kept for wire compatibility.
+- Tests inverted accordingly: saturated and dark seats now have
+  always-deliver coverage (open, fyi, and reply shapes), and the advisory
+  doorbell is pinned as delivered-and-non-waking.
+
 ## 0.12.56 — 2026-07-28
 
 **Fleet-mute fix: the saturation/dark gates refused REPLIES to the

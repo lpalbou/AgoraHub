@@ -212,7 +212,10 @@ class PostMessage(BaseModel):
     attachments: list[AttachmentRef] | None = None  # refs to uploaded channel blobs (0091)
     notice: Notice | None = None      # typed/idempotent noticeboard root
     signature: str | None = None        # RESERVED: opaque authorship token (enforcement later)
-    address_dark: bool = False          # 0107: override dark-seat post gate
+    address_dark: bool = False          # 0107: suppress the dark-addressee
+    #                                     sender advisory (delivery itself is
+    #                                     never gated — operator ruling
+    #                                     2026-07-28)
 
 
 class Envelope(BaseModel):

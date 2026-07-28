@@ -22,3 +22,10 @@ to seats the hub knew were dark.
 - `tests/test_dark_seat_gate_refuses_new_asks`
 - `tests/test_retirement_proposal_after_long_dark_episode`
 - Receipts: commons#6035 (0114 unit3 overlap), #6051 (unit2), #6053 (unit3)
+
+## Operator ruling (2026-07-28, evening)
+The post-time 403 gate is REMOVED: delivery is never refused for recipient
+state ("human users should ALWAYS receive messages. and the agents too").
+The dark-seat signal survives as observability (status rows, watchdog
+alerts) plus one ephemeral non-waking sender advisory; address_dark now
+merely suppresses that advisory. See CHANGELOG 0.12.57.

@@ -494,51 +494,30 @@ def test_overview_counts_acked_unanswered(client, room):
     assert asker["acked_unanswered"] == 0
 
 
-def test_saturation_gate_refuses_new_asks_to_saturated_seat(client, room, monkeypatch):
-    """0114: N escalated debts → teaching refusal on new asks TO that seat."""
-    from agora.hub import service as hub_service
-
-    monkeypatch.setattr(hub_service, "SATURATION_GATE_MIN_ESCALATED", 2)
+def test_saturated_seats_always_receive_messages(client, room):
+    """Operator ruling (2026-07-28): delivery is NEVER refused for recipient
+    state. The old 0114 saturation 403 muted the whole fleet toward the
+    operator (even a REPLY to the human was refused as 'adding to their
+    queue'); saturation is observability now (/status silence_class), not a
+    gate. Humans always receive their messages, and so do agents."""
     client.put("/channels/canvass/store/channel:meta",
                json={"value": {"response_sla_minutes": 0.001}},
                headers=_auth(room["asker"]))
-    for i in range(2):
+    for i in range(6):                       # well past the old gate of 5
         _post(client, room["asker"], status="open", title=f"debt {i}",
               asks=[{"id": "1", "text": "q", "to": ["named"]}])
     time.sleep(0.2)
 
+    # A new open ask, an fyi, and a DM reply to the deeply saturated seat:
+    # every one of them delivers.
     r = client.post("/channels/canvass/messages", headers=_auth(room["asker"]),
                     json={"title": "one more", "body": "b", "status": "open",
-                          "asks": [{"id": "1", "text": "blocked?", "to": ["named"]}]})
-    assert r.status_code == 403
-    assert "saturated" in r.json()["detail"]
-    assert "named" in r.json()["detail"]
-
-    # fyi to a saturated seat is still allowed (not a new ask obligation).
+                          "asks": [{"id": "1", "text": "more?", "to": ["named"]}]})
+    assert r.status_code == 200
     r = client.post("/channels/canvass/messages", headers=_auth(room["asker"]),
                     json={"title": "fyi ok", "body": "b", "status": "fyi",
                           "to": ["named"]})
     assert r.status_code == 200
-
-
-def test_replies_to_saturated_seats_always_pass(client, room, monkeypatch):
-    """Fleet-mute regression (2026-07-28): the saturation gate limits new
-    DEMAND, never discharge. It fired on replies too, so once the operator
-    seat read as saturated, every driven seat's answer to the human was
-    403-refused — the whole fleet went mute while turns burned."""
-    from agora.hub import service as hub_service
-
-    monkeypatch.setattr(hub_service, "SATURATION_GATE_MIN_ESCALATED", 2)
-    client.put("/channels/canvass/store/channel:meta",
-               json={"value": {"response_sla_minutes": 0.001}},
-               headers=_auth(room["asker"]))
-    for i in range(2):
-        _post(client, room["asker"], status="open", title=f"debt {i}",
-              asks=[{"id": "1", "text": "q", "to": ["named"]}])
-    time.sleep(0.2)
-
-    # Exact incident shape: the saturated seat DMs a question; the peer's
-    # reply into the DM (auto-addressed to the saturated seat) must pass.
     ask = client.post("/dms/asker/messages", headers=_auth(room["named"]),
                       json={"body": "can you answer?", "status": "open",
                             "asks": [{"id": "1", "text": "answer?"}]}).json()
@@ -547,78 +526,15 @@ def test_replies_to_saturated_seats_always_pass(client, room, monkeypatch):
                           "reply_to": ask["id"], "answers": ["1"]})
     assert r.status_code == 200
 
-    # New demand stays gated: a fresh open ask to the saturated seat is
-    # still refused.
-    r = client.post("/channels/canvass/messages", headers=_auth(room["asker"]),
-                    json={"title": "more", "body": "b", "status": "open",
-                          "asks": [{"id": "1", "text": "q", "to": ["named"]}]})
-    assert r.status_code == 403
 
-
-def test_gates_exempt_operator_targets(client, room, monkeypatch):
-    """An operator's queue is perpetually deep by design and only they can
-    drain it: asks TO the operator must never be saturation/dark-refused
-    (agents escalating to the human is the whole point of the seat)."""
-    from agora.hub import service as hub_service
-
-    monkeypatch.setattr(hub_service, "SATURATION_GATE_MIN_ESCALATED", 1)
-    service = client.app.state.service
-    service.register_agent("op", "Op", operator=True)
-
-    # One breached answer debt each on `named` (agent) and `op` (operator).
-    client.put("/channels/canvass/store/channel:meta",
-               json={"value": {"response_sla_minutes": 0.001}},
-               headers=_auth(room["asker"]))
-    _post(client, room["asker"], status="open", title="debt",
-          asks=[{"id": "1", "text": "q", "to": ["named"]}])
-    client.post("/dms/op/messages", headers=_auth(room["asker"]),
-                json={"body": "q1", "status": "open",
-                      "asks": [{"id": "1", "text": "q?"}]})
-    client.put("/channels/dm:asker--op/store/channel:meta",
-               json={"value": {"response_sla_minutes": 0.001}},
-               headers=_auth(room["asker"]))
-    time.sleep(0.2)
-
-    # Same saturation state, opposite outcomes: the agent seat stays gated…
-    r = client.post("/channels/canvass/messages", headers=_auth(room["asker"]),
-                    json={"title": "peer ask", "body": "b", "status": "open",
-                          "asks": [{"id": "1", "text": "q", "to": ["named"]}]})
-    assert r.status_code == 403 and "saturated" in r.json()["detail"]
-
-    # …while the operator is always reachable.
-    r = client.post("/dms/op/messages", headers=_auth(room["asker"]),
-                    json={"body": "need a decision", "status": "open",
-                          "asks": [{"id": "1", "text": "which way?"}]})
-    assert r.status_code == 200
-
-
-def test_replies_to_dark_seats_always_pass(client, room):
-    """A discharge must always be postable: a reply that can be refused
-    strands the debt forever (same incident class as saturation-on-reply)."""
+def test_dark_seats_always_receive_messages(client, room):
+    """0107 reshaped by the same ruling: asks and replies to an OFFLINE seat
+    deliver (the sender gets an ephemeral non-waking advisory instead of a
+    403 — pinned in test_routing); address_dark stays accepted as the
+    advisory suppressor for deliberate canvasses."""
     ask = client.post("/dms/asker/messages", headers=_auth(room["named"]),
                       json={"body": "q", "status": "open",
                             "asks": [{"id": "1", "text": "q?"}]}).json()
-    client.put("/channels/canvass/store/channel:meta",
-               json={"value": {"response_sla_minutes": 0.001}},
-               headers=_auth(room["asker"]))
-    _post(client, room["asker"], status="open", title="debt",
-          asks=[{"id": "1", "text": "q", "to": ["named"]}])
-    time.sleep(0.2)
-    service = client.app.state.service
-    service.presence._last_seen.pop("named", None)
-    service.presence._connections.pop("named", None)
-    service.presence.update("named", "offline")
-    service.dark_sweep()
-    assert "named" in service._dark_since
-
-    r = client.post("/dms/named/messages", headers=_auth(room["asker"]),
-                    json={"body": "answer", "status": "reply",
-                          "reply_to": ask["id"], "answers": ["1"]})
-    assert r.status_code == 200
-
-
-def test_dark_seat_gate_refuses_new_asks(client, room):
-    """0107: refuse new asks TO a seat in a dark episode."""
     client.put("/channels/canvass/store/channel:meta",
                json={"value": {"response_sla_minutes": 0.001}},
                headers=_auth(room["asker"]))
@@ -635,13 +551,15 @@ def test_dark_seat_gate_refuses_new_asks(client, room):
     r = client.post("/channels/canvass/messages", headers=_auth(room["asker"]),
                     json={"title": "to dark seat", "body": "b", "status": "open",
                           "asks": [{"id": "1", "text": "more?", "to": ["named"]}]})
-    assert r.status_code == 403
-    assert "DARK" in r.json()["detail"]
-
+    assert r.status_code == 200
     r = client.post("/channels/canvass/messages", headers=_auth(room["asker"]),
-                    json={"title": "override", "body": "b", "status": "open",
+                    json={"title": "canvass", "body": "b", "status": "open",
                           "address_dark": True,
                           "asks": [{"id": "1", "text": "canvass", "to": ["named"]}]})
+    assert r.status_code == 200
+    r = client.post("/dms/named/messages", headers=_auth(room["asker"]),
+                    json={"body": "answer", "status": "reply",
+                          "reply_to": ask["id"], "answers": ["1"]})
     assert r.status_code == 200
 
 

@@ -88,14 +88,15 @@ JOIN_TOKEN_PREFIX = "agora-join_"    # agora-join_<id:8hex>.<secret:48hex>
 MAX_JOIN_TOKEN_TTL = 30 * 86400.0    # hard cap (kubeadm defaults 24h; we cap 30d)
 # 0116: grace before surfacing a discharged-but-unclosed own thread.
 TO_CLOSE_MIN_AGE_SECONDS = 5 * 60.0
-# 0114: refuse new asks TO a seat holding this many SLA-breached answer debts.
-SATURATION_GATE_MIN_ESCALATED = 5
 # 0114/0107: routing hints appended to silence-class-tagged watchdog alerts.
+# ADVISORY ONLY (operator ruling 2026-07-28): delivery is never refused for
+# recipient state — the old saturation/dark 403 gates muted the fleet toward
+# the operator and were removed.
 _SILENCE_CLASS_ROUTE: dict[str, str] = {
     "dead": "ACTION: start/relaunch the offline seat — escalation cannot reach it.",
     "deaf": "ACTION: re-arm reception loop / restart the session.",
     "unseen": "ACTION: reprompt or relaunch — listener may be armed but debts are unread.",
-    "seen-and-ignored": "ACTION: compliance (0114) — do not add asks; saturation gate applies.",
+    "seen-and-ignored": "ACTION: compliance (0114) — prefer draining before adding asks.",
 }
 MAX_JOIN_TOKEN_USES = 100            # fleet provisioning ceiling
 CHANNEL_META_KEY = "channel:meta"
@@ -1182,41 +1183,6 @@ class HubService:
                                 "resolved; use open_vote for a fleet vote")
         return f"notice:{notice['kind']}:{notice['key']}"
 
-    def _require_unsaturated_addressees(self, poster: AgentInfo,
-                                        addressees: set[str],
-                                        status: Status) -> None:
-        """0114 supply-reduction gate: saturated seats get no NEW asks.
-
-        Scope (fleet-mute incident, 2026-07-28): the gate limits new DEMAND
-        (open/blocked), never SUPPLY — a reply discharges debt, so refusing
-        replies to a saturated seat is the gate working backwards (it made
-        the whole fleet unable to answer the operator). Operator seats are
-        exempt as targets: a human's queue is perpetually deep by design
-        (their desk absorbs it) and only they can drain it — 'drain their
-        queue first' is not actionable advice about your operator."""
-        if status not in (Status.open, Status.blocked):
-            return
-        if poster.operator or not addressees:
-            return
-        for seat in sorted(addressees):
-            if seat == poster.id or self.db.agent_is_operator(seat):
-                continue
-            info = AgentInfo(id=seat, name=seat)
-            escalated = [r for r in self.owed(info).to_answer if r.escalated]
-            n = len(escalated)
-            if n < SATURATION_GATE_MIN_ESCALATED:
-                continue
-            escalated.sort(key=lambda r: r.created_at)
-            oldest = escalated[0]
-            raise HubError(
-                403,
-                f"'{seat}' is saturated ({n} SLA-breached answer debts, "
-                f"gate={SATURATION_GATE_MIN_ESCALATED}) — drain their queue "
-                f"before adding new asks. Oldest: {oldest.channel}#{oldest.seq} "
-                f"(~{oldest.age_minutes:.0f}m). Fleet /status shows "
-                f"silence_class; operators may override.",
-            )
-
     def _is_dark_seat(self, agent_id: str) -> tuple[bool, float | None]:
         """0107: offline / dark-episode — escalation cannot reach the seat."""
         since = self._dark_since.get(agent_id)
@@ -1232,34 +1198,39 @@ class HubService:
         data = payload.data or {}
         return bool(data.get("address_dark"))
 
-    def _require_addressable_addressees(self, poster: AgentInfo,
-                                        addressees: set[str],
-                                        override_dark: bool,
-                                        status: Status) -> None:
-        """0107 post-time gate: refuse NEW asks TO dark seats.
-
-        Same scope rule as the saturation gate (fleet-mute incident,
-        2026-07-28): replies must always be postable — a discharge that can
-        be refused strands the debt forever — and operator seats are exempt
-        (a human is structurally 'dark' to liveness probes; their desk and
-        TUI are the reachable surfaces)."""
-        if status not in (Status.open, Status.blocked):
-            return
+    def _dark_addressee_nudge(self, poster: AgentInfo, message: Message,
+                              addressees: set[str],
+                              override_dark: bool) -> None:
+        """0107, reshaped by operator ruling (2026-07-28): DELIVERY IS NEVER
+        REFUSED for recipient state — humans always receive their messages,
+        and so do agents. The hub's job here is information, not censorship:
+        the message is already committed and delivered; the SENDER gets one
+        ephemeral, non-waking doorbell saying their addressee is offline, so
+        they can also route to a live seat instead of waiting on a corpse.
+        `address_dark=true` (a deliberate canvass) suppresses even that.
+        This replaced two 403 gates (0114 saturation, 0107 dark) that had
+        muted the whole fleet toward the operator — see CHANGELOG 0.12.56/57."""
         if poster.operator or override_dark or not addressees:
             return
+        if message.status not in (Status.open, Status.blocked):
+            return
+        dark_seats: list[str] = []
         for seat in sorted(addressees):
             if seat == poster.id or self.db.agent_is_operator(seat):
                 continue
-            dark, age = self._is_dark_seat(seat)
-            if not dark:
-                continue
-            age_clause = f" (~{age / 60:.0f}m in dark episode)" if age else ""
-            raise HubError(
-                403,
-                f"'{seat}' is DARK{age_clause} — escalation cannot reach an "
-                f"offline seat. Route via queue:* or a reporting delegate, or "
-                f"post with address_dark=true (operator/steward canvass).",
-            )
+            dark, _age = self._is_dark_seat(seat)
+            if dark:
+                dark_seats.append(seat)
+        if not dark_seats:
+            return
+        names = ", ".join(f"@{s}" for s in dark_seats)
+        plural = "is" if len(dark_seats) == 1 else "are"
+        self._deliver_doorbell(
+            poster.id, message,
+            f"HUB NOTICE — delivered, but {names} {plural} currently DARK "
+            "(offline; escalation cannot reach them until they return). "
+            "Expect delay; consider also routing to a live seat or a "
+            "reporting delegate.")
 
     def post_message(self, agent: AgentInfo, channel: str, payload: PostMessage) -> Message:
         """Post with a refusal audit: a refused send previously left no trace
@@ -1348,10 +1319,11 @@ class HubService:
         dedupe_key = self._message_contract(
             agent, channel, payload, data, addressees
         )
+        # Operator ruling (2026-07-28): no recipient-state refusals — humans
+        # and agents ALWAYS receive their messages. Dark/saturation state is
+        # information (status rows, watchdog alerts, the post-commit sender
+        # advisory below), never a delivery gate.
         override_dark = self._address_dark_override(payload)
-        self._require_addressable_addressees(agent, addressees, override_dark,
-                                             payload.status)
-        self._require_unsaturated_addressees(agent, addressees, payload.status)
         if data is not None:
             try:
                 # allow_nan=False doubles as the strict-JSON gate: NaN/Infinity
@@ -1423,6 +1395,8 @@ class HubService:
         try:
             self._routing_nudges(agent, channel, message)
             self._mention_nudges(agent, channel, message, mention_ctx)
+            self._dark_addressee_nudge(agent, message, addressees,
+                                       override_dark)
         except Exception:
             logging.getLogger("agora.hub.routing").exception(
                 "routing nudge failed (post succeeded)")
