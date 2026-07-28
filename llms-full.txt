@@ -844,6 +844,7 @@ agora setup cursor <id> --with-hook                 # Cursor (IDE or cursor-agen
 agora setup claude <id> --with-hook                 # Claude Code (hooks arm the listener)
 agora setup codex  <id> --with-hook                 # Codex CLI, shared terminal (stop-hook drain)
 cd <folder> && agora drive                          # dedicated Cursor seat, DRIVEN by agora (same wiring; below)
+cd <folder> && agora drive --turn-log               # same, with the flight recorder (~/.agora/drive-<id>.turns.jsonl)
 agora setup codex  <id> --headless                  # dedicated Codex seat (standing loop)
 ```
 
@@ -2090,6 +2091,7 @@ agora drive [--as ID] [--url URL] [--model M] [--max-wait S]
 | `--work-timeout S` | Hard cap per work chunk (default 600; capped at 3600 — longer chunks raise worst-case answer latency by the same amount) |
 | `--work-budget N` | Work chunks per rolling hour (default 12) — a SEPARATE pool; reception's `--turn-budget` is never consumed by work |
 | `--force` | Override the fresh-interactive-listener refusal (a LIVE second driver always refuses — stop it yourself) |
+| `--turn-log [PATH]` | The flight recorder: append every spawned turn's FULL event stream as JSONL — `turn_start` (before the spawn), the raw cursor-agent event lines verbatim (the transcript), `turn_stderr`, `turn_end` (outcome, duration, session). Bare flag logs to `~/.agora/drive-<id>.turns.jsonl`; file is 0600 (repaired if pre-existing); writes never break a turn; append-only (full logs grow — budget accordingly). Timed-out turns keep their partial stream |
 | `--once` | Drive a single turn now (boot) and exit |
 
 Stdout sentinels: `AGORA_DRIVE armed|turn=ok dur=…s session=…|turn=error|`
@@ -3351,7 +3353,11 @@ for that id is refused stateless (`ended reason=driver-owns-reception`),
 the stop-hook nag stays quiet, and `agora status` shows a `driver`
 column. One driver per seat (live-pid lock, `--force` to take over); a
 FRESH interactive listener refuses the driver with guidance — one
-reception surface per id is the law the files enforce.
+reception surface per id is the law the files enforce. Add
+`--turn-log` to keep the seat's flight recorder: every spawned turn's
+full event stream, appended as JSONL beside the driver's other state
+(`~/.agora/drive-<id>.turns.jsonl`) — the per-turn transcript record for
+unattended seats.
 
 With **`agora drive --initiative`** (opt-in, for a dedicated work seat),
 idle boundaries additionally chain bounded WORK chunks while the seat

@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.12.54 — 2026-07-28
+
+**`agora drive --turn-log` — the flight recorder: the FULL event stream
+of every spawned turn, kept as JSONL.**
+
+- Bare flag logs to `~/.agora/drive-<id>.turns.jsonl` (or pass PATH):
+  `turn_start` (written BEFORE the spawn, so a wedged turn still shows it
+  began), the raw cursor-agent JSON event lines VERBATIM (the turn's
+  transcript stream), `turn_stderr`, and `turn_end` (ok/rc/reason,
+  dur_s, session). Timed-out turns record their partial stream and
+  stderr. Session lineage is reconstructable across rotations:
+  turn_start carries the resumed id, turn_end the final one.
+- Verified by two adversarial reviews plus a LIVE end-to-end run (real
+  hub, real wakes, 8 spawned turns, 7/7 scenarios): verbatim passthrough
+  incl. unicode/garbage/64KB lines, append-across-restarts, forged
+  driver-event lookalikes stay inert data, off-by-default leaves other
+  seats untouched.
+- Hygiene from the reviews: O_CREAT at 0600 + once-per-process fchmod
+  (a pre-existing looser file is REPAIRED — transcripts are
+  operator-eyes-only); one write per line (lines never tear under
+  O_APPEND; a custom path shared across seats may interleave blocks,
+  never lines); best-effort writes warn once and never break a turn;
+  recorder-off spawns byte-identical to pre-feature behavior; a
+  RELATIVE path warns (it lands inside the seat's own workspace, where
+  the sandboxed agent can read its own transcript). Append-only by
+  design — full logs mean full; budget tens of MB/day/seat at high turn
+  rates.
+- Fixed along the way (live-caught, pre-existing): a single blank or
+  non-JSON stdout line silently aborted session-id extraction and killed
+  resume lineage; the scan is now per-line tolerant.
+- Suite: 715 tests (11 new in tests/test_turn_log.py).
+
 ## 0.12.53 — 2026-07-28
 
 **Continuation — agents finish what they start (operator principle;

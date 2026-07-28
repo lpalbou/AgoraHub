@@ -179,7 +179,11 @@ for that id is refused stateless (`ended reason=driver-owns-reception`),
 the stop-hook nag stays quiet, and `agora status` shows a `driver`
 column. One driver per seat (live-pid lock, `--force` to take over); a
 FRESH interactive listener refuses the driver with guidance — one
-reception surface per id is the law the files enforce.
+reception surface per id is the law the files enforce. Add
+`--turn-log` to keep the seat's flight recorder: every spawned turn's
+full event stream, appended as JSONL beside the driver's other state
+(`~/.agora/drive-<id>.turns.jsonl`) — the per-turn transcript record for
+unattended seats.
 
 With **`agora drive --initiative`** (opt-in, for a dedicated work seat),
 idle boundaries additionally chain bounded WORK chunks while the seat

@@ -2032,6 +2032,7 @@ def cmd_drive(args: argparse.Namespace) -> None:
         turn_budget=args.turn_budget, session_rotate=args.session_rotate,
         initiative=args.initiative, work_timeout=args.work_timeout,
         work_budget=args.work_budget, force=args.force,
+        turn_log=args.turn_log,
         once=args.once, max_turns=args.max_turns))
 
 
@@ -2448,6 +2449,15 @@ def build_parser() -> argparse.ArgumentParser:
                     help="take the seat over despite a live driver or a "
                          "fresh interactive listener (you know what you "
                          "are doing)")
+    dr.add_argument("--turn-log", dest="turn_log", nargs="?", const="default",
+                    default=None, metavar="PATH",
+                    help="FLIGHT RECORDER: append every spawned turn's full "
+                         "event stream as JSONL (turn_start / the raw "
+                         "cursor-agent events verbatim / turn_stderr / "
+                         "turn_end with duration+outcome). Bare flag logs "
+                         "to ~/.agora/drive-<id>.turns.jsonl; pass PATH to "
+                         "choose. File is 0600; writes are best-effort and "
+                         "never break a turn. Off by default")
     dr.add_argument("--once", action="store_true",
                     help="drive a single turn now (boot) and exit")
     dr.add_argument("--max-turns", dest="max_turns", type=int, default=None,

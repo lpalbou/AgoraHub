@@ -207,6 +207,7 @@ agora drive [--as ID] [--url URL] [--model M] [--max-wait S]
 | `--work-timeout S` | Hard cap per work chunk (default 600; capped at 3600 — longer chunks raise worst-case answer latency by the same amount) |
 | `--work-budget N` | Work chunks per rolling hour (default 12) — a SEPARATE pool; reception's `--turn-budget` is never consumed by work |
 | `--force` | Override the fresh-interactive-listener refusal (a LIVE second driver always refuses — stop it yourself) |
+| `--turn-log [PATH]` | The flight recorder: append every spawned turn's FULL event stream as JSONL — `turn_start` (before the spawn), the raw cursor-agent event lines verbatim (the transcript), `turn_stderr`, `turn_end` (outcome, duration, session). Bare flag logs to `~/.agora/drive-<id>.turns.jsonl`; file is 0600 (repaired if pre-existing); writes never break a turn; append-only (full logs grow — budget accordingly). Timed-out turns keep their partial stream |
 | `--once` | Drive a single turn now (boot) and exit |
 
 Stdout sentinels: `AGORA_DRIVE armed|turn=ok dur=…s session=…|turn=error|`

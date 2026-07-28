@@ -148,6 +148,7 @@ class Driver:
                  work_timeout: float = TURN_TIMEOUT,
                  work_budget: int = DEFAULT_WORK_BUDGET,
                  force: bool = False,
+                 turn_log: str | None = None,
                  spawn=None) -> None:
         self.agent_id = agent_id
         self.hub = hub
@@ -182,6 +183,26 @@ class Driver:
         self._work_strikes: dict[str, int] = {}   # claim-version -> receipt-less chunks
         self._chain_live = False                  # a work chain is running
         self._pending_wake = False                # a budget-parked wake is HELD
+        # The flight recorder (--turn-log, 2026-07-28): the FULL event
+        # stream of every spawned turn, appended as JSONL. Off by default;
+        # "default" resolves beside the seat's other driver state. Contents
+        # are the model's own transcript stream — operator eyes only, so
+        # the file is clamped 0600 like the notify files.
+        self._turn_log: Path | None = None
+        if turn_log:
+            self._turn_log = (home / f"drive-{agent_id}.turns.jsonl"
+                              if turn_log == "default"
+                              else Path(turn_log).expanduser())
+            if not self._turn_log.is_absolute():
+                # A relative path resolves against the driver's cwd — the
+                # seat's own WORKSPACE, where the sandboxed agent can read
+                # (and commit) its own transcript. Deliberate use stays
+                # possible; silence does not (review F5).
+                _emit(f"AGORA_DRIVE warn=turn-log-in-workspace "
+                      f"agent={agent_id} path={self._turn_log} "
+                      "(relative: lands in the seat's own cwd)")
+        self._turn_log_warned = False
+        self._turn_log_secured = False
 
     # -- one driver per seat (the ownership file) ------------------------------
 
@@ -315,6 +336,52 @@ class Driver:
         self._turn_times = [t for t in self._turn_times if now - t < 3600.0]
         return len(self._turn_times) < self.turn_budget
 
+    # -- the flight recorder (--turn-log) --------------------------------------
+
+    @staticmethod
+    def _prompt_kind(prompt: str) -> str:
+        if prompt.startswith("AGORA WAKE"):
+            return "wake"
+        if prompt.startswith("AGORA WORK CHUNK"):
+            return "work"
+        return "boot"
+
+    def _log_lines(self, lines: list[str]) -> None:
+        """Best-effort JSONL append: recording must NEVER break a turn.
+        A failure warns ONCE (the operator asked for these logs; silent
+        loss would be worse than the noise) and the turn proceeds.
+
+        Written the notify-sink way (review F2/F3): O_CREAT at 0600 (no
+        world-readable create window), fchmod once per process (repairs a
+        pre-existing looser file — transcripts carry peer content and tool
+        output, operator eyes only), and one os.write PER LINE so every
+        line lands atomically under O_APPEND (a custom path shared across
+        seats may still interleave BLOCKS, never tear a line)."""
+        if self._turn_log is None or not lines:
+            return
+        try:
+            fd = os.open(self._turn_log,
+                         os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
+            try:
+                if not self._turn_log_secured:
+                    os.fchmod(fd, 0o600)
+                    self._turn_log_secured = True
+                for line in lines:
+                    os.write(fd, (line if line.endswith("\n")
+                                  else line + "\n").encode("utf-8"))
+            finally:
+                os.close(fd)
+        except OSError:
+            if not self._turn_log_warned:
+                self._turn_log_warned = True
+                _emit(f"AGORA_DRIVE warn=turn-log-unwritable "
+                      f"agent={self.agent_id} path={self._turn_log}")
+
+    def _log_event(self, **fields) -> None:
+        if self._turn_log is None:
+            return  # recorder off = zero work, not even the dumps
+        self._log_lines([json.dumps(fields, ensure_ascii=False)])
+
     # -- the spawn (real) ----------------------------------------------------
 
     def _spawn_cursor_agent(self, prompt: str, session_id: str | None):
@@ -330,7 +397,12 @@ class Driver:
         if session_id:
             cmd += ["--resume", session_id]
         cmd.append(prompt)
+        kind = self._prompt_kind(prompt)
         t0 = time.time()
+        # turn_start BEFORE the spawn: a wedged turn still shows it began.
+        self._log_event(event="turn_start", ts=round(t0, 3),
+                        agent=self.agent_id, kind=kind,
+                        session=session_id, model=self.model)
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True,
                                   timeout=self._turn_timeout)
@@ -349,23 +421,67 @@ class Driver:
                         sid = obj["session_id"]
                 except ValueError:
                     pass
+            # The partial stream is exactly what the operator will want to
+            # read after a timeout — record it (stderr too), then the
+            # tombstone.
+            if self._turn_log is not None:
+                self._log_lines(out.splitlines())
+                err = exc.stderr or ""
+                if isinstance(err, bytes):
+                    err = err.decode("utf-8", "replace")
+                if err:
+                    self._log_event(event="turn_stderr",
+                                    ts=round(time.time(), 3),
+                                    agent=self.agent_id, text=err)
+                self._log_event(event="turn_end", ts=round(time.time(), 3),
+                                agent=self.agent_id, kind=kind, ok=False,
+                                reason="timeout",
+                                dur_s=round(time.time() - t0, 1),
+                                session=sid)
             _emit(f"AGORA_DRIVE turn=timeout agent={self.agent_id}")
             return sid, False
         except FileNotFoundError:
             raise SystemExit("agora drive: `cursor-agent` not found on PATH "
                              "(this driver spawns cursor-agent turns)")
+        # The raw stream verbatim: cursor-agent's own JSON event lines are
+        # the transcript; anything non-JSON stays as-is (it is a log).
+        # The whole recorder tail is gated so recorder-off spawns stay
+        # byte-identical to pre-feature behavior (review F1: an unguarded
+        # stderr probe broke injected fakes without that attribute).
+        if self._turn_log is not None:
+            self._log_lines((getattr(proc, "stdout", "") or "").splitlines())
+            stderr_text = getattr(proc, "stderr", "") or ""
+            if stderr_text:
+                self._log_event(event="turn_stderr",
+                                ts=round(time.time(), 3),
+                                agent=self.agent_id, text=stderr_text)
         if proc.returncode != 0:
+            if self._turn_log is not None:
+                self._log_event(event="turn_end", ts=round(time.time(), 3),
+                                agent=self.agent_id, kind=kind, ok=False,
+                                rc=proc.returncode,
+                                dur_s=round(time.time() - t0, 1),
+                                session=session_id)
             _emit(f"AGORA_DRIVE turn=error agent={self.agent_id} "
                   f"rc={proc.returncode}")
             return session_id, False
         new_sid = session_id
-        try:
-            for line in proc.stdout.splitlines():
+        # Per-line tolerance (live finding, 2026-07-28): one blank or
+        # non-JSON stdout line must not abort the scan for session_id —
+        # the whole-loop except silently killed resume lineage twice in
+        # the live verification (the timeout path always did it per-line).
+        for line in (getattr(proc, "stdout", "") or "").splitlines():
+            try:
                 obj = json.loads(line)
                 if isinstance(obj, dict) and obj.get("session_id"):
                     new_sid = obj["session_id"]
-        except ValueError:
-            pass
+            except ValueError:
+                pass
+        if self._turn_log is not None:
+            self._log_event(event="turn_end", ts=round(time.time(), 3),
+                            agent=self.agent_id, kind=kind, ok=True, rc=0,
+                            dur_s=round(time.time() - t0, 1),
+                            session=new_sid)
         # Success is auditable: without this line a healthy driver log shows
         # only arms and wakes, and the operator cannot tell turns from noise.
         _emit(f"AGORA_DRIVE turn=ok agent={self.agent_id} "
@@ -645,6 +761,7 @@ def run_drive(*, agent_id: str | None = None, url: str | None = None,
               session_rotate: int = DEFAULT_SESSION_ROTATE,
               initiative: bool = False, work_timeout: float = TURN_TIMEOUT,
               work_budget: int = DEFAULT_WORK_BUDGET, force: bool = False,
+              turn_log: str | None = None,
               once: bool = False, max_turns: int | None = None,
               cwd: Path | None = None) -> int:
     aid, hub = resolve_identity(agent_id, url, Path(cwd) if cwd else Path.cwd())
@@ -653,5 +770,5 @@ def run_drive(*, agent_id: str | None = None, url: str | None = None,
                     sandbox=sandbox_mode, turn_budget=turn_budget,
                     session_rotate=session_rotate, initiative=initiative,
                     work_timeout=work_timeout, work_budget=work_budget,
-                    force=force)
+                    force=force, turn_log=turn_log)
     return driver.run(once=once, max_turns=max_turns)

@@ -75,6 +75,7 @@ agora setup cursor <id> --with-hook                 # Cursor (IDE or cursor-agen
 agora setup claude <id> --with-hook                 # Claude Code (hooks arm the listener)
 agora setup codex  <id> --with-hook                 # Codex CLI, shared terminal (stop-hook drain)
 cd <folder> && agora drive                          # dedicated Cursor seat, DRIVEN by agora (same wiring; below)
+cd <folder> && agora drive --turn-log               # same, with the flight recorder (~/.agora/drive-<id>.turns.jsonl)
 agora setup codex  <id> --headless                  # dedicated Codex seat (standing loop)
 ```
 
