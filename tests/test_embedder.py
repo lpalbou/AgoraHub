@@ -95,7 +95,7 @@ def test_embedder_thread_fills_heals_and_reports(tmp_path):
     from agora.embed_client import EmbedClient
     from agora.embedder import Embedder
     from agora.vector_store import VectorStore
-    from tests.fake_embed import FakeEmbedServer
+    from fake_embed import FakeEmbedServer  # tests/ on sys.path under pytest
 
     server = FakeEmbedServer().start()
     store = VectorStore(str(tmp_path / "vectors.db"))

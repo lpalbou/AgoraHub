@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 pytest.importorskip("numpy")
 
 from agora.hub.app import create_app
-from tests.fake_embed import FakeEmbedServer
+from fake_embed import FakeEmbedServer  # tests/ is on sys.path under pytest
 
 ADMIN_KEY = "test-admin"
 

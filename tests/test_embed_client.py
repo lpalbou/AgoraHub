@@ -5,7 +5,7 @@ import pytest
 
 from agora.embed_client import (CANARY_TEXT, QUERY_INSTRUCTION, BreakerOpen,
                                 EmbedClient)
-from tests.fake_embed import FakeEmbedServer
+from fake_embed import FakeEmbedServer  # tests/ is on sys.path under pytest
 
 
 @pytest.fixture()
