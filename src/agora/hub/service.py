@@ -1183,12 +1183,23 @@ class HubService:
         return f"notice:{notice['kind']}:{notice['key']}"
 
     def _require_unsaturated_addressees(self, poster: AgentInfo,
-                                        addressees: set[str]) -> None:
-        """0114 supply-reduction gate: saturated seats get no new asks."""
+                                        addressees: set[str],
+                                        status: Status) -> None:
+        """0114 supply-reduction gate: saturated seats get no NEW asks.
+
+        Scope (fleet-mute incident, 2026-07-28): the gate limits new DEMAND
+        (open/blocked), never SUPPLY — a reply discharges debt, so refusing
+        replies to a saturated seat is the gate working backwards (it made
+        the whole fleet unable to answer the operator). Operator seats are
+        exempt as targets: a human's queue is perpetually deep by design
+        (their desk absorbs it) and only they can drain it — 'drain their
+        queue first' is not actionable advice about your operator."""
+        if status not in (Status.open, Status.blocked):
+            return
         if poster.operator or not addressees:
             return
         for seat in sorted(addressees):
-            if seat == poster.id:
+            if seat == poster.id or self.db.agent_is_operator(seat):
                 continue
             info = AgentInfo(id=seat, name=seat)
             escalated = [r for r in self.owed(info).to_answer if r.escalated]
@@ -1223,12 +1234,21 @@ class HubService:
 
     def _require_addressable_addressees(self, poster: AgentInfo,
                                         addressees: set[str],
-                                        override_dark: bool) -> None:
-        """0107 post-time gate: refuse new asks TO dark seats."""
+                                        override_dark: bool,
+                                        status: Status) -> None:
+        """0107 post-time gate: refuse NEW asks TO dark seats.
+
+        Same scope rule as the saturation gate (fleet-mute incident,
+        2026-07-28): replies must always be postable — a discharge that can
+        be refused strands the debt forever — and operator seats are exempt
+        (a human is structurally 'dark' to liveness probes; their desk and
+        TUI are the reachable surfaces)."""
+        if status not in (Status.open, Status.blocked):
+            return
         if poster.operator or override_dark or not addressees:
             return
         for seat in sorted(addressees):
-            if seat == poster.id:
+            if seat == poster.id or self.db.agent_is_operator(seat):
                 continue
             dark, age = self._is_dark_seat(seat)
             if not dark:
@@ -1329,8 +1349,9 @@ class HubService:
             agent, channel, payload, data, addressees
         )
         override_dark = self._address_dark_override(payload)
-        self._require_addressable_addressees(agent, addressees, override_dark)
-        self._require_unsaturated_addressees(agent, addressees)
+        self._require_addressable_addressees(agent, addressees, override_dark,
+                                             payload.status)
+        self._require_unsaturated_addressees(agent, addressees, payload.status)
         if data is not None:
             try:
                 # allow_nan=False doubles as the strict-JSON gate: NaN/Infinity

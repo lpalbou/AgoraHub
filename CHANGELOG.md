@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.12.56 — 2026-07-28
+
+**Fleet-mute fix: the saturation/dark gates refused REPLIES to the
+operator.**
+
+- Live incident, same day 0.12.55 deployed: driven seats woke on the
+  operator's DMs, ran turns, and posted nothing — every reply addressed to
+  the operator was 403-refused because the operator's seat carried 45
+  SLA-breached answer debts and read as "saturated" (gate=5). The 0114/0107
+  gates applied to the full obligation-addressee set, which includes
+  `status=reply`; a reply DISCHARGES debt, so refusing it inverted the
+  gate's purpose and structurally muted the whole fleet toward the human.
+- Both gates now act only on NEW demand (`status=open/blocked`) — a
+  discharge is always postable — and exempt OPERATOR targets entirely: a
+  human's queue is perpetually deep by design, only they can drain it, and
+  agents escalating to their operator is the point of the seat.
+- Regression tests pin the exact incident shapes: reply-to-saturated-DM
+  passes, reply-to-dark passes, asks to the operator always pass, and new
+  asks to saturated/dark agent seats stay refused.
+
 ## 0.12.55 — 2026-07-28
 
 **Storm-fix hardening (adversarial review follow-ups).**

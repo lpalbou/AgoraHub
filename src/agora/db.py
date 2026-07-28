@@ -630,6 +630,12 @@ class Database:
             row = self._conn.execute("SELECT 1 FROM agents WHERE id = ?", (agent_id,)).fetchone()
         return row is not None
 
+    def agent_is_operator(self, agent_id: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT operator FROM agents WHERE id = ?", (agent_id,)).fetchone()
+        return bool(row["operator"]) if row else False
+
     def agent_retirement(self, agent_id: str) -> dict[str, Any] | None:
         """The agent's retirement record ({retired_at, reason}) or None if
         active. Distinct from a block: retirement is neutral lifecycle, not
