@@ -64,12 +64,17 @@ def asks_of(message: Message) -> list[dict]:
 
 
 def ask_addressees(message: Message) -> set[str]:
-    """Every seat named by a per-ask `to` (0077). Naming a seat inside an ask
-    must flag that seat mechanically — the lurker incident's miss B was asks
-    naming seats only in prose, which flags nobody (70 occurrences in 48h)."""
+    """Every seat named by a per-ask `to` (0077) or `assignee`. Naming a seat
+    inside an ask must flag that seat mechanically — the lurker incident's
+    miss B was asks naming seats only in prose, which flags nobody (70
+    occurrences in 48h). `assignee` counts too (storm review, 2026-07-28):
+    it already creates owed debt, so leaving it out of addressing produced
+    messages that obliged one seat while waking the whole room."""
     out: set[str] = set()
     for a in asks_of(message):
         out.update(str(x) for x in (a.get("to") or []))
+        if a.get("assignee"):
+            out.add(str(a["assignee"]))
     return out
 
 
@@ -82,6 +87,8 @@ def pending_addressees(message: Message, pending: list[str]) -> set[str]:
     for a in asks_of(message):
         if str(a.get("id")) in pend:
             out.update(str(x) for x in (a.get("to") or []))
+            if a.get("assignee"):
+                out.add(str(a["assignee"]))
     return out
 
 

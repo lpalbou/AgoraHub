@@ -147,6 +147,45 @@
     "title": "CategoryCell",
     "type": "object"
    },
+   "CloseRow": {
+    "description": "Asker-side hygiene (agora-0116): your own open/blocked thread is fully\ndischarged (every ask answered or binary reply received) but not\nauthoritatively closed \u2014 advisory only, never wakes.",
+    "properties": {
+     "age_minutes": {
+      "default": 0.0,
+      "title": "Age Minutes",
+      "type": "number"
+     },
+     "answered_by": {
+      "default": "",
+      "title": "Answered By",
+      "type": "string"
+     },
+     "channel": {
+      "title": "Channel",
+      "type": "string"
+     },
+     "id": {
+      "title": "Id",
+      "type": "string"
+     },
+     "seq": {
+      "title": "Seq",
+      "type": "integer"
+     },
+     "title": {
+      "default": "",
+      "title": "Title",
+      "type": "string"
+     }
+    },
+    "required": [
+     "channel",
+     "id",
+     "seq"
+    ],
+    "title": "CloseRow",
+    "type": "object"
+   },
    "ConsumeRow": {
     "description": "An answer to YOUR OWN open question that you have not used (0078).",
     "properties": {
@@ -873,6 +912,33 @@
     "title": "MessageRow",
     "type": "object"
    },
+   "Notice": {
+    "description": "A noticeboard root's machine-checkable event identity.",
+    "properties": {
+     "key": {
+      "maxLength": 160,
+      "minLength": 1,
+      "title": "Key",
+      "type": "string"
+     },
+     "kind": {
+      "enum": [
+       "job",
+       "consensus",
+       "milestone",
+       "delivery"
+      ],
+      "title": "Kind",
+      "type": "string"
+     }
+    },
+    "required": [
+     "kind",
+     "key"
+    ],
+    "title": "Notice",
+    "type": "object"
+   },
    "ObligationRow": {
     "description": "ONE row shape for 'this message waits on a seat' (parity move 3,\nagora-0118): /owed.to_answer today, board/desk/digest surfaces as they\nmigrate. Field notes:\n\n- `sender`, not `from`: the envelope/Message field name, ending the\n  one-surface alias every TS client had to special-case. The wire still\n  emits `from` too (computed, deprecated) until the agora/0.4 bump.\n- `created_at` (truth) rides beside `age_minutes` (pre-rounded\n  convenience, deprecated at 0.4) so clients can compute their own ages\n  against the report's `computed_at`.",
     "properties": {
@@ -952,6 +1018,11 @@
       "title": "To Answer",
       "type": "integer"
      },
+     "to_close": {
+      "default": 0,
+      "title": "To Close",
+      "type": "integer"
+     },
      "to_consume": {
       "default": 0,
       "title": "To Consume",
@@ -979,6 +1050,13 @@
       "title": "To Answer",
       "type": "array"
      },
+     "to_close": {
+      "items": {
+       "$ref": "#/components/schemas/CloseRow"
+      },
+      "title": "To Close",
+      "type": "array"
+     },
      "to_consume": {
       "items": {
        "$ref": "#/components/schemas/ConsumeRow"
@@ -1000,6 +1078,11 @@
    "PostMessage": {
     "description": "Client -> hub payload to post a message.",
     "properties": {
+     "address_dark": {
+      "default": false,
+      "title": "Address Dark",
+      "type": "boolean"
+     },
      "answers": {
       "anyOf": [
        {
@@ -1063,6 +1146,16 @@
        }
       ],
       "title": "Data"
+     },
+     "notice": {
+      "anyOf": [
+       {
+        "$ref": "#/components/schemas/Notice"
+       },
+       {
+        "type": "null"
+       }
+      ]
      },
      "reply_to": {
       "anyOf": [
@@ -1186,6 +1279,22 @@
      }
     },
     "title": "RetireAgent",
+    "type": "object"
+   },
+   "RulingAcks": {
+    "properties": {
+     "keys": {
+      "items": {
+       "type": "string"
+      },
+      "title": "Keys",
+      "type": "array"
+     }
+    },
+    "required": [
+     "keys"
+    ],
+    "title": "RulingAcks",
     "type": "object"
    },
    "SearchHit": {
@@ -1722,8 +1831,8 @@
   "title": "Agora Hub HTTP API",
   "version": "agora/0.3",
   "x-agora-generator": {
-   "fastapi": "0.139.0",
-   "pydantic": "2.13.4"
+   "fastapi": "0.136.1",
+   "pydantic": "2.12.3"
   },
   "x-agora-protocol": "agora/0.3",
   "x-agora-semantics": [
@@ -1742,7 +1851,10 @@
    "search-blended",
    "envelope-addressed",
    "search-semantic-auto",
-   "claim-due-pings"
+   "claim-due-pings",
+   "blocked-addressed-asks",
+   "noticeboard-typed-roots",
+   "drive-session-lanes-v2"
   ]
  },
  "openapi": "3.1.0",
@@ -2415,7 +2527,7 @@
   },
   "/admin/status": {
    "get": {
-    "description": "One row per agent: presence, unread, oldest pending obligation. The\n'is anyone dark with work pending?' question as a single query \u2014 this IS\nthe dead-agent alarm, surfaced in `agora status` (no extra subsystem).",
+    "description": "Fleet liveness aggregate plus one row per agent. The 'is anyone dark\nwith work pending?' question as a single query \u2014 surfaced in `agora\nstatus` (no extra subsystem).",
     "operationId": "admin_status_admin_status_get",
     "parameters": [
      {
@@ -2434,12 +2546,9 @@
       "content": {
        "application/json": {
         "schema": {
-         "items": {
-          "additionalProperties": true,
-          "type": "object"
-         },
+         "additionalProperties": true,
          "title": "Response Admin Status Admin Status Get",
-         "type": "array"
+         "type": "object"
         }
        }
       },
@@ -4824,6 +4933,68 @@
     "summary": "Reputation Votes"
    }
   },
+  "/channels/{channel}/ruling-acks": {
+   "post": {
+    "description": "0113: record that this seat has read the current version of rulings.",
+    "operationId": "ack_rulings_channels__channel__ruling_acks_post",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "channel",
+      "required": true,
+      "schema": {
+       "title": "Channel",
+       "type": "string"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/RulingAcks"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Ack Rulings Channels  Channel  Ruling Acks Post",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Ack Rulings"
+   }
+  },
   "/channels/{channel}/store": {
    "get": {
     "operationId": "store_keys_channels__channel__store_get",
@@ -6344,7 +6515,7 @@
   },
   "/status": {
    "get": {
-    "description": "Fleet health for stewards (0084): the same per-seat overview the\noperator sees, gated to operators and REPORTING delegates \u2014 the seat\nchartered to chase silence could not see the lurk metrics (they lived\nbehind the admin key only). Refusal details are redacted for delegates:\nthey carry private/DM channel names and verbatim error text (HIGH-2);\nthe counts are what stewardship needs.",
+    "description": "Fleet health for stewards (0084): aggregate liveness plus the same\nper-seat overview the operator sees, gated to operators and REPORTING\ndelegates. Refusal details are redacted for delegates (HIGH-2).",
     "operationId": "fleet_status_status_get",
     "parameters": [
      {
@@ -6363,12 +6534,9 @@
       "content": {
        "application/json": {
         "schema": {
-         "items": {
-          "additionalProperties": true,
-          "type": "object"
-         },
+         "additionalProperties": true,
          "title": "Response Fleet Status Status Get",
-         "type": "array"
+         "type": "object"
         }
        }
       },

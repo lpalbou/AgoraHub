@@ -1,0 +1,28 @@
+{
+  "name": "to_close ledger (0116): discharged own open thread surfaces until resolved",
+  "setup": [
+    {"op": "register", "id": "asker"},
+    {"op": "register", "id": "helper"},
+    {"op": "channel", "name": "room", "owner": "asker", "members": ["helper"]},
+    {"op": "post", "as": "asker", "channel": "room", "ref": "q",
+     "body": "pick one", "title": "shape?",
+     "status": "open",
+     "asks": [{"id": "1", "text": "which shape?"}]},
+    {"op": "post", "as": "helper", "channel": "room", "ref": "a",
+     "body": "shape C", "status": "reply", "reply_to": "$q.id",
+     "answers": ["1"]},
+    {"op": "read", "as": "asker", "channel": "room", "id": "$a.id"}
+  ],
+  "expect": [
+    {"call": "owed", "as": "asker", "match": {
+      "to_consume": [],
+      "to_close": [{"channel": "room", "seq": "$q.seq", "answered_by": "helper"}],
+      "counts": {"to_consume": 0, "to_close": 1}}},
+    {"op": "post", "as": "asker", "channel": "room", "ref": "done",
+     "body": "adopting C", "status": "resolved", "reply_to": "$q.id",
+     "title": "consumed: shape C"},
+    {"call": "owed", "as": "asker", "match": {
+      "to_close": [],
+      "counts": {"to_close": 0}}}
+  ]
+}

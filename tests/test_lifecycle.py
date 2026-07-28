@@ -351,7 +351,7 @@ def test_retired_seat_never_trips_the_watchdog_or_overview():
         assert not any("bob" in m.body
                        for m in service.db.get_messages("hub-alerts", 0, 50))
     # The operator overview no longer lists the retired seat either.
-    rows = client.get("/admin/status", headers=ADMIN).json()
+    rows = client.get("/admin/status", headers=ADMIN).json()["agents"]
     assert all(row["agent_id"] != "bob" for row in rows)
     # And the asker's waiting_on tells the truth: 'retired', not
     # 'not-yet-acked' about a ghost.

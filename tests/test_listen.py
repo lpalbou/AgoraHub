@@ -73,6 +73,12 @@ def test_parse_line_accepts_notify_lines_and_skips_markers_and_junk():
     assert lenient is not None and lenient["seq"] == 12        # legacy string seq
 
 
+def test_retraction_tombstones_never_wake_listeners():
+    event = _event(status="blocked", flags="blocked,retracted", retracted=True)
+    assert not qualifies(event, "bob", important_only=False)
+    assert not qualifies(event, "bob", important_only=True)
+
+
 def test_qualifies_skips_own_messages_defensively():
     assert qualifies(_event(sender="alice"), "bob") is True
     assert qualifies(_event(sender="bob"), "bob") is False     # own line, legacy file
@@ -110,6 +116,22 @@ def test_important_only_qualification(flags, status, expected):
     ev = _event(flags=flags, status=status)
     assert qualifies(ev, "bob", important_only=True) is expected
     assert qualifies(ev, "bob", important_only=False) is True  # default: all peers
+
+
+def test_native_driver_gets_explicit_broadcast_wake_classification(capsys):
+    """The native driver must classify the triggering batch itself; an old
+    owed signature must not let room-wide noise bypass the broadcast fuse."""
+    from agora.listen import (_DRIVER_BROADCAST_WAKE, _deliver_wake)
+
+    broadcast = [_event(status="blocked", flags="blocked")]
+    addressed = [_event(status="fyi", flags="to-me,addressed")]
+    assert _deliver_wake(broadcast, "bob", preview=False, once=True,
+                         classify_driver_wake=True) == _DRIVER_BROADCAST_WAKE
+    assert _deliver_wake(addressed, "bob", preview=False, once=True,
+                         classify_driver_wake=True) == 2
+    # Public CLI/harness contract remains exit 2 for every qualifying wake.
+    assert _deliver_wake(broadcast, "bob", preview=False, once=True) == 2
+    capsys.readouterr()
 
 
 def test_wake_line_carries_hub_age_from_ulid():
@@ -217,6 +239,49 @@ def test_once_digest_wording_and_channel_cap():
     assert once_digest(events, owed=(0, 0)) == digest  # zero debt adds nothing
 
 
+def test_sharpest_debt_surfaces_on_wake_and_digest():
+    """0115: wakes lead with the top debt citation, not a bare owed=N count."""
+    from agora.listen import (_owed_wake_suffix,
+                              _sharpest_debt_digest_clause,
+                              _sharpest_debt_wake_token)
+
+    owed = {
+        "to_answer": [
+            {"channel": "commons", "seq": 3310, "sender": "laurent",
+             "age_minutes": 474.0, "asks_naming_you": ["1"], "escalated": True},
+            {"channel": "dm:agora--laurent", "seq": 12, "sender": "laurent",
+             "age_minutes": 30.0, "asks_naming_you": [], "escalated": False},
+        ],
+        "to_consume": [],
+        "counts": {"to_answer": 2, "to_consume": 0},
+    }
+    token = _sharpest_debt_wake_token(owed)
+    assert token == "commons#3310,7.9h,names-you"
+    assert _owed_wake_suffix((2, 0), owed) == (
+        " oldest=commons#3310,7.9h,names-you owed=2")
+    clause = _sharpest_debt_digest_clause(owed)
+    assert clause == "Sharpest debt: commons#3310 names you (7.9h). "
+    digest = once_digest([_event(channel="commons", seq=99)],
+                         owed=(2, 0), owed_raw=owed)
+    assert digest.startswith("AGORA: Sharpest debt: commons#3310 names you (7.9h).")
+    assert "owe 2 answer(s)" in digest
+
+
+def test_sharpest_debt_prefers_escalated_then_oldest_consume():
+    from agora.listen import _sharpest_debt_wake_token
+
+    owed = {
+        "to_answer": [],
+        "to_consume": [
+            {"channel": "commons", "answer_seq": 45, "answered_by": "runtime",
+             "age_minutes": 125.0},
+            {"channel": "commons", "answer_seq": 12, "answered_by": "memory",
+             "age_minutes": 10.0},
+        ],
+    }
+    assert _sharpest_debt_wake_token(owed) == "commons#45,2.1h,consume-runtime"
+
+
 def test_idle_nudge_is_an_accepted_noop(tmp_path, monkeypatch, capsys):
     """The initiative heartbeat was WITHDRAWN (0083 deprecated: clock-driven
     uninformed turns are the lurker anti-pattern in initiative costume;
@@ -257,11 +322,11 @@ def test_backlog_wake_fires_at_arm_for_missed_debt(tmp_path, monkeypatch,
     monkeypatch.setenv("AGORA_HOME", str(home))
     (home / "bob-inbox.log").write_text("")            # file mode, empty tail
 
-    snapshots = iter([((1, 0), "id-a"),                # arm 1: new debt -> wake
-                      ((1, 0), "id-a"),                # arm 2: same -> quiet
-                      ((2, 0), "id-a,id-b")])          # arm 3: grew -> wake
+    snapshots = iter([((1, 0), "id-a", None),                # arm 1: new debt -> wake
+                      ((1, 0), "id-a", None),                # arm 2: same -> quiet
+                      ((2, 0), "id-a,id-b", None)])          # arm 3: grew -> wake
     monkeypatch.setattr("agora.listen._owed_snapshot",
-                        lambda hub, aid: next(snapshots, ((0, 0), None)))
+                        lambda hub, aid: next(snapshots, ((0, 0), None, None)))
 
     common = dict(agent_id="bob", url="http://127.0.0.1:1", source="file",
                   once=True, max_wait=0.1, debounce=0.01, heartbeat=0,
@@ -300,14 +365,14 @@ def test_escalated_debt_re_rings_per_age_band(tmp_path, monkeypatch, capsys,
 
     def snap_for(r):
         now = time.time()
-        return (1, 0), listen_mod._debt_token(dict(r), now)
+        return (1, 0), listen_mod._debt_token(dict(r), now), None
 
     seq = iter([snap_for(row),         # arm 1: fresh debt -> wake, sig recorded
                 snap_for(row),         # arm 2: unchanged -> quiet
                 snap_for(escalated),   # arm 3: hub escalated, SAME id -> re-ring
                 snap_for(escalated)])  # arm 4: same band -> quiet again
     monkeypatch.setattr("agora.listen._owed_snapshot",
-                        lambda hub, aid: next(seq, ((0, 0), None)))
+                        lambda hub, aid: next(seq, ((0, 0), None, None)))
     common = dict(agent_id="bob", url="http://127.0.0.1:1", source="file",
                   once=True, max_wait=0.1, debounce=0.01, heartbeat=0,
                   poll=0.01, cwd=tmp_path)
@@ -429,7 +494,7 @@ def test_event_wake_records_signature_so_arm_check_stays_quiet(tmp_path):
     home = tmp_path / "home"
     home.mkdir()
     orig = listen_mod._owed_snapshot
-    listen_mod._owed_snapshot = lambda hub, aid: ((1, 0), "sig-x")
+    listen_mod._owed_snapshot = lambda hub, aid: ((1, 0), "sig-x", None)
     orig_home = listen_mod._config.home
     listen_mod._config.home = lambda: home
     try:

@@ -72,7 +72,8 @@ def test_typed_surfaces_are_in_the_schema():
     from export_openapi import generate
 
     schemas = generate()["components"]["schemas"]
-    for name in ("OwedReport", "ObligationRow", "ConsumeRow", "WaitingRow",
+    for name in ("OwedReport", "ObligationRow", "ConsumeRow", "CloseRow",
+                 "WaitingRow",
                  "MessageRow", "Envelope", "WhoamiReport"):
         assert name in schemas, f"{name} fell out of the served OpenAPI"
     row = schemas["ObligationRow"]["properties"]

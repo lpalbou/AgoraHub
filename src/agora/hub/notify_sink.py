@@ -47,6 +47,7 @@ def notify_line(envelope: Envelope) -> str:
         # flag and keep today's behavior: degradation = status quo noise,
         # never deafness.
         ("addressed", envelope.addressed),
+        ("retracted", envelope.retracted),
         (envelope.status.value, envelope.status.value in ("open", "blocked")),
     ] if on)
     preview = (envelope.body or "")[:200]
@@ -55,6 +56,7 @@ def notify_line(envelope: Envelope) -> str:
         "from": envelope.sender, "id": envelope.id,
         "kind": envelope.kind.value,
         "status": envelope.status.value, "title": envelope.title,
+        "retracted": envelope.retracted,
         "flags": flags, **({"preview": preview} if preview else {}),
         # Hub-computed count (same trust class as seq/flags): a body-less
         # attachment message otherwise leaves no trace on this line at all.

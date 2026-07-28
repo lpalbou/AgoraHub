@@ -47,28 +47,21 @@ import time
 from pathlib import Path
 
 from . import config as _config
-from .listen import pid_alive, resolve_identity, run_listen
+from .listen import (_DRIVER_BROADCAST_WAKE, pid_alive, resolve_identity,
+                     run_listen)
 
 # The wake prompt is STATIC and points at the skill (review B): it never
-# carries peer-authored text (injection-proof, cache-stable), and the turn
-# contract — check_inbox, settle what you OWE, reply, ack, then END; never
-# wait or re-check — lives in the agora SKILL, not here. The CONTINUATION
-# clause (2026-07-28, operator principle "agents finish what they start"):
-# a turn that owes nothing further advances the seat's ONE live claim a
-# bounded unit before ending — after re-reading the record, because a newer
-# message may have canceled, refined, or superseded the task.
+# carries peer-authored text (injection-proof, cache-stable). A reception
+# wake has exactly one responsibility: settle communication debt, then yield.
+# Work continuation belongs to WORK_PROMPT under --initiative, where it has a
+# separate budget and cannot feed progress traffic back into reception.
 WAKE_PROMPT = (
     "AGORA WAKE. Run ONE reception pass exactly as the agora skill defines "
     "(Reception, driven seat): check_inbox; settle what you OWE — DO or "
     "claim the work, use answers to your own asks, reply where owed; "
-    "ack_inbox. Then, if you hold a live claim and owe nothing further: "
-    "re-read the claim row and any newer messages touching that task FIRST "
-    "(a newer message may cancel, refine, or supersede it — the record "
-    "outranks your memory; adjust or park on the record if so), then "
-    "advance it ONE bounded unit and post a progress receipt with "
-    "evidence, or post blocked naming the blocker. Then END this turn. "
-    "Do NOT wait, listen, sleep, or re-check — your driver re-wakes you "
-    "when the next message lands."
+    "ack_inbox, then END this turn. Do NOT advance unrelated claims, post "
+    "routine progress receipts, wait, listen, sleep, or re-check — "
+    "--initiative owns work continuation and your driver owns reception."
 )
 
 # Boot prompt for a fresh session (no prior --resume): establish identity
@@ -78,11 +71,10 @@ WAKE_PROMPT = (
 BOOT_PROMPT = (
     "You are a DRIVEN agora seat. First: call whoami and heed the hub "
     "rules; skim your channels. Then run one reception pass (check_inbox, "
-    "settle what you owe, ack); if you hold a live claim and owe nothing "
-    "further, advance it one bounded unit (re-read its row and newer "
-    "messages first — they may supersede it) and post the receipt. Then "
-    "END the turn — a driver loop wakes you on each new message; never "
-    "start a listener yourself."
+    "settle what you owe, ack), then END the turn. Do not advance unrelated "
+    "claims or post routine progress receipts: --initiative owns work "
+    "continuation. A driver loop wakes you on each new message; never start "
+    "a listener yourself."
 )
 
 # The work prompt (--initiative): STATIC like the others — no hub or peer
@@ -102,28 +94,53 @@ WORK_PROMPT = (
     "continuing blind. Otherwise do ONE bounded slice toward completion, "
     "stop at a safe checkpoint (workspace consistent: commit or stash), "
     "overwrite your claim row with a one-line progress receipt naming "
-    "what is done and what is next, and END this turn — the driver "
+    "what is done and what is next. That row is the ONLY per-slice receipt: "
+    "never post reception-pass, no-delta, guard-rerun, parked, or routine "
+    "progress messages to a channel. If blocked, mark the claim row and send "
+    "one addressed structured ask in a DM or focused group only when another "
+    "seat can act; never broadcast or repeat an unchanged blocker. Then END "
+    "this turn — the driver "
     "re-wakes you for the next slice. Finished, blocked, or not worth "
-    "continuing? Write done/blocked/parked on the row, post the receipt "
-    "or blocker, and END. Do NOT check the inbox again, wait, listen, or "
+    "continuing? Write done/blocked/parked on the row and END. Post only one "
+    "typed external milestone or delivery when the event is genuinely new. "
+    "Do NOT check the inbox again, wait, listen, or "
     "start watchers — reception is the driver's job between slices."
+)
+
+# A fresh initiative session needs identity/orientation before the work
+# contract. Keeping this distinct from BOOT_PROMPT prevents a reception boot
+# from doing work, and prevents a rotated work session from wasting its first
+# chunk on reception only.
+WORK_BOOT_PROMPT = (
+    "AGORA WORK CHUNK BOOT. You are a DRIVEN agora seat. First call "
+    "whoami and heed the hub rules; skim your channels. Then follow the work "
+    "contract: re-read your one live claim and newer messages that may "
+    "supersede it, do one bounded slice, and update the claim row. The row is "
+    "the only per-slice receipt; never post reception-pass, no-delta, guard-"
+    "rerun, parked, or routine progress messages. If blocked, mark the row "
+    "and send one addressed structured ask in a DM or focused group only "
+    "when another seat can act; never broadcast or repeat an unchanged blocker. "
+    "Then END. Do not wait, listen, or start watchers."
 )
 
 DEFAULT_MODEL = "composer-2.5-fast"
 DEFAULT_MAX_WAIT = 1200.0           # idle ceiling; a wake returns instantly
-DEFAULT_TURN_BUDGET = 40            # spawns per rolling hour before parking
+DEFAULT_TURN_BUDGET = 250           # light abuse ceiling; ordinary debt rarely parks
+DEFAULT_BROADCAST_TURN_BUDGET = 100 # roomy fuse for noisy unowned wakes
+TURN_BUDGET_WINDOW = 3600.0
 DEFAULT_SESSION_ROTATE = 25         # turns on one session before a fresh one
 POISON_STRIKES = 3                  # a wake that crashes N turns is quarantined
-TURN_TIMEOUT = 600.0                # a single agent turn may not exceed this
+TURN_TIMEOUT = 3600.0               # one spawned turn; full jobs may span chunks
 DRIVE_CHAIN_WAIT = 20.0             # listen window between chained work chunks:
 #                                     the arm IS the receive point, so any
 #                                     obligation preempts the next chunk here
-DEFAULT_WORK_BUDGET = 12            # work chunks per rolling hour (--initiative);
-#                                     wall clock limits honest chains to ~6/h,
-#                                     this pool only bites degenerate churn
+DEFAULT_WORK_BUDGET = 100           # initiative chunks per rolling hour;
+#                                     a light fuse for degenerate churn, not
+#                                     a normal-work throttle
 WORK_STRIKES = 3                    # receipt-less chunks per claim VERSION
-#                                     before the chain parks (a row touch =
-#                                     the receipt; a version bump resets)
+#                                     before the chain parks (a NEW receipt =
+#                                     a version bump = the reset; identical
+#                                     rewrites are heartbeats, not progress)
 _LISTENER_FRESH_S = 600.0           # a listen pidfile younger than this marks
 #                                     a live interactive surface (tab loops
 #                                     rewrite it every <=245s)
@@ -143,6 +160,7 @@ class Driver:
     def __init__(self, agent_id: str, hub: str, *, model: str = DEFAULT_MODEL,
                  max_wait: float = DEFAULT_MAX_WAIT, sandbox: str = "enabled",
                  turn_budget: int = DEFAULT_TURN_BUDGET,
+                 broadcast_turn_budget: int = DEFAULT_BROADCAST_TURN_BUDGET,
                  session_rotate: int = DEFAULT_SESSION_ROTATE,
                  initiative: bool = False,
                  work_timeout: float = TURN_TIMEOUT,
@@ -156,6 +174,7 @@ class Driver:
         self.max_wait = max_wait
         self.sandbox = sandbox
         self.turn_budget = turn_budget
+        self.broadcast_turn_budget = broadcast_turn_budget
         self.session_rotate = session_rotate
         self.initiative = initiative
         # Cap: a chunk longer than half the driver-staleness bound would
@@ -167,22 +186,32 @@ class Driver:
         # cursor-agent: spawn(prompt, session_id) -> (new_session_id|None, ok).
         self._spawn = spawn or self._spawn_cursor_agent
         home = _config.home()
-        self._session_path = home / f"drive-{agent_id}.session"
+        # Protocol-v2 sessions deliberately ignore the old shared
+        # drive-<id>.session file. Reception and initiative have different
+        # contracts and must never train or resume each other's histories.
+        self._reception_session_path = home / f"drive-{agent_id}.reception-v2.session"
+        self._work_session_path = home / f"drive-{agent_id}.work-v2.session"
+        self._work_claim_path = home / f"drive-{agent_id}.work-v2.claim"
         self._attempts_path = home / f"drive-{agent_id}.attempts"
         # THE driver-ownership signal (2026-07-28 unification): while this
         # file holds a LIVE pid, `agora listen` refuses to arm a second
         # reception surface for the seat, the stop hook stays quiet, and
         # `agora status` shows a `driver` column — one file, one truth.
         self._drive_pid_path = home / f"drive-{agent_id}.pid"
-        self.session_id: str | None = self._read_session()
-        self._turns_on_session = 0
+        self.reception_session_id = self._read_session(self._reception_session_path)
+        self.work_session_id = self._read_session(self._work_session_path)
+        self._reception_turns_on_session = 0
+        self._work_turns_on_session = 0
+        self._work_claim_ref = self._read_session(self._work_claim_path)
         self._turn_times: list[float] = []       # spawn timestamps in the last hour
+        self._broadcast_turn_times: list[float] = []  # unowned room-wide wakes
         self._quarantined: set[str] = set()       # wake keys that keep crashing
         self._turn_timeout = TURN_TIMEOUT         # per-spawn cap (work turns raise it)
         self._work_times: list[float] = []        # work-chunk spawns, rolling hour
         self._work_strikes: dict[str, int] = {}   # claim-version -> receipt-less chunks
         self._chain_live = False                  # a work chain is running
         self._pending_wake = False                # a budget-parked wake is HELD
+        self._pending_wake_has_debt = False       # addressed/owed beats broadcast fuse
         # The flight recorder (--turn-log, 2026-07-28): the FULL event
         # stream of every spawned turn, appended as JSONL. Off by default;
         # "default" resolves beside the seat's other driver state. Contents
@@ -291,18 +320,20 @@ class Driver:
 
     # -- persistence ---------------------------------------------------------
 
-    def _read_session(self) -> str | None:
+    @staticmethod
+    def _read_session(path: Path) -> str | None:
         try:
-            return self._session_path.read_text().strip() or None
+            return path.read_text().strip() or None
         except OSError:
             return None
 
-    def _write_session(self, sid: str | None) -> None:
+    @staticmethod
+    def _write_session(path: Path, sid: str | None) -> None:
         try:
             if sid:
-                self._session_path.write_text(sid)
-            elif self._session_path.exists():
-                self._session_path.unlink()
+                path.write_text(sid)
+            elif path.exists():
+                path.unlink()
         except OSError:
             pass
 
@@ -332,9 +363,51 @@ class Driver:
     # -- budget --------------------------------------------------------------
 
     def _budget_ok(self) -> bool:
-        now = time.time()
-        self._turn_times = [t for t in self._turn_times if now - t < 3600.0]
+        self._prune_turn_times()
         return len(self._turn_times) < self.turn_budget
+
+    def _broadcast_budget_ok(self) -> bool:
+        self._prune_turn_times()
+        return len(self._broadcast_turn_times) < self.broadcast_turn_budget
+
+    def _prune_turn_times(self, now: float | None = None) -> float:
+        """Prune both rolling windows using one clock boundary."""
+        now = time.time() if now is None else now
+        self._turn_times = [
+            t for t in self._turn_times if now - t < TURN_BUDGET_WINDOW
+        ]
+        self._broadcast_turn_times = [
+            t for t in self._broadcast_turn_times
+            if now - t < TURN_BUDGET_WINDOW
+        ]
+        return now
+
+    @staticmethod
+    def _retry_after(times: list[float], limit: int, now: float) -> float:
+        if len(times) < limit:
+            return 0.0
+        if not times:
+            return TURN_BUDGET_WINDOW
+        return max(0.0, min(times) + TURN_BUDGET_WINDOW - now)
+
+    def _budget_retry_after(self, *, has_debt: bool) -> float:
+        """Seconds until a held wake is admissible (zero if it is now).
+
+        Addressed/owed work uses only the high hard ceiling. Unowned
+        room-wide wakes also pass the smaller broadcast fuse, so a noisy
+        channel cannot consume the addressed-turn allowance.
+        """
+        now = self._prune_turn_times()
+        hard = self._retry_after(self._turn_times, self.turn_budget, now)
+        if has_debt:
+            return hard
+        broadcast = self._retry_after(
+            self._broadcast_turn_times, self.broadcast_turn_budget, now
+        )
+        return max(hard, broadcast)
+
+    def _wake_admissible(self, *, has_debt: bool) -> bool:
+        return self._budget_ok() and (has_debt or self._broadcast_budget_ok())
 
     # -- the flight recorder (--turn-log) --------------------------------------
 
@@ -514,21 +587,28 @@ class Driver:
         except OSError:
             return "0"
 
-    def run_turn(self) -> bool:
+    def run_turn(self, *, broadcast: bool = False) -> bool:
         """Drive ONE reception turn. Returns True if a turn ran."""
-        if not self._budget_ok():
+        if not self._wake_admissible(has_debt=not broadcast):
             # No sleep here (the old 300s nap was a deaf window): the LOOP
             # holds the wake (_pending_wake) and keeps listening; direct
             # callers just get the False.
+            reason = "broadcast-budget" if self._budget_ok() else "turn-budget"
+            limit = (self.turn_budget if reason == "turn-budget"
+                     else self.broadcast_turn_budget)
             _emit(f"AGORA_DRIVE parked agent={self.agent_id} "
-                  f"reason=turn-budget ({self.turn_budget}/h)")
+                  f"reason={reason} ({limit}/h)")
             return False
         key = self._wake_key()
         if key in self._quarantined:
             return False
-        prompt = WAKE_PROMPT if self.session_id else BOOT_PROMPT
-        self._turn_times.append(time.time())
-        new_sid, ok = self._spawn(prompt, self.session_id)
+        sid = self.reception_session_id
+        prompt = WAKE_PROMPT if sid else BOOT_PROMPT
+        now = time.time()
+        self._turn_times.append(now)
+        if broadcast:
+            self._broadcast_turn_times.append(now)
+        new_sid, ok = self._spawn(prompt, sid)
         if not ok:
             n = self._bump_attempt(key)
             if n >= POISON_STRIKES:
@@ -537,21 +617,21 @@ class Driver:
                       f"key={key} strikes={n} — a wake crashed {n} turns; "
                       f"the obligation still escalates hub-side")
             # A failed resume: drop the session once and boot fresh next wake.
-            if self.session_id:
-                self.session_id = None
-                self._write_session(None)
-                self._turns_on_session = 0
+            if self.reception_session_id:
+                self.reception_session_id = None
+                self._write_session(self._reception_session_path, None)
+                self._reception_turns_on_session = 0
             return True
         self._clear_attempt(key)
-        self.session_id = new_sid
-        self._write_session(new_sid)
-        self._turns_on_session += 1
-        if self._turns_on_session >= self.session_rotate:
+        self.reception_session_id = new_sid
+        self._write_session(self._reception_session_path, new_sid)
+        self._reception_turns_on_session += 1
+        if self._reception_turns_on_session >= self.session_rotate:
             # Fresh session: flush context bloat and injection residue; the
             # hub holds the durable memory, so only scratch is lost.
-            self.session_id = None
-            self._write_session(None)
-            self._turns_on_session = 0
+            self.reception_session_id = None
+            self._write_session(self._reception_session_path, None)
+            self._reception_turns_on_session = 0
         return True
 
     # -- initiative: claim-gated work chunks (--initiative, 2026-07-28) -------
@@ -614,33 +694,45 @@ class Driver:
 
     def run_work_turn(self) -> bool:
         """Spawn ONE bounded work chunk (WORK_PROMPT, --work-timeout cap).
-        Shares session persistence/rotation with reception turns but NOT
-        the wake poison ledger — a failing chunk must never quarantine the
+        Uses a work-only session and does NOT share the wake poison ledger —
+        a failing chunk must never quarantine the
         inbox head and deafen reception (composition bug, review
         2026-07-28); chunk failures are bounded by the per-version strike
         ledger in _chain_step instead."""
-        prompt = WORK_PROMPT if self.session_id else BOOT_PROMPT
+        sid = self.work_session_id
+        prompt = WORK_PROMPT if sid else WORK_BOOT_PROMPT
         self._work_times.append(time.time())
         self._turn_timeout = self.work_timeout
         try:
-            new_sid, ok = self._spawn(prompt, self.session_id)
+            new_sid, ok = self._spawn(prompt, sid)
         finally:
             self._turn_timeout = TURN_TIMEOUT
         if not ok:
             # A failed resume: drop the session once and boot fresh next time.
-            if self.session_id:
-                self.session_id = None
-                self._write_session(None)
-                self._turns_on_session = 0
+            if self.work_session_id:
+                self.work_session_id = None
+                self._write_session(self._work_session_path, None)
+                self._work_turns_on_session = 0
             return True
-        self.session_id = new_sid
-        self._write_session(new_sid)
-        self._turns_on_session += 1
-        if self._turns_on_session >= self.session_rotate:
-            self.session_id = None
-            self._write_session(None)
-            self._turns_on_session = 0
+        self.work_session_id = new_sid
+        self._write_session(self._work_session_path, new_sid)
+        self._work_turns_on_session += 1
+        if self._work_turns_on_session >= self.session_rotate:
+            self.work_session_id = None
+            self._write_session(self._work_session_path, None)
+            self._work_turns_on_session = 0
         return True
+
+    def _activate_work_claim(self, channel: str, key: str) -> None:
+        """Bind work context to one claim; a different claim boots fresh."""
+        ref = f"{channel}/{key}"
+        if ref == self._work_claim_ref:
+            return
+        self._work_claim_ref = ref
+        self._write_session(self._work_claim_path, ref)
+        self.work_session_id = None
+        self._write_session(self._work_session_path, None)
+        self._work_turns_on_session = 0
 
     def _chain_step(self) -> bool:
         """One initiative step at an idle boundary: spawn a work chunk when
@@ -656,12 +748,14 @@ class Driver:
             self._chain_live = False
             return False
         channel, key, version = snap
+        self._activate_work_claim(channel, key)
         ck = f"{channel}/{key}@{version}"
         if self._work_strikes.get(ck, 0) >= WORK_STRIKES:
             if self._chain_live:
                 _emit(f"AGORA_DRIVE initiative=parked agent={self.agent_id} "
                       f"key={ck} reason=no-receipt ({WORK_STRIKES} chunks "
-                      "left the claim row untouched; a row touch resumes)")
+                      "left the claim row unchanged; a NEW receipt on the "
+                      "row — a version bump — resumes)")
             self._chain_live = False
             return False
         if not self._work_budget_ok():
@@ -702,6 +796,18 @@ class Driver:
             backoff = 1.0
             while max_turns is None or driven < max_turns:
                 self._touch_drive_pid()
+                # A held human/peer debt outranks idle listening. Run it as
+                # soon as capacity returns; unowned broadcasts additionally
+                # pass the small anti-storm fuse.
+                if (self._pending_wake
+                        and self._wake_admissible(
+                            has_debt=self._pending_wake_has_debt)):
+                    has_debt = self._pending_wake_has_debt
+                    self._pending_wake = False
+                    self._pending_wake_has_debt = False
+                    if self.run_turn(broadcast=not has_debt):
+                        driven += 1
+                    continue
                 # source=auto: notify-file tail when the hub is local (0
                 # sockets), websocket otherwise — hard-coding "file" made
                 # remote seats deaf. signal_passthrough: SIGTERM/SIGINT must
@@ -714,17 +820,27 @@ class Driver:
                 window = (DRIVE_CHAIN_WAIT
                           if (self.initiative and self._chain_live)
                           else self.max_wait)
+                if self._pending_wake:
+                    retry = self._budget_retry_after(
+                        has_debt=self._pending_wake_has_debt)
+                    window = min(window, max(retry, 0.01))
                 rc = run_listen(agent_id=self.agent_id, url=self.hub,
                                 once=True, important_only=True,
                                 max_wait=window, source="auto",
                                 signal_passthrough=True, driver_call=True)
-                if rc == 2:                   # obligation wake (live or backlog)
-                    if self._budget_ok():
+                if rc in (2, _DRIVER_BROADCAST_WAKE):
+                    # The listener classifies the triggering batch itself.
+                    # This cannot be confused by an old unchanged owed row:
+                    # addressed/forced events + backlog debt return 2; a pure
+                    # room-wide open/blocked batch returns the internal code 4.
+                    has_debt = rc == 2
+                    if self._wake_admissible(has_debt=has_debt):
                         # This turn drains the WHOLE inbox, held debt
                         # included — a still-set flag would spawn a
                         # spurious turn at the next idle (review F2).
                         self._pending_wake = False
-                        if self.run_turn():
+                        self._pending_wake_has_debt = False
+                        if self.run_turn(broadcast=not has_debt):
                             driven += 1
                         backoff = 1.0
                     else:
@@ -735,16 +851,27 @@ class Driver:
                         # stall, review 2026-07-28); the flag converts it
                         # into a turn the moment the budget window slides.
                         self._pending_wake = True
+                        self._pending_wake_has_debt |= has_debt
+                        reason = ("turn-budget" if has_debt
+                                  else "broadcast-budget")
                         _emit(f"AGORA_DRIVE parked agent={self.agent_id} "
-                              f"reason=turn-budget ({self.turn_budget}/h) "
+                              f"reason={reason} "
                               "wake=held")
                 elif rc == 0:                 # idle timeout OR hub-unreachable
-                    if self._pending_wake and self._budget_ok():
+                    if (self._pending_wake
+                            and self._wake_admissible(
+                                has_debt=self._pending_wake_has_debt)):
+                        has_debt = self._pending_wake_has_debt
                         self._pending_wake = False
-                        if self.run_turn():
+                        self._pending_wake_has_debt = False
+                        if self.run_turn(broadcast=not has_debt):
                             driven += 1
                         continue
-                    if self.initiative:
+                    # A HELD wake blocks new work chunks (storm review,
+                    # 2026-07-28): starting a chunk here could pin the seat
+                    # for up to --work-timeout while a human's debt sits at
+                    # its exact release point — reception outranks work.
+                    if self.initiative and not self._pending_wake:
                         if self._chain_step():
                             driven += 1
                 else:                         # unexpected: bounded backoff
@@ -758,6 +885,7 @@ class Driver:
 def run_drive(*, agent_id: str | None = None, url: str | None = None,
               model: str = DEFAULT_MODEL, max_wait: float = DEFAULT_MAX_WAIT,
               sandbox: str = "enabled", turn_budget: int = DEFAULT_TURN_BUDGET,
+              broadcast_turn_budget: int = DEFAULT_BROADCAST_TURN_BUDGET,
               session_rotate: int = DEFAULT_SESSION_ROTATE,
               initiative: bool = False, work_timeout: float = TURN_TIMEOUT,
               work_budget: int = DEFAULT_WORK_BUDGET, force: bool = False,
@@ -768,6 +896,7 @@ def run_drive(*, agent_id: str | None = None, url: str | None = None,
     sandbox_mode = "" if sandbox == "none" else sandbox
     driver = Driver(aid, hub, model=model, max_wait=max_wait,
                     sandbox=sandbox_mode, turn_budget=turn_budget,
+                    broadcast_turn_budget=broadcast_turn_budget,
                     session_rotate=session_rotate, initiative=initiative,
                     work_timeout=work_timeout, work_budget=work_budget,
                     force=force, turn_log=turn_log)

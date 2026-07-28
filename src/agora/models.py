@@ -23,7 +23,7 @@ from __future__ import annotations
 import re
 import time
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import AliasChoices, BaseModel, Field, computed_field
 
@@ -189,6 +189,13 @@ class AttachmentRef(BaseModel):
     filename: str | None = None
 
 
+class Notice(BaseModel):
+    """A noticeboard root's machine-checkable event identity."""
+
+    kind: Literal["job", "consensus", "milestone", "delivery"]
+    key: str = Field(min_length=1, max_length=160)
+
+
 class PostMessage(BaseModel):
     """Client -> hub payload to post a message."""
 
@@ -203,7 +210,9 @@ class PostMessage(BaseModel):
     asks: list[Ask] | None = None       # numbered questions (open/blocked only)
     answers: list[str] | None = None    # ask ids this reply discharges (reply only)
     attachments: list[AttachmentRef] | None = None  # refs to uploaded channel blobs (0091)
+    notice: Notice | None = None      # typed/idempotent noticeboard root
     signature: str | None = None        # RESERVED: opaque authorship token (enforcement later)
+    address_dark: bool = False          # 0107: override dark-seat post gate
 
 
 class Envelope(BaseModel):
@@ -397,6 +406,20 @@ class WaitingRow(BaseModel):
 class OwedCounts(BaseModel):
     to_answer: int = 0
     to_consume: int = 0
+    to_close: int = 0
+
+
+class CloseRow(BaseModel):
+    """Asker-side hygiene (agora-0116): your own open/blocked thread is fully
+    discharged (every ask answered or binary reply received) but not
+    authoritatively closed — advisory only, never wakes."""
+
+    channel: str
+    id: str
+    seq: int
+    title: str = ""
+    answered_by: str = ""
+    age_minutes: float = 0.0
 
 
 class OwedReport(BaseModel):
@@ -407,6 +430,7 @@ class OwedReport(BaseModel):
 
     to_answer: list[ObligationRow] = Field(default_factory=list)
     to_consume: list[ConsumeRow] = Field(default_factory=list)
+    to_close: list[CloseRow] = Field(default_factory=list)
     waiting_on: list[WaitingRow] = Field(default_factory=list)
     counts: OwedCounts = Field(default_factory=OwedCounts)
     computed_at: float = 0.0

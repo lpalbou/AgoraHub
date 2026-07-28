@@ -502,13 +502,13 @@ def admin_status(
     token: str = Depends(bearer_token),
     service: HubService = Depends(get_service),
     admin_key: str = Depends(get_admin_key),
-) -> list[dict[str, Any]]:
-    """One row per agent: presence, unread, oldest pending obligation. The
-    'is anyone dark with work pending?' question as a single query — this IS
-    the dead-agent alarm, surfaced in `agora status` (no extra subsystem)."""
+) -> dict[str, Any]:
+    """Fleet liveness aggregate plus one row per agent. The 'is anyone dark
+    with work pending?' question as a single query — surfaced in `agora
+    status` (no extra subsystem)."""
     if not hmac.compare_digest(token, admin_key):
         raise HTTPException(403, "status overview requires the admin key")
-    return service.agent_status_overview()
+    return service.status_overview()
 
 
 @router.post("/admin/search/rebuild")
@@ -839,6 +839,21 @@ def channel_digest(
     return _run(service.channel_digest, agent, channel)
 
 
+class RulingAcks(BaseModel):
+    keys: list[str]
+
+
+@router.post("/channels/{channel}/ruling-acks")
+def ack_rulings(
+    channel: str,
+    body: RulingAcks,
+    agent: AgentInfo = Depends(current_agent),
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    """0113: record that this seat has read the current version of rulings."""
+    return _run(service.ack_rulings, agent, channel, body.keys)
+
+
 # -- inbox (the trigger surface: long-poll for unread across all my channels) --------
 
 def _stale_client_notice(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -938,24 +953,21 @@ def owed(
 def fleet_status(
     agent: AgentInfo = Depends(current_agent),
     service: HubService = Depends(get_service),
-) -> list[dict[str, Any]]:
-    """Fleet health for stewards (0084): the same per-seat overview the
-    operator sees, gated to operators and REPORTING delegates — the seat
-    chartered to chase silence could not see the lurk metrics (they lived
-    behind the admin key only). Refusal details are redacted for delegates:
-    they carry private/DM channel names and verbatim error text (HIGH-2);
-    the counts are what stewardship needs."""
-    def go() -> list[dict[str, Any]]:
+) -> dict[str, Any]:
+    """Fleet health for stewards (0084): aggregate liveness plus the same
+    per-seat overview the operator sees, gated to operators and REPORTING
+    delegates. Refusal details are redacted for delegates (HIGH-2)."""
+    def go() -> dict[str, Any]:
         holds = any(d["agent_id"] == agent.id and "reporting" in d.get("powers", ())
                     for d in service.active_delegations())
         if not (agent.operator or holds):
             raise HubError(403, "fleet status is for operators and reporting "
                                 "delegates (whoami.delegations is the proof)")
-        rows = service.agent_status_overview()
+        overview = service.status_overview()
         if not agent.operator:
-            for r in rows:
+            for r in overview["agents"]:
                 r.pop("last_refusal", None)
-        return rows
+        return overview
     return _run(go)
 
 

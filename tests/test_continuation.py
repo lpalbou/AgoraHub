@@ -21,8 +21,8 @@ import pytest
 
 import agora.drive as drive_mod
 import agora.listen as listen_mod
-from agora.drive import (BOOT_PROMPT, WAKE_PROMPT, WORK_PROMPT, WORK_STRIKES,
-                         Driver)
+from agora.drive import (BOOT_PROMPT, WAKE_PROMPT, WORK_BOOT_PROMPT,
+                         WORK_PROMPT, WORK_STRIKES, Driver)
 
 
 @pytest.fixture()
@@ -35,18 +35,19 @@ def _driver(home, spawn, **kw):
     return Driver("worker", "http://127.0.0.1:1", spawn=spawn, **kw)
 
 
-# -- prompts: static, and they carry the continuation contract ----------------
+# -- prompts: static, with reception and work kept separate --------------------
 
-def test_prompts_are_static_and_carry_supersession_check():
-    """Injection guard (review B parity): no format placeholders, no
-    interpolation — and every turn contract teaches the supersession
-    re-read BEFORE continuing (the operator's requirement: newer messages
-    may cancel, refine, or replace the task)."""
-    for prompt in (WAKE_PROMPT, BOOT_PROMPT, WORK_PROMPT):
+def test_prompts_are_static_and_separate_reception_from_work():
+    """Reception settles messages; only initiative prompts continue work."""
+    for prompt in (WAKE_PROMPT, BOOT_PROMPT, WORK_BOOT_PROMPT, WORK_PROMPT):
         assert "{" not in prompt and "}" not in prompt
-    for prompt in (WAKE_PROMPT, WORK_PROMPT):
+    for prompt in (WORK_BOOT_PROMPT, WORK_PROMPT):
         assert "supersede" in prompt
-        assert "re-read the claim row" in prompt
+        assert "re-read" in prompt
+    assert "Do NOT advance unrelated claims" in WAKE_PROMPT
+    assert "routine progress receipts" in BOOT_PROMPT
+    assert "ONLY per-slice receipt" in WORK_PROMPT
+    assert "addressed structured ask" in WORK_PROMPT
     assert WORK_PROMPT.startswith("AGORA WORK CHUNK")
     assert WAKE_PROMPT.startswith("AGORA WAKE")
 
@@ -208,7 +209,7 @@ def test_chain_spawns_work_turns_while_claim_progresses(home, monkeypatch):
                         lambda: ("commons", "claim:x", next(versions, 99)))
     _run_loop(d, [0, 0, 0], monkeypatch)
     assert len(calls) == 3
-    assert calls[0] == BOOT_PROMPT            # fresh session boots first
+    assert calls[0] == WORK_BOOT_PROMPT       # fresh work session orients + works
     assert calls[1] == WORK_PROMPT
     assert calls[2] == WORK_PROMPT
 
@@ -241,8 +242,8 @@ def test_obligation_preempts_chain(home, monkeypatch):
     monkeypatch.setattr(d, "_claim_snapshot",
                         lambda: ("commons", "claim:x", next(versions)))
     _run_loop(d, [0, 2, 0], monkeypatch)
-    assert calls[0] == BOOT_PROMPT            # work chunk (fresh session)
-    assert calls[1] == WAKE_PROMPT            # the obligation's turn
+    assert calls[0] == WORK_BOOT_PROMPT       # work chunk (fresh session)
+    assert calls[1] == BOOT_PROMPT            # reception has its own session
     assert calls[2] == WORK_PROMPT            # chain resumes after
 
 
@@ -257,8 +258,8 @@ def test_work_budget_is_a_separate_pool(home, monkeypatch):
                         lambda: ("commons", "claim:x", next(versions)))
     _run_loop(d, [0, 0, 2], monkeypatch)
     # chunk 1 spends the whole work pool; idle 2 parks; the wake still runs.
-    assert calls[0] == BOOT_PROMPT
-    assert calls[1] == WAKE_PROMPT
+    assert calls[0] == WORK_BOOT_PROMPT
+    assert calls[1] == BOOT_PROMPT
     assert len(calls) == 2
 
 
@@ -283,6 +284,79 @@ def test_budget_parked_wake_is_held_not_lost(home, monkeypatch):
     assert len(calls) == 2
 
 
+def test_held_wake_blocks_new_work_chunks(home, monkeypatch):
+    """While a wake is HELD (budget-parked), idle boundaries must not start
+    work chunks: a chunk could pin the seat for up to --work-timeout while
+    a human's debt sits at its exact release point. Reception outranks
+    work; the moment the window slides, the held wake runs first."""
+    calls = []
+    d = _driver(home, lambda p, s: (calls.append(p) or "s", True),
+                initiative=True, turn_budget=1)
+    versions = iter(range(1, 50))
+    monkeypatch.setattr(d, "_claim_snapshot",
+                        lambda: ("commons", "claim:x", next(versions)))
+    assert d.run_turn() is True               # exhaust the reception budget
+    _run_loop(d, [2, 0, 0], monkeypatch)      # wake held; two idle boundaries
+    assert d._pending_wake is True
+    assert all(not p.startswith("AGORA WORK CHUNK") for p in calls[1:])
+    d._turn_times.clear()                     # budget window slides
+    _run_loop(d, [0], monkeypatch)
+    assert d._pending_wake is False           # held wake ran at the boundary
+    # The held wake ran BEFORE any new work chunk was allowed to start.
+    work_first = next((i for i, p in enumerate(calls)
+                       if p.startswith("AGORA WORK CHUNK")), len(calls))
+    assert calls.index(WAKE_PROMPT) < work_first
+
+
+def test_budget_held_wake_rechecks_at_exact_release(home, monkeypatch):
+    """A held debt caps the next blocking listen at budget release instead
+    of inheriting the ordinary 20-minute idle delay."""
+    now = {"value": 4600.0}
+    monkeypatch.setattr(drive_mod.time, "time", lambda: now["value"])
+    calls = []
+    windows = []
+    d = _driver(home, lambda p, s: (calls.append(p) or "s", True),
+                turn_budget=1, max_wait=1200.0)
+    d._turn_times = [1010.0]                    # capacity returns in 10s
+    rcs = iter([2, 0])
+
+    def fake_listen(**kw):
+        windows.append(kw["max_wait"])
+        rc = next(rcs)
+        if rc == 0:
+            now["value"] = 4610.0              # exact rolling-window edge
+        return rc
+
+    monkeypatch.setattr(drive_mod, "run_listen", fake_listen)
+    d.run(max_turns=1)
+    assert calls == [BOOT_PROMPT]
+    assert windows == [1200.0, 10.0]
+
+
+def test_broadcast_storm_stops_without_work_feedback(home, monkeypatch):
+    """Pure room-wide wakes use the small fuse and every spawned prompt is
+    reception-only; eight seats running this contract cannot manufacture a
+    new claim-progress wake from the reception path."""
+    calls = []
+    d = _driver(home, lambda p, s: (calls.append(p) or "s", True),
+                turn_budget=250, broadcast_turn_budget=2)
+    _run_loop(d, [listen_mod._DRIVER_BROADCAST_WAKE] * 3, monkeypatch)
+    assert calls == [BOOT_PROMPT, WAKE_PROMPT]
+    assert all("status=fyi" not in prompt for prompt in calls)
+    assert d._pending_wake is True
+    assert d._pending_wake_has_debt is False
+
+
+def test_addressed_debt_bypasses_exhausted_broadcast_fuse(home, monkeypatch):
+    """Human/addressed work is protected up to the high hard ceiling."""
+    calls = []
+    d = _driver(home, lambda p, s: (calls.append(p) or "s", True),
+                turn_budget=250, broadcast_turn_budget=1)
+    assert d.run_turn(broadcast=True) is True          # exhaust noise fuse
+    _run_loop(d, [2], monkeypatch)                     # addressed/forced wake
+    assert calls == [BOOT_PROMPT, WAKE_PROMPT]
+
+
 def test_pending_wake_cleared_by_normal_wake(home, monkeypatch):
     """Review F2: a held wake must be CLEARED when a normal wake runs a
     turn (that turn drains the whole inbox) — otherwise the stale flag
@@ -294,9 +368,9 @@ def test_pending_wake_cleared_by_normal_wake(home, monkeypatch):
     _run_loop(d, [2], monkeypatch)               # wake while parked: held
     assert d._pending_wake is True and len(calls) == 1
     d._turn_times.clear()                        # budget window slides
-    _run_loop(d, [2, 0], monkeypatch)            # a NEW wake runs a turn...
+    _run_loop(d, [0], monkeypatch)               # loop-top runs held wake...
     assert d._pending_wake is False              # ...and clears the flag
-    assert len(calls) == 2                       # idle boundary spawned nothing
+    assert len(calls) == 2                       # later idle spawned nothing
 
 
 def test_wake_key_prefers_owed_signature(home):

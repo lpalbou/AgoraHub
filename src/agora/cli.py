@@ -1438,6 +1438,13 @@ def cmd_inbox(args):
                       f" ({row.age_minutes}m ago) — read id={row.answer_id}"
                       " and use it, or close your thread")
             print()
+        if owed and owed.counts.to_close:
+            print("ADVISORY — your open threads, fully answered:")
+            for row in owed.to_close[:10]:
+                print(f"- CLOSE {row.channel}#{row.seq}: "
+                      f"{row.answered_by} answered ({row.age_minutes}m ago)"
+                      f" — post status=resolved")
+            print()
         envs = await c.check_inbox(wait=a.wait)
         print(render_envelopes([e.model_dump(mode="json") for e in envs]))
     _run_agent_cmd(args, go)
@@ -1467,6 +1474,10 @@ def cmd_post(args):
     async def go(c, a):
         to = [x.strip() for x in a.to.split(",")] if a.to else []
         data = json.loads(a.data) if a.data else None
+        if bool(a.notice_kind) != bool(a.notice_key):
+            sys.exit("post: --notice-kind and --notice-key are required together")
+        notice = ({"kind": a.notice_kind, "key": a.notice_key}
+                  if a.notice_kind else None)
         # --ask "1:question text" (repeatable) -> numbered asks on an open/blocked msg
         asks = None
         if a.ask:
@@ -1489,7 +1500,8 @@ def cmd_post(args):
         m = await c.post(a.channel, a.body, title=a.title or "",
                          status=Status(a.status), urgency=Urgency(a.urgency),
                          to=to, critical=a.critical, data=data, reply_to=a.reply_to,
-                         asks=asks, answers=answers, attachments=attachments)
+                         asks=asks, answers=answers, attachments=attachments,
+                         notice=notice)
         print(f"posted to {a.channel} as {args.as_agent}: seq {m.seq}, id {m.id}")
     _run_agent_cmd(args, go)
 
@@ -1507,8 +1519,18 @@ def cmd_dm(args):
                 if name.strip():
                     ref["filename"] = name.strip()
                 attachments.append(ref)
+        # --ask parity with `agora post` (storm review): status=blocked
+        # requires a structured ask, so a dm without an ask surface made
+        # `--status blocked` an unconditional 400 dead end.
+        asks = None
+        if getattr(a, "ask", None):
+            asks = []
+            for spec in a.ask:
+                aid, _, text = spec.partition(":")
+                asks.append({"id": aid.strip(), "text": text.strip()})
         m = await c.dm(a.to, a.body, title=a.title or "", status=Status(a.status),
-                       urgency=Urgency(a.urgency), attachments=attachments)
+                       urgency=Urgency(a.urgency), attachments=attachments,
+                       asks=asks)
         print(f"DM to {a.to} sent: seq {m.seq}")
     _run_agent_cmd(args, go)
 
@@ -2029,7 +2051,9 @@ def cmd_drive(args: argparse.Namespace) -> None:
     sys.exit(run_drive(
         agent_id=args.as_agent, url=args.url, model=args.model,
         max_wait=args.max_wait, sandbox=args.sandbox,
-        turn_budget=args.turn_budget, session_rotate=args.session_rotate,
+        turn_budget=args.turn_budget,
+        broadcast_turn_budget=args.broadcast_turn_budget,
+        session_rotate=args.session_rotate,
         initiative=args.initiative, work_timeout=args.work_timeout,
         work_budget=args.work_budget, force=args.force,
         turn_log=args.turn_log,
@@ -2074,12 +2098,37 @@ def cmd_status(args: argparse.Namespace) -> None:
     if not admin_key:
         return
     try:
-        rows = httpx.get(f"{url}/admin/status", timeout=5,
+        data = httpx.get(f"{url}/admin/status", timeout=5,
                          headers={"Authorization": f"Bearer {admin_key}"}).json()
     except Exception:
         return
-    if not isinstance(rows, list):
+    if isinstance(data, dict):
+        fleet = data.get("fleet") or {}
+        rows = data.get("agents") or []
+    elif isinstance(data, list):
+        fleet = {}
+        rows = data
+    else:
         return
+    if fleet:
+        dark = " DARK EPISODE" if fleet.get("dark_episode") else ""
+        print(f"\nfleet: {fleet.get('live', '?')}/{fleet.get('eligible', '?')} live "
+              f"({100 * fleet.get('live_fraction', 0):.0f}%){dark}")
+    digest = (data.get("report_digest") if isinstance(data, dict) else {}) or {}
+    for row in digest.get("delegates") or []:
+        age = row.get("period_age_minutes")
+        age_s = f"{age:.0f}m" if age is not None else "-"
+        if digest.get("paused"):
+            flag = "paused (fleet dark)"
+        elif row.get("replied"):
+            flag = "replied"
+        elif row.get("missed_alerted"):
+            flag = "MISSED"
+        elif row.get("overdue"):
+            flag = "overdue"
+        else:
+            flag = "pending"
+        print(f"digest: {row.get('delegate', '?')} period={age_s} {flag}")
     print(f"\n{'agent':<16} {'state':<8} {'listener':<9} {'driver':<8} "
           f"{'unread':>6} {'pending':>7}  oldest-pending")
     # The hub can only see what CONTACTS it: an open-but-idle IDE tab makes no
@@ -2397,6 +2446,12 @@ def build_parser() -> argparse.ArgumentParser:
     ln.add_argument("--poll", type=float, default=0.5, help=argparse.SUPPRESS)
     ln.set_defaults(func=cmd_listen)
 
+    # Keep parser defaults coupled to the engine constants. These values are
+    # operator policy, so duplicating literals here risks a CLI/runtime split.
+    from .drive import (DEFAULT_BROADCAST_TURN_BUDGET,
+                        DEFAULT_TURN_BUDGET, DEFAULT_WORK_BUDGET,
+                        TURN_TIMEOUT)
+
     dr = sub.add_parser("drive",
                         help="external resume-driver for a HEADLESS seat: "
                              "wait on obligations, spawn one bounded "
@@ -2419,9 +2474,16 @@ def build_parser() -> argparse.ArgumentParser:
                          "disabled (cursor-agent's own default), or none "
                          "(--force, all tools, NO container — only in a "
                          "throwaway VM)")
-    dr.add_argument("--turn-budget", dest="turn_budget", type=int, default=40,
+    dr.add_argument("--turn-budget", dest="turn_budget", type=int,
+                    default=DEFAULT_TURN_BUDGET,
                     help="max spawned turns per rolling hour before parking "
-                         "(runaway-loop bound; default 40)")
+                         f"(light abuse ceiling; default {DEFAULT_TURN_BUDGET})")
+    dr.add_argument("--broadcast-turn-budget", dest="broadcast_turn_budget",
+                    type=int, default=DEFAULT_BROADCAST_TURN_BUDGET,
+                    help="unowned room-wide wake turns per rolling hour "
+                         "(anti-storm fuse; addressed/owed work uses the "
+                         "main --turn-budget; default "
+                         f"{DEFAULT_BROADCAST_TURN_BUDGET})")
     dr.add_argument("--session-rotate", dest="session_rotate", type=int,
                     default=25,
                     help="turns on one cursor-agent session before rotating "
@@ -2434,15 +2496,17 @@ def build_parser() -> argparse.ArgumentParser:
                          "Chunks end at checkpoints; any obligation "
                          "preempts the next chunk; 3 receipt-less chunks "
                          "per claim version park the chain. Default: off "
-                         "(reception-only, plus the turn-exit work unit "
-                         "every rule now teaches)")
+                         "(reception-only)")
     dr.add_argument("--work-timeout", dest="work_timeout", type=float,
-                    default=600.0,
-                    help="hard cap per work chunk in seconds (default 600; "
-                         "raising it raises worst-case answer latency by "
-                         "the same amount)")
-    dr.add_argument("--work-budget", dest="work_budget", type=int, default=12,
-                    help="max work chunks per rolling hour (default 12; "
+                    default=TURN_TIMEOUT,
+                    help="hard cap for one spawned work chunk in seconds "
+                         f"(default and maximum {TURN_TIMEOUT:.0f}; a full "
+                         "job may span many chunks)")
+    dr.add_argument("--work-budget", dest="work_budget", type=int,
+                    default=DEFAULT_WORK_BUDGET,
+                    help="max work chunks per rolling hour (default "
+                         f"{DEFAULT_WORK_BUDGET}; "
+                         "light runaway fuse only; "
                          "separate pool — reception's --turn-budget is "
                          "never consumed by work)")
     dr.add_argument("--force", action="store_true",
@@ -2550,6 +2614,8 @@ def build_parser() -> argparse.ArgumentParser:
     po.add_argument("--title", default=""); po.add_argument("--to", default="")
     po.add_argument("--reply-to", dest="reply_to", default=None)
     po.add_argument("--critical", action="store_true"); po.add_argument("--data", default=None)
+    po.add_argument("--notice-kind", choices=["job", "consensus", "milestone", "delivery"])
+    po.add_argument("--notice-key", help="stable event id; repeated keys are refused")
     po.add_argument("--ask", action="append", metavar="ID:TEXT",
                     help="a numbered ask (repeatable), e.g. --ask '1:confirm the payload cap?'")
     po.add_argument("--answer", default=None, metavar="IDS",
@@ -2568,6 +2634,9 @@ def build_parser() -> argparse.ArgumentParser:
     dm.add_argument("--attach", action="append", metavar="SHA256[:NAME]",
                     help="attach an uploaded blob by id (upload to the dm:<a>--<b> "
                          "channel with `agora attachment put` first)")
+    dm.add_argument("--ask", action="append", metavar="ID:TEXT",
+                    help="a numbered ask (repeatable; required for "
+                         "--status blocked), e.g. --ask '1:which schema?'")
     dm.add_argument("body")
     dm.set_defaults(func=cmd_dm)
 

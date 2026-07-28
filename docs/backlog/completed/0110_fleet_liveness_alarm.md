@@ -37,3 +37,15 @@ interactive IDE tabs that die with the app). 0110 makes the death
 VISIBLE within minutes instead of the operator discovering it at
 breakfast. The infra choice (how seats stay alive overnight) is a
 separate operator-owned decision this card should surface, not solve.
+
+## Shipped
+
+- **Unit 1:** `_fleet_liveness_sweep()` in `dark_sweep()` — collapse when
+  0 live or &lt;50% live after 5m confirm; one FLEET DARK/RECOVERED per
+  episode to hub-alerts (addressed to operators); open-claims count in
+  body. Live = reception armed OR presence idle/working/active.
+- **Unit 2:** `fleet_liveness_snapshot()` on `GET /status` and
+  `GET /admin/status` (`{fleet, agents}`); operator DM mirror via
+  `_post_operator_dm` on dm:hub--{op}; `agora status` prints fleet line.
+- **Tests:** `test_fleet_liveness_sweep_alerts_once_then_recovers`,
+  `test_fleet_liveness_snapshot_on_status`.

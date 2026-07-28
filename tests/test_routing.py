@@ -78,6 +78,122 @@ def test_old_hubs_without_the_flag_keep_room_wide_wakes():
     assert qualifies(legacy, "me", important_only=True)
 
 
+def test_noticeboard_roots_are_typed_and_idempotent(tmp_path):
+    client = make_client(tmp_path)
+    alice = register(client, "alice")
+    bob = register(client, "bob")
+    make_public_channel(client, alice, "commons", bob)
+
+    noisy = client.post("/channels/commons/messages",
+                        json={"body": "reception pass (no delta)"}, headers=bob)
+    assert noisy.status_code == 400
+    assert "noticeboard" in noisy.json()["detail"]
+
+    payload = {"body": "release is available", "status": "fyi",
+               "notice": {"kind": "delivery", "key": "agora-0.13.0"}}
+    first = client.post("/channels/commons/messages", json=payload, headers=bob)
+    assert first.status_code == 200
+    duplicate = client.post("/channels/commons/messages", json=payload, headers=bob)
+    assert duplicate.status_code == 409
+    assert "duplicate notice" in duplicate.json()["detail"]
+
+    reply = client.post("/channels/commons/messages",
+                        json={"body": "received", "status": "reply",
+                              "reply_to": first.json()["id"]}, headers=alice)
+    assert reply.status_code == 200
+
+
+def test_noticeboard_votes_must_be_canonical(tmp_path):
+    """The vote carve-out takes only real votes (storm review): a bare
+    {"tag": ...} dict must not mint unaddressed open roots, and a
+    retracted notice releases its idempotency key for a corrected repost."""
+    client = make_client(tmp_path)
+    alice = register(client, "alice")
+    bob = register(client, "bob")
+    make_public_channel(client, alice, "commons", bob)
+
+    fake = client.post("/channels/commons/messages",
+                       json={"body": "spam", "status": "open",
+                             "data": {"vote": {"tag": "x1"}}}, headers=bob)
+    assert fake.status_code == 400
+    assert "canonical" in fake.json()["detail"]
+
+    from agora.vote import build_vote_post
+    payload = build_vote_post("bob", "pick a queue backend",
+                              ["redis", "sqlite"])
+
+    # Degenerate shapes die: duplicate options, absent/zero/boolean deadline.
+    # (Infinity/NaN never reach the vote check — the strict-JSON data gate
+    # refuses them wire-level.)
+    for bad_vote in (
+        {**payload["data"]["vote"], "options": ["redis", "REDIS"]},
+        {**payload["data"]["vote"], "closes_at": 0},
+        {**payload["data"]["vote"], "closes_at": True},
+    ):
+        r = client.post("/channels/commons/messages",
+                        json={"body": "v", "status": "open",
+                              "data": {"vote": bad_vote}}, headers=bob)
+        assert r.status_code == 400, bad_vote
+
+    # A vote root smuggling asks would sticky-pin the whole room — refused.
+    with_asks = client.post(
+        "/channels/commons/messages",
+        json={"body": payload["body"], "status": "open",
+              "data": payload["data"],
+              "asks": [{"id": "1", "text": "vote now?"}]}, headers=bob)
+    assert with_asks.status_code == 400
+    assert "no asks" in with_asks.json()["detail"]
+    real = client.post("/channels/commons/messages",
+                       json={"body": payload["body"], "title": payload["title"],
+                             "status": "open", "data": payload["data"]},
+                       headers=bob)
+    assert real.status_code == 200
+
+    # Same canonical vote, same tag, reposted: the dedupe key holds.
+    again = client.post("/channels/commons/messages",
+                        json={"body": payload["body"], "title": payload["title"],
+                              "status": "open", "data": payload["data"]},
+                        headers=bob)
+    assert again.status_code == 409
+
+
+def test_retraction_releases_the_notice_key(tmp_path):
+    """Retract a wrong notice, repost corrected content under the SAME
+    event key: the identity outlives one bad posting of it."""
+    client = make_client(tmp_path)
+    alice = register(client, "alice")
+    bob = register(client, "bob")
+    make_public_channel(client, alice, "commons", bob)
+
+    payload = {"body": "release 0.13 is available", "status": "fyi",
+               "notice": {"kind": "delivery", "key": "agora-0.13.0"}}
+    first = client.post("/channels/commons/messages", json=payload, headers=bob)
+    assert first.status_code == 200
+    mid = first.json()["id"]
+    retracted = client.post(f"/channels/commons/messages/{mid}/retract",
+                            headers=bob)
+    assert retracted.status_code == 200
+    corrected = client.post("/channels/commons/messages",
+                            json={**payload, "body": "release 0.13 is "
+                                  "available (corrected notes link)"},
+                            headers=bob)
+    assert corrected.status_code == 200
+
+
+def test_noticeboard_policy_survives_unrelated_meta_edits(tmp_path):
+    client = make_client(tmp_path)
+    alice = register(client, "alice")
+    client.post("/channels", json={"name": "commons", "private": False},
+                headers=alice)
+    changed = client.put("/channels/commons/store/channel%3Ameta",
+                         json={"value": {"purpose": "fleet decisions"}},
+                         headers=alice)
+    assert changed.status_code == 200
+    info = client.get("/channels/commons/info", headers=alice).json()
+    assert info["meta"]["purpose"] == "fleet decisions"
+    assert info["meta"]["traffic_policy"] == "noticeboard"
+
+
 # -- broadcast-obligation notice (0133) --------------------------------------
 
 def _notify_lines(tmp_path: Path, agent_id: str) -> list[dict]:
@@ -100,6 +216,7 @@ def test_broadcast_open_in_big_room_doorbells_the_sender(tmp_path):
                if str(l.get("id", "")).startswith("notice:")]
     assert len(notices) == 1
     assert "obliges ALL 5" in notices[0]["preview"]
+    assert not qualifies(notices[0], "sender", important_only=True)
     # Nothing stored: the room's history carries only the real message
     # (join/create system rows aside).
     hist = client.get("/channels/board/messages", headers=sender).json()
@@ -215,7 +332,7 @@ def test_groups_arrive_with_their_charter_written(tmp_path):
     content = r.json()["content"]
     assert "queue-tiers — charter" in content
     assert "design the queue tiers" in content
-    assert "receipt to #commons" in content
+    assert "typed delivery notice to #commons" in content
 
 
 # -- noise report (the proof instrument) ---------------------------------------

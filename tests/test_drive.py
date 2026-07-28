@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import pytest
 
-from agora.drive import (BOOT_PROMPT, POISON_STRIKES, WAKE_PROMPT, Driver)
+from agora.drive import (BOOT_PROMPT, DEFAULT_BROADCAST_TURN_BUDGET,
+                         DEFAULT_TURN_BUDGET, DEFAULT_WORK_BUDGET,
+                         POISON_STRIKES, TURN_TIMEOUT, WAKE_PROMPT, Driver)
 
 
 @pytest.fixture()
@@ -39,7 +41,7 @@ def test_a_turn_boots_fresh_then_resumes_the_session(home):
     d.run_turn()
     assert calls[0] == (BOOT_PROMPT, None)          # boot: no session yet
     assert calls[1] == (WAKE_PROMPT, "sess-1")      # resume with static prompt
-    assert (home / "drive-worker.session").read_text() == "sess-1"
+    assert (home / "drive-worker.reception-v2.session").read_text() == "sess-1"
 
 
 def test_turn_budget_parks_a_runaway(home, monkeypatch):
@@ -56,6 +58,19 @@ def test_turn_budget_parks_a_runaway(home, monkeypatch):
     ran = [d.run_turn() for _ in range(6)]
     assert n["spawns"] == 3                          # budget capped the spawns
     assert ran.count(False) == 3                     # the rest parked
+
+
+def test_default_driver_limits_are_light_abuse_fuses(home):
+    """Defaults leave ample room for healthy reception and initiative."""
+    driver = _driver(home, lambda p, s: ("s", True))
+    assert DEFAULT_TURN_BUDGET == 250
+    assert DEFAULT_BROADCAST_TURN_BUDGET == 100
+    assert DEFAULT_WORK_BUDGET == 100
+    assert TURN_TIMEOUT == 3600.0
+    assert driver.turn_budget == 250
+    assert driver.broadcast_turn_budget == 100
+    assert driver.work_budget == 100
+    assert driver.work_timeout == 3600.0
 
 
 def test_poison_wake_is_quarantined_after_strikes(home):
@@ -101,11 +116,40 @@ def test_crashed_resume_drops_session_and_boots_next(home):
 
     d = _driver(home, spawn)
     d.run_turn()                                     # -> s1
-    assert d.session_id == "s1"
+    assert d.reception_session_id == "s1"
     d.run_turn()                                     # crashes -> session dropped
-    assert d.session_id is None
+    assert d.reception_session_id is None
     d.run_turn()                                     # boots fresh -> s2
-    assert d.session_id == "s2"
+    assert d.reception_session_id == "s2"
+
+
+def test_reception_and_work_sessions_are_isolated_and_legacy_is_ignored(home):
+    (home / "drive-worker.session").write_text("storm-trained-legacy")
+    calls = []
+
+    def spawn(prompt, sid):
+        calls.append((prompt, sid))
+        return ("reception" if len(calls) == 1 else "work"), True
+
+    d = _driver(home, spawn, initiative=True)
+    d.run_turn()
+    d._activate_work_claim("design", "claim:x")
+    d.run_work_turn()
+    assert calls[0][1] is None and calls[1][1] is None
+    assert d.reception_session_id == "reception"
+    assert d.work_session_id == "work"
+    assert (home / "drive-worker.session").read_text() == "storm-trained-legacy"
+
+
+def test_changing_work_claim_rotates_only_the_work_session(home):
+    d = _driver(home, lambda prompt, sid: ("s", True), initiative=True)
+    d.reception_session_id = "reception"
+    d._activate_work_claim("design", "claim:a")
+    d.run_work_turn()
+    assert d.work_session_id == "s"
+    d._activate_work_claim("design", "claim:b")
+    assert d.work_session_id is None
+    assert d.reception_session_id == "reception"
 
 
 def test_backlog_wake_from_listen_drives_a_turn(home, monkeypatch):

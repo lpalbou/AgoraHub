@@ -166,6 +166,33 @@ def test_store_cas(service, agents):
     assert service.store_get(alice, "design", "contract").value == {"v": 2}
 
 
+def test_identical_store_write_is_heartbeat_not_progress(service, agents):
+    """An identical rewrite by the row's own author refreshes liveness
+    (updated_at — so a claim touch still clears its cadence ping) but never
+    mints a version (so repeating one receipt cannot fake progress past the
+    initiative guard). A PEER's identical write is a pure no-op: liveness
+    can only be asserted by whoever authored the row's current state."""
+    alice, bob = agents
+    first = service.store_set(alice, "design", "claim:task",
+                              {"owner": "alice", "status": "building"})
+    again = service.store_set(alice, "design", "claim:task",
+                              {"owner": "alice", "status": "building"},
+                              expect_version=first.version)
+    assert again.version == first.version
+    assert again.updated_at >= first.updated_at
+    fetched = service.store_get(alice, "design", "claim:task")
+    assert fetched.version == first.version
+    assert fetched.updated_at == again.updated_at
+
+    service.join_channel(bob, "design",
+                         service.create_invite(alice, "design", invitee="bob"))
+    forged = service.store_set(bob, "design", "claim:task",
+                               {"owner": "alice", "status": "building"})
+    assert forged.version == first.version
+    assert forged.updated_by == alice.id          # bob asserted nothing
+    assert forged.updated_at == fetched.updated_at
+
+
 def test_rate_limit_arrests_reply_loops(agents):
     # Fresh service with a tight budget to exercise the safety valve.
     service = HubService(Database(":memory:"), rate_per_minute=1.0)

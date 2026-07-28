@@ -1247,8 +1247,9 @@ class ChatApp:
         # Typed consumption (agora-0118): the reference client renders the
         # canonical `sender` field — never the deprecated `from` alias whose
         # removal the 0.4 bump carries.
-        ta, tc, wo = owed.to_answer, owed.to_consume, owed.waiting_on
-        if not (ta or tc or wo):
+        ta, tc, wo, tc_close = (owed.to_answer, owed.to_consume,
+                                owed.waiting_on, owed.to_close)
+        if not (ta or tc or wo or tc_close):
             self._print(s.dim("nothing owed, nothing waiting — clean slate"))
             return
         if ta:
@@ -1276,6 +1277,13 @@ class ChatApp:
                          else "not served yet (offline/behind)")
                 self._print(f"  {safe(r.channel)}#{r.seq} ask {r.ask} -> "
                             f"{s.sender(safe(r.seat))}: {state}")
+        if tc_close:
+            self._print(s.bold("TO CLOSE (your threads, fully answered — advisory):"))
+            for r in tc_close:
+                self._print(f"  {safe(r.channel)}#{r.seq} "
+                            f"{s.sender(safe(r.answered_by))} answered · "
+                            f"{fmt_age(r.age_minutes)} · post resolved + "
+                            f"decision:<slug>")
 
     async def cmd_board(self) -> None:
         """The operator's follow-the-work table (done / pending / ongoing /

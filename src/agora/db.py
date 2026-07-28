@@ -108,6 +108,14 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS idx_messages_channel_seq ON messages (channel, seq);
 CREATE INDEX IF NOT EXISTS idx_messages_reply_to ON messages (reply_to);
+CREATE TABLE IF NOT EXISTS message_dedupe (
+    channel     TEXT NOT NULL,
+    sender      TEXT NOT NULL,
+    dedupe_key  TEXT NOT NULL,
+    message_id  TEXT NOT NULL,
+    created_at  REAL NOT NULL,
+    PRIMARY KEY (channel, sender, dedupe_key)
+);
 CREATE TABLE IF NOT EXISTS reads (
     message_id  TEXT NOT NULL,
     agent_id    TEXT NOT NULL,
@@ -175,6 +183,14 @@ CREATE TABLE IF NOT EXISTS charter_receipts (
     version     INTEGER NOT NULL,
     read_at     REAL NOT NULL,
     PRIMARY KEY (agent_id, channel)
+);
+CREATE TABLE IF NOT EXISTS ruling_receipts (
+    agent_id    TEXT NOT NULL,
+    channel     TEXT NOT NULL,
+    ruling_key  TEXT NOT NULL,
+    version     INTEGER NOT NULL,
+    read_at     REAL NOT NULL,
+    PRIMARY KEY (agent_id, channel, ruling_key)
 );
 -- The hub rules the operator serves to every agent via /whoami (single row).
 -- No row = the packaged default text (version 0) is served.
@@ -288,6 +304,14 @@ class StoreConflict(Exception):
     def __init__(self, current_version: int) -> None:
         super().__init__(f"store version conflict (current={current_version})")
         self.current_version = current_version
+
+
+class DuplicateMessage(Exception):
+    """A typed idempotency key already names a committed message."""
+
+    def __init__(self, message_id: str) -> None:
+        super().__init__(message_id)
+        self.message_id = message_id
 
 
 class JoinTokenRefused(Exception):
@@ -1128,13 +1152,22 @@ class Database:
                        urgency: str, title: str, body: str,
                        data: dict[str, Any] | None, reply_to: str | None,
                        critical: bool = False, downgraded: bool = False,
-                       to: list[str] | None = None) -> Message:
+                       to: list[str] | None = None,
+                       dedupe_key: str | None = None) -> Message:
         """Insert atomically with the next per-channel seq (the order authority),
         chaining the message into the channel's append-only hash ledger."""
         now = time.time()
         msg_id = new_ulid()
         to = to or []
         with self._lock:
+            if dedupe_key:
+                prior = self._conn.execute(
+                    "SELECT message_id FROM message_dedupe"
+                    " WHERE channel = ? AND sender = ? AND dedupe_key = ?",
+                    (channel, sender, dedupe_key),
+                ).fetchone()
+                if prior is not None:
+                    raise DuplicateMessage(prior["message_id"])
             row = self._conn.execute(
                 "SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM messages WHERE channel = ?",
                 (channel,),
@@ -1157,6 +1190,13 @@ class Database:
                  int(downgraded), json.dumps(to), title, body,
                  json.dumps(data) if data is not None else None, reply_to, now, msg_hash),
             )
+            if dedupe_key:
+                self._conn.execute(
+                    "INSERT INTO message_dedupe"
+                    " (channel, sender, dedupe_key, message_id, created_at)"
+                    " VALUES (?,?,?,?,?)",
+                    (channel, sender, dedupe_key, msg_id, now),
+                )
             # Search sync (0132), same transaction as the source write.
             s_title, s_text = _si.message_doc(channel, msg_id, title, body, data)
             _si.put_doc(self._conn, "message", channel, msg_id, s_title, s_text, now)
@@ -1274,6 +1314,13 @@ class Database:
                 "SELECT channel FROM messages WHERE id = ?", (message_id,)).fetchone()
             if row is not None:
                 _si.del_doc(self._conn, "message", row["channel"], message_id)
+            # A retracted notice releases its idempotency key (storm review):
+            # the event identity outlives one wrong posting of it — retract,
+            # correct, repost under the SAME key must work, or a typo burns
+            # the key forever and the 409 teaches nothing recoverable.
+            self._conn.execute(
+                "DELETE FROM message_dedupe WHERE message_id = ?",
+                (message_id,))
             self._conn.commit()
 
     def last_seq(self, channel: str) -> int:
@@ -1596,11 +1643,39 @@ class Database:
         now = time.time()
         with self._lock:
             row = self._conn.execute(
-                "SELECT version FROM store WHERE channel = ? AND key = ?", (channel, key)
+                "SELECT value, version, updated_by, updated_at FROM store"
+                " WHERE channel = ? AND key = ?", (channel, key)
             ).fetchone()
             current = row["version"] if row else 0
             if expect_version is not None and expect_version != current:
                 raise StoreConflict(current)
+            # Identical writes are a HEARTBEAT, not progress (storm review,
+            # 2026-07-28): they refresh updated_at — so a claim touch still
+            # clears its cadence ping, exactly as every rule text teaches —
+            # but never mint a version, so a loop repeating the same receipt
+            # cannot fake progress past the initiative no-progress guard
+            # (strikes are keyed on the version). Only the author of the
+            # row's CURRENT state may heartbeat it: a peer's identical write
+            # is a pure no-op, otherwise any seat could invisibly forge
+            # another's claim liveness (suppressing cadence pings and the
+            # steward's stale-claim sweep) with no version minted and no
+            # audit trail.
+            if row is not None and json.loads(row["value"]) == value:
+                if updated_by == row["updated_by"]:
+                    self._conn.execute(
+                        "UPDATE store SET updated_at = ?"
+                        " WHERE channel = ? AND key = ?",
+                        (now, channel, key),
+                    )
+                    self._conn.commit()
+                    return StoreEntry(
+                        channel=channel, key=key, value=value, version=current,
+                        updated_by=updated_by, updated_at=now,
+                    )
+                return StoreEntry(
+                    channel=channel, key=key, value=value, version=current,
+                    updated_by=row["updated_by"], updated_at=row["updated_at"],
+                )
             new_version = current + 1
             self._conn.execute(
                 "INSERT INTO store (channel, key, value, version, updated_by, updated_at)"
@@ -2212,6 +2287,31 @@ class Database:
             row = self._conn.execute(
                 "SELECT version FROM charter_receipts"
                 " WHERE agent_id = ? AND channel = ?", (agent_id, channel),
+            ).fetchone()
+        return row["version"] if row else None
+
+    def ruling_receipt_set(self, agent_id: str, channel: str, ruling_key: str,
+                           version: int) -> None:
+        """0113: record that this seat saw ruling_key at store version N."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO ruling_receipts"
+                " (agent_id, channel, ruling_key, version, read_at)"
+                " VALUES (?,?,?,?,?)"
+                " ON CONFLICT (agent_id, channel, ruling_key) DO UPDATE SET"
+                " version = MAX(version, excluded.version),"
+                " read_at = excluded.read_at",
+                (agent_id, channel, ruling_key, version, time.time()),
+            )
+            self._conn.commit()
+
+    def ruling_receipt_get(self, agent_id: str, channel: str,
+                           ruling_key: str) -> int | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT version FROM ruling_receipts"
+                " WHERE agent_id = ? AND channel = ? AND ruling_key = ?",
+                (agent_id, channel, ruling_key),
             ).fetchone()
         return row["version"] if row else None
 

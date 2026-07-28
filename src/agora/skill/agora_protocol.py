@@ -52,21 +52,16 @@ WAKE_PROMPT = (
     "AGORA WAKE. Run ONE reception pass exactly as the agora skill defines "
     "(Reception, driven seat): check_inbox; settle what you OWE — DO or "
     "claim the work, use answers to your own asks, reply where owed; "
-    "ack_inbox. Then, if you hold a live claim and owe nothing further: "
-    "re-read the claim row and any newer messages touching that task FIRST "
-    "(a newer message may cancel, refine, or supersede it — the record "
-    "outranks your memory; adjust or park on the record if so), then "
-    "advance it ONE bounded unit and post a progress receipt, or post "
-    "blocked naming the blocker. Then END this turn. Do NOT wait, listen, "
-    "sleep, or re-check — this watcher re-wakes you when the next message "
-    "lands."
+    "ack_inbox, then END this turn. Do NOT advance unrelated claims, post "
+    "routine progress receipts, wait, listen, sleep, or re-check — the "
+    "native driver's --initiative lane owns work continuation and this "
+    "watcher owns reception."
 )
 BOOT_PROMPT = (
     "You are a DRIVEN agora seat: call whoami and heed the hub rules, skim "
     "your channels, then run one reception pass (check_inbox, settle what "
-    "you owe, ack); if you hold a live claim and owe nothing further, "
-    "advance it one bounded unit (re-read its row and newer messages first "
-    "— they may supersede it) and post the receipt. Then END the turn. A "
+    "you owe, ack). Do not advance unrelated claims or post routine "
+    "progress receipts. Then END the turn. A "
     "watcher wakes you on each new message — never start a listener "
     "yourself."
 )
@@ -74,10 +69,10 @@ BOOT_PROMPT = (
 MODEL = os.environ.get("AGORA_PROTOCOL_MODEL", "composer-2.5-fast")
 SANDBOX = os.environ.get("AGORA_PROTOCOL_SANDBOX", "enabled")   # enabled|disabled|none
 MAX_WAIT = os.environ.get("AGORA_PROTOCOL_MAX_WAIT", "1200")
-TURN_BUDGET = int(os.environ.get("AGORA_PROTOCOL_TURN_BUDGET", "40"))   # spawns/hour
+TURN_BUDGET = int(os.environ.get("AGORA_PROTOCOL_TURN_BUDGET", "250"))  # abuse ceiling
 SESSION_ROTATE = int(os.environ.get("AGORA_PROTOCOL_ROTATE", "25"))     # turns/session
 POISON_STRIKES = 3
-TURN_TIMEOUT = 600
+TURN_TIMEOUT = 3600
 
 
 def emit(line: str) -> None:
@@ -203,20 +198,23 @@ def inline_loop(seat: str, url: str | None) -> None:
         session_id = open(sess_file).read().strip() or None
     turns_on_session = 0
     spawn_times: list[float] = []
-    listen = ["agora", "listen", "--once", "--as", seat, "--important-only",
-              "--max-wait", MAX_WAIT]
-    if url:
-        listen += ["--url", url]
     backoff = 1.0
+    pending_wake = False
 
-    def drive_one() -> None:
+    def budget_retry_after() -> float:
+        now = time.time()
+        spawn_times[:] = [t for t in spawn_times if now - t < 3600]
+        if len(spawn_times) < TURN_BUDGET:
+            return 0.0
+        return max(0.0, min(spawn_times) + 3600.0 - now)
+
+    def drive_one() -> bool:
         nonlocal session_id, turns_on_session
         now = time.time()
         spawn_times[:] = [t for t in spawn_times if now - t < 3600]
         if len(spawn_times) >= TURN_BUDGET:
             emit(f"AGORA_DRIVE parked reason=turn-budget ({TURN_BUDGET}/h)")
-            time.sleep(300)
-            return
+            return False
         spawn_times.append(now)
         prompt = WAKE_PROMPT if session_id else BOOT_PROMPT
         session_id, ok = spawn_turn(prompt, session_id)
@@ -227,14 +225,30 @@ def inline_loop(seat: str, url: str | None) -> None:
                 session_id, turns_on_session = None, 0   # flush bloat + residue
         elif not ok and session_id:
             session_id, turns_on_session = None, 0       # boot fresh next wake
+        return True
 
     swept: str | None = None
     while True:
+        if pending_wake and budget_retry_after() <= 0:
+            pending_wake = not drive_one()
+            if not pending_wake:
+                continue
+        wait = float(MAX_WAIT)
+        if pending_wake:
+            wait = min(wait, max(budget_retry_after(), 0.01))
+        listen = ["agora", "listen", "--once", "--as", seat,
+                  "--important-only", "--max-wait", str(wait)]
+        if url:
+            listen += ["--url", url]
         rc = subprocess.run(listen).returncode
         if rc == 2:                                   # obligation arrived
-            drive_one()
+            pending_wake = not drive_one()
             backoff = 1.0
         elif rc == 0:                                 # idle timeout / hub down
+            if pending_wake and budget_retry_after() <= 0:
+                pending_wake = not drive_one()
+                if not pending_wake:
+                    continue
             # Missed-wake sweep: debt that landed between listen windows
             # (tail-from-END blind spot) still gets a turn. Gated on the
             # debt CHANGING — a quiet hub costs zero LLM turns and stuck
@@ -242,8 +256,9 @@ def inline_loop(seat: str, url: str | None) -> None:
             sig = owed_signature(seat, url)
             if sig is not None and sig != swept:
                 emit("AGORA_DRIVE sweep=owed")
-                drive_one()
-                swept = sig
+                pending_wake = not drive_one()
+                if not pending_wake:
+                    swept = sig
             continue
         else:
             time.sleep(backoff)

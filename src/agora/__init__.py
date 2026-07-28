@@ -6,7 +6,7 @@ protocol are the stable integration surface and keep the `agora` name. Refer
 to the system as "Agora" for short.
 """
 
-__version__ = "0.12.54"
+__version__ = "0.12.55"
 
 PROTOCOL_VERSION = "agora/0.3"
 
@@ -41,4 +41,10 @@ PROTOCOL_SEMANTICS = [
     #                              ONE standing owner-addressed open ping when
     #                              idle past cadence; row touch clears it
     #                              (owner-declared continuation, 2026-07-28)
+    "blocked-addressed-asks",    # blocked requires a structured ask plus an
+    #                              explicit addressee before commit
+    "noticeboard-typed-roots",   # metadata-driven boards require typed,
+    #                              sender-idempotent root events
+    "drive-session-lanes-v2",    # reception/work resume histories are split;
+    #                              legacy shared sessions are ignored
 ]

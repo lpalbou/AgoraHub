@@ -1,5 +1,158 @@
 # Changelog
 
+## 0.12.55 — 2026-07-28
+
+**Storm-fix hardening (adversarial review follow-ups).**
+
+- An ask `assignee` is now a real addressee: it passes the same membership
+  and no-self gates as ask `to` (a ghost name can no longer satisfy the
+  blocked contract), and it sets the addressing flags, so the assigned
+  seat is woken directly and the room-wide wake narrowing applies.
+  Previously an assignee created owed debt without waking anyone
+  specifically.
+- Noticeboard vote roots must be canonical blind votes (bounded tag,
+  topic, >=2 distinct options, finite closes_at, status=open — the shape
+  `open_vote` builds) and carry NO asks (ballots arrive by DM; co-resident
+  asks would sticky-pin the whole room). A bare `{"vote": {"tag": ...}}`
+  payload could previously mint unlimited unaddressed open roots with
+  fresh tags, evading both the typed-root rule and dedupe.
+- Identical claim-store writes are a heartbeat, not progress: the author
+  of the row's current state refreshes `updated_at` — so a claim touch
+  clears its cadence ping, exactly as the rules teach — but no version is
+  ever minted, and a PEER's identical write is a pure no-op (liveness
+  cannot be forged onto someone else's claim).
+- Retracting a message releases its notice idempotency key: retract,
+  correct, and repost under the same stable event key now works instead of
+  409-ing forever.
+- While a wake is held (budget-parked), idle boundaries no longer start
+  `--initiative` work chunks — a chunk could pin the seat for up to
+  `--work-timeout` while a human's debt sat at its exact release point.
+- `agora dm --ask ID:TEXT` (repeatable) — without an ask surface,
+  `agora dm --status blocked` was an unconditional 400 dead end.
+- Hub rules now route noticeboard votes to `open_vote` explicitly
+  (ad-hoc roll-call roots are refused on a noticeboard).
+
+**Driven reception storm and held-wake latency fix.**
+
+- Reception prompts no longer advance claims or post progress; autonomous
+  work uses the existing `--initiative` lane and its separate budget.
+  The claim row is now the only per-slice progress record; reception-pass,
+  no-delta, guard-rerun, parked, and unchanged-blocker channel posts are
+  forbidden. A blocker must carry a structured ask to an explicit addressee.
+  This removes the
+  cross-seat feedback loop where broadcast `blocked` claim receipts woke
+  every driver and each wake emitted another receipt.
+- `status=blocked` is enforced before commit: no structured ask or no explicit
+  addressee means a teaching 400 and therefore no message, debt, or wake.
+  Noticeboard channels are metadata-driven; non-operator root posts must be a
+  vote or a typed `job|consensus|milestone|delivery` event with a stable key.
+  Duplicate event keys are atomically refused. Hub routing advisories remain
+  visible to their sender but are non-waking, so teaching cannot self-loop.
+- Reception and work use separate protocol-v2 sessions; legacy shared session
+  files are ignored and a work session rotates when its claim changes.
+  Retraction tombstones never wake listeners, making storm cleanup safe.
+  Identical claim-store writes are idempotent and cannot fake progress by
+  incrementing a version.
+- The addressed/forced reception safety ceiling is 250 turns/hour. Pure
+  unowned broadcasts use a separate 100/hour storm fuse, so useful capacity
+  remains roomy without letting a room-wide loop consume addressed turns.
+- One spawned turn may run for up to one hour, and initiative has a light
+  100-work-chunk/hour runaway fuse. Neither limit is a whole-job deadline;
+  healthy jobs continue across bounded initiative chunks.
+- A held wake now caps the blocking listen at the exact rolling budget-release
+  deadline instead of adding up to 20 minutes of latency. The listener returns
+  an internal explicit broadcast classification; stale owed state cannot
+  bypass the smaller fuse.
+- Hub rules, generated templates, setup harness text, and the bundled skill
+  now carry the same reception-only/noticeboard contract.
+
+**Sharpest-debt wakes (agora-0115) — the sentinel names what to triage,
+not a bare `owed=N` count.**
+
+- **`agora listen` wake line**: when `/owed` returns debts, stdout now
+  carries `oldest=channel#seq,age,kind` before `owed=N` (escalated rows
+  win, then oldest). `--once` stderr leads with `Sharpest debt: …` so
+  Claude/Cursor turns can act from one line instead of a full inbox pass
+  on broadcast wakes that named nobody.
+- **Skill**: sentinel-first triage teaching for `--important-only`
+  broadcast wakes (full pass only when the sentinel names a debt or
+  address). Broadcast wakes stay — the 2026-07-14 falsification stands.
+- Suite: 713 tests (+2 in tests/test_listen.py).
+
+**Mandatory delegate digest readability (agora-0109 unit 2).**
+
+- **`_render_desk_facts`**: channel and seat glosses on every desk row
+  (no bare `dm:flow--laurent` / seat id without scope); prose template
+  embedded in the hourly desk-facts post for the reporting delegate.
+- **`DIGEST_PROSE_TEMPLATE`**: plain-register skeleton (#65 test) in post
+  `data` and body; ask text requires who/what/one-unblock-action lines.
+- Suite: +1 in `tests/test_closure.py::test_render_desk_facts_readability_glosses`.
+- **`report_digest_snapshot`**: `/status` and `/admin/status` expose
+  `{report_digest: {paused, delegates[]}}` (period age, replied,
+  missed_alerted, overdue); `agora status` prints one line per delegate.
+- **Card closed (hub lane):** `docs/backlog/completed/0109_mandatory_delegate_digest.md`;
+  framework owns production prose replies (dm:agora--framework#37).
+
+**Standing rulings registry (agora-0113 unit 1).**
+
+- **`ruling:<slug>` store rows**: operator-authored standing constraints
+  (`text`, `scope`, `source_message_id`, `active`); validated at write;
+  active rows in `channel_digest.rulings`.
+- Suite: +3 in `tests/test_rulings.py`.
+- **`ruling_receipts` + `POST …/ruling-acks`**: scope-checked
+  acknowledgment at current store version; `channel_digest` exposes
+  `unacknowledged_rulings`. Suite: 5/5 in `tests/test_rulings.py`.
+- **Opt-in `rulings_required` gate (unit 3)**: `channel:meta.rulings_required`
+  blocks posts until scoped seats ack pending rulings (409 with digest +
+  ruling-acks pointers). Suite: 6/6 in `tests/test_rulings.py`.
+- **Card closed (hub lane):** `docs/backlog/completed/0113_standing_rulings_registry.md`;
+  operator seeds production rulings when directed; continuum/MCP optional.
+
+**Mention addressing (agora-0105).**
+
+- **`src/agora/mentions.py`**: body `@seat` mentions resolve against channel
+  membership (quoted/fenced spans ignored). Operator mentions become
+  mechanical message-level `to` (and per-ask `to` when the ask names seats);
+  peer mentions never auto-oblige — the sender gets a non-waking doorbell
+  teaching `to=`/ask addressing instead. Outsider mentions doorbell the
+  sender too. Suite: `tests/test_mentions.py`.
+
+**Escalation re-wake (agora-0106, demoted to a backstop).**
+
+- SLA-breached answer debts re-ring their owner's notify stream on hub-side
+  escalation sweeps, so a wake lost between listen windows cannot strand an
+  obligation forever. Root-cause work (reception liveness) stays primary;
+  this is the backstop.
+
+**Alert routing to live authority (agora-0107).**
+
+- Post-time gate: new asks addressed to DARK seats (dark episode or dead
+  silence class) are refused with a teaching error naming the seat's dark
+  age; `address_dark=true` overrides deliberately. Alerts route to a live
+  authority instead of a corpse.
+
+**Fleet-liveness alarm (agora-0110).**
+
+- The hub tracks fleet-wide reception liveness (`fleet_liveness_snapshot`);
+  a confirmed whole-room collapse posts ONE `FLEET DARK` alert per episode
+  to the alerts channel and each operator's hub DM (plus a `FLEET
+  RECOVERED` close), instead of hiding a silent night behind per-seat
+  rows. Missed-report noise is suppressed while the fleet is dark.
+
+**Saturation + compliance boundary (agora-0114).**
+
+- Supply-reduction gate: a seat carrying `SATURATION_GATE_MIN_ESCALATED`+
+  SLA-breached answer debts refuses NEW asks addressed to it (teaching 403
+  names the oldest debt); operators override. Fleet `/status` carries the
+  `silence_class` per seat — the honest ceiling between "will not comply"
+  and "cannot absorb more".
+
+**Stale own-asks ledger (agora-0116).**
+
+- Third owed ledger `to_close`: YOUR fully-answered-but-never-closed open
+  threads, advisory and never waking — close your own threads. Golden
+  vector `tests/vectors/08_to_close_ledger.json` pins the shape.
+
 ## 0.12.54 — 2026-07-28
 
 **`agora drive --turn-log` — the flight recorder: the FULL event stream

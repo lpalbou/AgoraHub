@@ -399,7 +399,8 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
                      reply_to: str | None = None, critical: bool = False,
                      asks: list[dict] | None = None,
                      answers: list[str] | None = None,
-                     attachments: list[dict] | None = None) -> dict:
+                     attachments: list[dict] | None = None,
+                     notice_kind: str = "", notice_key: str = "") -> dict:
         """Post to a channel you belong to.
 
         title: short subject (required etiquette for open/blocked; ≤120 chars) —
@@ -422,11 +423,17 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
                      [{"id": "<sha256 from put_attachment>", "filename": "spec.pdf"}].
                      Recipients get the refs in every envelope and fetch bytes
                      with read_attachment.
+        notice_kind/notice_key: required together for a noticeboard root;
+                     kind is job, consensus, milestone, or delivery, and key
+                     is a stable event id. Retrying the same pair is refused.
         """
+        notice = ({"kind": notice_kind, "key": notice_key}
+                  if notice_kind or notice_key else None)
         return _call("POST", f"/channels/{channel}/messages", json={
             "body": body, "title": title, "status": status, "urgency": urgency,
             "to": to or [], "reply_to": reply_to, "critical": critical,
             "asks": asks, "answers": answers, "attachments": attachments,
+            "notice": notice,
         })
 
     @mcp.tool()
@@ -582,7 +589,8 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
             counts = owed.get("counts", {})
         except Exception:
             return ""
-        if not (counts.get("to_answer") or counts.get("to_consume")):
+        if not (counts.get("to_answer") or counts.get("to_consume")
+                or counts.get("to_close")):
             return ""
         lines = ["YOU OWE (settle these before new work; ack clears none of it):"]
         to_answer = owed.get("to_answer", [])
@@ -611,6 +619,19 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
         if len(to_consume) > 10:
             lines.append(f"  … +{len(to_consume) - 10} more to consume — "
                          "GET /owed for the full list")
+        to_close = owed.get("to_close", [])
+        if to_close:
+            lines.append("")
+            lines.append("ADVISORY — your open threads, fully answered (post "
+                         "status=resolved + decision:<slug> when ready):")
+            for row in to_close[:10]:
+                lines.append(
+                    f"- CLOSE {row['channel']}#{row['seq']}: "
+                    f"{row['answered_by']} answered ({row['age_minutes']}m ago)"
+                    f" — read_message id={row['id']}, then post resolved")
+            if len(to_close) > 10:
+                lines.append(f"  … +{len(to_close) - 10} more to close — "
+                             "GET /owed for the full list")
         return "\n".join(lines) + "\n\n"
 
     @mcp.tool()

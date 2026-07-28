@@ -575,12 +575,40 @@ def test_deaf_sweep_alerts_when_present_seat_stops_arming():
     service.dark_sweep()
     msgs = client.get("/channels/hub-alerts/messages", headers=op2).json()
     assert any("AGENT DEAF: uic" in m["body"] for m in msgs)
+    assert any("silence_class=deaf" in m["body"] for m in msgs)
     assert not any("AGENT DARK: uic" in m["body"] for m in msgs)
 
     # An armed reception loop is NOT deaf: recovery ends the episode.
     service.presence.mark_reception("uic")
     assert service.dark_sweep() == []
     assert "uic" not in service._deaf_since
+
+
+def test_silence_watchdog_alert_addresses_reporting_steward():
+    """0114/0107: DARK/DEAF/LURK alerts tag silence_class and address stewards."""
+    client = make_client()
+    flow = register(client, "flow")
+    op = register(client, "op", operator=True)
+    steward = register(client, "steward")
+    target = register(client, "uic")
+    make_channel(client, flow, "room", target, steward)
+    client.put("/admin/delegation",
+               json={"agent_id": "steward", "powers": ["reporting"]},
+               headers={"Authorization": f"Bearer {ADMIN_KEY}"})
+    client.put("/channels/room/store/channel:meta",
+               json={"value": {"response_sla_minutes": 0.001}}, headers=flow)
+    post(client, flow, body="for uic", title="q", status="open", to=["uic"],
+         asks=[{"id": "1", "text": "a?"}])
+    time.sleep(0.2)
+    service = client.app.state.service
+    service.presence.touch("uic")
+    service.presence._last_reception["uic"] = time.time() - 1000.0
+    service.dark_sweep()
+    msgs = client.get("/channels/hub-alerts/messages", headers=op).json()
+    deaf = [m for m in msgs if "AGENT DEAF: uic" in m["body"]]
+    assert len(deaf) == 1
+    assert "silence_class=deaf" in deaf[0]["body"]
+    assert "steward" in deaf[0]["to"]
 
 
 def test_history_rows_carry_viewer_read_state():
@@ -728,6 +756,32 @@ def test_dark_sweep_alerts_operator_once_per_episode():
     assert r.status_code == 200
     assert any("AGENT DARK: uic" in m["body"] for m in r.json())
 
+
+def test_retirement_proposal_after_long_dark_episode(monkeypatch):
+    """0107: long-dark seat with breached debt gets one retirement proposal."""
+    from agora.hub import service as hub_service
+
+    monkeypatch.setattr(hub_service, "DARK_RETIRE_PROPOSAL_SECONDS", 0.0)
+    client = make_client()
+    flow = register(client, "flow")
+    op = register(client, "op", operator=True)
+    dark = register(client, "uic")
+    make_channel(client, flow, "room", dark)
+    client.put("/channels/room/store/channel:meta",
+               json={"value": {"response_sla_minutes": 0.001}}, headers=flow)
+    post(client, flow, body="for uic", title="q", status="open", to=["uic"],
+         asks=[{"id": "1", "text": "a?"}])
+    time.sleep(0.2)
+    service = client.app.state.service
+    service.presence._last_seen.pop("uic", None)
+    service.dark_sweep()
+    assert "uic" in service._dark_since
+    msgs = client.get("/channels/hub-alerts/messages", headers=op).json()
+    assert any("RETIREMENT PROPOSAL: 'uic'" in m["body"] for m in msgs)
+    assert any(m.get("to") == ["op"] for m in msgs
+               if "RETIREMENT PROPOSAL" in m["body"])
+    assert service._retirement_proposal_sweep() == []
+
     # Episode ends when the seat's overdue work clears: the asker closes the
     # thread, so uic no longer holds an escalated obligation.
     q_id = next(m["id"] for m in client.get("/channels/room/messages",
@@ -736,3 +790,238 @@ def test_dark_sweep_alerts_operator_once_per_episode():
     post(client, flow, body="closing", status="resolved", reply_to=q_id)
     assert service.dark_sweep() == []
     assert "uic" not in service._dark_since
+
+
+def test_escalation_rewake_re_emits_notify_once_per_sla_band(tmp_path):
+    """0106: hub re-delivers escalated debts into notify files so listeners
+    see the escalated flag; deduped per band; suppressed once DARK owns seat."""
+    import json
+
+    app = create_app(db_path=":memory:", admin_key=ADMIN_KEY,
+                     rate_per_minute=600.0, dark_watch_seconds=0,
+                     notify_dir=str(tmp_path / "notify"))
+    client = TestClient(app)
+    flow = register(client, "flow")
+    uic = register(client, "uic")
+    make_channel(client, flow, "room", uic)
+    client.put("/channels/room/store/channel:meta",
+               json={"value": {"response_sla_minutes": 0.001}}, headers=flow)
+    post(client, flow, body="for uic", title="q", status="open", to=["uic"],
+         asks=[{"id": "1", "text": "a?"}])
+    # Armed + present: not DARK/DEAF — the 0106 target class.
+    client.get("/owed", headers={**uic, "X-Agora-Reception": "arm"})
+    time.sleep(0.2)
+
+    service = client.app.state.service
+    log = tmp_path / "notify" / "uic-inbox.log"
+    assert log.exists()
+    n_before_sweep = len(log.read_text().strip().split("\n"))
+    assert all("escalated" not in json.loads(line).get("flags", "")
+               for line in log.read_text().strip().split("\n"))
+
+    assert service._escalation_rewake_sweep() == ["uic"]
+    lines = log.read_text().strip().split("\n")
+    assert len(lines) == n_before_sweep + 1
+    last = json.loads(lines[-1])
+    assert "escalated" in last["flags"]
+
+    assert service._escalation_rewake_sweep() == []  # same band: no storm
+    assert len(log.read_text().strip().split("\n")) == len(lines)
+
+    # DARK episode suppresses further re-rings (0107 bound).
+    service.presence._last_seen.pop("uic", None)
+    service.dark_sweep()
+    assert "uic" in service._dark_since
+    assert service._escalation_rewake_sweep() == []
+
+
+def test_dropped_wake_re_emits_unread_pre_sla_on_armed_seat(tmp_path, monkeypatch):
+    """0106 emit≠process: armed + unread pre-SLA debt gets notify re-emit."""
+    from agora.hub import service as hub_service
+
+    monkeypatch.setattr(hub_service, "DROPPED_WAKE_REEMIT_SECONDS", 9999.0)
+    app = create_app(db_path=":memory:", admin_key=ADMIN_KEY,
+                     rate_per_minute=600.0, dark_watch_seconds=0,
+                     notify_dir=str(tmp_path / "notify"))
+    client = TestClient(app)
+    flow = register(client, "flow")
+    uic = register(client, "uic")
+    make_channel(client, flow, "room", uic)
+    client.put("/channels/room/store/channel:meta",
+               json={"value": {"response_sla_minutes": 60}}, headers=flow)
+    post(client, flow, body="for uic", title="q", status="open", to=["uic"],
+         asks=[{"id": "1", "text": "a?"}])
+    client.get("/owed", headers={**uic, "X-Agora-Reception": "arm"})
+
+    service = client.app.state.service
+    log = tmp_path / "notify" / "uic-inbox.log"
+    n_before = len(log.read_text().strip().split("\n"))
+    assert service._dropped_wake_sweep() == ["uic"]
+    assert len(log.read_text().strip().split("\n")) == n_before + 1
+    assert service._dropped_wake_sweep() == []  # deduped until interval
+
+    msg_id = client.get("/owed", headers=uic).json()["to_answer"][0]["id"]
+    client.get(f"/channels/room/messages/{msg_id}", headers=uic)
+    assert service._dropped_wake_sweep() == []
+
+
+def test_fleet_liveness_sweep_alerts_once_then_recovers(monkeypatch):
+    """0110: aggregate collapse raises FLEET DARK; recovery closes episode."""
+    from agora.hub import service as hub_service
+
+    monkeypatch.setattr(hub_service, "FLEET_MIN_ELIGIBLE", 3)
+    monkeypatch.setattr(hub_service, "FLEET_DARK_CONFIRM_SECONDS", 0.0)
+    client = make_client()
+    op = register(client, "op", operator=True)
+    a = register(client, "a")
+    b = register(client, "b")
+    register(client, "c")
+    service = client.app.state.service
+    assert service._fleet_liveness_sweep() == ["fleet-dark"]
+    assert service._fleet_liveness_sweep() == []
+
+    client.get("/owed", headers={**a, "X-Agora-Reception": "arm"})
+    client.get("/owed", headers={**b, "X-Agora-Reception": "arm"})
+    assert service._fleet_liveness_sweep() == ["fleet-recovered"]
+
+    msgs = client.get("/channels/hub-alerts/messages", headers=op).json()
+    assert any("FLEET DARK" in m["body"] for m in msgs)
+    assert any("FLEET RECOVERED" in m["body"] for m in msgs)
+
+    dm = client.get("/channels/dm:hub--op/messages", headers=op).json()
+    assert any("FLEET DARK" in m["body"] for m in dm)
+    assert any("FLEET RECOVERED" in m["body"] for m in dm)
+
+
+def test_fleet_liveness_snapshot_on_status(monkeypatch):
+    """0110: /status carries aggregate fleet liveness alongside agent rows."""
+    from agora.hub import service as hub_service
+
+    monkeypatch.setattr(hub_service, "FLEET_MIN_ELIGIBLE", 3)
+    client = make_client()
+    op = register(client, "op", operator=True)
+    register(client, "a")
+    register(client, "b")
+    register(client, "c")
+    r = client.get("/status", headers=op)
+    assert r.status_code == 200
+    data = r.json()
+    assert "fleet" in data and "agents" in data
+    fleet = data["fleet"]
+    assert fleet["eligible"] >= 3
+    assert fleet["live"] <= fleet["eligible"]
+    assert "live_fraction" in fleet
+    assert "open_claims" in fleet
+    assert "report_digest" in data
+
+
+def test_report_digest_snapshot_on_status(monkeypatch):
+    """0109: /status exposes delegate digest cadence observability."""
+    from agora.hub import service as hub_service
+
+    monkeypatch.setattr(hub_service, "REPORT_DIGEST_PERIOD_SECONDS", 0.0)
+    client = make_client()
+    op = register(client, "op", operator=True)
+    steward = register(client, "steward")
+    client.put("/admin/delegation", headers={"Authorization": f"Bearer {ADMIN_KEY}"},
+               json={"agent_id": "steward", "powers": ["reporting"]})
+    service = client.app.state.service
+    service._report_digest_sweep()
+    r = client.get("/status", headers=op)
+    digest = r.json()["report_digest"]
+    assert digest["delegates"]
+    row = digest["delegates"][0]
+    assert row["delegate"] == "steward"
+    assert row["replied"] is False
+    assert row["desk_post_id"]
+
+
+def test_report_digest_sweep_missed_then_satisfied(monkeypatch):
+    """0109: hub posts desk facts; missed digest -> operator DM; reply clears."""
+    from agora.hub import service as hub_service
+
+    monkeypatch.setattr(hub_service, "REPORT_DIGEST_PERIOD_SECONDS", 0.0)
+    client = make_client()
+    op = register(client, "op", operator=True)
+    steward = register(client, "steward")
+    client.put("/admin/delegation", headers={"Authorization": f"Bearer {ADMIN_KEY}"},
+               json={"agent_id": "steward", "powers": ["reporting"]})
+    service = client.app.state.service
+    assert service._report_digest_sweep() == ["desk-facts:steward"]
+
+    assert service._report_digest_sweep() == ["missed-report:steward",
+                                              "desk-facts:steward"]
+    dm = client.get("/channels/dm:hub--op/messages", headers=op).json()
+    assert any("MISSED-REPORT: steward" in m["body"] for m in dm)
+
+    alerts = client.get("/channels/hub-alerts/messages", headers=op).json()
+    desk_post = next(m for m in reversed(alerts)
+                     if m.get("title") == "hourly digest: desk facts"
+                     and m["status"] == "open")
+    client.post("/channels/hub-alerts/messages",
+                json={"body": "Shipped: nothing new. Blocked: none. "
+                      "Fleet: all seats nudged to continue or re-check gates.",
+                      "status": "reply", "reply_to": desk_post["id"],
+                      "answers": ["digest"]},
+                headers=steward)
+    assert service._report_digest_sweep() == ["desk-facts:steward"]
+    dm2 = client.get("/channels/dm:hub--op/messages", headers=op).json()
+    assert sum("MISSED-REPORT: steward" in m["body"] for m in dm2) == 1
+
+
+def test_report_digest_paused_when_fleet_dark(monkeypatch):
+    """0109: no missed-report spam while aggregate fleet is dark."""
+    from agora.hub import service as hub_service
+
+    monkeypatch.setattr(hub_service, "REPORT_DIGEST_PERIOD_SECONDS", 0.0)
+    monkeypatch.setattr(hub_service, "FLEET_MIN_ELIGIBLE", 3)
+    monkeypatch.setattr(hub_service, "FLEET_DARK_CONFIRM_SECONDS", 0.0)
+    client = make_client()
+    op = register(client, "op", operator=True)
+    steward = register(client, "steward")
+    register(client, "a")
+    register(client, "b")
+    register(client, "c")
+    client.put("/admin/delegation", headers={"Authorization": f"Bearer {ADMIN_KEY}"},
+               json={"agent_id": "steward", "powers": ["reporting"]})
+    service = client.app.state.service
+    service._report_digest_sweep()
+    service._fleet_liveness_sweep()
+    assert service._report_digest_paused()
+    assert service._report_digest_sweep() == []
+
+
+def test_render_desk_facts_readability_glosses():
+    """0109: desk-facts render includes channel/seat glosses + prose template."""
+    client = make_client()
+    register(client, "op", operator=True)
+    steward = register(client, "steward")
+    flow = register(client, "flow")
+    client.put("/me/about",
+               json={"about": "Owns fleet stewardship and hourly digests."},
+               headers=steward)
+    client.put("/me/about",
+               json={"about": "Owns abstractflow visual editor."},
+               headers=flow)
+    client.put("/admin/delegation", headers={"Authorization": f"Bearer {ADMIN_KEY}"},
+               json={"agent_id": "steward", "powers": ["reporting"]})
+    service = client.app.state.service
+    assert service._gloss_channel("commons") == "commons (noticeboard)"
+    assert "private" in service._gloss_channel("dm:flow--op")
+    assert "abstractflow" in service._gloss_agent("flow")
+    line = service._format_desk_fact_line({
+        "channel": "dm:flow--op",
+        "who_waits": "flow",
+        "what": "flow editor walkthrough",
+        "age_minutes": 42.0,
+        "one_action": "answer or waive on the record",
+    })
+    assert "flow editor walkthrough" in line
+    assert "abstractflow" in line
+    assert "DM flow↔op (private)" in line
+    assert "42m old" in line
+    body, snapshot = service._render_desk_facts("steward")
+    assert snapshot["digest_prose_template"]
+    assert "Overnight:" in body
+    assert "re-check your gate" in body
+    assert "one unblock action" in body.lower()

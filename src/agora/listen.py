@@ -39,6 +39,8 @@ ADAPT_FACTOR = 2.0                     # 60→120→240→480→960→cap: 5-6 i
 ADAPT_CAP_DEFAULT = 1200.0             # 20 min; --max-wait overrides the cap
 _HUB_UNREACHABLE = 3                   # internal: ws arm gave up (hub down) — do
 #                                        NOT widen on it, and map to exit 0
+_DRIVER_BROADCAST_WAKE = 4              # internal: pure room-wide wake; native
+#                                        driver applies its smaller storm fuse
 _IMPORTANT_FLAGS = {"to-me", "reply-to-me", "critical", "escalated"}
 _FLAG_ORDER = ("to-me", "reply-to-me", "open", "blocked", "critical", "escalated", "dm")
 
@@ -116,7 +118,7 @@ def next_backoff(current: float, rc: int, cap: float) -> float:
     a clean idle timeout (exit 0) widens ×FACTOR up to the cap; anything else
     (signal, hub-unreachable, error) leaves it unchanged — only a genuine
     'nothing happened for the whole window' earns a widen."""
-    if rc == 2:
+    if rc in (2, _DRIVER_BROADCAST_WAKE):
         return ADAPT_MIN
     if rc == 0:
         return max(ADAPT_MIN, min(current * ADAPT_FACTOR, cap))
@@ -198,11 +200,15 @@ def qualifies(event: dict[str, Any], agent_id: str, important_only: bool = False
     wakes the debounce already coalesces; the code now matches the taught
     contract. Storm control stays where it belongs: debounce (one wake per
     burst), per-ask `to` for precision, and fyi never waking anyone."""
+    tokens = {t for t in str(event.get("flags", "")).split(",") if t}
+    # Retraction tombstones update live UIs but carry no words and no debt.
+    # In particular, retracting a blocked storm must not replay that storm.
+    if bool(event.get("retracted")) or "retracted" in tokens:
+        return False
     if event["from"] == agent_id:
         return False
     if not important_only:
         return True
-    tokens = {t for t in str(event.get("flags", "")).split(",") if t}
     if str(event.get("status", "")) in ("open", "blocked"):
         # Narrowed wake rule (0135, measured: 62% of commons wakes were
         # ADDRESSED opens waking the whole room): an open/blocked that
@@ -266,12 +272,97 @@ REWAKE_BAND_SECONDS = 4 * 3600.0
 #   the wake-per-window storm the signature gate exists to prevent.
 
 
-def _owed_snapshot(hub: str, agent_id: str) -> tuple[tuple[int, int] | None, str | None]:
-    """One GET /owed -> (counts, signature). counts feed the wake surfaces
+def _format_debt_age(minutes: float) -> str:
+    """Compact age for wake/digest surfaces (0115): hours when >= 60m."""
+    if minutes >= 60:
+        return f"{minutes / 60:.1f}h"
+    return f"{minutes:.1f}m"
+
+
+def _debt_rank(row: dict[str, Any]) -> tuple[int, float]:
+    """Sort key: escalated debts beat fresh ones, then oldest first."""
+    esc = 1 if row.get("escalated") else 0
+    return (esc, float(row.get("age_minutes") or 0.0))
+
+
+def _sharpest_debt_wake_token(owed: dict[str, Any]) -> str | None:
+    """Top debt as a sentinel-safe token (0115): channel#seq,age,kind."""
+    best: tuple[tuple[int, float], str] | None = None
+    for row in owed.get("to_answer", []):
+        if not isinstance(row, dict):
+            continue
+        rank = _debt_rank(row)
+        chan = _safe_channel(str(row.get("channel", "")))
+        seq = int(row.get("seq") or 0)
+        age = _format_debt_age(float(row.get("age_minutes") or 0.0))
+        kind = ("names-you" if row.get("asks_naming_you")
+                else f"from-{_safe_channel(str(row.get('sender', '?')))}")
+        token = f"{chan}#{seq},{age},{kind}"
+        if best is None or rank > best[0]:
+            best = (rank, token)
+    for row in owed.get("to_consume", []):
+        if not isinstance(row, dict):
+            continue
+        rank = (0, float(row.get("age_minutes") or 0.0))
+        chan = _safe_channel(str(row.get("channel", "")))
+        seq = int(row.get("answer_seq") or row.get("seq") or 0)
+        age = _format_debt_age(float(row.get("age_minutes") or 0.0))
+        who = _safe_channel(str(row.get("answered_by", "?")))
+        token = f"{chan}#{seq},{age},consume-{who}"
+        if best is None or rank > best[0]:
+            best = (rank, token)
+    return best[1] if best else None
+
+
+def _sharpest_debt_digest_clause(owed: dict[str, Any]) -> str | None:
+    """Human-readable sharpest-debt lead for --once stderr (0115)."""
+    best: tuple[tuple[int, float], str] | None = None
+    for row in owed.get("to_answer", []):
+        if not isinstance(row, dict):
+            continue
+        rank = _debt_rank(row)
+        chan = _safe_channel(str(row.get("channel", "")))
+        seq = int(row.get("seq") or 0)
+        age = _format_debt_age(float(row.get("age_minutes") or 0.0))
+        detail = ("names you" if row.get("asks_naming_you")
+                  else f"from {_safe_channel(str(row.get('sender', '?')))}")
+        clause = f"{chan}#{seq} {detail} ({age})"
+        if best is None or rank > best[0]:
+            best = (rank, clause)
+    for row in owed.get("to_consume", []):
+        if not isinstance(row, dict):
+            continue
+        rank = (0, float(row.get("age_minutes") or 0.0))
+        chan = _safe_channel(str(row.get("channel", "")))
+        seq = int(row.get("answer_seq") or row.get("seq") or 0)
+        age = _format_debt_age(float(row.get("age_minutes") or 0.0))
+        who = _safe_channel(str(row.get("answered_by", "?")))
+        clause = f"{chan}#{seq} consume answer from {who} ({age})"
+        if best is None or rank > best[0]:
+            best = (rank, clause)
+    return f"Sharpest debt: {best[1]}. " if best else None
+
+
+def _owed_wake_suffix(counts: tuple[int, int],
+                      owed_raw: dict[str, Any] | None) -> str:
+    """Append owed count (+ sharpest debt when known) to a wake line."""
+    total = counts[0] + counts[1]
+    if not total:
+        return ""
+    token = _sharpest_debt_wake_token(owed_raw) if owed_raw else None
+    if token:
+        return f" oldest={token} owed={total}"
+    return f" owed={total}"
+
+
+def _owed_snapshot(hub: str, agent_id: str) -> tuple[tuple[int, int] | None,
+                                                    str | None,
+                                                    dict[str, Any] | None]:
+    """One GET /owed -> (counts, signature, raw). counts feed the wake surfaces
     (0079: the woken turn must start knowing what it OWES); the signature is
     the debt as a comparable string (sorted message ids — None when nothing
     is owed or the hub is unknowable). Never raises, never blocks a wake:
-    cached key only, short timeout, any failure -> (None, None).
+    cached key only, short timeout, any failure -> (None, None, None).
 
     ESCALATION RE-RING (0106; the 2026-07-23 forensics class): the id-only
     signature made the backlog gate's own doctrine — "unchanged debt waits
@@ -287,7 +378,7 @@ def _owed_snapshot(hub: str, agent_id: str) -> tuple[tuple[int, int] | None, str
     try:
         key = _config.get_cached_key(hub, agent_id)
         if not key:
-            return None, None
+            return None, None, None
         import httpx
         # X-Agora-Reception (0098): this /owed poll runs at every arm, so it
         # doubles as the reception heartbeat the hub uses to tell an armed
@@ -296,19 +387,19 @@ def _owed_snapshot(hub: str, agent_id: str) -> tuple[tuple[int, int] | None, str
                       headers={"Authorization": f"Bearer {key}",
                                "X-Agora-Reception": "arm"}, timeout=5.0)
         if r.status_code != 200:
-            return None, None
+            return None, None, None
         owed = r.json()
         counts_raw = owed.get("counts", {})
         counts = (int(counts_raw.get("to_answer", 0)),
                   int(counts_raw.get("to_consume", 0)))
         if not (counts[0] or counts[1]):
-            return counts, None
+            return counts, None, owed
         now = time.time()
         ids = sorted([_debt_token(row, now) for row in owed.get("to_answer", [])]
                      + [row.get("answer_id", "") for row in owed.get("to_consume", [])])
-        return counts, ",".join(ids)
+        return counts, ",".join(ids), owed
     except Exception:
-        return None, None
+        return None, None, None
 
 
 def _debt_token(row: dict[str, Any], now: float) -> str:
@@ -386,7 +477,7 @@ def _record_owed_signature(hub: str, agent_id: str,
     check never re-fires for debt a wake already delivered (the seat may
     still be mid-turn settling it when the loop re-arms 5s later)."""
     if sig is None:
-        _, sig = _owed_snapshot(hub, agent_id)
+        _, sig, _ = _owed_snapshot(hub, agent_id)
     try:
         path = _sig_path(agent_id)
         if sig:
@@ -416,7 +507,7 @@ def _backlog_wake_at_arm(hub: str, agent_id: str, *, once: bool) -> int | None:
     arm."""
     if not once:
         return None                      # streaming mode delivers live events
-    counts, sig = _owed_snapshot(hub, agent_id)
+    counts, sig, owed_raw = _owed_snapshot(hub, agent_id)
     if sig is None:
         return None
     last = None
@@ -428,9 +519,12 @@ def _backlog_wake_at_arm(hub: str, agent_id: str, *, once: bool) -> int | None:
         return None
     _record_owed_signature(hub, agent_id, sig)
     counts = counts or (0, 0)
-    _emit(f"AGORA_WAKE agent={agent_id} n=0 backlog owed={counts[0] + counts[1]}")
-    print(f"AGORA: you OWE {counts[0]} answer(s) and {counts[1]} unconsumed "
-          "answer(s) that arrived while no listener was watching. "
+    line = f"AGORA_WAKE agent={agent_id} n=0 backlog"
+    line += _owed_wake_suffix(counts, owed_raw)
+    _emit(line)
+    lead = (_sharpest_debt_digest_clause(owed_raw) if owed_raw else "") or ""
+    print(f"AGORA: {lead}you OWE {counts[0]} answer(s) and {counts[1]} "
+          "unconsumed answer(s) that arrived while no listener was watching. "
           "check_inbox lists them; settle before new work — DO or claim "
           "what is yours, reply where owed, then ack.",
           file=sys.stderr, flush=True)
@@ -438,7 +532,9 @@ def _backlog_wake_at_arm(hub: str, agent_id: str, *, once: bool) -> int | None:
 
 
 def once_digest(events: list[dict[str, Any]],
-                owed: tuple[int, int] | None = None) -> str:
+                owed: tuple[int, int] | None = None,
+                *,
+                owed_raw: dict[str, Any] | None = None) -> str:
     """--once stderr digest: informational, redacted (counts + channel names).
     Channel names are clamped (Claude shows this stderr to the model verbatim,
     so a crafted name must not smuggle newlines or instructions into it).
@@ -448,7 +544,10 @@ def once_digest(events: list[dict[str, Any]],
     shown = ", ".join(chans[:_CHANNEL_CAP])
     if len(chans) > _CHANNEL_CAP:
         shown += f" (+{len(chans) - _CHANNEL_CAP} more)"
-    text = (f"AGORA: you have {len(events)} new message(s) in {shown}. Triage "
+    lead = ""
+    if owed_raw and (owed_raw.get("to_answer") or owed_raw.get("to_consume")):
+        lead = _sharpest_debt_digest_clause(owed_raw) or ""
+    text = (f"AGORA: {lead}you have {len(events)} new message(s) in {shown}. Triage "
             "each: DO or claim what is yours to do; read and use answers to "
             "your own asks; reply where a reply is owed; then ack. Ack means "
             "seen, not done.")
@@ -460,13 +559,13 @@ def once_digest(events: list[dict[str, Any]],
 
 
 def _deliver_wake(batch, agent_id, *, preview: bool, once: bool,
-                  hub: str = "") -> int | None:
+                  hub: str = "", classify_driver_wake: bool = False) -> int | None:
     """Emit the wake sentinel (+ stderr digest and exit-2 in --once mode)."""
-    owed, sig = _owed_snapshot(hub, agent_id) if hub else (None, None)
+    owed, sig, owed_raw = (_owed_snapshot(hub, agent_id) if hub
+                           else (None, None, None))
     line = wake_line(batch, agent_id, preview=preview)
     if owed and (owed[0] or owed[1]):
-        # Identifiers-only guarantee holds: a bare integer, no agent text.
-        line += f" owed={owed[0] + owed[1]}"
+        line += _owed_wake_suffix(owed, owed_raw)
     _emit(line)
     if once:
         # This wake delivers the current debt too (its digest names it), so
@@ -475,7 +574,17 @@ def _deliver_wake(batch, agent_id, *, preview: bool, once: bool,
         # must not re-fire for debt this wake already announced.
         if hub:
             _record_owed_signature(hub, agent_id, sig)
-        print(once_digest(batch, owed), file=sys.stderr, flush=True)
+        print(once_digest(batch, owed, owed_raw=owed_raw),
+              file=sys.stderr, flush=True)
+        if classify_driver_wake:
+            flags = {
+                token
+                for event in batch
+                for token in str(event.get("flags", "")).split(",")
+                if token
+            }
+            if not (flags & _IMPORTANT_FLAGS):
+                return _DRIVER_BROADCAST_WAKE
         return 2
     return None
 
@@ -635,6 +744,7 @@ def run_file_mode(path: Path, agent_id: str, hub_url: str, pid_path: Path, *,
                   debounce: float = DEFAULT_DEBOUNCE, important_only: bool = False,
                   preview: bool = False, poll: float = 0.5,
                   heartbeat: float = DEFAULT_HEARTBEAT, window: float | None = None,
+                  classify_driver_wake: bool = False,
                   stop: Callable[[], bool] = lambda: False) -> int:
     try:
         fh = open(path, "rb")
@@ -668,7 +778,8 @@ def run_file_mode(path: Path, agent_id: str, hub_url: str, pid_path: Path, *,
                 batch = batcher.pop_ready()
                 if batch:
                     code = _deliver_wake(batch, agent_id, preview=preview,
-                                         once=once, hub=hub_url)
+                                         once=once, hub=hub_url,
+                                         classify_driver_wake=classify_driver_wake)
                     if code is not None:
                         return code
                 if heartbeat > 0 and time.monotonic() - last_beat >= heartbeat:
@@ -691,6 +802,7 @@ async def run_ws_mode(url: str, key: str, agent_id: str, pid_path: Path, *,
                       debounce: float = DEFAULT_DEBOUNCE, important_only: bool = False,
                       preview: bool = False, notify_file: str | None = None,
                       heartbeat: float = DEFAULT_HEARTBEAT,
+                      classify_driver_wake: bool = False,
                       window: float | None = None) -> int:
     from .client import AgoraClient
     from .client.client import AgoraError  # not re-exported by the package
@@ -748,7 +860,8 @@ async def run_ws_mode(url: str, key: str, agent_id: str, pid_path: Path, *,
             batch = [ev for ev in events if qualifies(ev, agent_id, important_only)]
             if batch:
                 code = _deliver_wake(batch, agent_id, preview=preview,
-                                     once=once, hub=url)
+                                     once=once, hub=url,
+                                     classify_driver_wake=classify_driver_wake)
                 if code is not None:
                     return code
     finally:
@@ -818,7 +931,8 @@ def run_listen(*, agent_id: str | None = None, url: str | None = None,
     effective_wait = read_backoff(backoff_path, cap) if adaptive else max_wait
     shared = dict(once=once, max_wait=effective_wait, debounce=debounce,
                   important_only=important_only, preview=preview,
-                  heartbeat=heartbeat, window=effective_wait if adaptive else None)
+                  heartbeat=heartbeat, window=effective_wait if adaptive else None,
+                  classify_driver_wake=driver_call)
     try:
         # Everything after the lock is acquired lives inside the try: a failure
         # as early as the pidfile write must still release the lock in the

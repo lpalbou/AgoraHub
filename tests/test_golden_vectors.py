@@ -224,7 +224,9 @@ def subset_match(expected: Any, served: Any, path: str) -> None:
 
 
 @pytest.mark.parametrize("vector_path", VECTORS, ids=[p.stem for p in VECTORS])
-def test_golden_vector(vector_path: Path) -> None:
+def test_golden_vector(vector_path: Path, monkeypatch) -> None:
+    if vector_path.stem == "08_to_close_ledger":
+        monkeypatch.setattr("agora.hub.service.TO_CLOSE_MIN_AGE_SECONDS", 0)
     vector = json.loads(vector_path.read_text())
     world = VectorWorld()
     for step in vector["setup"]:

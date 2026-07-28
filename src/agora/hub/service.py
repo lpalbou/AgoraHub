@@ -11,13 +11,15 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import time
 from collections import deque
+from dataclasses import dataclass, field
 from typing import Any
 
-from ..db import Database, JoinTokenRefused
+from ..db import Database, DuplicateMessage, JoinTokenRefused
 from ..governance import (
     CHARTER_PATH,
     GROUP_CHARTER_TEMPLATE,
@@ -25,6 +27,7 @@ from ..governance import (
     RESERVED_FS_PREFIX,
 )
 from ..ids import new_token
+from ..mentions import resolve_mentions
 from ..models import (
     DM_PREFIX,
     FS_PREFIX,
@@ -43,6 +46,7 @@ from ..models import (
     MAX_FS_PATH_CHARS,
     MAX_STORE_VALUE_BYTES,
     AgentInfo,
+    CloseRow,
     ColleagueNote,
     ConsumeRow,
     Envelope,
@@ -82,18 +86,54 @@ from .ratelimit import RateLimiter
 RESERVED_STORE_PREFIX = "channel:"   # channel-level keys: owner-writable only
 JOIN_TOKEN_PREFIX = "agora-join_"    # agora-join_<id:8hex>.<secret:48hex>
 MAX_JOIN_TOKEN_TTL = 30 * 86400.0    # hard cap (kubeadm defaults 24h; we cap 30d)
+# 0116: grace before surfacing a discharged-but-unclosed own thread.
+TO_CLOSE_MIN_AGE_SECONDS = 5 * 60.0
+# 0114: refuse new asks TO a seat holding this many SLA-breached answer debts.
+SATURATION_GATE_MIN_ESCALATED = 5
+# 0114/0107: routing hints appended to silence-class-tagged watchdog alerts.
+_SILENCE_CLASS_ROUTE: dict[str, str] = {
+    "dead": "ACTION: start/relaunch the offline seat — escalation cannot reach it.",
+    "deaf": "ACTION: re-arm reception loop / restart the session.",
+    "unseen": "ACTION: reprompt or relaunch — listener may be armed but debts are unread.",
+    "seen-and-ignored": "ACTION: compliance (0114) — do not add asks; saturation gate applies.",
+}
 MAX_JOIN_TOKEN_USES = 100            # fleet provisioning ceiling
 CHANNEL_META_KEY = "channel:meta"
 _META_FIELDS = {"purpose", "norms", "expected_traffic", "response_sla_minutes", "language",
-                "authorship_required", "state", "norms_required"}
+                "authorship_required", "state", "norms_required", "rulings_required",
+                "traffic_policy"}
 _CHANNEL_STATES = {"open", "closed"}
 _META_LANGUAGES = {"plain", "terse", "structured"}
+_TRAFFIC_POLICIES = {"collaboration", "noticeboard"}
 MAX_READ_ANCESTORS = 5
 DARK_REALERT_SECONDS = 6 * 3600.0   # flap guard: max one alert per agent per window
+# 0107: propose retirement after a seat stays dark this long with breached debt.
+DARK_RETIRE_PROPOSAL_SECONDS = 7 * 86400.0
 LURK_SLA_MULTIPLE = 2.0             # lurk = escalated unread PAST 2x the channel SLA
 LURK_CONFIRM_SECONDS = 600.0        # candidate must persist a full listener cycle+turn
 #                                     before the alert: a seat that JUST re-armed (or
 #                                     is mid-recovery) gets its chance to catch up
+# 0106: hub re-emits notify lines at SLA breach steps so file listeners see
+# the `escalated` flag (the arm-time /owed signature flip handles the other
+# path; this closes the notify-tail gap for --important-only).
+ESCALATION_REWAKE_BANDS = (1.0, 2.0, 4.0)  # multiples of channel SLA
+# Pre-SLA emit≠process (0106): re-ring unread debts on armed seats when the
+# client likely recorded the owed signature without the woken turn reading.
+DROPPED_WAKE_REEMIT_SECONDS = 30.0
+# 0110: aggregate fleet-liveness — per-seat DARK/DEAF miss "everyone gone".
+FLEET_MIN_ELIGIBLE = 3
+FLEET_LIVE_FRACTION = 0.5
+FLEET_DARK_CONFIRM_SECONDS = 300.0
+# 0109: reporting delegate owes an hourly digest reply to hub desk facts.
+REPORT_DIGEST_PERIOD_SECONDS = 3600.0
+REPORT_DIGEST_ASK_ID = "digest"
+# Plain-register skeleton the reporting delegate fills (0109 #65 test).
+DIGEST_PROSE_TEMPLATE = (
+    "Overnight: <N things finished — plain names, one line each>.\n"
+    "Blocked on operator: <who / what / one unblock action>.\n"
+    "Fleet: <all alive | N dark | who to nudge — continue, release, "
+    "or re-check your gate>."
+)
 
 # Attachment serve hardening (0091): content types a browser could execute
 # as active content are stored verbatim but SERVED as octet-stream, so the
@@ -162,6 +202,7 @@ class HubService:
                  db_path: str = "",
                  embedding: dict[str, str] | None = None) -> None:
         self.db = db
+        self._ensure_builtin_noticeboard_policy()
         self.max_attachment_bytes = max_attachment_bytes
         self.max_channel_attachment_bytes = max_channel_attachment_bytes
         # One shared binder so fan-out and long-poll wakes marshal onto the
@@ -220,6 +261,13 @@ class HubService:
         # episode dedupe, both torn down when the seat reads/answers.
         self._lurk_since: dict[str, float] = {}
         self._lurk_alerted: set[str] = set()
+        # 0106: per (agent, message) highest SLA band re-emitted to notify files.
+        self._rewake_band: dict[tuple[str, str], int] = {}
+        # 0106 emit≠process: last pre-SLA re-emit for unread armed-seat debts.
+        self._dropped_wake_at: dict[tuple[str, str], float] = {}
+        # 0110: fleet-wide dark episode (aggregate reception collapse).
+        self._fleet_dark_since: float | None = None
+        self._fleet_dark_alerted = False
         # DARK/DEAF re-alert cooldown (c3436, HOLE 3): PERSISTED, not
         # in-memory. The old in-memory flap guard reset on every restart,
         # so each hub bounce re-fired the whole DARK/DEAF wave off the same
@@ -256,6 +304,22 @@ class HubService:
         # Track operator post timestamps; a burst raises one loud alert.
         self._operator_posts: dict[str, deque] = {}
         self._operator_burst_alerted_at: dict[str, float] = {}
+
+    def _ensure_builtin_noticeboard_policy(self) -> None:
+        """Migrate the conventional commons board to explicit metadata.
+
+        This is a one-time bootstrap/migration only. Posting enforcement is
+        channel-name agnostic and reads `channel:meta.traffic_policy`, so any
+        room can opt into or out of the same policy without code changes.
+        """
+        if self.db.get_channel("commons") is None:
+            return
+        row = self.db.store_get("commons", CHANNEL_META_KEY)
+        value = dict(row.value) if row and isinstance(row.value, dict) else {}
+        if "traffic_policy" in value:
+            return
+        value["traffic_policy"] = "noticeboard"
+        self.db.store_set("commons", CHANNEL_META_KEY, value, "hub")
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Record the serving event loop. Called by every async entry point
@@ -469,6 +533,13 @@ class HubService:
             raise HubError(409, f"channel '{name}' already exists")
         channel = self.db.create_channel(name, private, agent.id)
         self._post_system(name, f"channel created by {agent.id}")
+        if name == "commons":
+            # Bootstrap the conventional fleet board as data, not as a
+            # special case in post_message. Runtime enforcement reads only
+            # channel:meta. Existing hubs receive the same one-time migration
+            # in __init__.
+            self.db.store_set(name, CHANNEL_META_KEY,
+                              {"traffic_policy": "noticeboard"}, "hub")
         return channel.model_dump()
 
     def create_group(self, agent: AgentInfo, name: str, members: list[str],
@@ -685,7 +756,24 @@ class HubService:
             seen.add(aid)
             entry = {"id": aid, "text": sanitize_text(str(a.get("text", "")), MAX_ASK_CHARS)}
             if a.get("assignee"):
-                entry["assignee"] = sanitize_text(str(a["assignee"]), MAX_ASSIGNEE_CHARS)
+                assignee = sanitize_text(str(a["assignee"]), MAX_ASSIGNEE_CHARS)
+                # An assignee is an addressee (storm review, 2026-07-28): it
+                # creates owed debt, so it gets the same gates as ask `to` —
+                # a ghost name must not satisfy addressing rules while the
+                # message obliges nobody real, and self-assignment is as
+                # meaningless as asking yourself.
+                if sender and assignee == sender:
+                    raise HubError(400, f"ask '{aid}': you cannot assign an "
+                                        "ask to yourself")
+                if channel:
+                    if members is None:
+                        members = {m.agent_id for m in self.db.list_members(channel)}
+                    if assignee not in members:
+                        raise HubError(400, f"ask '{aid}' assigns a non-member: "
+                                            f"'{assignee}' — describe_channel "
+                                            "lists who is here; drop the "
+                                            "assignee or invite them first")
+                entry["assignee"] = assignee
             if a.get("to"):
                 # Per-ask addressing (0077, anti-lurk): naming a seat INSIDE an
                 # ask must flag that seat mechanically — the field incident was
@@ -774,6 +862,8 @@ class HubService:
         if payload.attachments is not None:
             data["attachments"] = [a.model_dump(exclude_none=True)
                                    for a in payload.attachments]
+        if payload.notice is not None:
+            data["notice"] = payload.notice.model_dump()
         if "asks" in data:
             data["asks"] = self._validate_asks(data["asks"], payload.status,
                                                sender=sender, channel=channel)
@@ -786,6 +876,18 @@ class HubService:
             # the typed param or a hand-built data payload.
             data["attachments"] = self._validate_attachments(data["attachments"],
                                                              channel)
+        if "notice" in data:
+            raw = data["notice"]
+            if not isinstance(raw, dict) or set(raw) != {"kind", "key"}:
+                raise HubError(400, "notice must be exactly {kind, key}")
+            kind, key = str(raw.get("kind", "")), str(raw.get("key", ""))
+            if kind not in {"job", "consensus", "milestone", "delivery"}:
+                raise HubError(400, "notice.kind must be job, consensus, "
+                                    "milestone, or delivery")
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}", key):
+                raise HubError(400, "notice.key must be a stable 1-160 character "
+                                    "event id using letters, digits, . _ : / or -")
+            data["notice"] = {"kind": kind, "key": key}
         if "item_ref" in data:
             # Work-id citation (0093): the STRUCTURED stitch between a hub
             # message and a backlog item. Validated when present so the
@@ -977,6 +1079,168 @@ class HubService:
         self.db.delete_agent(target_id)
         return {"agent": target_id, "deleted": True}
 
+    def _obligation_addressees(self, payload: PostMessage,
+                               data: dict[str, Any] | None) -> set[str]:
+        """Seats a post would newly oblige (message to, ask assignee, ask to)."""
+        if payload.status not in (Status.open, Status.blocked, Status.reply):
+            return set()
+        out: set[str] = set()
+        if payload.to:
+            out.update(payload.to)
+        for a in (data or {}).get("asks") or []:
+            if a.get("assignee"):
+                out.add(str(a["assignee"]))
+            out.update(str(x) for x in (a.get("to") or []))
+        return out
+
+    def _channel_traffic_policy(self, channel: str) -> str:
+        row = self.db.store_get(channel, CHANNEL_META_KEY)
+        if row and isinstance(row.value, dict):
+            value = row.value.get("traffic_policy")
+            if value in _TRAFFIC_POLICIES:
+                return str(value)
+        return "collaboration"
+
+    def _message_contract(self, agent: AgentInfo, channel: str,
+                          payload: PostMessage,
+                          data: dict[str, Any] | None,
+                          addressees: set[str]) -> str | None:
+        """Validate obligation and noticeboard invariants before commit.
+
+        Returns the typed root's durable idempotency key when one applies.
+        """
+        if payload.status == Status.blocked:
+            asks = (data or {}).get("asks") or []
+            if not asks or not addressees:
+                raise HubError(
+                    400,
+                    "status=blocked requires at least one structured ask and "
+                    "an explicit addressee (message to=, ask.to, or "
+                    "ask.assignee). Put parked/unchanged state in the claim "
+                    "row; ask for help in an addressed DM or focused group.",
+                )
+
+        if (self._channel_traffic_policy(channel) != "noticeboard"
+                or agent.operator or agent.id == "hub"
+                or payload.reply_to is not None):
+            return None
+
+        vote = (data or {}).get("vote")
+        if isinstance(vote, dict):
+            # The vote exception exists because a vote is the one
+            # legitimately OBLIGING root on a board — but only a real vote.
+            # Require the canonical shape every chairing surface builds via
+            # vote.build_vote_post (storm review: a bare {"tag": ...} dict
+            # minted unlimited unaddressed open roots, dedupe evaded by
+            # fresh tags). A hand-crafted payload passing this shape IS a
+            # vote — any member may chair one — so nothing legitimate is
+            # lost; only the degenerate spam shape dies. Ballots arrive by
+            # DM, never as asks: co-resident asks would sticky-pin every
+            # member room-wide — the exact incident class this gate closes.
+            if (data or {}).get("asks"):
+                raise HubError(400, "noticeboard votes carry no asks — "
+                                    "ballots arrive by DM (open_vote); run "
+                                    "roll-call votes in a collaboration "
+                                    "channel or group")
+            tag = str(vote.get("tag") or "")
+            topic = str(vote.get("topic") or "").strip()
+            options = vote.get("options")
+            distinct = ({o.strip().casefold() for o in options
+                         if isinstance(o, str) and o.strip()}
+                        if isinstance(options, list) else set())
+            valid_options = (isinstance(options, list)
+                             and len(distinct) >= 2
+                             and all(isinstance(o, str) and o.strip()
+                                     for o in options))
+            closes_at = vote.get("closes_at")
+            valid_deadline = (isinstance(closes_at, (int, float))
+                              and not isinstance(closes_at, bool)
+                              and math.isfinite(closes_at) and closes_at > 0)
+            valid_tag = (0 < len(tag) <= 64
+                         and not any(c.isspace() or ord(c) < 32 for c in tag))
+            if not (valid_tag and topic and valid_options and valid_deadline
+                    and payload.status == Status.open):
+                raise HubError(400, "noticeboard votes must be canonical "
+                                    "blind votes — use open_vote (status="
+                                    "open with data.vote carrying tag, "
+                                    "topic, >=2 distinct options, a finite "
+                                    "closes_at)")
+            return f"vote:{tag}"
+
+        notice = (data or {}).get("notice")
+        if not isinstance(notice, dict):
+            raise HubError(
+                400,
+                "this channel is a noticeboard: root posts must be a vote or "
+                "carry notice={kind,key}, where kind is job, consensus, "
+                "milestone, or delivery. Claim progress, reception reports, "
+                "parked state, guard output, and blockers belong in the "
+                "claim row, a DM, or a focused group.",
+            )
+        if payload.status not in (Status.fyi, Status.resolved):
+            raise HubError(400, "typed noticeboard roots use status=fyi or "
+                                "resolved; use open_vote for a fleet vote")
+        return f"notice:{notice['kind']}:{notice['key']}"
+
+    def _require_unsaturated_addressees(self, poster: AgentInfo,
+                                        addressees: set[str]) -> None:
+        """0114 supply-reduction gate: saturated seats get no new asks."""
+        if poster.operator or not addressees:
+            return
+        for seat in sorted(addressees):
+            if seat == poster.id:
+                continue
+            info = AgentInfo(id=seat, name=seat)
+            escalated = [r for r in self.owed(info).to_answer if r.escalated]
+            n = len(escalated)
+            if n < SATURATION_GATE_MIN_ESCALATED:
+                continue
+            escalated.sort(key=lambda r: r.created_at)
+            oldest = escalated[0]
+            raise HubError(
+                403,
+                f"'{seat}' is saturated ({n} SLA-breached answer debts, "
+                f"gate={SATURATION_GATE_MIN_ESCALATED}) — drain their queue "
+                f"before adding new asks. Oldest: {oldest.channel}#{oldest.seq} "
+                f"(~{oldest.age_minutes:.0f}m). Fleet /status shows "
+                f"silence_class; operators may override.",
+            )
+
+    def _is_dark_seat(self, agent_id: str) -> tuple[bool, float | None]:
+        """0107: offline / dark-episode — escalation cannot reach the seat."""
+        since = self._dark_since.get(agent_id)
+        if since is not None:
+            return True, time.time() - since
+        if self.silence_class_for_seat(agent_id) == "dead":
+            return True, None
+        return False, None
+
+    def _address_dark_override(self, payload: PostMessage) -> bool:
+        if payload.address_dark:
+            return True
+        data = payload.data or {}
+        return bool(data.get("address_dark"))
+
+    def _require_addressable_addressees(self, poster: AgentInfo,
+                                        addressees: set[str],
+                                        override_dark: bool) -> None:
+        """0107 post-time gate: refuse new asks TO dark seats."""
+        if poster.operator or override_dark or not addressees:
+            return
+        for seat in sorted(addressees):
+            if seat == poster.id:
+                continue
+            dark, age = self._is_dark_seat(seat)
+            if not dark:
+                continue
+            age_clause = f" (~{age / 60:.0f}m in dark episode)" if age else ""
+            raise HubError(
+                403,
+                f"'{seat}' is DARK{age_clause} — escalation cannot reach an "
+                f"offline seat. Route via queue:* or a reporting delegate, or "
+                f"post with address_dark=true (operator/steward canvass).",
+            )
+
     def post_message(self, agent: AgentInfo, channel: str, payload: PostMessage) -> Message:
         """Post with a refusal audit: a refused send previously left no trace
         anywhere, so "agent X never answers" was indistinguishable from
@@ -1031,7 +1295,9 @@ class HubService:
                 # verbatim (it can only name the counterpart anyway —
                 # there is nobody else in the room).
                 payload = payload.model_copy(update={"to": peers})
+        payload, mention_ctx = self._apply_mention_addressing(agent, channel, payload)
         self._require_charter_read(channel, agent)
+        self._require_rulings_ack(channel, agent)
         if len(payload.body.encode()) > MAX_BODY_BYTES:
             raise HubError(413, f"body exceeds {MAX_BODY_BYTES} bytes")
         # A reply's whole meaning is "this answers something": a bare
@@ -1058,6 +1324,13 @@ class HubService:
             if parent is None or parent.channel != channel:
                 raise HubError(400, "reply_to must reference a message in this channel")
         data = self._prepare_structured(payload, sender=agent.id, channel=channel)
+        addressees = self._obligation_addressees(payload, data)
+        dedupe_key = self._message_contract(
+            agent, channel, payload, data, addressees
+        )
+        override_dark = self._address_dark_override(payload)
+        self._require_addressable_addressees(agent, addressees, override_dark)
+        self._require_unsaturated_addressees(agent, addressees)
         if data is not None:
             try:
                 # allow_nan=False doubles as the strict-JSON gate: NaN/Infinity
@@ -1098,12 +1371,19 @@ class HubService:
             if not self.interrupt_budget.allow(agent.id):
                 urgency, downgraded = Urgency.next_turn, True
 
-        message = self.db.insert_message(
-            channel, agent.id, kind=Kind.message.value, status=payload.status.value,
-            urgency=urgency.value, title=sanitize_title(payload.title), body=payload.body,
-            data=data, reply_to=payload.reply_to,
-            critical=payload.critical, downgraded=downgraded, to=payload.to,
-        )
+        try:
+            message = self.db.insert_message(
+                channel, agent.id, kind=Kind.message.value,
+                status=payload.status.value, urgency=urgency.value,
+                title=sanitize_title(payload.title), body=payload.body,
+                data=data, reply_to=payload.reply_to,
+                critical=payload.critical, downgraded=downgraded,
+                to=payload.to, dedupe_key=dedupe_key,
+            )
+        except DuplicateMessage as exc:
+            raise HubError(409, "duplicate notice refused: this sender already "
+                                "posted the same typed event "
+                                f"({exc.message_id})") from exc
         if agent.operator:
             self._operator_burst_check(agent.id, channel)
         if payload.reply_to and parent is not None and not parent.critical:
@@ -1121,6 +1401,7 @@ class HubService:
         # than the noise it prevents.
         try:
             self._routing_nudges(agent, channel, message)
+            self._mention_nudges(agent, channel, message, mention_ctx)
         except Exception:
             logging.getLogger("agora.hub.routing").exception(
                 "routing nudge failed (post succeeded)")
@@ -1196,6 +1477,78 @@ class HubService:
                     "reply. (One-time nudge; the hub never blocks.)",
                     status="fyi", reply_to=root.id)
 
+    @dataclass
+    class _MentionContext:
+        outsiders: list[str] = field(default_factory=list)
+        unobliged: list[str] = field(default_factory=list)
+
+    def _apply_mention_addressing(self, agent: AgentInfo, channel: str,
+                                  payload: PostMessage) -> tuple[PostMessage, _MentionContext]:
+        """0105: operator @mentions in the body become message-level `to`
+        (mechanical obligation under 0102). Quoted fence spans are ignored;
+        explicit `to` is preserved and merged."""
+        ctx = self._MentionContext()
+        if channel.startswith(DM_PREFIX):
+            return payload, ctx
+        members = {m.agent_id for m in self.db.list_members(channel)}
+        in_room, ctx.outsiders = resolve_mentions(payload.body, members)
+        if agent.operator and in_room:
+            merged = list(payload.to or [])
+            for seat in in_room:
+                if seat != agent.id and seat not in merged:
+                    merged.append(seat)
+            if merged != list(payload.to or []):
+                payload = payload.model_copy(update={"to": merged})
+        if payload.asks:
+            new_asks = []
+            asks_changed = False
+            for ask in payload.asks:
+                in_ask, out_ask = resolve_mentions(ask.text, members)
+                for o in out_ask:
+                    if o not in ctx.outsiders:
+                        ctx.outsiders.append(o)
+                if agent.operator and not ask.to:
+                    seats = [s for s in in_ask if s != agent.id][:self.MAX_ASK_TO]
+                    if seats:
+                        ask = ask.model_copy(update={"to": seats})
+                        asks_changed = True
+                elif not agent.operator:
+                    for s in in_ask:
+                        if (s != agent.id and s not in (ask.to or [])
+                                and s not in (payload.to or [])
+                                and s not in ctx.unobliged):
+                            ctx.unobliged.append(s)
+                new_asks.append(ask)
+            if asks_changed:
+                payload = payload.model_copy(update={"asks": new_asks})
+        if not agent.operator:
+            for s in in_room:
+                if (s != agent.id and s not in (payload.to or [])
+                        and s not in ctx.unobliged):
+                    ctx.unobliged.append(s)
+        return payload, ctx
+
+    def _mention_nudges(self, agent: AgentInfo, channel: str,
+                        message: Message,
+                        ctx: _MentionContext) -> None:
+        """0105 teaching gestures — ephemeral doorbells, never stored."""
+        if ctx.outsiders:
+            names = ", ".join(f"@{s}" for s in ctx.outsiders)
+            self._deliver_doorbell(
+                agent.id, message,
+                f"HUB NOTICE — you wrote {names} but "
+                f"{'that seat is' if len(ctx.outsiders) == 1 else 'those seats are'} "
+                "not a member of this channel. Invite them first if you "
+                "meant to oblige them here.")
+        if ctx.unobliged:
+            names = ", ".join(f"@{s}" for s in ctx.unobliged)
+            self._deliver_doorbell(
+                agent.id, message,
+                f"HUB NOTICE — you wrote {names} in the body but obliged "
+                "nobody (to=[]). Peers are never auto-addressed from "
+                "@mentions — add them to `to` or use /ask @seat if you "
+                "meant it.")
+
     def noise_report(self, hours: float = 24.0) -> dict[str, Any]:
         """The routing reform's proof instrument (0135): per-channel wake and
         participation numbers over a bounded window, derived live — nothing
@@ -1245,8 +1598,8 @@ class HubService:
                 "computed_at": time.time()}
 
     def _deliver_doorbell(self, agent_id: str, mirror: Message, body: str) -> None:
-        """An EPHEMERAL sender-facing notice: one notify-file line, nothing
-        stored — read_message on its id 404s and the body stands alone. The
+        """An EPHEMERAL, non-waking sender notice: one notify-file line,
+        nothing stored — read_message on its id 404s and the body stands alone. The
         channel/seq MIRROR the real message so acking can never move a
         cursor past real traffic (same construction as the stale-client
         notice, http_api._stale_client_notice)."""
@@ -1256,7 +1609,11 @@ class HubService:
             id=f"notice:{mirror.id}", channel=mirror.channel, seq=mirror.seq,
             sender="hub", kind=Kind.system, status=Status.fyi,
             urgency=Urgency.inbox, effective_urgency=Urgency.inbox,
-            to_me=True, addressed=True, title="hub notice: broadcast obligation",
+            # Delivery is targeted by the sink call itself. Do not set to_me:
+            # teaching feedback must be visible without recursively spawning
+            # another driven reception turn.
+            to_me=False, addressed=False,
+            title="hub notice: broadcast obligation",
             body=body, body_bytes=len(body.encode())))
 
     #: Operator-key burst tripwire (0104): 6+ posts inside 15s is machine
@@ -1314,6 +1671,23 @@ class HubService:
             raise HubError(409, f"this channel requires reading its charter "
                                 f"first: fs_read '{CHARTER_PATH}' in "
                                 f"'{channel}' (v{row['version']}), then retry")
+
+    def _require_rulings_ack(self, channel: str, agent: AgentInfo) -> None:
+        """0113 opt-in gate: scoped seats must ack current standing rulings."""
+        meta = self.db.store_get(channel, CHANNEL_META_KEY)
+        if not (meta and isinstance(meta.value, dict)
+                and meta.value.get("rulings_required")):
+            return
+        unacked = self._unacknowledged_rulings(agent, channel)
+        if not unacked:
+            return
+        keys = ", ".join(r["key"] for r in unacked[:5])
+        more = f" (+{len(unacked) - 5} more)" if len(unacked) > 5 else ""
+        raise HubError(409, f"this channel requires acknowledging standing "
+                            f"rulings first: GET /channels/{channel}/digest "
+                            f"(see unacknowledged_rulings), then POST "
+                            f"/channels/{channel}/ruling-acks — pending: "
+                            f"{keys}{more}")
 
     def _post_system(self, channel: str, body: str,
                      to: list[str] | None = None,
@@ -1445,6 +1819,8 @@ class HubService:
         - decisions: the channel store's `decision:*` keys — the room's
           distilled, versioned decision record (written by convention when a
           thread resolves).
+        - rulings: the channel store's `ruling:*` keys — standing operator
+          constraints that outlive the thread (0113).
 
         This is the 'cheap view' half of the knowledge norm; the distillation
         practice (writing decision keys) stays with the agents."""
@@ -1509,27 +1885,38 @@ class HubService:
                 elif m.status == Status.resolved:
                     decided.append({**brief, "resolved": True})
         decisions = []
+        rulings = []
         for entry in self.db.store_keys(channel):
-            if not entry["key"].startswith("decision:"):
-                continue
-            stored = self.db.store_get(channel, entry["key"])
-            if stored is not None:
-                decisions.append({"key": entry["key"], "value": stored.value,
-                                  "version": stored.version,
-                                  "updated_by": stored.updated_by})
+            if entry["key"].startswith("decision:"):
+                stored = self.db.store_get(channel, entry["key"])
+                if stored is not None:
+                    decisions.append({"key": entry["key"], "value": stored.value,
+                                      "version": stored.version,
+                                      "updated_by": stored.updated_by})
+            elif entry["key"].startswith(self._RULING_PREFIX):
+                stored = self.db.store_get(channel, entry["key"])
+                if stored is not None and isinstance(stored.value, dict):
+                    if stored.value.get("active", True):
+                        rulings.append({"key": entry["key"], "value": stored.value,
+                                        "version": stored.version,
+                                        "updated_by": stored.updated_by})
         # open_questions must be complete (an unanswered seq-5 question still
         # matters), but `decided` grows forever: cap it newest-first and keep
         # the total so truncation is visible (review M1).
         decided_total = len(decided)
         decided = sorted(decided, key=lambda d: d["seq"], reverse=True)[:50]
+        unacked = self._unacknowledged_rulings(agent, channel)
         return {
             "channel": channel,
             "open_questions": open_questions,
             "decided": decided,
             "decisions": decisions,
+            "rulings": rulings,
+            "unacknowledged_rulings": unacked,
             "counts": {"open_questions": len(open_questions),
                        "decided_shown": len(decided), "decided_total": decided_total,
-                       "decisions": len(decisions)},
+                       "decisions": len(decisions), "rulings": len(rulings),
+                       "unacknowledged_rulings": len(unacked)},
         }
 
     # -- envelopes (viewer-specific delivery) ------------------------------------
@@ -1832,6 +2219,10 @@ class HubService:
           read_message of the answer, on any later in-thread post by the
           asker, or on authoritative closure. Never escalates, never wakes
           by itself: it surfaces here, in check_inbox, and on the board.
+        - `to_close` (0116): the agent's OWN open/blocked threads that are
+          fully discharged (every ask answered, or a binary reply received)
+          but not authoritatively closed — advisory hygiene only; never
+          wakes or escalates. Surfaces after to_answer/to_consume.
         """
         channels = self.db.channels_of(agent.id)
         ops = self.operator_ids()
@@ -1957,10 +2348,32 @@ class HubService:
                         channel=m.channel, seq=m.seq, ask=str(a["id"]),
                         seat=seat, state=state,
                     ))
+        to_close: list[CloseRow] = []
+        for m in self.db.my_open_messages(agent.id, channels):
+            replies = self.db.replies_to(m.id)
+            if closed_authoritatively(m, replies, ops):
+                continue
+            ds = discharge_state(m, replies, ops)
+            if not ds.discharged:
+                continue
+            non_sender = [r for r in replies if r.sender != agent.id]
+            if not non_sender:
+                continue
+            last = max(non_sender, key=lambda r: r.created_at)
+            age_since = now - last.created_at
+            if age_since < TO_CLOSE_MIN_AGE_SECONDS:
+                continue
+            to_close.append(CloseRow(
+                channel=m.channel, id=m.id, seq=m.seq,
+                title=m.title, answered_by=last.sender,
+                age_minutes=round(age_since / 60, 1),
+            ))
         return OwedReport(
-            to_answer=to_answer, to_consume=to_consume, waiting_on=waiting_on,
+            to_answer=to_answer, to_consume=to_consume, to_close=to_close,
+            waiting_on=waiting_on,
             counts=OwedCounts(to_answer=len(to_answer),
-                              to_consume=len(to_consume)),
+                              to_consume=len(to_consume),
+                              to_close=len(to_close)),
             computed_at=now)
 
     async def wait_inbox(self, agent: AgentInfo, timeout: float) -> list[Envelope]:
@@ -2012,6 +2425,16 @@ class HubService:
             if self.db.member_role(channel, agent.id) != "owner":
                 raise HubError(403, f"'{key}' is channel-level metadata: owner-writable only")
             if key == CHANNEL_META_KEY:
+                # Purpose/norm/SLA edits must not accidentally turn off a
+                # noticeboard. `store set` replaces values, so preserve this
+                # policy field unless the owner explicitly supplies a new one.
+                current_meta = self.db.store_get(channel, CHANNEL_META_KEY)
+                if (isinstance(value, dict) and current_meta
+                        and isinstance(current_meta.value, dict)
+                        and "traffic_policy" in current_meta.value
+                        and "traffic_policy" not in value):
+                    value = dict(value)
+                    value["traffic_policy"] = current_meta.value["traffic_policy"]
                 self._validate_channel_meta(value)
         if key.startswith(self._QUEUE_PREFIX):
             # Curation authority is now MECHANICAL (0068): queue rows are the
@@ -2024,6 +2447,12 @@ class HubService:
                                     "to request a decision, post an open ask "
                                     "addressed to the decider instead")
             self._validate_queue_row(value)
+        if key.startswith(self._RULING_PREFIX):
+            if not agent.operator:
+                raise HubError(403, "ruling:* rows are operator-authored "
+                                    "standing constraints (0113) — only the "
+                                    "operator may write or revoke them")
+            self._validate_ruling_row(value)
         if key.startswith("claim:") and isinstance(value, dict):
             # Identity fields inside store values are validated against the
             # caller (0068/ADR-0004; live-test finding): you may claim FOR
@@ -2195,6 +2624,13 @@ class HubService:
         norms_required = value.get("norms_required")
         if norms_required is not None and not isinstance(norms_required, bool):
             raise HubError(400, "channel:meta.norms_required must be a boolean")
+        rulings_required = value.get("rulings_required")
+        if rulings_required is not None and not isinstance(rulings_required, bool):
+            raise HubError(400, "channel:meta.rulings_required must be a boolean")
+        traffic_policy = value.get("traffic_policy")
+        if traffic_policy is not None and traffic_policy not in _TRAFFIC_POLICIES:
+            raise HubError(400, "channel:meta.traffic_policy must be one of "
+                                f"{sorted(_TRAFFIC_POLICIES)}")
         # purpose/norms are free text delivered to every joiner: strip control
         # characters and cap them at write time like every other member-authored
         # headline (they were the one unvalidated path into join/describe).
@@ -3142,6 +3578,8 @@ class HubService:
     # -- decision board (0070): derived pending + curated queue --------------------
 
     _QUEUE_PREFIX = "queue:"
+    _RULING_PREFIX = "ruling:"
+    _RULING_FIELDS = {"text", "scope", "source_message_id", "active"}
     _QUEUE_FIELDS = {"q", "options", "evidence", "waiting", "since", "tier",
                      "default", "decided", "done_when"}
     #: done_when (0111/M3): a queue/desk row waiting on a HUB-OBSERVABLE act
@@ -3227,6 +3665,100 @@ class HubService:
                                     "chars (the decision:<slug> or message ref "
                                     "that settled it)")
             value["decided"] = sanitize_text(decided, 200)
+
+    @staticmethod
+    def _validate_ruling_row(value: Any) -> None:
+        """0113: standing operator rulings — visible, versioned, citable."""
+        if not isinstance(value, dict):
+            raise HubError(400, "ruling rows must be objects (see docs: 0113)")
+        unknown = set(value) - HubService._RULING_FIELDS
+        if unknown:
+            raise HubError(400, f"unknown ruling fields: {sorted(unknown)} "
+                                f"(allowed: {sorted(HubService._RULING_FIELDS)})")
+        text = value.get("text")
+        if not isinstance(text, str) or not text.strip() or len(text) > 2000:
+            raise HubError(400, "ruling needs text: the standing constraint "
+                                "(<=2000 chars)")
+        value["text"] = sanitize_text(text, 2000)
+        scope = value.get("scope")
+        if not isinstance(scope, list) or not scope or len(scope) > 32:
+            raise HubError(400, "ruling scope must be a non-empty list of seat "
+                                "ids (<=32) or [\"*\"] for fleet-wide")
+        if scope == ["*"]:
+            value["scope"] = ["*"]
+        else:
+            cleaned = [sanitize_text(str(s), 64) for s in scope if str(s).strip()]
+            if not cleaned:
+                raise HubError(400, "ruling scope must name at least one seat "
+                                    "or [\"*\"] for fleet-wide")
+            value["scope"] = cleaned
+        source = value.get("source_message_id")
+        if not isinstance(source, str) or not source.strip() or len(source) > 128:
+            raise HubError(400, "ruling needs source_message_id: the operator "
+                                "message this derives from (<=128 chars)")
+        value["source_message_id"] = sanitize_text(source.strip(), 128)
+        active = value.get("active", True)
+        if not isinstance(active, bool):
+            raise HubError(400, "ruling active must be a boolean")
+        value["active"] = active
+
+    def _ruling_applies_to(self, agent_id: str, scope: list[str]) -> bool:
+        return "*" in scope or agent_id in scope
+
+    def _active_ruling_entries(self, channel: str,
+                               agent_id: str) -> list[dict[str, Any]]:
+        """Active ruling:* rows in scope for this seat (0113)."""
+        rows: list[dict[str, Any]] = []
+        for entry in self.db.store_keys(channel):
+            if not entry["key"].startswith(self._RULING_PREFIX):
+                continue
+            stored = self.db.store_get(channel, entry["key"])
+            if stored is None or not isinstance(stored.value, dict):
+                continue
+            if not stored.value.get("active", True):
+                continue
+            scope = stored.value.get("scope") or []
+            if not isinstance(scope, list) or not self._ruling_applies_to(
+                    agent_id, [str(s) for s in scope]):
+                continue
+            rows.append({"key": entry["key"], "value": stored.value,
+                           "version": stored.version,
+                           "updated_by": stored.updated_by})
+        return rows
+
+    def _unacknowledged_rulings(self, agent: AgentInfo,
+                                channel: str) -> list[dict[str, Any]]:
+        """Rulings in scope whose store version is newer than the seat's ack."""
+        out: list[dict[str, Any]] = []
+        for row in self._active_ruling_entries(channel, agent.id):
+            seen = self.db.ruling_receipt_get(agent.id, channel, row["key"])
+            if seen is not None and seen >= row["version"]:
+                continue
+            out.append({**row, "ack_version": seen})
+        return out
+
+    def ack_rulings(self, agent: AgentInfo, channel: str,
+                    keys: list[str]) -> dict[str, Any]:
+        """Record acknowledgment of active rulings (0113 charter-read pattern)."""
+        self.require_membership(channel, agent.id)
+        self._require_unpaused(agent, channel)
+        acked: list[str] = []
+        for key in keys:
+            if not key.startswith(self._RULING_PREFIX):
+                raise HubError(400, f"'{key}' is not a ruling key "
+                                    "(expected ruling:<slug>)")
+            stored = self.db.store_get(channel, key)
+            if stored is None or not isinstance(stored.value, dict):
+                raise HubError(404, f"ruling '{key}' not found in '{channel}'")
+            if not stored.value.get("active", True):
+                raise HubError(409, f"ruling '{key}' is revoked — nothing to ack")
+            scope = stored.value.get("scope") or []
+            if not isinstance(scope, list) or not self._ruling_applies_to(
+                    agent.id, [str(s) for s in scope]):
+                raise HubError(403, f"ruling '{key}' is not in your scope")
+            self.db.ruling_receipt_set(agent.id, channel, key, stored.version)
+            acked.append(key)
+        return {"channel": channel, "agent_id": agent.id, "acked": acked}
 
     # Terminal claim-status spellings observed in the field beside the taught
     # {"done": true} (hub rule 2 / the skill): seats write status="done" or
@@ -3704,14 +4236,15 @@ class HubService:
             ch = self.db.get_channel(overdue[0].channel)
             if ch is not None and not ch.private:
                 example = f"{overdue[0].channel}#{overdue[0].seq}"
-            self._ensure_alerts_channel()
-            self._post_system(
-                self.DARK_ALERTS_CHANNEL,
+            self._post_silence_watchdog_alert(
+                agent_id,
                 f"AGENT DARK: {agent_id} is offline holding {len(overdue)} "
                 f"SLA-breached obligation(s), oldest ~{age_min:.0f} min "
                 f"(e.g. {example}). Escalation cannot reach an offline seat "
                 f"— only the operator can start it. One alert per dark "
-                f"episode.")
+                f"episode.",
+                explicit_class="dead",
+            )
             alerted.append(agent_id)
         # Episodes end when the seat returns or its overdue work clears.
         for agent_id in list(self._dark_since):
@@ -3728,6 +4261,486 @@ class HubService:
                 self._lurk_alerted.discard(agent_id)
         alerted.extend(self._steward_sweep())
         alerted.extend(self._claim_due_sweep())
+        alerted.extend(self._retirement_proposal_sweep())
+        alerted.extend(self._escalation_rewake_sweep())
+        alerted.extend(self._dropped_wake_sweep())
+        alerted.extend(self._fleet_liveness_sweep())
+        alerted.extend(self._report_digest_sweep())
+        return alerted
+
+    def _fleet_eligible_agents(self) -> list[str]:
+        """Non-retired, non-hub-blocked seats (0110 denominator)."""
+        hub_blocked = {b["agent_id"] for b in self.db.blocks_active(self.HUB_SCOPE)}
+        out: list[str] = []
+        for agent_id in self.db.list_agent_ids():
+            if agent_id == "hub":
+                continue
+            if agent_id in hub_blocked:
+                continue
+            if self.db.agent_retirement(agent_id) is not None:
+                continue
+            out.append(agent_id)
+        return out
+
+    def _fleet_seat_live(self, agent_id: str) -> bool:
+        """A seat counts as live when reception is armed OR it has recent
+        authenticated activity / a push connection (MCP-only tabs)."""
+        rec, _ = self.presence.reception(agent_id)
+        if rec == "armed":
+            return True
+        return self.presence.get(agent_id).state in ("idle", "working", "active")
+
+    def _fleet_open_claims_count(self) -> int:
+        n = 0
+        for ch in self.db.channel_names():
+            for entry in self.db.store_keys(ch):
+                if not entry["key"].startswith("claim:"):
+                    continue
+                stored = self.db.store_get(ch, entry["key"])
+                if stored is None or not isinstance(stored.value, dict):
+                    continue
+                if self._claim_done(stored.value) or self._claim_parked(stored.value):
+                    continue
+                n += 1
+        return n
+
+    def fleet_liveness_snapshot(self) -> dict[str, Any]:
+        """0110 aggregate for /status: eligible/live counts, collapse signal,
+        open claims, and in-memory dark-episode state."""
+        eligible = self._fleet_eligible_agents()
+        live = [a for a in eligible if self._fleet_seat_live(a)]
+        now = time.time()
+        fraction = (len(live) / len(eligible)) if eligible else 1.0
+        collapsed = bool(eligible) and (
+            len(live) == 0 or fraction < FLEET_LIVE_FRACTION)
+        dark_since: float | None = self._fleet_dark_since
+        if collapsed and dark_since is None:
+            dark_since = now
+        dark_seconds = int(now - dark_since) if (collapsed and dark_since) else 0
+        return {
+            "eligible": len(eligible),
+            "live": len(live),
+            "live_fraction": round(fraction, 3),
+            "collapsed": collapsed,
+            "dark_episode": self._fleet_dark_alerted,
+            "dark_seconds": dark_seconds,
+            "open_claims": self._fleet_open_claims_count(),
+            "min_eligible": FLEET_MIN_ELIGIBLE,
+        }
+
+    def _ensure_operator_dm_channel(self, operator_id: str) -> str:
+        """Hub→operator DM for fleet alarms (0110): ownerless pairwise room."""
+        name = dm_channel_name("hub", operator_id)
+        self.db.ensure_channel(name, private=True, created_by="hub", add_owner=False)
+        self.db.add_member(name, operator_id, role="member")
+        return name
+
+    def _post_operator_dm(self, operator_id: str, body: str) -> None:
+        """Mirror hub-alerts into the operator's DM (0110 card routing)."""
+        channel = self._ensure_operator_dm_channel(operator_id)
+        self._post_system(channel, body, to=[operator_id], status="fyi")
+
+    def _fleet_liveness_sweep(self) -> list[str]:
+        """0110: one FLEET DARK alert when aggregate reception collapses;
+        FLEET RECOVERED when broad life returns. Addressed to operators."""
+        ops = sorted(self.operator_ids())
+        if not ops:
+            return []
+        eligible = self._fleet_eligible_agents()
+        if len(eligible) < FLEET_MIN_ELIGIBLE:
+            return []
+        live = [a for a in eligible if self._fleet_seat_live(a)]
+        now = time.time()
+        fraction = len(live) / len(eligible)
+        collapsed = len(live) == 0 or fraction < FLEET_LIVE_FRACTION
+        if collapsed:
+            if self._fleet_dark_since is None:
+                self._fleet_dark_since = now
+            if now - self._fleet_dark_since < FLEET_DARK_CONFIRM_SECONDS:
+                return []
+            if self._fleet_dark_alerted:
+                return []
+            self._fleet_dark_alerted = True
+            claims = self._fleet_open_claims_count()
+            body = (
+                f"FLEET DARK: {len(live)}/{len(eligible)} seats live "
+                f"(<{FLEET_LIVE_FRACTION:.0%} or zero armed/recent activity "
+                f"for {int(now - self._fleet_dark_since)}s). "
+                f"{claims} open claim(s) on the board. The room went quiet "
+                f"— per-seat DARK/DEAF only fires on individual SLA debts. "
+                f"Only the operator can restart seats. One alert per episode.")
+            self._ensure_alerts_channel()
+            self._post_system(self.DARK_ALERTS_CHANNEL, body, to=ops)
+            for op in ops:
+                self._post_operator_dm(op, body)
+            return ["fleet-dark"]
+        if self._fleet_dark_alerted:
+            self._fleet_dark_alerted = False
+            self._fleet_dark_since = None
+            body = (
+                f"FLEET RECOVERED: {len(live)}/{len(eligible)} seats live again.")
+            self._ensure_alerts_channel()
+            self._post_system(self.DARK_ALERTS_CHANNEL, body, to=ops)
+            for op in ops:
+                self._post_operator_dm(op, body)
+            return ["fleet-recovered"]
+        self._fleet_dark_since = None
+        return []
+
+    def _report_digest_paused(self) -> bool:
+        """0109: skip missed-report noise while the fleet is dark (0110)."""
+        if self._fleet_dark_alerted:
+            return True
+        snap = self.fleet_liveness_snapshot()
+        return (snap["eligible"] >= FLEET_MIN_ELIGIBLE and snap["collapsed"])
+
+    def _reporting_delegates(self) -> list[str]:
+        return sorted({d["agent_id"] for d in self.active_delegations()
+                       if "reporting" in d.get("powers", ())})
+
+    def _load_report_contract(self, delegate: str) -> dict[str, Any]:
+        raw = self.db.meta_get(f"report:{delegate}")
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    def _save_report_contract(self, delegate: str, contract: dict[str, Any]) -> None:
+        self.db.meta_set(f"report:{delegate}", json.dumps(contract))
+
+    def _gloss_channel(self, channel: str) -> str:
+        """0109 readability: never a bare channel id on the digest surface."""
+        if channel == "commons":
+            return "commons (noticeboard)"
+        if channel == self.DARK_ALERTS_CHANNEL:
+            return "hub-alerts (watchdog)"
+        if channel.startswith(DM_PREFIX):
+            parts = channel[len(DM_PREFIX):].split("--", 1)
+            if len(parts) == 2:
+                a, b = parts
+                if a == "hub":
+                    return f"DM hub→{b} (operator private)"
+                return f"DM {a}↔{b} (private)"
+        return channel
+
+    def _gloss_agent(self, agent_id: str) -> str:
+        """0109 readability: seat id plus a one-line scope gloss when known."""
+        about = (self.db.get_about(agent_id) or "").strip()
+        if not about:
+            return agent_id
+        snippet = about.split(".", 1)[0].strip()
+        if len(snippet) > 72:
+            snippet = snippet[:69].rstrip() + "…"
+        return f"{agent_id} ({snippet})"
+
+    def _format_desk_fact_line(self, row: dict[str, Any]) -> str:
+        """One desk row: who / what / where / age / one unblock action."""
+        where = self._gloss_channel(str(row.get("channel") or ""))
+        who = self._gloss_agent(str(row.get("who_waits") or ""))
+        what = row.get("what") or "(untitled ask)"
+        age = float(row.get("age_minutes") or 0.0)
+        action = row.get("one_action") or "decide"
+        return (f"- {what} — from {who}, {age:.0f}m old, in {where}: "
+                f"{action}")
+
+    def _render_desk_facts(self, delegate: str) -> tuple[str, dict[str, Any]]:
+        """Plain-register desk snapshot the delegate annotates (0111/0109)."""
+        desk = self.desk(AgentInfo(id=delegate, name=delegate))
+        fleet = self.fleet_liveness_snapshot()
+        lines = [
+            f"DESK FACTS — {len(desk['rows'])} item(s) waiting on the operator:",
+            "(Each line: what / who waits / where / age / one unblock action.)",
+        ]
+        for row in desk["rows"][:12]:
+            lines.append(self._format_desk_fact_line(row))
+        if len(desk["rows"]) > 12:
+            lines.append(f"  (+{len(desk['rows']) - 12} more on GET /desk)")
+        lines.append(
+            f"Fleet: {fleet['live']}/{fleet['eligible']} seats live; "
+            f"{fleet['open_claims']} open claim(s) on the board.")
+        lines.append("")
+        lines.append("Your prose (reply with answers=[\"digest\"]):")
+        lines.append(DIGEST_PROSE_TEMPLATE)
+        return "\n".join(lines), {
+            "desk": desk,
+            "fleet": fleet,
+            "digest_prose_template": DIGEST_PROSE_TEMPLATE,
+        }
+
+    def _desk_digest_reply_ok(self, delegate: str, post_id: str,
+                              since: float) -> bool:
+        for m in self.db.replies_to(post_id):
+            if m.sender != delegate or m.retracted or m.created_at < since:
+                continue
+            if m.status not in (Status.reply, Status.fyi):
+                continue
+            answers = (m.data or {}).get("answers") or []
+            if REPORT_DIGEST_ASK_ID in answers:
+                return True
+            if len((m.body or "").strip()) >= 40:
+                return True
+        return False
+
+    def _close_digest_post(self, post_id: str) -> None:
+        msg = self.db.get_message(post_id)
+        if msg is None or msg.status != Status.open:
+            return
+        self._post_system(
+            self.DARK_ALERTS_CHANNEL,
+            "digest period closed — superseded by the next desk-facts post.",
+            status="resolved", reply_to=post_id)
+
+    def _post_digest_desk_facts(self, delegate: str) -> Message:
+        body, snapshot = self._render_desk_facts(delegate)
+        self._ensure_alerts_channel()
+        message = self.db.insert_message(
+            self.DARK_ALERTS_CHANNEL, "hub", kind=Kind.system.value,
+            status=Status.open.value, urgency="inbox",
+            title="hourly digest: desk facts",
+            body=body,
+            data={
+                **snapshot,
+                "report_digest": True,
+                "asks": [{
+                    "id": REPORT_DIGEST_ASK_ID,
+                    "text": ("Reply with plain-register prose using the template "
+                             "above: no bare backlog ids without a gloss; every "
+                             "line names who / what / one unblock action; nudge "
+                             "stalled seats (continue, release, or re-check your "
+                             "gate)."),
+                    "to": [delegate],
+                }],
+                "digest_prose_template": DIGEST_PROSE_TEMPLATE,
+            },
+            to=[delegate],
+            reply_to=None,
+        )
+        self._wake(message)
+        return message
+
+    def _report_digest_sweep(self) -> list[str]:
+        """0109: hourly desk-facts post + missed-report to operator DM."""
+        if self._report_digest_paused():
+            return []
+        delegates = self._reporting_delegates()
+        if not delegates:
+            return []
+        now = time.time()
+        ops = sorted(self.operator_ids())
+        alerted: list[str] = []
+        for delegate in delegates:
+            contract = self._load_report_contract(delegate)
+            period_start = float(contract.get("period_start") or 0.0)
+            desk_post_id = contract.get("desk_post_id")
+            period_elapsed = (period_start <= 0.0
+                                or now - period_start >= REPORT_DIGEST_PERIOD_SECONDS)
+            if not period_elapsed:
+                continue
+            if desk_post_id and period_start > 0.0:
+                if not self._desk_digest_reply_ok(delegate, str(desk_post_id),
+                                                  period_start):
+                    if not contract.get("missed_alerted"):
+                        hours = (now - period_start) / 3600.0
+                        body = (
+                            f"MISSED-REPORT: {delegate} owed an hourly digest "
+                            f"for {hours:.1f}h — no reply to the desk-facts "
+                            f"post. Reprompt stalled seats or post the digest "
+                            f"now (continue, release, or re-check your gate).")
+                        for op in ops:
+                            self._post_operator_dm(op, body)
+                        contract["missed_alerted"] = True
+                        alerted.append(f"missed-report:{delegate}")
+                self._close_digest_post(str(desk_post_id))
+            msg = self._post_digest_desk_facts(delegate)
+            contract = {
+                "period_start": now,
+                "desk_post_id": msg.id,
+                "desk_post_channel": msg.channel,
+                "missed_alerted": False,
+            }
+            self._save_report_contract(delegate, contract)
+            alerted.append(f"desk-facts:{delegate}")
+        return alerted
+
+    def _escalation_rewake_band_index(self, age_seconds: float,
+                                      sla_seconds: float) -> int:
+        """0106 band index: -1 = not breached; 0/1/2 at 1×/2×/4× SLA multiples."""
+        if sla_seconds <= 0 or age_seconds <= sla_seconds:
+            return -1
+        ratio = age_seconds / sla_seconds
+        if ratio <= ESCALATION_REWAKE_BANDS[1]:
+            return 0
+        if ratio <= ESCALATION_REWAKE_BANDS[2]:
+            return 1
+        return 2
+
+    def _escalation_rewake_suppressed(self, agent_id: str) -> bool:
+        """0107 bounds 0106: DARK/DEAF episodes own unreachable seats."""
+        return agent_id in self._dark_since or agent_id in self._deaf_since
+
+    def _escalation_rewake_sweep(self) -> list[str]:
+        """0106: re-deliver escalated obligations into notify files once per
+        SLA band (1×, 2×, 4×) so `--important-only` listeners re-ring when
+        the post-time notify line was the only wake and the seat missed it.
+        Pause-aware age comes from owed(); dedupe is per (seat, message, band)."""
+        if self.notify_sink is None:
+            return []
+        now = time.time()
+        live: set[tuple[str, str]] = set()
+        rewoken: list[str] = []
+        hub_blocked = {b["agent_id"] for b in self.db.blocks_active(self.HUB_SCOPE)}
+        for agent_id in self.db.list_agent_ids():
+            if agent_id in hub_blocked:
+                continue
+            if self._escalation_rewake_suppressed(agent_id):
+                continue
+            report = self.owed(AgentInfo(id=agent_id, name=agent_id))
+            emitted = False
+            for row in report.to_answer:
+                if not row.escalated:
+                    continue
+                sla_s = self.channel_sla(row.channel) * 60.0
+                if row.pending_asks or row.asks_naming_you:
+                    born = row.created_at
+                else:
+                    born = max(row.created_at, self._directive_epoch)
+                age_s = now - born - self.paused_seconds_since(born)
+                band = self._escalation_rewake_band_index(age_s, sla_s)
+                if band < 0:
+                    continue
+                key = (agent_id, row.id)
+                live.add(key)
+                if band <= self._rewake_band.get(key, -1):
+                    continue
+                message = self.db.get_message(row.id)
+                if message is None:
+                    continue
+                envelope = self.envelope_for(agent_id, message)
+                if not envelope.escalated:
+                    continue
+                self.notify_sink.deliver(agent_id, envelope)
+                self._rewake_band[key] = band
+                emitted = True
+            if emitted:
+                rewoken.append(agent_id)
+        for key in list(self._rewake_band):
+            if key not in live:
+                del self._rewake_band[key]
+        return rewoken
+
+    def _dropped_wake_sweep(self) -> list[str]:
+        """0106 emit≠process: an armed seat with an UNREAD pre-SLA debt may
+        have taken a wake, recorded the owed signature, and aborted before
+        read_message — the listener arm gate stays quiet. Re-emit the notify
+        line on a bounded interval; a read receipt stops re-rings (0114:
+        seen-and-ignored is not a hub problem). Post-SLA debts use the
+        escalation re-emit sweep instead."""
+        if self.notify_sink is None:
+            return []
+        now = time.time()
+        live: set[tuple[str, str]] = set()
+        rewoken: list[str] = []
+        hub_blocked = {b["agent_id"] for b in self.db.blocks_active(self.HUB_SCOPE)}
+        for agent_id in self.db.list_agent_ids():
+            if agent_id in hub_blocked:
+                continue
+            if self._escalation_rewake_suppressed(agent_id):
+                continue
+            if self.presence.reception(agent_id)[0] != "armed":
+                continue
+            report = self.owed(AgentInfo(id=agent_id, name=agent_id))
+            emitted = False
+            for row in report.to_answer:
+                if row.escalated:
+                    continue
+                if self.db.has_read(row.id, agent_id):
+                    continue
+                key = (agent_id, row.id)
+                live.add(key)
+                last = self._dropped_wake_at.get(key, 0.0)
+                if now - last < DROPPED_WAKE_REEMIT_SECONDS:
+                    continue
+                message = self.db.get_message(row.id)
+                if message is None:
+                    continue
+                self.notify_sink.deliver(agent_id,
+                                         self.envelope_for(agent_id, message))
+                self._dropped_wake_at[key] = now
+                emitted = True
+            if emitted:
+                rewoken.append(agent_id)
+        for key in list(self._dropped_wake_at):
+            if key not in live:
+                del self._dropped_wake_at[key]
+        return rewoken
+
+    def _standing_retirement_proposals(self) -> dict[str, Message]:
+        """Open hub retirement-proposal alerts keyed by target agent (0107)."""
+        out: dict[str, Message] = {}
+        if self.db.get_channel(self.DARK_ALERTS_CHANNEL) is None:
+            return out
+        ops = self.operator_ids()
+        for m in self.db.open_obligations([self.DARK_ALERTS_CHANNEL]):
+            if m.sender != "hub":
+                continue
+            info = (m.data or {}).get("retirement_proposal")
+            if not isinstance(info, dict):
+                continue
+            if closed_authoritatively(m, self.db.replies_to(m.id), ops):
+                continue
+            agent_id = str(info.get("agent_id") or "")
+            if agent_id:
+                out[agent_id] = m
+        return out
+
+    def _retirement_proposal_sweep(self) -> list[str]:
+        """0107 slice 3: one retirement proposal per long-dark breached seat."""
+        now = time.time()
+        ops = self.operator_ids()
+        if not ops:
+            return []
+        standing = self._standing_retirement_proposals()
+        alerted: list[str] = []
+        for agent_id, since in list(self._dark_since.items()):
+            if agent_id in ops:
+                continue
+            if self.db.agent_retirement(agent_id) is not None:
+                continue
+            if now - since < DARK_RETIRE_PROPOSAL_SECONDS:
+                continue
+            info = AgentInfo(id=agent_id, name=agent_id)
+            overdue = [e for e in self.inbox(info) if e.escalated]
+            if not overdue:
+                continue
+            if agent_id in standing:
+                continue
+            days = (now - since) / 86400.0
+            self._ensure_alerts_channel()
+            self._post_system(
+                self.DARK_ALERTS_CHANNEL,
+                f"RETIREMENT PROPOSAL: '{agent_id}' has been DARK ~{days:.1f}d "
+                f"holding {len(overdue)} SLA-breached obligation(s). Confirm "
+                f"with `agora retire {agent_id}` if decommissioning is "
+                f"appropriate, or restart the seat to dismiss. One proposal "
+                f"per dark episode.",
+                to=sorted(ops),
+                status="open",
+                data={"retirement_proposal": {"agent_id": agent_id,
+                                              "dark_since": since}},
+            )
+            alerted.append(f"retire-proposal:{agent_id}")
+        for agent_id, msg in standing.items():
+            if agent_id not in self._dark_since:
+                self._post_system(
+                    self.DARK_ALERTS_CHANNEL,
+                    f"Retirement proposal for '{agent_id}' withdrawn — dark "
+                    "episode ended or obligations cleared.",
+                    status="resolved",
+                    reply_to=msg.id,
+                )
         return alerted
 
     def _alerted_at(self, kind: str, agent_id: str) -> float:
@@ -3772,15 +4785,16 @@ class HubService:
         ch = self.db.get_channel(overdue[0].channel)
         if ch is not None and not ch.private:
             example = f"{overdue[0].channel}#{overdue[0].seq}"
-        self._ensure_alerts_channel()
-        self._post_system(
-            self.DARK_ALERTS_CHANNEL,
+        self._post_silence_watchdog_alert(
+            agent_id,
             f"AGENT DEAF: {agent_id} looks present but its reception loop "
             f"went silent ~{age / 60:.0f} min ago while it holds "
             f"{len(overdue)} SLA-breached obligation(s) (e.g. {example}). "
             "Its listener is almost certainly dead — the seat wakes for "
             "nothing. Re-arm it (restart the reception loop / the session); "
-            "escalation cannot reach a deaf seat. One alert per deaf episode.")
+            "escalation cannot reach a deaf seat. One alert per deaf episode.",
+            explicit_class="deaf",
+        )
         alerted.append(agent_id)
 
     def _lurk_sweep_one(self, agent_id: str, lurk_now: set[str],
@@ -3829,16 +4843,17 @@ class HubService:
         ch = self.db.get_channel(rotting[0].channel)
         if ch is not None and not ch.private:
             example = f"{rotting[0].channel}#{rotting[0].seq}"
-        self._ensure_alerts_channel()
-        self._post_system(
-            self.DARK_ALERTS_CHANNEL,
+        self._post_silence_watchdog_alert(
+            agent_id,
             f"AGENT LURKING: {agent_id}'s reception is armed and heartbeating,"
             f" but {len(rotting)} obligation(s) addressed to it have rotted "
             f"UNREAD well past SLA (oldest ~{(now - oldest) / 60:.0f} min, "
             f"e.g. {example}). The doorbell rings; nobody comes: its session "
             "is likely stuck in a follow-up-only loop where wakes and stop-"
             "hook prompts no longer reach the model. Reprompt or relaunch "
-            "that session. One alert per lurk episode.")
+            "that session. One alert per lurk episode.",
+            explicit_class="unseen",
+        )
         alerted.append(agent_id)
 
     def _steward_sweep(self) -> list[str]:
@@ -4113,6 +5128,85 @@ class HubService:
             except Exception:
                 log.exception("dark sweep failed (will retry next interval)")
 
+    def _reporting_stewards(self, exclude: str = "") -> list[str]:
+        return sorted({
+            d["agent_id"] for d in self.active_delegations()
+            if "reporting" in d.get("powers", ()) and d["agent_id"] != exclude})
+
+    def _silence_alert_suffix(self, agent_id: str,
+                              explicit_class: str | None = None) -> str:
+        """0114 mandate #3 + 0107 routing: tag alerts with silence_class."""
+        klass = explicit_class or self.silence_class_for_seat(agent_id) or "unknown"
+        action = _SILENCE_CLASS_ROUTE.get(klass, "see fleet /status silence_class")
+        return f" [silence_class={klass}; {action}]"
+
+    def _post_silence_watchdog_alert(self, agent_id: str, body: str,
+                                     explicit_class: str | None = None) -> None:
+        """Hub-alerts archive + addressed delivery to reporting stewards (0107)."""
+        stewards = self._reporting_stewards(exclude=agent_id)
+        self._ensure_alerts_channel()
+        self._post_system(
+            self.DARK_ALERTS_CHANNEL,
+            body + self._silence_alert_suffix(agent_id, explicit_class),
+            to=stewards or None,
+        )
+
+    def silence_class_for_seat(self, agent_id: str) -> str | None:
+        """0114: classify SLA-breached answer debt by silence root cause so
+        stewards route (dead/deaf/unseen/seen-and-ignored) instead of
+        forensics. None when the seat has no escalated to_answer rows."""
+        info = AgentInfo(id=agent_id, name=agent_id)
+        escalated = [r for r in self.owed(info).to_answer if r.escalated]
+        if not escalated:
+            return None
+        if self.presence.get(agent_id).state == "offline":
+            return "dead"
+        reception_state, _ = self.presence.reception(agent_id)
+        if reception_state == "stale":
+            return "deaf"
+        unread = any(
+            self.db.get_cursor(agent_id, row.channel) < row.seq
+            for row in escalated)
+        if unread:
+            return "unseen"
+        return "seen-and-ignored"
+
+    def report_digest_snapshot(self) -> dict[str, Any]:
+        """0109 observability: reporting-delegate digest cadence for /status."""
+        now = time.time()
+        paused = self._report_digest_paused()
+        delegates: list[dict[str, Any]] = []
+        for delegate in self._reporting_delegates():
+            contract = self._load_report_contract(delegate)
+            period_start = float(contract.get("period_start") or 0.0)
+            desk_post_id = contract.get("desk_post_id")
+            replied = False
+            if desk_post_id and period_start > 0.0:
+                replied = self._desk_digest_reply_ok(
+                    delegate, str(desk_post_id), period_start)
+            period_age = (now - period_start) if period_start > 0 else None
+            delegates.append({
+                "delegate": delegate,
+                "period_age_minutes": (round(period_age / 60, 1)
+                                       if period_age is not None else None),
+                "period_seconds": REPORT_DIGEST_PERIOD_SECONDS,
+                "desk_post_id": desk_post_id,
+                "replied": replied,
+                "missed_alerted": bool(contract.get("missed_alerted")),
+                "overdue": (period_age is not None
+                            and period_age >= REPORT_DIGEST_PERIOD_SECONDS
+                            and not replied),
+            })
+        return {"paused": paused, "delegates": delegates}
+
+    def status_overview(self) -> dict[str, Any]:
+        """Fleet liveness aggregate plus per-seat rows (0110 + 0084)."""
+        return {
+            "fleet": self.fleet_liveness_snapshot(),
+            "agents": self.agent_status_overview(),
+            "report_digest": self.report_digest_snapshot(),
+        }
+
     def agent_status_overview(self) -> list[dict[str, Any]]:
         """Operator overview: per agent, presence + unread count + the oldest
         still-pending obligation's age. Reuses the exact inbox computation the
@@ -4155,8 +5249,10 @@ class HubService:
                 "pending_obligations": len(pending),
                 "oldest_pending_minutes": round((now - oldest) / 60, 1) if oldest else None,
                 "owed_answers": debts.counts.to_answer,
+                "escalated_owed": sum(1 for r in debts.to_answer if r.escalated),
                 "owed_consumption": debts.counts.to_consume,
                 "acked_unanswered": acked_unanswered,
+                "silence_class": self.silence_class_for_seat(agent_id),
                 "refused_sends_1h": len(refusals),
                 "last_refusal": refusals[-1] if refusals else None,
             })

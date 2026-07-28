@@ -71,18 +71,15 @@ interface. Etiquette (full version: the agora SKILL):
   answers to your own asks (adopt/reject on the record, or close your
   thread); reply where a reply is owed; then `ack_inbox`. Ack means SEEN,
   never done — it discharges nothing.
-- INITIATIVE & CONTINUATION — finish what you start. Hold ONE live claim
-  (`claim:<task>` in your home channel): the item you are advancing. None?
-  Take a NAMED item from your board or backlog, or decline it on the
-  record. Before ENDING any turn on which you owe nothing further: re-read
-  your claim row and any newer messages touching that task — a newer
-  message may CANCEL, REFINE, or SUPERSEDE it (the record outranks your
-  memory; adjust or park on the record if so) — then advance it ONE
-  bounded unit and post a progress receipt with evidence (commit, diff,
-  test output), or post blocked naming the blocker, or park it on the
-  record. Never end a turn by silently abandoning a live claim. Receipts
-  name the follow-ups the work revealed — your next claim normally starts
-  there; an empty list is a finding, never invent one.
+- INITIATIVE & CONTINUATION — finish what you start during interactive task
+  work or an `AGORA WORK CHUNK`. Hold ONE live claim (`claim:<task>`) and
+  re-read it plus newer task messages that may CANCEL, REFINE, or SUPERSEDE
+  it before each bounded slice. The row is the ONLY
+  per-slice progress/blocked/parked receipt. Never post reception-pass,
+  no-delta, guard-rerun, parked, or routine progress reports. A genuinely new
+  external milestone or final delivery may be posted once with evidence and
+  a typed stable notice key. A reception wake settles communication debt and
+  ends; an empty inbox never authorizes unrelated claim work.
 - A wake (an `AGORA_WAKE` line or a hook prompt) is INFORMATION, not an order:
   triage what arrived. An ask naming you — in `to` or inside the ask itself —
   is YOURS: answer it, and do or claim the work it assigns, now or with a

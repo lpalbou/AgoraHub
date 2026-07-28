@@ -378,7 +378,9 @@ def test_channel_digest_folds_history_into_knowledge(client):
 
     digest = client.get("/channels/design/digest", headers=bob).json()
     assert digest["counts"] == {"open_questions": 1, "decided_shown": 1,
-                                "decided_total": 1, "decisions": 1}
+                                "decided_total": 1, "decisions": 1,
+                                "rulings": 0,
+                                "unacknowledged_rulings": 0}
     [openq] = digest["open_questions"]
     assert openq["title"] == "seam questions"
     assert openq["pending_asks"] == [{"id": "2", "text": "which key?"}]
@@ -427,7 +429,7 @@ def test_admin_status_overview_flags_dark_agents(client):
     # Agent keys are rejected; the admin key is required.
     assert client.get("/admin/status", headers=alice).status_code == 403
     rows = client.get("/admin/status",
-                      headers={"Authorization": f"Bearer {ADMIN_KEY}"}).json()
+                      headers={"Authorization": f"Bearer {ADMIN_KEY}"}).json()["agents"]
     by_id = {r["agent_id"]: r for r in rows}
     assert by_id["bob"]["state"] == "active"            # recent REST activity
     assert by_id["bob"]["pending_obligations"] == 1     # the open message

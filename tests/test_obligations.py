@@ -209,13 +209,43 @@ def test_bare_reply_rejected(service, team):
 
 
 def test_non_reply_statuses_stand_alone(service, team):
-    """0050 non-goal guard: fyi/open/blocked/resolved never require a parent —
-    a free-standing resolved close stays valid."""
+    """fyi/open/resolved stand alone; blocked is an addressed help contract."""
     alice, _ = team
-    for status in (Status.fyi, Status.open, Status.blocked, Status.resolved):
+    for status in (Status.fyi, Status.open, Status.resolved):
         m = service.post_message(alice, "design", PostMessage(
             status=status, body=f"standalone {status.value}"))
         assert m.reply_to is None
+
+
+def test_blocked_requires_structured_ask_and_explicit_addressee(service, team):
+    alice, bob = team
+    with pytest.raises(HubError, match="structured ask"):
+        service.post_message(alice, "design", PostMessage(
+            status=Status.blocked, body="parked"))
+    m = service.post_message(alice, "design", PostMessage(
+        status=Status.blocked, body="need a decision", to=[bob.id],
+        asks=[{"id": "1", "text": "choose the compatible schema?"}]))
+    assert m.status == Status.blocked and m.to == [bob.id]
+
+
+def test_assignee_is_a_real_addressee(service, team):
+    """The storm-review assignee gap: an assignee creates owed debt, so it
+    must pass the membership gate and set the addressing flags — a ghost
+    name must not satisfy the blocked contract while waking the whole room."""
+    alice, bob = team
+    with pytest.raises(HubError, match="non-member"):
+        service.post_message(alice, "design", PostMessage(
+            status=Status.blocked, body="stuck",
+            asks=[{"id": "1", "text": "unblock me?", "assignee": "ghost"}]))
+    with pytest.raises(HubError, match="yourself"):
+        service.post_message(alice, "design", PostMessage(
+            status=Status.blocked, body="stuck",
+            asks=[{"id": "1", "text": "unblock me?", "assignee": alice.id}]))
+    m = service.post_message(alice, "design", PostMessage(
+        status=Status.blocked, body="stuck",
+        asks=[{"id": "1", "text": "unblock me?", "assignee": bob.id}]))
+    env = _envelope(service, bob, m.id)
+    assert env is not None and env.to_me and env.addressed
 
 
 def test_answers_referencing_unknown_ask_rejected(service, team):
@@ -251,13 +281,20 @@ def test_raw_data_asks_are_validated_too(service, team):
 
 
 def test_assignee_is_sanitized_and_bounded(service, team):
-    """The optional ask `assignee` is now capped and control-stripped like text."""
-    alice, _ = team
+    """The optional ask `assignee` is control-stripped BEFORE the membership
+    gate (so a member name wrapped in control chars resolves to the member),
+    and an oversized/ghost name is refused as a non-member — the cap is now
+    enforced by the gate rather than silently truncating into a ghost."""
+    alice, bob = team
     m = service.post_message(alice, "design", PostMessage(
         status=Status.open, body="q",
-        asks=[{"id": "1", "text": "a", "assignee": "bob\n\t" + "x" * 200}]))
+        asks=[{"id": "1", "text": "a", "assignee": "\tbob\n"}]))
     stored = service.db.get_message(m.id).data["asks"][0]["assignee"]
-    assert len(stored) <= 64 and "\n" not in stored and "\t" not in stored
+    assert stored == bob.id
+    with pytest.raises(HubError, match="non-member"):
+        service.post_message(alice, "design", PostMessage(
+            status=Status.open, body="q",
+            asks=[{"id": "1", "text": "a", "assignee": "bob" + "x" * 200}]))
 
 
 def test_signature_is_echoed_on_envelope_verified_by_is_none(service, team):

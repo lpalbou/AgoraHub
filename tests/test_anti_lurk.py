@@ -13,6 +13,8 @@ own asks were silently ackable, and read-but-unanswered debt was invisible.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -161,6 +163,41 @@ def test_owed_to_consume_tracks_unread_answers_and_clears(client, room):
     _post(client, room["asker"], status="resolved", reply_to=msg["id"],
           title="consumed: shape C it is", body="adopting C")
     assert client.get("/owed", headers=_auth(room["asker"])).json()["counts"]["to_consume"] == 0
+
+
+def test_owed_to_close_surfaces_discharged_unclosed_threads(client, room, monkeypatch):
+    """0116: fully answered own threads still open/blocked surface in to_close
+    (advisory); authoritative closure clears them."""
+    monkeypatch.setattr("agora.hub.service.TO_CLOSE_MIN_AGE_SECONDS", 0)
+    msg = _post(client, room["asker"], status="open", title="pick a shape",
+                asks=[{"id": "1", "text": "which shape?"}])
+    ans = _post(client, room["named"], status="reply", reply_to=msg["id"],
+                answers=["1"], title="shape C", body="evidence")
+    client.get(f"/channels/canvass/messages/{ans['id']}", headers=_auth(room["asker"]))
+
+    owed = client.get("/owed", headers=_auth(room["asker"])).json()
+    assert owed["counts"]["to_consume"] == 0
+    assert owed["counts"]["to_close"] == 1
+    row = owed["to_close"][0]
+    assert row["seq"] == msg["seq"] and row["answered_by"] == "named"
+
+    _post(client, room["asker"], status="resolved", reply_to=msg["id"],
+          title="consumed: shape C", body="adopting C")
+    owed = client.get("/owed", headers=_auth(room["asker"])).json()
+    assert owed["counts"]["to_close"] == 0
+
+
+def test_owed_to_close_waits_while_asks_pending(client, room, monkeypatch):
+    """0116: partial answers are waiting_on, not to_close."""
+    monkeypatch.setattr("agora.hub.service.TO_CLOSE_MIN_AGE_SECONDS", 0)
+    msg = _post(client, room["asker"], status="open", title="two asks",
+                asks=[{"id": "1", "text": "a", "to": ["named"]},
+                      {"id": "2", "text": "b", "to": ["bystander"]}])
+    _post(client, room["named"], status="reply", reply_to=msg["id"],
+          answers=["1"], title="a done", body="a")
+    owed = client.get("/owed", headers=_auth(room["asker"])).json()
+    assert owed["counts"]["to_close"] == 0
+    assert any(w["ask"] == "2" for w in owed.get("waiting_on", []))
 
 
 # -- 0080: operator lurk visibility ------------------------------------------------
@@ -435,7 +472,9 @@ def test_fleet_status_gated_to_operators_and_reporting_delegates(client, room):
                json={"agent_id": "named", "powers": ["reporting"]})
     r = client.get("/status", headers=_auth(room["named"]))
     assert r.status_code == 200
-    rows = r.json()
+    data = r.json()
+    rows = data["agents"]
+    assert "fleet" in data
     assert any(row["agent_id"] == "asker" for row in rows)
     assert all("acked_unanswered" in row and "last_refusal" not in row
                for row in rows)
@@ -448,8 +487,101 @@ def test_overview_counts_acked_unanswered(client, room):
                 json={"cursors": {"canvass": msg["seq"]}})
 
     rows = client.get("/admin/status",
-                      headers={"Authorization": f"Bearer {ADMIN_KEY}"}).json()
+                      headers={"Authorization": f"Bearer {ADMIN_KEY}"}).json()["agents"]
     named = next(r for r in rows if r["agent_id"] == "named")
     assert named["acked_unanswered"] == 1 and named["owed_answers"] == 1
     asker = next(r for r in rows if r["agent_id"] == "asker")
     assert asker["acked_unanswered"] == 0
+
+
+def test_saturation_gate_refuses_new_asks_to_saturated_seat(client, room, monkeypatch):
+    """0114: N escalated debts → teaching refusal on new asks TO that seat."""
+    from agora.hub import service as hub_service
+
+    monkeypatch.setattr(hub_service, "SATURATION_GATE_MIN_ESCALATED", 2)
+    client.put("/channels/canvass/store/channel:meta",
+               json={"value": {"response_sla_minutes": 0.001}},
+               headers=_auth(room["asker"]))
+    for i in range(2):
+        _post(client, room["asker"], status="open", title=f"debt {i}",
+              asks=[{"id": "1", "text": "q", "to": ["named"]}])
+    time.sleep(0.2)
+
+    r = client.post("/channels/canvass/messages", headers=_auth(room["asker"]),
+                    json={"title": "one more", "body": "b", "status": "open",
+                          "asks": [{"id": "1", "text": "blocked?", "to": ["named"]}]})
+    assert r.status_code == 403
+    assert "saturated" in r.json()["detail"]
+    assert "named" in r.json()["detail"]
+
+    # fyi to a saturated seat is still allowed (not a new ask obligation).
+    r = client.post("/channels/canvass/messages", headers=_auth(room["asker"]),
+                    json={"title": "fyi ok", "body": "b", "status": "fyi",
+                          "to": ["named"]})
+    assert r.status_code == 200
+
+
+def test_dark_seat_gate_refuses_new_asks(client, room):
+    """0107: refuse new asks TO a seat in a dark episode."""
+    client.put("/channels/canvass/store/channel:meta",
+               json={"value": {"response_sla_minutes": 0.001}},
+               headers=_auth(room["asker"]))
+    _post(client, room["asker"], status="open", title="first",
+          asks=[{"id": "1", "text": "q", "to": ["named"]}])
+    time.sleep(0.2)
+    service = client.app.state.service
+    service.presence._last_seen.pop("named", None)
+    service.presence._connections.pop("named", None)
+    service.presence.update("named", "offline")
+    service.dark_sweep()
+    assert "named" in service._dark_since
+
+    r = client.post("/channels/canvass/messages", headers=_auth(room["asker"]),
+                    json={"title": "to dark seat", "body": "b", "status": "open",
+                          "asks": [{"id": "1", "text": "more?", "to": ["named"]}]})
+    assert r.status_code == 403
+    assert "DARK" in r.json()["detail"]
+
+    r = client.post("/channels/canvass/messages", headers=_auth(room["asker"]),
+                    json={"title": "override", "body": "b", "status": "open",
+                          "address_dark": True,
+                          "asks": [{"id": "1", "text": "canvass", "to": ["named"]}]})
+    assert r.status_code == 200
+
+
+def test_overview_silence_class_routes_sla_breach(client, room):
+    """0114: fleet /status exposes silence_class on escalated debts."""
+    client.put("/channels/canvass/store/channel:meta",
+               json={"value": {"response_sla_minutes": 0.001}},
+               headers=_auth(room["asker"]))
+    msg = _post(client, room["asker"], status="open", title="for named",
+                asks=[{"id": "1", "text": "row", "to": ["named"]}])
+    time.sleep(0.2)
+    service = client.app.state.service
+
+    rows = client.get("/admin/status",
+                      headers={"Authorization": f"Bearer {ADMIN_KEY}"}).json()["agents"]
+    named = next(r for r in rows if r["agent_id"] == "named")
+    assert named["silence_class"] == "unseen"
+
+    client.post("/inbox/ack", headers=_auth(room["named"]),
+                json={"cursors": {"canvass": msg["seq"]}})
+    rows = client.get("/admin/status",
+                      headers={"Authorization": f"Bearer {ADMIN_KEY}"}).json()["agents"]
+    named = next(r for r in rows if r["agent_id"] == "named")
+    assert named["silence_class"] == "seen-and-ignored"
+
+    service.presence.touch("named")
+    service.presence._last_reception["named"] = time.time() - 1000.0
+    rows = client.get("/admin/status",
+                      headers={"Authorization": f"Bearer {ADMIN_KEY}"}).json()["agents"]
+    named = next(r for r in rows if r["agent_id"] == "named")
+    assert named["silence_class"] == "deaf"
+
+    service.presence._last_seen.pop("named", None)
+    service.presence._connections.pop("named", None)
+    service.presence.update("named", "offline")
+    rows = client.get("/admin/status",
+                      headers={"Authorization": f"Bearer {ADMIN_KEY}"}).json()["agents"]
+    named = next(r for r in rows if r["agent_id"] == "named")
+    assert named["silence_class"] == "dead"
