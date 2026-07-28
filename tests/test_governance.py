@@ -256,6 +256,10 @@ def test_docs_templates_match_packaged_constants():
 
 def test_hub_rules_text_stays_one_screenful_class():
     """The rules are read by LLM agents every session: keep them bounded.
-    (~60 lines is the agreed budget; growth beyond it needs a design pass.)"""
-    assert len(HUB_RULES_DEFAULT.splitlines()) <= 60
+    (~70 lines is the agreed budget; growth beyond it needs a design pass.
+    2026-07-28: raised 60 -> 70 by the continuation design pass — six
+    adversarial reviews added the ADVANCE definition to rule 2 and the
+    owner-declared claim-cadence rule 7; the operator's principle "agents
+    finish what they start" earned the six lines.)"""
+    assert len(HUB_RULES_DEFAULT.splitlines()) <= 70
     assert len(CHANNEL_CHARTER_TEMPLATE.splitlines()) <= 25

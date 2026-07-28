@@ -2050,6 +2050,40 @@ class HubService:
                                         "existing owner unchanged")
             elif current_owner is not None:
                 value = {**value, "owner": current_owner}
+            # Claim-due cadence (2026-07-28): `cadence_minutes` is the
+            # owner declaring "remind ME when this row idles past N min"
+            # (see _claim_due_sweep). Validate the TYPE here so a junk
+            # value fails at write time, loudly, instead of silently
+            # never pinging; 0 is the documented "declared off". And it is
+            # OWNER-declared by doctrine: a peer adding a cadence to my
+            # claim would have the hub ping me on a schedule I never set
+            # (review F7) — only the owner (or operator) may set/change it.
+            if "cadence_minutes" in value:
+                raw_cadence = value["cadence_minutes"]
+                if isinstance(raw_cadence, bool):
+                    raise HubError(400, "claim cadence_minutes must be a "
+                                        "number of minutes (0 disables "
+                                        "claim-due pings)")
+                try:
+                    cadence = float(raw_cadence)
+                except (TypeError, ValueError):
+                    raise HubError(400, "claim cadence_minutes must be a "
+                                        "number of minutes (0 disables "
+                                        "claim-due pings)")
+                if cadence < 0:
+                    raise HubError(400, "claim cadence_minutes must be >= 0 "
+                                        "(0 disables claim-due pings)")
+                prev_raw = (current.value.get("cadence_minutes")
+                            if current is not None
+                            and isinstance(current.value, dict) else None)
+                effective_owner = value.get("owner") or current_owner
+                if (raw_cadence != prev_raw and not agent.operator
+                        and agent.id != effective_owner):
+                    raise HubError(403, "cadence_minutes is OWNER-declared "
+                                        "(the hub surfaces debts their "
+                                        "author declared): only the claim "
+                                        "owner or the operator may set or "
+                                        "change it")
             # Claim/key consistency (0093): when the claim key's task part
             # parses as a WORK ID and the value carries an `item` field,
             # they must agree — a pointer row that points two ways would
@@ -3693,6 +3727,7 @@ class HubService:
                 del self._lurk_since[agent_id]
                 self._lurk_alerted.discard(agent_id)
         alerted.extend(self._steward_sweep())
+        alerted.extend(self._claim_due_sweep())
         return alerted
 
     def _alerted_at(self, kind: str, agent_id: str) -> float:
@@ -3904,6 +3939,165 @@ class HubService:
             if closed_authoritatively(m, self.db.replies_to(m.id), ops):
                 continue
             out.append(m)
+        return out
+
+    # -- claim-due pings: owner-declared continuation (2026-07-28) -----------
+    #
+    # DOCTRINE (the line four adversarial reviews settled): the hub may
+    # SURFACE obligations; it may never AUTHOR work. A claim row that
+    # declares `cadence_minutes: N` is its owner declaring a self-authored
+    # debt ("remind ME when this idles past N"); the hub merely surfaces it.
+    # A row WITHOUT cadence never pings anyone — no default-on, ever: a
+    # hub that nudges undeclared work is a scheduler in disguise, and the
+    # measured field failure (Jul-20 canvass hour) shows manufactured
+    # attention buys bookkeeping, not work.
+    #
+    # SHAPE: a stored, addressed, open SYSTEM message in the claim's own
+    # channel — deliberately the ONLY shape that reaches every reception
+    # path with zero client code (owed ledger + to-me notify flag + ws
+    # envelope + stop-hook sig + inbox pin; a new owed list, notify flag,
+    # or ws frame type would leave old listeners silently deaf — the
+    # cross-framework review's rollout proof). Standing-ping discipline is
+    # the steward sweep's 0093 contract verbatim: at most ONE per
+    # (channel, owner); same due-set + band posts nothing; a changed set
+    # supersedes; an empty set closes; restart-safe because standing pings
+    # are FOUND in the channel, never remembered in memory.
+
+    CLAIM_DUE_MIN_CADENCE_MINUTES = 30.0    # floor: clamps peer/typo cadence-1 spam
+    CLAIM_DUE_MAX_BANDS = 3                 # dormant after 3 unproductive day-bands
+    #                                         (the standing ping stays open and
+    #                                         escalates; only REPOSTS stop —
+    #                                         the hub never forges parked/done)
+    CLAIM_DUE_BAND_SECONDS = 86400.0        # one repost band per untouched day
+
+    @staticmethod
+    def _claim_cadence_seconds(value: dict[str, Any]) -> float | None:
+        """The owner-declared cadence in seconds, or None (no pings). 0 and
+        negatives read as 'declared off'; junk reads as absent. Clamped to
+        the floor so a hostile/typo cadence cannot storm (store writes are
+        member-visible and attributed, but cheap to spam otherwise)."""
+        raw = value.get("cadence_minutes")
+        if raw is None:
+            return None
+        try:
+            minutes = float(raw)
+        except (TypeError, ValueError):
+            return None
+        if minutes <= 0:
+            return None
+        return max(minutes, HubService.CLAIM_DUE_MIN_CADENCE_MINUTES) * 60.0
+
+    def _claim_due_sweep(self) -> list[str]:
+        """One standing 'claims due' ping per (channel, owner) whose
+        cadence-declared claims have idled past their cadence. The row
+        touch IS the receipt (same contract the steward sweep teaches);
+        done/parked rows never ping; supersede/close is the hub's own
+        debt hygiene. Jitter (+/-20%, keyed on the claim key) de-syncs
+        fleet-wide cadence boundaries so pings never arrive as a herd.
+        HUB PAUSE silences the sweep entirely, and paused time never ages
+        a row toward due (the 0069 clock rule) — triggering.md's doctrine
+        paragraph promises both."""
+        if self.hub_paused() is not None:
+            return []
+        now = time.time()
+        due: dict[tuple[str, str], list[tuple[str, float, int]]] = {}
+        for ch in self.db.channel_names():
+            members = {m.agent_id for m in self.db.list_members(ch)}
+            for entry in self.db.store_keys(ch):
+                key = entry["key"]
+                if not key.startswith("claim:"):
+                    continue
+                stored = self.db.store_get(ch, key)
+                if stored is None or not isinstance(stored.value, dict):
+                    continue
+                value = stored.value
+                cadence_s = self._claim_cadence_seconds(value)
+                if cadence_s is None:
+                    continue
+                if self._claim_done(value) or self._claim_parked(value):
+                    continue
+                owner = str(value.get("owner") or stored.updated_by or "")
+                if not owner or owner not in members:
+                    # A departed owner is the steward sweep's problem;
+                    # never rebroadcast a personal reminder to the room.
+                    continue
+                # Deterministic +/-20% jitter so one cadence value across
+                # many claims cannot fire the whole fleet on one tick.
+                jitter = 1.0 + 0.4 * (
+                    int(hashlib.sha256(key.encode()).hexdigest()[:4], 16)
+                    / 0xFFFF - 0.5)
+                idle = (now - stored.updated_at
+                        - self.paused_seconds_since(stored.updated_at))
+                if idle <= cadence_s * jitter:
+                    continue
+                band = min(int(idle // self.CLAIM_DUE_BAND_SECONDS),
+                           self.CLAIM_DUE_MAX_BANDS)
+                due.setdefault((ch, owner), []).append((key, idle, band))
+        standing = self._standing_claim_pings()
+        alerted: list[str] = []
+        # Close standing pings whose (channel, owner) no longer owes.
+        for (ch, owner), pings in standing.items():
+            if (ch, owner) in due:
+                continue
+            for old in pings:
+                self._post_system(
+                    ch, "claims-due episode closed: every listed claim was "
+                        "touched, finished, parked, or its cadence was "
+                        "removed.", status="resolved", reply_to=old.id)
+            alerted.append(f"claim-due:{ch}/{owner}:cleared")
+        for (ch, owner), rows in sorted(due.items()):
+            rows.sort()
+            sig = hashlib.sha256("\n".join(
+                f"{key}@{band}" for key, _idle, band in rows
+            ).encode()).hexdigest()[:16]
+            mine = standing.get((ch, owner), [])
+            if any(isinstance(m.data, dict)
+                   and isinstance(m.data.get("claim_due"), dict)
+                   and m.data["claim_due"].get("sig") == sig for m in mine):
+                continue    # the standing ping already states exactly this
+            for old in mine:
+                self._post_system(
+                    ch, "superseded by the next claims-due ping (the due "
+                        "set changed); this episode is closed.",
+                    status="resolved", reply_to=old.id)
+            listed = "; ".join(
+                f"{key} (idle {idle / 3600.0:.1f}h)" for key, idle, _b in rows[:6])
+            if len(rows) > 6:
+                listed += f" (+{len(rows) - 6} more)"
+            self._post_system(
+                ch,
+                f"CLAIMS DUE: {listed}. You declared a check-in cadence on "
+                "this work. FIRST re-read the claim row and any newer "
+                "messages touching the task — they may have canceled, "
+                "refined, or superseded it; adjust or park on the record "
+                "if so. Otherwise advance it one bounded unit and post a "
+                "progress receipt. Touching the claim row resets its "
+                "cadence and clears this ping; done/parked rows never "
+                "ping. The hub closes this ping itself when the set "
+                "changes or empties.",
+                to=[owner],
+                data={"claim_due": {"sig": sig, "owner": owner,
+                                    "claims": [k for k, _i, _b in rows]}})
+            alerted.append(f"claim-due:{ch}/{owner}:{len(rows)}")
+        return alerted
+
+    def _standing_claim_pings(self) -> dict[tuple[str, str], list[Message]]:
+        """Every hub-authored claims-due ping still standing open, keyed by
+        (channel, owner). Read from the channels, not memory (restart-safe,
+        the 0093 pattern)."""
+        out: dict[tuple[str, str], list[Message]] = {}
+        ops = self.operator_ids()
+        for ch in self.db.channel_names():
+            for m in self.db.open_obligations([ch]):
+                if m.sender != "hub" or not isinstance(m.data, dict):
+                    continue
+                info = m.data.get("claim_due")
+                if not isinstance(info, dict):
+                    continue
+                if closed_authoritatively(m, self.db.replies_to(m.id), ops):
+                    continue
+                owner = str(info.get("owner") or (m.to[0] if m.to else ""))
+                out.setdefault((ch, owner), []).append(m)
         return out
 
     async def dark_watchdog(self, interval_seconds: float = 300.0) -> None:

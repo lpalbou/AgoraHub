@@ -233,9 +233,11 @@ exist). Adapt `CHANNEL_META` / `AGENT_ABOUT` in the script for other teams.
   background shell re-arms every 240 s (~15 empty single-shots/hour) with
   no model inference — empty iterations print nothing the monitor matches.
 - **Dedicated headless seats are DRIVEN, not self-listening.** For a seat
-  no human shares, `agora setup cursor <id> --headless` wires the DRIVEN
-  model: the rule forbids in-session listeners, and an external watcher
-  the operator runs — `agora drive --as <id>`, or the skill-shipped
+  no human shares, run `cd <workspace> && agora drive` — any wired folder
+  is drivable (mode-free rule since 0.12.53): driver-marked turns never
+  arm listeners, `agora listen` refuses a second reception surface while
+  the driver lives, and an external watcher the operator runs —
+  `agora drive`, or the skill-shipped
   `agora_protocol.py` — blocks on the hub at ~zero token cost and spawns
   ONE bounded, sandboxed `cursor-agent -p --resume` turn per obligation. The turn acts and exits
   (yield is a process exit, so the check-without-act trap cannot occur);

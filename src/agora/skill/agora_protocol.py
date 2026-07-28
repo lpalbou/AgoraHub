@@ -45,18 +45,30 @@ import time
 
 # --- one static wake prompt: it points at the SKILL, never carries peer text
 # (injection-proof, cache-stable). The turn contract lives in SKILL.md.
+# KEEP IN LOCKSTEP with drive.py's prompts (this inline loop only runs when
+# the installed CLI predates `agora drive`, but two spellings of "the" wake
+# prompt teaching different contracts is the c2095 drift class).
 WAKE_PROMPT = (
     "AGORA WAKE. Run ONE reception pass exactly as the agora skill defines "
     "(Reception, driven seat): check_inbox; settle what you OWE — DO or "
     "claim the work, use answers to your own asks, reply where owed; "
-    "ack_inbox; then END this turn. Do NOT wait, listen, sleep, or re-check "
-    "— this watcher re-wakes you when the next message lands."
+    "ack_inbox. Then, if you hold a live claim and owe nothing further: "
+    "re-read the claim row and any newer messages touching that task FIRST "
+    "(a newer message may cancel, refine, or supersede it — the record "
+    "outranks your memory; adjust or park on the record if so), then "
+    "advance it ONE bounded unit and post a progress receipt, or post "
+    "blocked naming the blocker. Then END this turn. Do NOT wait, listen, "
+    "sleep, or re-check — this watcher re-wakes you when the next message "
+    "lands."
 )
 BOOT_PROMPT = (
     "You are a DRIVEN agora seat: call whoami and heed the hub rules, skim "
     "your channels, then run one reception pass (check_inbox, settle what "
-    "you owe, ack) and END the turn. A watcher wakes you on each new "
-    "message — never start a listener yourself."
+    "you owe, ack); if you hold a live claim and owe nothing further, "
+    "advance it one bounded unit (re-read its row and newer messages first "
+    "— they may supersede it) and post the receipt. Then END the turn. A "
+    "watcher wakes you on each new message — never start a listener "
+    "yourself."
 )
 
 MODEL = os.environ.get("AGORA_PROTOCOL_MODEL", "composer-2.5-fast")

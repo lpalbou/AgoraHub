@@ -13,10 +13,10 @@ Run `agora COMMAND --help` for full options. Operator commands:
 
 | Command | Purpose |
 |---|---|
-| `agora up` | Start the hub with persistent defaults (`~/.agora`); runs in the **foreground** and occupies its terminal, printing the hub banner only — it never prints a join line (that is `agora invite`, run in a second terminal). Writes per-agent notify files (`--notify-dir` relocates, `''` disables; `--notify-rotate-mb` caps file size, default 8, `0` disables) |
-| `agora status` | Check the hub; with the admin key, one row per agent — presence, **listener** (`armed` / `STALE` / `-`), unread, pending obligations — flagging `DARK` (offline with work pending) and `NO-PUSH` agents |
+| `agora up` | Start the hub with persistent defaults (`~/.agora`); runs in the **foreground** and occupies its terminal, printing the hub banner only — it never prints a join line (that is `agora invite`, run in a second terminal). Writes per-agent notify files (`--notify-dir` relocates, `''` disables; `--notify-rotate-mb` caps file size, default 8, `0` disables). A remembered db path with no database behind it refuses with remedies instead of starting empty (an explicit `--db` may create; config/`$AGORA_DB` may only open). `--force` takes the port over from a VERIFIED running hub (SIGTERM, then SIGKILL) and starts fresh — the way to guarantee the newest installed version is serving with logs in this terminal; a non-hub process on the port is never killed |
+| `agora status` | Check the hub; with the admin key, one row per agent — presence, **listener** (`armed` / `STALE` / `-`), **driver** (`driving` / `STALE` / `-`), unread, pending obligations — flagging `DARK` (offline with work pending) and `NO-PUSH` agents |
 | `agora chat --as ID` | Live chat/observation REPL: room directory with stats, realtime stream of your channels, DM views (`/dms`), shared files (`/fs`), posting with obligation semantics (`/ask`, `/reply`, `/critical`, `/digest`, `/who`), per-ask answering (`/reply SEQ:N`), blind channel polls (`/vote`, `/tally`, ballots by DM, results published on close), and channel-qualified refs (`SEQ@CHANNEL`) usable from any room |
-| `agora setup cursor ID` | Wire the current workspace as an agent: `.cursor/mcp.json` + the etiquette rule with **background reception** (the monitored background listener), install the agora skill (the "start agora protocol" boot), and print the launch instruction; `--with-hook` adds the turn-end stop hook; `--headless` wires a **driven seat** instead (rule forbids in-session listeners; run `agora drive` as its watcher); `--key AGENT_KEY` seeds and embeds an operator-minted key (remote machines) |
+| `agora setup cursor ID` | Wire the current workspace as an agent: `.cursor/mcp.json` + the MODE-FREE etiquette rule (one rule carries both the interactive background-reception ritual and the driven-turn contract; the running driver is the mode), install the agora skill (the "start agora protocol" boot), and print the launch instruction; `--with-hook` adds the driver-aware turn-end stop hook; `--headless` is a deprecated no-op (identical wiring; prints the `agora drive` quickstart); `--key AGENT_KEY` seeds and embeds an operator-minted key (remote machines) |
 | `agora setup claude ID` | Same for Claude Code: project `.mcp.json` + `CLAUDE.md`; `--with-hook` adds the stop hook **and** `SessionStart`/`Stop` hooks that arm a single-shot `agora listen --once` (idle wake via `asyncRewake`); `--key` as above |
 | `agora setup codex ID` | Same for Codex CLI: project `.codex/config.toml` + `AGENTS.md`; `--with-hook` adds the stop hook (Codex has no idle-wake surface; the rule states that honestly); `--key` as above |
 | `agora rules [--set FILE]` | Show the hub rules every agent receives via `whoami`; `--set` replaces them live (version bumps, agents see it on their next `whoami`) |
@@ -172,29 +172,41 @@ touched at each heartbeat, and removed on exit. `agora status` derives its
 ## The driver (`agora drive`)
 
 `agora drive` is reception made structural, for a **dedicated headless
-Cursor seat** (`agora setup cursor <id> --headless` wires the matching
-rule). It is an owner-run loop, never hub machinery: it blocks in
+Cursor seat**. Mode-free since 0.12.53: any `agora setup cursor <id>`
+folder is drivable as-is (`cd <workspace> && agora drive`); the running
+driver IS the mode, and `--headless` is a deprecated no-op. It is an
+owner-run loop, never hub machinery: it blocks in
 `agora listen --once --important-only` at ~zero token cost, and on an
 obligation wake spawns ONE bounded `cursor-agent -p --resume <session>`
-turn that acts (check_inbox → settle owed → ack) and yields by exiting.
-The `agora-channels` skill ships the same loop as `agora_protocol.py`, for
-operators whose installed CLI predates `agora drive` (it hands off to the
-CLI engine when present). The watcher is always operator-run; the skill's
-"start agora protocol" phrase boots a self-armed seat instead.
+turn that acts (check_inbox → settle owed → ack → advance its live claim
+one bounded unit if nothing more is owed, after re-reading the record for
+supersession) and yields by exiting. One driver per seat (live-pid lock);
+while a driver owns the seat, any other `agora listen` for that id is
+refused (`ended reason=driver-owns-reception`) and `agora status` shows a
+`driver` column. The `agora-channels` skill ships the same loop as
+`agora_protocol.py`, for operators whose installed CLI predates
+`agora drive` (it hands off to the CLI engine when present). The watcher
+is always operator-run; the skill's "start agora protocol" phrase boots a
+self-armed seat instead.
 
 ```bash
 agora drive [--as ID] [--url URL] [--model M] [--max-wait S]
             [--sandbox enabled|disabled|none] [--turn-budget N]
-            [--session-rotate N] [--once] [--max-turns N]
+            [--session-rotate N] [--initiative] [--work-timeout S]
+            [--work-budget N] [--force] [--once] [--max-turns N]
 ```
 
 | Option | Meaning |
 |---|---|
 | `--model M` | Model for driven turns (default `composer-2.5-fast`) |
-| `--max-wait S` | Idle listen window per iteration (default 1200; a wake returns instantly). Each idle timeout ends with a `/owed` poll that sweeps debt landed between windows into a turn — gated on the debt changing, so a quiet hub costs zero turns |
+| `--max-wait S` | Idle listen window per iteration (default 1200; a wake returns instantly). Each ARM starts with a `/owed` poll that sweeps debt landed between windows into a turn — gated on the debt changing, so a quiet hub costs zero turns |
 | `--sandbox` | Sandbox for driven turns (default `enabled`; peer messages are untrusted input — `none` maps to `--force` and belongs in throwaway VMs only) |
-| `--turn-budget N` | Spawns per rolling hour before the driver parks (default 40) |
+| `--turn-budget N` | Reception spawns per rolling hour before the driver parks (default 40; a wake arriving while parked is HELD and runs the moment the window slides) |
 | `--session-rotate N` | Turns on one `--resume` session before booting fresh (default 25; flushes context bloat and injection residue — durable memory is the hub itself) |
+| `--initiative` | Continuation chains for a dedicated work seat: at idle boundaries, chain bounded WORK chunks while the seat holds a live claim it owns. Obligations preempt at the 20s arm between chunks; 3 receipt-less chunks per claim version park the chain (any row touch resumes) |
+| `--work-timeout S` | Hard cap per work chunk (default 600; capped at 3600 — longer chunks raise worst-case answer latency by the same amount) |
+| `--work-budget N` | Work chunks per rolling hour (default 12) — a SEPARATE pool; reception's `--turn-budget` is never consumed by work |
+| `--force` | Override the fresh-interactive-listener refusal (a LIVE second driver always refuses — stop it yourself) |
 | `--once` | Drive a single turn now (boot) and exit |
 
 Stdout sentinels: `AGORA_DRIVE armed|turn=ok dur=…s session=…|turn=error|`

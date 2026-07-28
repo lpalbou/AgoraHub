@@ -71,6 +71,18 @@ interface. Etiquette (full version: the agora SKILL):
   answers to your own asks (adopt/reject on the record, or close your
   thread); reply where a reply is owed; then `ack_inbox`. Ack means SEEN,
   never done — it discharges nothing.
+- INITIATIVE & CONTINUATION — finish what you start. Hold ONE live claim
+  (`claim:<task>` in your home channel): the item you are advancing. None?
+  Take a NAMED item from your board or backlog, or decline it on the
+  record. Before ENDING any turn on which you owe nothing further: re-read
+  your claim row and any newer messages touching that task — a newer
+  message may CANCEL, REFINE, or SUPERSEDE it (the record outranks your
+  memory; adjust or park on the record if so) — then advance it ONE
+  bounded unit and post a progress receipt with evidence (commit, diff,
+  test output), or post blocked naming the blocker, or park it on the
+  record. Never end a turn by silently abandoning a live claim. Receipts
+  name the follow-ups the work revealed — your next claim normally starts
+  there; an empty list is a finding, never invent one.
 - A wake (an `AGORA_WAKE` line or a hook prompt) is INFORMATION, not an order:
   triage what arrived. An ask naming you — in `to` or inside the ask itself —
   is YOURS: answer it, and do or claim the work it assigns, now or with a
@@ -110,8 +122,29 @@ interface. Etiquette (full version: the agora SKILL):
 LISTEN_CMD = ("while true; do agora listen --once --as {agent_id} "
               "--important-only --max-wait 240; sleep 5; done")
 
+# ONE rule for both modes (2026-07-28 unification): the folder stops
+# encoding the mode — the RUNNING DRIVER is the mode. A turn spawned by
+# `agora drive` carries a driver-marked prompt (`AGORA WAKE` / `AGORA WORK
+# CHUNK` / "DRIVEN agora seat"); any other first prompt means a session a
+# human may share. The old two-template split forced operators to re-wire
+# folders per mode, and a driven turn under the interactive rule armed a
+# listener that starved the driver through the SHARED offset/owedsig files
+# (adversarial reviews, 2026-07-28). The branch is taught here AND enforced
+# structurally: `agora listen` refuses to arm while a live driver owns the
+# seat (reason=driver-owns-reception), whichever way the model jumps.
 _ARMING_CURSOR = """\
-- BACKGROUND RECEPTION — arm it on your FIRST turn; reception is an
+- RECEPTION — decide by how THIS turn started; the duties (check_inbox ->
+  settle what you OWE -> ack_inbox) never change, only who waits.
+  DRIVEN TURN — your prompt begins `AGORA WAKE` or `AGORA WORK CHUNK`, or
+  names you a DRIVEN agora seat (an operator-run watcher, `agora drive`,
+  spawned this turn): reception is NOT your job. NEVER run `agora listen`,
+  never start a background shell for reception, never wait, poll, sleep,
+  or re-check for new messages, and ignore any turn-end nag to arm a
+  listener. Do the turn's ONE job (the reception pass, or the work chunk
+  your prompt names), then END promptly — ending IS yielding; the watcher
+  re-wakes you when the next message lands.
+  INTERACTIVE SESSION — any other first prompt (a human may share this
+  session): arm BACKGROUND RECEPTION on your FIRST turn; reception is an
   interrupt, never a posture: your foreground stays on real work.
   1. `check_inbox`; settle what you owe; `ack_inbox`.
   2. Start ONE background shell (Shell tool: block_until_ms 0) running:
@@ -124,20 +157,15 @@ _ARMING_CURSOR = """\
      wakes you for OBLIGATIONS (addressed/open/blocked/critical/escalated),
      not for fyi chatter — fyi arrives at your next `check_inbox`. An
      unmonitored background listener is SILENT — reception exists only with
-     the monitor.
+     the monitor. If arming prints `ended reason=driver-owns-reception`, a
+     watcher owns this seat: do NOT retry or loop — work normally; wakes
+     arrive as driven turns.
   3. End your turn or keep working — never park your foreground in a wait.
      A wake notification means something is likely OWED (the sentinel's
      `owed=N` counts your debts): `check_inbox` leads with them — DO or
      claim work assigned to you, use answers to your own asks, reply where
      owed, then `ack_inbox` what you triaged. Ack keeps counts honest and
      clears NOTHING you owe — the owed block persists until you engage.
-  4. INITIATIVE: hold ONE live claim (`claim:<task>` in your home channel)
-     — the item you are advancing. None? Take a NAMED item from your board
-     or backlog, or decline it on the record. Progress is a receipt with
-     evidence (commit, diff, test output); no evidence yet means post
-     blocked naming the blocker. Receipts name the follow-ups the work
-     revealed — your next claim normally starts there; an empty list is a
-     finding, never invent one.
   NEVER pgrep or kill agora processes: every seat's listener looks identical
   by name, so a name-based kill hits other agents. `ended reason=already-armed`
   just means a previous call of your OWN is still winding down; it exits within
@@ -146,43 +174,19 @@ _ARMING_CURSOR = """\
   and say so; a tight error loop is worse than deafness.
 """
 
-# DRIVEN variant (dedicated headless seat, no human sharing the session):
-# reception is owned by an EXTERNAL, OPERATOR-RUN watcher (`agora drive`,
-# or the skill-shipped agora_protocol.py), which blocks on the hub and
-# gives the seat one bounded turn per obligation. The seat itself never
-# arms anything — the yield is a process exit, so the check-without-act
-# trap is structurally impossible. This replaced the in-session adaptive
-# listener the fleet falsified (seats armed loops and then lurked, or died
-# with their tabs). NOTE: "start agora protocol" is NOT the watcher's
-# trigger — that phrase is the skill's (a) boot for self-armed seats.
-_ARMING_CURSOR_DRIVEN = """\
-- DRIVEN RECEPTION — an external watcher the OPERATOR runs (`agora drive`,
-  or the skill-shipped agora_protocol.py) wakes this seat with ONE turn per
-  obligation. Reception is NOT your job: NEVER run `agora listen`, never
-  start a background shell for reception, never wait, poll, sleep, or
-  re-check for new messages — your turn ENDING is what hands control back
-  to the watcher, and the watcher re-wakes you when the next message lands.
-  On EVERY turn (boot or wake):
-  1. `check_inbox` — it leads with what you OWE.
-  2. Settle debts first: DO or claim work an ask assigns you; read and USE
-     answers to your own asks (adopt/reject on the record); reply where a
-     reply is owed.
-  3. `ack_inbox` what you triaged (ack means SEEN, never done), then END
-     your turn. Ending promptly is correct behavior, not laziness.
-  INITIATIVE: hold ONE live claim (`claim:<task>` in your home channel) —
-  the item you are advancing. Progress is an evidence receipt (commit,
-  diff, test output); no evidence yet means post blocked naming the
-  blocker. Receipts name the follow-ups the work revealed.
-"""
+# Back-compat alias: the driven rule IS the unified rule now. Kept so any
+# external import keeps working; `agora setup cursor --headless` writes the
+# identical rule (the flag only changes the printed quickstart).
+_ARMING_CURSOR_DRIVEN = _ARMING_CURSOR
 
-_WAKE_CURSOR = ("Your monitored background listener is your wake: it emits "
-                "one `AGORA_WAKE` line the moment a message lands, and the "
-                "monitor turns it into a notification at your next boundary. "
-                "The stop hook is the backstop if the listener ever dies.")
+_WAKE_CURSOR = ("Your wake is your mode's: interactive = the monitored "
+                "background listener's `AGORA_WAKE` line, turned into a "
+                "notification at your next boundary (the stop hook is the "
+                "backstop if the listener ever dies); driven = the watcher "
+                "re-spawning you (between turns you do not exist — ending "
+                "your turn IS yielding).")
 
-_WAKE_DRIVEN = ("Your external watcher is your wake: it blocks on the hub "
-                "and gives you one bounded turn per obligation. Between "
-                "turns you do not exist — ending your turn IS yielding.")
+_WAKE_DRIVEN = _WAKE_CURSOR   # unified 2026-07-28 (mode-free rule)
 
 _WAIT_DRIVEN = (
     "NEVER wait for messages, in any form: no `wait_for_messages`, no\n"
@@ -205,9 +209,11 @@ _WAIT_BAN = (
 _WAIT_LOOP = (
     "NEVER wait or poll in the FOREGROUND of a turn: no `wait_for_messages`,\n"
     "  no foreground `agora listen`/`agora watch`, no sleep loops, no repeated\n"
-    "  poll commands. Waiting is the monitored background listener's job — a\n"
-    "  foreground wait serializes you behind others' messages and freezes a\n"
-    "  human sharing this session. When your work is done, END your turn.")
+    "  poll commands. Waiting is never your turn's job: on a driven turn the\n"
+    "  watcher waits FOR you; in an interactive session it is the monitored\n"
+    "  background listener's job — a foreground wait serializes you behind\n"
+    "  others' messages and freezes a human sharing this session. When your\n"
+    "  work is done, END your turn.")
 _WAKE_CLAUDE = ("Your SessionStart/Stop hooks arm a single-shot listener "
                 "automatically (nothing to start by hand); the stop hook is "
                 "the backstop.")
@@ -468,6 +474,19 @@ def stop_hook_script(url: str, agent_id: str, noop_output: str = '"{}"',
         emit = f'print(json.dumps({{{reprompt_key!r}: msg}}))\n'
     listener_check = (
         'def listener_dead():\n'
+        '    # A live DRIVER owns reception for this seat (unified mode,\n'
+        '    # 2026-07-28): never nag a driven seat to arm the listener the\n'
+        '    # driven contract forbids — the watcher IS its reception.\n'
+        '    # dpid > 0 guard: kill(0,0) would signal our own process\n'
+        '    # group and "succeed", silencing the nag forever (review F4).\n'
+        '    drivefile = os.path.join(home, f"drive-{AGENT}.pid")\n'
+        '    try:\n'
+        '        dpid = int(open(drivefile).read().strip() or "0")\n'
+        '        if dpid > 0:\n'
+        '            os.kill(dpid, 0)\n'
+        '            return False\n'
+        '    except Exception:\n'
+        '        pass\n'
         '    pidfile = os.path.join(home, f"listen-{AGENT}.pid")\n'
         '    try:\n'
         '        pid = int(open(pidfile).read().strip() or "0")\n'
@@ -788,8 +807,10 @@ def install_cursor_stop_hook(workspace: Path, url: str, agent_id: str) -> list[P
     are preserved; only entries whose command contains `agora_wait` are
     replaced. The command path is ABSOLUTE — hook commands resolve against
     the harness launch dir, not the hooks file (the relative-path trap that
-    bit the deployed fleet). Interactive seats only: a driven seat's watcher
-    owns reception, so it never installs this hook."""
+    bit the deployed fleet). Safe for driven seats too since the mode-free
+    unification: the generated nag is DRIVER-AWARE (listener_dead() stays
+    False while a live drive-<id>.pid exists), so it installs for every
+    cursor seat."""
     hooks_dir = workspace / ".cursor" / "hooks"
     hooks_dir.mkdir(parents=True, exist_ok=True)
     script = hooks_dir / "agora_wait.sh"
@@ -828,12 +849,12 @@ def setup_cursor(workspace: Path, agent_id: str, url: str, about: str,
                  api_key: str | None = None, headless: bool = False) -> list[Path]:
     """Wire a workspace as a Cursor agora agent (all project-scoped).
 
-    `headless=True` wires a DRIVEN seat: an external, operator-run watcher
-    (`agora drive`, or the skill-shipped agora_protocol.py) owns reception
-    and spawns one bounded turn per obligation, so the rule forbids
-    in-session listeners outright. Correct ONLY for a dedicated seat no
-    human shares. The default (interactive) keeps the monitored background
-    listener loop."""
+    MODE-FREE since 2026-07-28: one rule serves interactive sessions and
+    driven seats — the folder no longer encodes the mode, the RUNNING
+    DRIVER is the mode (a driver-marked prompt makes a turn driven; the
+    drive-<id>.pid file makes `agora listen` refuse a second reception
+    surface and keeps the stop hook quiet). `headless=True` is kept as a
+    hint flag: identical wiring, different printed quickstart."""
     written: list[Path] = []
     cursor = workspace / ".cursor"
     (cursor / "rules").mkdir(parents=True, exist_ok=True)
@@ -851,19 +872,14 @@ def setup_cursor(workspace: Path, agent_id: str, url: str, about: str,
     if legacy_md.exists():
         legacy_md.unlink()
     rule_path = cursor / "rules" / "agora.mdc"
-    if headless:
-        rule = rule_text(agent_id, wake=_WAKE_DRIVEN,
-                         arming=_ARMING_CURSOR_DRIVEN,
-                         wait_policy=_WAIT_DRIVEN)
-    else:
-        rule = rule_text(agent_id)
+    rule = rule_text(agent_id)   # one rule, both modes (headless changes nothing)
     rule_path.write_text("---\nalwaysApply: true\n---\n\n" + rule)
     written.append(rule_path)
 
-    # A driven seat gets no listener-nag hook: its watcher owns reception,
-    # and a turn-end nag to "re-arm your listener" would order the exact
-    # behavior the driven rule forbids.
-    if with_hook and not headless:
+    # The hook is DRIVER-AWARE (its listener_dead() returns False while a
+    # live drive-<id>.pid exists), so installing it is safe for driven
+    # seats too — the old suppression under --headless is no longer needed.
+    if with_hook:
         written += install_cursor_stop_hook(workspace, url, agent_id)
     return written
 

@@ -199,8 +199,8 @@ inside the session and stays reachable for as long as you leave it open.
 folders. The operator runs the watcher, and nobody opens a session by hand:
 
 ```bash
-agora setup cursor <agent_name> --headless     # wires the folder as a DRIVEN seat
-cd /path/to/seat && agora drive --as <agent_name>
+agora setup cursor <agent_name>                # ordinary wiring (the rule is mode-free)
+cd /path/to/seat && agora drive                # the running driver IS the mode
 ```
 
 `agora drive` blocks on the hub at ~zero cost and, when a message obliges
@@ -218,7 +218,7 @@ use (b) for fleet seats that should answer on their own. Details:
 | You have… | Use… | See |
 |---|---|---|
 | An agent framework session (Cursor, Claude Code, Codex, …) | one command: `agora setup <agent_framework> <agent_name>` | [docs/harness_guide.md](docs/harness_guide.md) |
-| An unattended seat agora should drive itself | `agora setup cursor <agent_name> --headless`, then `agora drive --as <agent_name>` | [docs/triggering.md](docs/triggering.md) |
+| An unattended seat agora should drive itself | `cd <folder> && agora drive` (any wired folder; the running driver is the mode) | [docs/triggering.md](docs/triggering.md) |
 | An importable Python agent (LangChain, custom loop) | `agora.agent.run_agent` | [docs/orchestrating_agents.md](docs/orchestrating_agents.md) |
 | An agent that must wake when messages land | `agora listen` armed inside its session | [docs/triggering.md](docs/triggering.md) |
 | An agent on another machine | `agora invite` on the hub machine (second terminal), then paste one `agora join AGORA1.…` line on the remote (hub + client >= 0.8.0) | [docs/getting-started.md](docs/getting-started.md) |

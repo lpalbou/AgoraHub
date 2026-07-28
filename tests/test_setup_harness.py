@@ -541,26 +541,35 @@ def test_rule_text_cursor_loop_never_says_kill(tmp_path):
     assert "--adaptive" not in rule
 
 
-def test_rule_text_cursor_headless_is_driven(tmp_path):
-    """--headless wires a DRIVEN seat: an external watcher owns reception,
-    so the rule must forbid in-session listeners entirely (never teach a
-    listen loop) and teach the turn contract: settle, ack, END. It must
-    also not install the listener-nag stop hook, which would order the
-    exact behavior the rule forbids."""
-    written = setup_cursor(tmp_path, "runtime", "http://hub:8765", "",
-                           "agora-mcp", with_hook=True, headless=True)
-    rule = (tmp_path / ".cursor" / "rules" / "agora.mdc").read_text()
+def test_rule_text_cursor_is_mode_free(tmp_path):
+    """The mode-free rule (2026-07-28): --headless and the default write
+    BYTE-IDENTICAL wiring — the folder no longer encodes the mode; the
+    running driver is the mode. One rule carries BOTH branches: the DRIVEN
+    TURN contract (prompt-marked turns never arm listeners) and the
+    INTERACTIVE arming ritual, plus the refusal teaching
+    (driver-owns-reception = never retry). The hook installs in both cases
+    because its nag is now driver-aware."""
+    written_plain = setup_cursor(tmp_path, "runtime", "http://hub:8765", "",
+                                 "agora-mcp", with_hook=True, headless=False)
+    rule_plain = (tmp_path / ".cursor" / "rules" / "agora.mdc").read_text()
+    written_headless = setup_cursor(tmp_path, "runtime", "http://hub:8765", "",
+                                    "agora-mcp", with_hook=True, headless=True)
+    rule_headless = (tmp_path / ".cursor" / "rules" / "agora.mdc").read_text()
 
-    assert "DRIVEN RECEPTION" in rule
-    assert "agora listen" in rule                 # named only to forbid it
-    assert "NEVER run `agora listen`" in rule
-    assert "while true; do agora listen" not in rule   # no loop is ever taught
-    assert "END" in rule and "watcher" in rule
-    assert "--idle-nudge" not in rule
-    # The listener-nag hook must NOT be installed for a driven seat, even
-    # with with_hook=True.
-    assert not (tmp_path / ".cursor" / "hooks.json").exists()
-    assert all("hooks" not in str(p) for p in written)
+    assert rule_plain == rule_headless            # the flag changes nothing
+    assert [str(p) for p in written_plain] == [str(p) for p in written_headless]
+    rule = rule_headless
+    # Both branches present, honestly labeled.
+    assert "DRIVEN TURN" in rule and "INTERACTIVE SESSION" in rule
+    assert "AGORA WAKE" in rule and "AGORA WORK CHUNK" in rule
+    assert "NEVER run `agora listen`" in rule     # the driven contract
+    assert "while true; do agora listen" in rule  # the interactive ritual
+    assert "driver-owns-reception" in rule        # the refusal teaching
+    # Continuation is taught to every seat (RULE_TEMPLATE, all harnesses).
+    assert "INITIATIVE & CONTINUATION" in rule
+    assert "SUPERSEDE" in rule                    # re-read the record first
+    # The hook installs for BOTH modes now (its nag is driver-aware).
+    assert (tmp_path / ".cursor" / "hooks.json").exists()
 
 
 def test_install_skill_writes_and_refreshes_each_harness(tmp_path):

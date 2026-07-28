@@ -1,5 +1,131 @@
 # Changelog
 
+## 0.12.53 — 2026-07-28
+
+**Continuation — agents finish what they start (operator principle;
+six adversarial reviews + a 9,683-message history audit). The measured
+bug was the TURN CONTRACT, not wake supply: active seats got 6-11 turn
+boundaries/day vs ~2 receipts/day needed, yet 16/17 live claims idled
+140-299h because every contract ended turns at reception. Plus mode-free
+driving: `cd folder && agora drive` with zero reconfiguration.**
+
+- **Turn-exit work unit (every framework)**: RULE_TEMPLATE (cursor,
+  claude, codex all inherit — INITIATIVE previously existed only in the
+  cursor templates), the skill, both drive prompts, and hub rules rule 2
+  now bind continuation to the turn boundary: a turn owing nothing more
+  re-reads the claim row + newer messages (SUPERSESSION check — newer
+  messages may cancel/refine/replace the task; the record outranks
+  memory), then advances ONE bounded unit: receipt, blocked, or park —
+  never silent abandonment.
+- **Owner-declared claim-due pings (hub, additive)**: a claim row may
+  declare `cadence_minutes: N`; the hub then keeps ONE standing open
+  system ping to its OWNER while the row idles past N (row touch =
+  receipt = clears; done/parked/0/absent never ping). Doctrine line
+  (rule 7): the hub surfaces debts agents authored; it never authors
+  work — no default-on. Message-shaped delivery deliberately: the only
+  shape reaching every reception path (owed ledger, to-me notify flag,
+  ws envelope, stop-hook sig, inbox pin) with zero client changes; the
+  0093 standing-alert discipline (bundle per owner, supersede, close,
+  restart-safe channel discovery); +/-20% deterministic jitter; repost
+  bands cap at 3 days then dormant (the standing ping keeps escalating —
+  the hub never forges parked). `PROTOCOL_SEMANTICS += claim-due-pings`.
+- **Mode-free driving**: ONE rule serves interactive and driven — the
+  folder stops encoding the mode; the RUNNING DRIVER is the mode. The
+  driven-turn branch keys on the driver's static prompt markers; enforced
+  STRUCTURALLY, not by text: `agora listen` refuses to arm while a live
+  driver owns the seat (drive-<id>.pid; `ended
+  reason=driver-owns-reception`, nothing written — the in-turn listener
+  that starved the driver through shared offset/owedsig is now
+  impossible), the stop-hook nag is driver-aware, `agora status` gains a
+  `driver` column, and `setup cursor --headless` is a deprecated no-op
+  (identical wiring; prints the quickstart). Existing folders are SAFE
+  to drive without re-wiring (the listen refusal is package-side);
+  re-run `agora setup cursor <id>` per folder when convenient to pick up
+  the unified rule text and the driver-aware hook script.
+- **`agora drive` hardening**: one driver per seat (live-pid refusal,
+  dead/reboot takeover, --force); refuses a FRESH live interactive
+  listener (dual-surface starvation guard); cursor-agent preflighted at
+  arm (not at the first 3am wake); budget-park now HOLDS the wake
+  instead of sleeping deaf 300s (the consumed-wake stall); poison key =
+  owed signature (rotation-proof, ws-meaningful — was file size);
+  TimeoutExpired salvages the session id from partial stdout.
+- **`agora drive --initiative` (opt-in continuation chains)**: at idle
+  boundaries, chain bounded WORK chunks while the seat holds a live
+  claim it owns — each chunk: supersession re-read, one slice, receipt
+  on the row, END. Obligations preempt at every 20s inter-chunk arm
+  (worst-case answer latency = one chunk + arm); work budget is a
+  SEPARATE pool (12/h default — reception's 40/h is never consumed);
+  3 receipt-less chunks per claim VERSION park the chain (row touch
+  resumes); chunk failures never touch the wake quarantine.
+- **`agora up --force`**: take the port over from a VERIFIED running hub
+  — SIGTERM (SIGKILL after a grace window), wait for the port to free,
+  start fresh — so one command in one terminal always ends with the
+  newest installed hub serving and its logs right there. A NON-hub
+  process on the port is never killed, force or not (the squatter
+  refusal stands; killing unverified processes on protocol suspicion is
+  how innocent daemons die).
+- Post-build verification: three adversarial reviewers (code diff, live
+  sandbox end-to-end, cross-surface coherence); their findings landed
+  before ship: guard order + LIVE-driver --force refusal, held-wake
+  cleared on normal wakes, hook kill(0,0) guard, pause gate + paused-time
+  idle exclusion on the sweep, owner-only cadence writes, work-timeout
+  cap, seven stale --headless doc sites rewritten. Suite: 704 tests (28
+  new in tests/test_continuation.py, 5 in tests/test_up_force.py); hub
+  rules budget 60 -> 70 lines by this design pass.
+
+## 0.12.52 — 2026-07-28
+
+**Source-aware db-path preflight (`db_locate`) — the a2a→agora rename
+incident: a remembered path may OPEN a database, never mint one. Designed
+against an adversarial review (10 findings, 2 of which reshaped the
+design).**
+
+- The incident: the project directory holding a custom-located hub db was
+  renamed while the hub ran. The hub kept writing through its open file
+  descriptors, so nothing surfaced until a reboot; the next `agora up`
+  died on a raw sqlite "unable to open database file" (config.json still
+  remembered the old absolute path, whose parent was gone). The NEAR-MISS
+  was worse: had the stale parent still existed, sqlite would have minted
+  an EMPTY db and the hub would have booted amnesiac — silently splitting
+  3 weeks of multi-agent history.
+- New rule (src/agora/db_locate.py, full decision matrix in its
+  docstring, every row tested): an EXPLICIT `--db` typed this run may
+  create a new database; a REMEMBERED path (config.json db_path,
+  `$AGORA_DB`) may only open an existing one. A remembered path with
+  nothing usable behind it (missing, 0-byte, directory, unwritable)
+  refuses with a named diagnosis: the path, the likely cause, an
+  inventory of what exists (default-location db, newest snapshot in
+  `~/.agora/backups` — existence/size/mtime only, counting would open a
+  db another hub may serve), and two explicit remedies. `REFUSING to
+  start:` prefix + exit 3, parity with the port-squatter refusal.
+- `--db` no longer takes its argparse default from `$AGORA_DB` (review
+  F1 — the blocker): a months-old export in a shell profile is remembered
+  state, not an explicit choice, and must not carry create-authority. The
+  env var still works, resolved inside cmd_up as its own source. A
+  config db_path that resolves to the default is reclassified DEFAULT
+  (F2), so deliberately deleting the default db still boots fresh —
+  with one loud "creating a NEW EMPTY hub db" notice when a config
+  already exists.
+- Flag/env paths are normalized (expanduser + abspath) before use and
+  persistence; a RELATIVE remembered db_path refuses (its meaning would
+  depend on the start directory); `--db :memory:` refuses by name
+  (`Database(":memory:")` stays available to tests); `--home` is now
+  abspath'd too (F6).
+- config.json is persisted only AFTER the db opens successfully (F4):
+  a crashed boot no longer re-blesses the very path it failed on, and a
+  no-op double launch (`up --db /new` while a hub serves) no longer
+  rewrites db_path to a file no hub is using.
+- A DIFFERENT-port `agora up` against the db a live hub is already
+  serving now refuses (F8 — WAL admits two writers; two hubs on one
+  file double-deliver every message). The same-port double launch keeps
+  its friendly exit 0.
+- `agora backup` / `agora restore` share the resolver and policy (F5):
+  a missing remembered db gets the same moved-project diagnosis instead
+  of a raw FileNotFoundError; restore refuses a missing parent by name.
+- docs: troubleshooting gains the refusal verbatim with remedies;
+  "keep the db at the default location" stated as the class-killing
+  practice. Suite: 671 tests (23 new in tests/test_db_locate.py).
+
 ## 0.12.51 — 2026-07-27
 
 **Semantic search (agora-0137; operator order dm#182: "keywords and

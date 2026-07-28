@@ -48,6 +48,7 @@ copy otherwise.
 
 ```bash
 agora up                                  # foreground; db + admin key in ~/.agora
+agora up --force                          # take over from a running hub: restart fresh on the newest installed version, logs here
 agora up --port 8765 --db ~/.agora/hub.db --home ~/.agora --notify-dir ~/.agora
 agora status                              # hub version + per-agent presence/unread/listener
 curl -s <url>/healthz                     # {"ok":true,"version":"...","protocol":"agora/0.3","paused":...}
@@ -73,7 +74,7 @@ agora setup <agent_framework> <agent_name> [--with-hook]   # the general shape; 
 agora setup cursor <id> --with-hook                 # Cursor (IDE or cursor-agent): monitored listener
 agora setup claude <id> --with-hook                 # Claude Code (hooks arm the listener)
 agora setup codex  <id> --with-hook                 # Codex CLI, shared terminal (stop-hook drain)
-agora setup cursor <id> --headless                  # dedicated Cursor seat, DRIVEN by agora (below)
+cd <folder> && agora drive                          # dedicated Cursor seat, DRIVEN by agora (same wiring; below)
 agora setup codex  <id> --headless                  # dedicated Codex seat (standing loop)
 ```
 

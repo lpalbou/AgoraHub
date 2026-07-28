@@ -766,9 +766,35 @@ def run_listen(*, agent_id: str | None = None, url: str | None = None,
                poll: float = 0.5, adaptive: bool = False,
                idle_nudge: float = 0.0,  # accepted no-op since 0.10.5 (see cli)
                signal_passthrough: bool = False,
+               driver_call: bool = False,
                cwd: Path | None = None) -> int:
     aid, hub = resolve_identity(agent_id, url, Path(cwd) if cwd else Path.cwd())
     home = _config.home()
+    # ONE reception owner per seat (2026-07-28): while a driver (`agora
+    # drive`) owns this seat — live pid in drive-<id>.pid — any listener
+    # armed from INSIDE a spawned turn (a turn obeying a legacy interactive
+    # rule) or from a stray session would tail the same notify file and
+    # advance the SHARED offset/owedsig, starving the driver of wakes: both
+    # blind-spot recoveries go dead while `agora status` still says "armed".
+    # Refuse STATELESSLY — nothing written, nothing consumed — whichever
+    # way the model jumps. The driver's own embedded listen passes
+    # driver_call=True; the age bound keeps a reboot-reused pid from
+    # refusing forever.
+    if not driver_call:
+        drive_pid_path = home / f"drive-{aid}.pid"
+        try:
+            dpid = int(drive_pid_path.read_text().strip() or "0")
+            dage = time.time() - drive_pid_path.stat().st_mtime
+        except (OSError, ValueError):
+            dpid, dage = 0, float("inf")
+        if (dpid > 0 and dpid != os.getpid() and pid_alive(dpid)
+                and dage < 7200.0):
+            print(f"a watcher (agora drive, pid {dpid}) owns reception for "
+                  f"'{aid}': STOP this listener/loop shell and END your "
+                  "turn — wakes arrive as driven turns; do not retry or "
+                  "re-arm.", file=sys.stderr, flush=True)
+            _emit("AGORA_LISTEN ended reason=driver-owns-reception")
+            return 0
     src = resolve_source(source, hub, home, aid)
     lock_path = Path(lock).expanduser() if lock else home / f"listen-{aid}.lock"
     pid_path = home / f"listen-{aid}.pid"

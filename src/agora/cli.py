@@ -25,6 +25,7 @@ import time
 from pathlib import Path
 
 from . import config as _config
+from . import db_locate as _db_locate
 
 
 def _resolve_mcp_command() -> str:
@@ -86,7 +87,11 @@ def _apply_home(args: argparse.Namespace) -> None:
     child process sees the same home."""
     home = getattr(args, "home", None)
     if home:
-        os.environ["AGORA_HOME"] = str(Path(home).expanduser())
+        # abspath as well as expanduser: a relative --home would otherwise
+        # persist CWD-dependent meaning into every child process (db_locate
+        # review F6) — the same trap as a relative remembered db_path.
+        os.environ["AGORA_HOME"] = os.path.abspath(
+            str(Path(home).expanduser()))
 
 DEFAULT_PORT = 8765
 
@@ -134,38 +139,109 @@ def _port_holder(host: str, port: int) -> tuple[int, str] | None:
     return 0, ""  # taken, but holder unidentifiable — still refuse loudly
 
 
-def _preflight_port(host: str, port: int, url: str) -> None:
+def _preflight_port(host: str, port: int, url: str,
+                    force: bool = False) -> None:
     """Before binding, diagnose a busy port instead of dying on a raw
     EADDRINUSE (agora-0096). If a healthy agora hub already holds it, say so
-    and exit 0 (a double-launch is not an error). If a NON-hub squatter
-    holds it, name the pid+command and exit 3 — a 10-second diagnosis in
-    place of the silent deaf-room outage."""
+    and exit 0 (a double-launch is not an error) — unless `force`, which
+    TAKES THE PORT OVER: SIGTERM the VERIFIED hub (escalating to SIGKILL),
+    wait for the port to free, and proceed, so `agora up --force` in a
+    terminal always ends with the newest installed hub serving and its logs
+    in THAT terminal. A NON-hub squatter is never killed, force or not
+    (killing an unverified process on protocol suspicion is how innocent
+    daemons die): name the pid+command and exit 3."""
     holder = _port_holder(host, port)
     if holder is None:
         return  # free: proceed to bind
     # Something listens. Is it a real agora hub?
+    is_hub, version = False, "?"
     try:
         import httpx
         r = httpx.get(f"{url}/healthz", timeout=3.0)
         body = r.json()
         if r.status_code == 200 and body.get("protocol", "").startswith("agora/"):
-            print(f"an agora hub is ALREADY running at {url} "
-                  f"(version {body.get('version', '?')}) — nothing to do. "
-                  "Stop it first if you meant to restart.", file=sys.stderr)
-            raise SystemExit(0)
-    except SystemExit:
-        raise
+            is_hub, version = True, body.get("version", "?")
     except Exception:
-        pass  # not an agora hub (or not answering) — a squatter; fall through
+        pass  # not an agora hub (or not answering) — a squatter path below
     pid, cmd = holder
+    if is_hub and not force:
+        print(f"an agora hub is ALREADY running at {url} "
+              f"(version {version}) — nothing to do. "
+              "Stop it first if you meant to restart, or take the port "
+              "over with `agora up --force`.", file=sys.stderr)
+        raise SystemExit(0)
+    if is_hub and force:
+        if not pid:
+            print(f"REFUSING to start: a hub answers at {url} but its pid "
+                  "is unidentifiable (lsof missing or opaque) — nothing "
+                  "safe to kill. Stop it by hand and retry.",
+                  file=sys.stderr)
+            raise SystemExit(3)
+        import signal
+        print(f"--force: taking over port {port} from the running agora "
+              f"hub (version {version}, pid {pid}) — SIGTERM, then "
+              "SIGKILL if it lingers.", file=sys.stderr)
+        for sig, grace in ((signal.SIGTERM, 10.0), (signal.SIGKILL, 5.0)):
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                pass  # already gone
+            except PermissionError:
+                print(f"REFUSING to start: pid {pid} is not ours to kill "
+                      "(EPERM) — another user owns that hub.",
+                      file=sys.stderr)
+                raise SystemExit(3)
+            deadline = time.monotonic() + grace
+            while time.monotonic() < deadline:
+                if _port_holder(host, port) is None:
+                    print(f"--force: port {port} is free; starting fresh.",
+                          file=sys.stderr)
+                    return
+                time.sleep(0.25)
+        print(f"REFUSING to start: pid {pid} survived SIGTERM and SIGKILL "
+              f"and port {port} is still held — inspect it by hand.",
+              file=sys.stderr)
+        raise SystemExit(3)
     who = f"pid {pid} ({cmd})" if pid else "an unidentified process"
     print(
         f"REFUSING to start: port {port} is held by {who} — NOT an agora "
         f"hub. This is exactly the silent-squatter class that left the room "
         f"deaf for 16h (a stray static file server on the hub port). Free "
         f"the port (kill {pid or 'that pid'}) and retry, or start on a "
-        f"different port with --port.", file=sys.stderr)
+        f"different port with --port. (--force never kills an UNVERIFIED "
+        f"process — only a hub that answers /healthz as agora.)",
+        file=sys.stderr)
     raise SystemExit(3)
+
+
+def _preflight_foreign_hub(db_path: str, cfg: dict, url: str) -> None:
+    """Refuse to open a db another LIVE hub is serving. WAL admits two
+    writer processes on one file, so `agora up --port 8766` against the
+    running hub's db would boot fine and double every notify fan-out. The
+    same-port double launch is already handled (exit 0 in _preflight_port);
+    this catches the different-port case: config remembers the db AND the
+    config url answers as an agora hub somewhere other than where we are
+    about to bind (adversarial review F8, 2026-07-27)."""
+    cfg_db, cfg_url = cfg.get("db_path"), cfg.get("url")
+    if not (cfg_db and cfg_url) or cfg_url.rstrip("/") == url.rstrip("/"):
+        return
+    if os.path.realpath(cfg_db) != os.path.realpath(db_path):
+        return
+    try:
+        import httpx
+        r = httpx.get(f"{cfg_url.rstrip('/')}/healthz", timeout=3.0)
+        if r.status_code == 200 and r.json().get(
+                "protocol", "").startswith("agora/"):
+            print(f"REFUSING to start: a hub at {cfg_url} is already "
+                  f"serving this db ({db_path}). Two hubs on one SQLite "
+                  "file double-deliver every message. Stop that hub first, "
+                  "or start this one on its OWN db with --db.",
+                  file=sys.stderr)
+            raise SystemExit(3)
+    except SystemExit:
+        raise
+    except Exception:
+        pass  # config url answers nothing hub-like: proceed
 
 
 def cmd_up(args: argparse.Namespace) -> None:
@@ -187,10 +263,20 @@ def cmd_up(args: argparse.Namespace) -> None:
 
     home = _config.home()
     cfg = _config.load_config()
-    db_path = args.db or cfg.get("db_path") or str(home / "agora.db")
+    # Source-aware db resolution (db_locate): an EXPLICIT --db may create a
+    # new database; a REMEMBERED path (config.json, $AGORA_DB) may only open
+    # an existing one — the a2a->agora rename incident (2026-07-27) showed a
+    # stale remembered path silently minting an empty hub is the worst
+    # failure this command has. Refusals exit 3 with named remedies.
+    resolved = _db_locate.resolve(args.db, os.environ.get("AGORA_DB"),
+                                  cfg.get("db_path"), str(home / "agora.db"))
+    db_notices = _db_locate.preflight_up(
+        resolved, home=home, default=str(home / "agora.db"),
+        config_exists=(home / "config.json").exists())
+    db_path = resolved.path
+    _preflight_foreign_hub(db_path, cfg, _default_url(args.port))
     admin_key = os.environ.get("AGORA_ADMIN_KEY") or cfg.get("admin_key") or secrets.token_hex(16)
     url = _default_url(args.port)
-    _config.save_config(url=url, admin_key=admin_key, db_path=db_path)
 
     # Hub-written notify files: the hub maintains <id>-inbox.log for every
     # local agent itself, so no watcher processes, supervisors or OS services
@@ -199,6 +285,8 @@ def cmd_up(args: argparse.Namespace) -> None:
 
     print(f"agora hub → {url}")
     print(f"  db:     {db_path}")
+    for notice in db_notices:
+        print(f"  {notice}")
     print(f"  config: {_config.home() / 'config.json'} (admin key saved; agents self-register)")
     if notify_dir:
         print(f"  notify: {notify_dir}/<agent>-inbox.log (hub-written; nothing to run)")
@@ -219,7 +307,9 @@ def cmd_up(args: argparse.Namespace) -> None:
     # Refuse a squatted port with a NAMED diagnosis instead of a raw bind
     # error or (worse) letting a look-alike squatter answer politely while
     # the room goes deaf (agora-0096, the 16h-deaf-room incident).
-    _preflight_port(args.host, args.port, url)
+    # --force takes over from a VERIFIED hub only (fresh restart on the
+    # newest installed code, logs in THIS terminal).
+    _preflight_port(args.host, args.port, url, force=args.force)
     app = create_app(db_path=db_path, admin_key=admin_key,
                      rate_per_minute=args.rate_per_minute,
                      notify_dir=notify_dir or None,
@@ -232,6 +322,12 @@ def cmd_up(args: argparse.Namespace) -> None:
                      # adopts it, a live hub's durable choice never yields
                      # to a hand-edited file.
                      embedding=cfg.get("embedding"))
+    # Persist config only AFTER the db opened and migrated successfully.
+    # Saving earlier planted remembered lies twice over: a crashed boot
+    # re-blessed the very path it failed on, and a no-op double launch
+    # (`up --db /new` while a hub is serving) rewrote db_path to a file no
+    # hub was using (adversarial review F4, 2026-07-27).
+    _config.save_config(url=url, admin_key=admin_key, db_path=db_path)
     # Pin WS keepalive explicitly: connection-derived presence relies on dead
     # sockets being detected within a bounded window (audit M4). Defaults can
     # differ per uvicorn/ws backend; make the bound deliberate.
@@ -370,11 +466,12 @@ def cmd_setup_cursor(args: argparse.Namespace) -> None:
     if api_key:
         _print_key_placement(written[0])
     if headless:
-        # A driven seat needs no kickoff paste and no open window: the
-        # watcher boots it headlessly and re-wakes it per obligation.
-        print("\nThis seat is DRIVEN: start its watcher from this workspace "
+        # Mode-free since 0.12.53: --headless changed NOTHING in the wiring
+        # (the running driver is the mode); it only prints this quickstart.
+        print("\n--headless is a deprecated no-op (wiring is identical; the "
+              "running driver IS the mode). This folder is drivable now "
               "(it blocks; keep it running, Ctrl-C to stop):\n"
-              f"  cd {workspace} && agora drive --as {args.agent}\n"
+              f"  cd {workspace} && agora drive\n"
               "Driven turns run sandboxed (--sandbox enabled) and yield by "
               "exiting; the watcher re-wakes the seat when a message lands.")
         _warn_if_not_project_root(workspace, args.agent)
@@ -666,7 +763,12 @@ def cmd_backup(args: argparse.Namespace) -> None:
     from . import backup as _backup
 
     cfg = _config.load_config()
-    db_path = args.db or cfg.get("db_path") or str(_config.home() / "agora.db")
+    home = _config.home()
+    resolved = _db_locate.resolve(args.db, os.environ.get("AGORA_DB"),
+                                  cfg.get("db_path"), str(home / "agora.db"))
+    _db_locate.preflight_backup(resolved, home=home,
+                                default=str(home / "agora.db"))
+    db_path = resolved.path
     out = Path(args.out) if args.out else _backup.default_snapshot_path(
         _config.home() / "backups")
     try:
@@ -689,7 +791,12 @@ def cmd_restore(args: argparse.Namespace) -> None:
     from . import backup as _backup
 
     cfg = _config.load_config()
-    db_path = args.db or cfg.get("db_path") or str(_config.home() / "agora.db")
+    home = _config.home()
+    resolved = _db_locate.resolve(args.db, os.environ.get("AGORA_DB"),
+                                  cfg.get("db_path"), str(home / "agora.db"))
+    _db_locate.preflight_restore(resolved, home=home,
+                                 default=str(home / "agora.db"))
+    db_path = resolved.path
     url = _hub_url(args)
     # A restore under a live hub would race its WAL; refuse with the fix.
     try:
@@ -1892,6 +1999,24 @@ def _listener_state(home: Path, agent_id: str) -> str:
     return "STALE"
 
 
+def _driver_state(home: Path, agent_id: str) -> str:
+    """`agora status` driver column from `drive-<id>.pid` (the one file that
+    means 'a driver owns this seat'): live pid = "driving"; pidfile whose
+    holder is dead = "STALE" (the driver crashed — restart it); no file =
+    "-". NOTE: unlike the listener column, no mtime bound on the live case —
+    a driver blocked in a long work chunk legitimately goes minutes without
+    touching the file, and pid liveness is the truth here."""
+    from .listen import pid_alive
+    pid_path = Path(home) / f"drive-{agent_id}.pid"
+    try:
+        pid = int(pid_path.read_text().strip() or "0")
+    except (OSError, ValueError):
+        return "-"
+    if pid > 0 and pid_alive(pid):
+        return "driving"
+    return "STALE"
+
+
 def cmd_drive(args: argparse.Namespace) -> None:
     """The external resume-driver for a HEADLESS seat: block cheaply in
     `agora listen --once --important-only`, and on an obligation wake spawn
@@ -1905,6 +2030,8 @@ def cmd_drive(args: argparse.Namespace) -> None:
         agent_id=args.as_agent, url=args.url, model=args.model,
         max_wait=args.max_wait, sandbox=args.sandbox,
         turn_budget=args.turn_budget, session_rotate=args.session_rotate,
+        initiative=args.initiative, work_timeout=args.work_timeout,
+        work_budget=args.work_budget, force=args.force,
         once=args.once, max_turns=args.max_turns))
 
 
@@ -1952,8 +2079,8 @@ def cmd_status(args: argparse.Namespace) -> None:
         return
     if not isinstance(rows, list):
         return
-    print(f"\n{'agent':<16} {'state':<8} {'listener':<9} {'unread':>6} "
-          f"{'pending':>7}  oldest-pending")
+    print(f"\n{'agent':<16} {'state':<8} {'listener':<9} {'driver':<8} "
+          f"{'unread':>6} {'pending':>7}  oldest-pending")
     # The hub can only see what CONTACTS it: an open-but-idle IDE tab makes no
     # calls, so it honestly reads offline even though it will respond at its
     # next prompt. Spell that out or every operator misreads the table.
@@ -1961,7 +2088,9 @@ def cmd_status(args: argparse.Namespace) -> None:
               "authenticated call <10m ago |\n  offline = no contact (an open but "
               "idle IDE tab reads offline; it acts at its next prompt/turn)\n"
               "  listener: armed = live `agora listen` pidfile | STALE = pidfile "
-              "but dead/old | - = none")
+              "but dead/old | - = none\n"
+              "  driver: driving = live `agora drive` owns the seat | STALE = "
+              "driver crashed (restart it) | - = none")
     for row in rows:
         oldest = row["oldest_pending_minutes"]
         oldest_s = f"{oldest:.0f}m" if oldest is not None else "-"
@@ -1989,8 +2118,10 @@ def cmd_status(args: argparse.Namespace) -> None:
             flag += (f" <- BLOCKED-SEND: {row['refused_sends_1h']}x last hour "
                      f"(last: {last.get('code')} {str(last.get('detail'))[:60]})")
         listener = _listener_state(_config.home(), row["agent_id"])
+        driver = _driver_state(_config.home(), row["agent_id"])
         print(f"{row['agent_id']:<16} {row['state']:<8} {listener:<9} "
-              f"{row['unread']:>6} {row['pending_obligations']:>7}  {oldest_s}{flag}")
+              f"{driver:<8} {row['unread']:>6} "
+              f"{row['pending_obligations']:>7}  {oldest_s}{flag}")
     print(f"\n{legend}")
 
 
@@ -2007,7 +2138,14 @@ def build_parser() -> argparse.ArgumentParser:
     up = sub.add_parser("up", help="start the hub with persistent defaults")
     up.add_argument("--host", default=os.environ.get("AGORA_HOST", "127.0.0.1"))
     up.add_argument("--port", type=int, default=int(os.environ.get("AGORA_PORT", DEFAULT_PORT)))
-    up.add_argument("--db", default=os.environ.get("AGORA_DB"))
+    # No env default here: cmd_up must tell a --db TYPED THIS RUN from a
+    # months-old $AGORA_DB in a shell profile — only the typed flag has the
+    # authority to create a new database (db_locate F1). The env var still
+    # works; it is resolved inside cmd_up as remembered state.
+    up.add_argument("--db", default=None,
+                    help="hub db file (default: config.json db_path, else "
+                         "~/.agora/agora.db; $AGORA_DB is honored but may "
+                         "only point at an EXISTING db)")
     up.add_argument("--rate-per-minute", type=float, default=60.0)
     up.add_argument("--notify-dir", default=None,
                     help="dir for hub-written <agent>-inbox.log files "
@@ -2024,6 +2162,12 @@ def build_parser() -> argparse.ArgumentParser:
                     type=float, default=0.0,
                     help="per-channel total attachment storage cap in MB "
                          "(default: 1024)")
+    up.add_argument("--force", action="store_true",
+                    help="take the port over: SIGTERM (then SIGKILL) a "
+                         "VERIFIED agora hub already serving it and start "
+                         "fresh here — guarantees the newest installed "
+                         "version is the one running, with logs in THIS "
+                         "terminal. Never kills a non-hub process")
     up.set_defaults(func=cmd_up)
 
     _KEY_HELP = ("operator-minted agent key (from `agora register`): seeds the "
@@ -2054,10 +2198,10 @@ def build_parser() -> argparse.ArgumentParser:
                             help=headless_help)
 
     _HEADLESS_HELP = {
-        "cursor": ("dedicated seat, no human shares the session: wire a "
-                   "DRIVEN seat (rule forbids in-session listeners; run "
-                   "`agora drive --as <id>` as its watcher). Do NOT use "
-                   "for a human-shared tab"),
+        "cursor": ("DEPRECATED no-op since 0.12.53 (mode-free wiring): the "
+                   "rule is identical either way — the running driver IS "
+                   "the mode (`cd <workspace> && agora drive`). The flag "
+                   "only prints the driver quickstart"),
         "claude": None,   # hooks already arm reception; no dedicated variant
         "codex": ("dedicated seat, no human shares the session: the rule "
                   "makes the standing wait_for_messages loop the seat's "
@@ -2282,6 +2426,28 @@ def build_parser() -> argparse.ArgumentParser:
                     help="turns on one cursor-agent session before rotating "
                          "to a fresh one (context-bloat + injection-residue "
                          "flush; default 25)")
+    dr.add_argument("--initiative", action="store_true",
+                    help="CONTINUATION for a dedicated work seat: at idle "
+                         "boundaries, chain bounded WORK chunks while the "
+                         "seat holds a live claim (claim:<task> it owns). "
+                         "Chunks end at checkpoints; any obligation "
+                         "preempts the next chunk; 3 receipt-less chunks "
+                         "per claim version park the chain. Default: off "
+                         "(reception-only, plus the turn-exit work unit "
+                         "every rule now teaches)")
+    dr.add_argument("--work-timeout", dest="work_timeout", type=float,
+                    default=600.0,
+                    help="hard cap per work chunk in seconds (default 600; "
+                         "raising it raises worst-case answer latency by "
+                         "the same amount)")
+    dr.add_argument("--work-budget", dest="work_budget", type=int, default=12,
+                    help="max work chunks per rolling hour (default 12; "
+                         "separate pool — reception's --turn-budget is "
+                         "never consumed by work)")
+    dr.add_argument("--force", action="store_true",
+                    help="take the seat over despite a live driver or a "
+                         "fresh interactive listener (you know what you "
+                         "are doing)")
     dr.add_argument("--once", action="store_true",
                     help="drive a single turn now (boot) and exit")
     dr.add_argument("--max-turns", dest="max_turns", type=int, default=None,

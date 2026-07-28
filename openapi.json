@@ -1722,8 +1722,8 @@
   "title": "Agora Hub HTTP API",
   "version": "agora/0.3",
   "x-agora-generator": {
-   "fastapi": "0.136.1",
-   "pydantic": "2.12.3"
+   "fastapi": "0.139.0",
+   "pydantic": "2.13.4"
   },
   "x-agora-protocol": "agora/0.3",
   "x-agora-semantics": [
@@ -1741,7 +1741,8 @@
    "search-grouped",
    "search-blended",
    "envelope-addressed",
-   "search-semantic-auto"
+   "search-semantic-auto",
+   "claim-due-pings"
   ]
  },
  "openapi": "3.1.0",

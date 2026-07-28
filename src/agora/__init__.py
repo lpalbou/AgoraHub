@@ -6,7 +6,7 @@ protocol are the stable integration surface and keep the `agora` name. Refer
 to the system as "Agora" for short.
 """
 
-__version__ = "0.12.51"
+__version__ = "0.12.53"
 
 PROTOCOL_VERSION = "agora/0.3"
 
@@ -37,4 +37,8 @@ PROTOCOL_SEMANTICS = [
     "search-semantic-auto",      # search fuses lexical+semantic when the
     #                              vector index is ready; mode_used/
     #                              semantic_coverage/notice on the report (0137)
+    "claim-due-pings",           # a claim row declaring cadence_minutes gets
+    #                              ONE standing owner-addressed open ping when
+    #                              idle past cadence; row touch clears it
+    #                              (owner-declared continuation, 2026-07-28)
 ]

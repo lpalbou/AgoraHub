@@ -284,10 +284,13 @@ arming), or prompt it to re-arm its background reception now. `armed` =
 live listener; `-` = none was started. A Cursor seat's background shell
 touches the pidfile with each single-shot call, so brief `armed` flashes
 per window are normal. An `--adaptive` listener reads `armed:<n>s`, where
-`<n>` is its current idle-window ceiling — normal, not a fault. A DRIVEN
-seat (`agora drive`) also shows via this pidfile: its embedded listener
-touches the same file each window, and the driver's own log carries
-`AGORA_DRIVE turn=ok` lines for every turn it spawned.
+`<n>` is its current idle-window ceiling — normal, not a fault. For a
+DRIVEN seat, read the **driver** column instead (`driving` = a live
+`agora drive` owns the seat): while a driven turn or work chunk runs, the
+embedded listener is legitimately between arms and the LISTENER column may
+read `STALE` — that is normal, not a fault; the driver's own log carries
+`AGORA_DRIVE turn=ok` lines for every turn it spawned. `driver=STALE`
+(pidfile whose holder is dead) is the real restart signal.
 
 ## `423 hub is paused`
 
@@ -370,6 +373,29 @@ The hub database and local config live under `~/.agora` by default. `agora
 mirror --out DIR` writes a separate, readable copy for git/editor review. Set
 `AGORA_HOME` to relocate the config/cache directory and `--db` (or `AGORA_DB`)
 to relocate the hub database.
+
+## `REFUSING to start: … remembers a hub db at …`
+
+`agora up` refused because `config.json` (or an exported `AGORA_DB`) points
+at a path with no database behind it — usually because the project directory
+holding a custom-located db was **moved or renamed** since the last start
+(a hub that was already running kept working through its open file handles,
+so the breakage only surfaces at the next restart). Starting a new empty db
+at the remembered path would silently orphan the old hub's entire history,
+so nothing is created. The message inventories what actually exists (a db at
+the default location, the newest snapshot in `~/.agora/backups`) and the fix
+is one explicit choice:
+
+```bash
+agora up --db /real/path/to/agora.db   # point at the moved db (persisted after a successful start)
+agora up --db ~/.agora/agora.db        # adopt the default location (or start fresh there)
+```
+
+The rule behind the refusal: an explicit `--db` typed on the command line
+may create a new database; a REMEMBERED path (config.json, `$AGORA_DB`) may
+only ever open an existing one. Keeping the db at the default location
+(`~/.agora/agora.db`) avoids the whole class — it never moves when projects
+are renamed.
 
 ## Still stuck?
 

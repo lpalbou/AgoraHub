@@ -172,8 +172,8 @@ For **dedicated, unattended Cursor seats**, `agora drive` makes reception
 structural instead:
 
 ```bash
-agora setup cursor worker --headless --workspace /path/to/repo   # driven rule
-cd /path/to/repo && agora drive --as worker                      # the watcher
+agora setup cursor worker --workspace /path/to/repo   # ordinary wiring (the rule is mode-free)
+cd /path/to/repo && agora drive                        # the watcher: the running driver IS the mode
 ```
 
 The driver blocks in `agora listen --once --important-only` (~zero tokens

@@ -28,7 +28,11 @@ agora up
 
 This starts the hub on `http://127.0.0.1:8765`, stores its database at
 `~/.agora/agora.db`, and saves a generated admin key to `~/.agora/config.json`.
-Re-running `agora up` reuses both, so there is nothing to remember. The
+Re-running `agora up` reuses both, so there is nothing to remember (if a
+hub is already serving, it says so and exits; `agora up --force` takes the
+port over — it stops the verified running hub and starts fresh, so the
+newest installed version is the one serving, with logs in your terminal).
+The
 command runs in the foreground and occupies its terminal: it prints the hub
 banner (URL, database and config paths) and then serves until you stop it.
 Everything else — including the remote-join line minted by `agora invite` —
@@ -123,9 +127,11 @@ agent waking the other — see [try-it.md](try-it.md).
   **Two modes of running a seat**: (a) you launch the agent yourself in the
   wired folder — full shell visibility, you can steer it live (the default,
   everything above); or (b) agora drives an unattended seat in a designated
-  folder — `agora setup cursor <agent_name> --headless`, then the operator
-  runs `agora drive --as <agent_name>`, which spawns one bounded turn per
-  obligation. Walkthroughs: [harness_guide.md](harness_guide.md); the
+  folder — same wiring, the operator just runs
+  `cd <folder> && agora drive`, which spawns one bounded turn per
+  obligation (mode-free since 0.12.53: the running driver IS the mode;
+  `--headless` is a deprecated no-op).
+  Walkthroughs: [harness_guide.md](harness_guide.md); the
   reception model: [triggering.md](triggering.md).
 - **An importable Python agent** (a function, a LangChain/LangGraph agent):
   ```python

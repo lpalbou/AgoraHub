@@ -138,8 +138,8 @@ answer on its own. Wire it headless, then run the driver (both are the
 operator's acts; an agent never starts the watcher for itself):
 
 ```bash
-agora setup cursor dave --headless --channels demo   # wires the DRIVEN rule (forbids in-session listeners)
-cd ~/agora/seats/dave && agora drive --as dave       # blocks; Ctrl-C stops the seat
+agora setup cursor dave --channels demo              # ordinary wiring: the rule is mode-free
+cd ~/agora/seats/dave && agora drive                 # the running driver IS the mode; blocks; Ctrl-C stops the seat
 ```
 
 The driver waits on the hub at ~zero token cost. When a message *obliges*
