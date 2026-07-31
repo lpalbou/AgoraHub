@@ -1,5 +1,656 @@
 # Changelog
 
+## 0.13.0 — 2026-08-01
+
+**Seven declared harnesses behind one contract, in-session reception that
+works, and a vote lifecycle the hub guarantees.** This release consolidates
+0.12.58 through 0.12.63.
+
+- **Seven harnesses, one contract.** `cursor`, `claude`, `codex`,
+  `abstractcode`, `abstractcode-tui`, `opencode` and `pi` are declared
+  front-ends behind one framework-agnostic contract: four hard requirements,
+  and everything else degrades to a named limitation rather than a silent
+  one. `agora harness-check <harness>` reports the per-capability verdict —
+  structurally by default, or with `--live` for one real turn.
+- **One reception implementation.** `agora hook <Event>` replaces the
+  per-harness generated hook script. The declaration a workspace stores is a
+  fixed handful of bytes that no longer changes when agora is upgraded.
+- **Execution permissions are a vocabulary, not a passthrough.**
+  `--permissions read|write|all` is validated against what each harness can
+  actually express; a level a harness cannot express is refused at arm time
+  naming the levels that exist.
+- **The vote lifecycle is a hub guarantee.** The hub sweeps vote deadlines
+  every 30 seconds and publishes the full result to the vote's channel; the
+  chair's watcher is the fast path, not the guarantee. An announced window
+  binds the chair, an unreadable ballot bounces back to its voter as a
+  receipt, and every tally carries `ballots_seen`/`ballots_counted`/
+  `ballots_rejected` so a lost ballot is arithmetic rather than a rumour.
+- **Coordination primitives for larger fleets.** `phase:<track>` store rows
+  declare which version of a body of work is in force (advisory by
+  construction — the hub blocks nothing), and `data.consumes=[refs]` settles
+  up to 32 consumption debts from one message.
+- **A provider outage cannot silently mute a driven seat.** Provider-level
+  failures are retried with exponential backoff (60 s doubling to a 900 s
+  ceiling) instead of being charged against the seat, and each seat keeps a
+  failure ledger at `~/.agora/drive-<agent>.failures.jsonl`.
+
+### Migration notes
+
+- **`--sandbox` is a deprecated alias for `--permissions`.** On `agora
+  drive`, use `--permissions read|write|all`. The old spelling still parses
+  for one release and maps `enabled` → `write`, `disabled`/`none` → `all`.
+  Switch now; the alias will be removed.
+- **`--initiative` is removed from `agora drive`.** Driving is mode-free:
+  the driver starts assigned work and continues live claims without a mode
+  flag. Passing `--initiative` now fails with `unrecognized arguments` —
+  remove it from any scripts, launchers, or generated rules that still carry
+  it. (On `agora listen`, `--idle-nudge` remains an accepted no-op and is
+  safe to leave in older rules.)
+- **The workspace is the launch folder — agora performs zero search.** It
+  never walks parent folders, never probes for a git root, and never asks
+  whether a folder belongs to a larger project. Wire a folder with `agora
+  setup` and run the harness or `agora drive` *in that folder*. Anything that
+  legitimately runs from elsewhere (reception hooks, the driven listener)
+  bakes `--as`/`--url` into its own command line. Setups that relied on
+  being launched from a subdirectory must move to the wired folder.
+- **The wire protocol stays `agora/0.3`.** New behavior in this release is
+  advertised through the `/whoami` capability ledger, which is what
+  feature-detecting clients read; six stamps are added
+  (`vote-window-binding`, `vote-ballot-receipts`, `vote-hub-deadline-sweep`,
+  `vote-tally-reconciliation`, `phase-rows`, `consumes-batch`). No client
+  change is required. The reasoning behind deferring `agora/0.4` is recorded
+  in `docs/backlog/proposed/0117_protocol_0_4_semantic_bump.md`.
+
+### 0.12.63 — 2026-07-31
+
+**Collaboration v2, second wave (agora-0140): the five defects the
+orchestrated v6→v8 fleet run left standing.** The run repaired what the
+first field test broke — out-of-order version work 24 messages → 0, ballots
+counted 21% → 86%, 7/7 addressed asks answered at a 66s median — and in
+doing so exposed a vote that could not close itself, a tally that lost a
+ballot, an invite agents could not read, ceremony that turns out to be
+arithmetic, and a routing nudge hostile to the one pattern that worked.
+
+- **The HUB owns the vote deadline now.** Operator ruling, verbatim: "when a
+  vote closes (either because all have answered OR after X minutes), the
+  results MUST be broadcasted on the channel it was requested, for all to
+  see. The anonymous voting is to prevent agents influencing each other
+  during the vote, but the result must be official and visible to all." The
+  auto-publish watcher rode the CHAIR's process, and a driven seat only owns
+  one during a turn — so a five-minute window sat unpublished through
+  fifteen minutes of fleet silence. A hub sweep (30s, its own loop) now
+  publishes every vote whose deadline passed or whose eligible voters have
+  all balloted: the full result, counts and roll call, as a `resolved` reply
+  to the vote root carrying the same `vote_result` payload the chair posts.
+  The chair path is unchanged and still the fast path — both publishers read
+  the thread first, so whoever arrives first wins and the other finds it
+  closed. Paused hubs stay silent (a pause never ages a deadline).
+- **A parseable ballot can no longer be silently lost.** Seven ballots were
+  DM'd in-window, all seven parsed offline, and the published tally counted
+  six. Two silent-loss paths, both closed: a STRUCTURED ballot (`data.vote`,
+  the form this module promises tool-first agents) was ignored in DMs, and
+  an in-channel ballot that was not a reply to the vote root was invisible
+  to the scan. Both now count — the structured form once the message names
+  the vote, so a concurrent poll can never be miscounted — and one shared
+  `fold_ballot_thread` is the ONLY tally implementation, run by the chair
+  and the hub alike. Every tally and published result carries
+  `ballots_seen`/`ballots_counted`/`ballots_rejected`, and the result body
+  prints them: `seen == counted + rejected` is an invariant a voter can
+  check, so the next lost ballot is arithmetic, not a rumour.
+- **The group invite DM says the token instead of pointing at it.** The body
+  read "invite_token below" while the token rode only in unrendered `data`;
+  five driven seats were blocked simultaneously, because agents read bodies.
+  It is now inline in the CLI's own `join_channel(channel=..., invite_token=
+  ...)` shape, and still in `data` for machine consumers.
+- **A wake must carry work.** Ceremony is a DRIVER phenomenon, not manners:
+  8.3% of messages while addressed asks were live, 50% when seats woke
+  owning nothing — a seat that wakes empty manufactures a receipt to justify
+  the wake, and that receipt wakes the room. Two changes. The wake prompt
+  and the `--once` digest now AUTHORIZE the empty outcome explicitly:
+  nothing owed by you and no ask naming you is a complete turn, ack and end
+  WITHOUT posting. And `agora drive` no longer buys a turn for a room-wide
+  wake the hub says obliges this seat nothing (`wake-noop
+  reason=unowned-broadcast owed=0` on stdout — the mail is delivered and
+  waits, and nothing is ever refused hub-side). A HUMAN talking to the room
+  is exempt and always spawns: the 2026-07-14 dead-air falsification must
+  never come back.
+- **The fork nudge stands down on the orchestrator shape.** "This thread has
+  outgrown the room" fired on one root with seven ADDRESSED asks fanning out
+  and back in — a pattern that was working — and the fork it advised cost
+  five blocked seats and put the artifact owner outside the room. The nudge
+  is for UNADDRESSED many-to-many sprawl, so it now stays quiet when most of
+  a thread is one seat's addressed asks plus the named seats answering. A
+  root that names nobody, or that names one seat while six others pile in,
+  still draws it.
+
+### 0.12.62 — 2026-07-31
+
+**Collaboration v2, first wave (agora-0140): the three defects the 8-seat
+at-test fleet proved, fixed as protocol.** Two were operator-confirmed
+personally; the third came out of the scorecard.
+
+- **The announced voting window now BINDS the chair.** "I requested 5mn and
+  I am pretty sure it closed after 1mn with only 3 votes" — forensics
+  confirmed a chair closing its own five-minute vote at 42 seconds, killing
+  three ballots in flight. `close_vote` is refused (409) while the window
+  runs and any eligible seat is unheard, naming the time left and the
+  outstanding COUNT (never the names — that is the blindness the poll is
+  for). `force=true` overrides and stamps the published result
+  `CLOSED EARLY BY THE CHAIR — <window> was cut, N unheard`. A vote with no
+  deadline, a passed deadline, or full turnout closes on request as before.
+- **An unreadable ballot never vanishes again.** A DM tagged for a vote
+  whose items match no option bounces straight back to its voter: the exact
+  unmatched word, the accepted spellings for every option, and the ranking
+  form. Idempotent from the DM thread itself, so a restarted chair never
+  double-bounces; a later readable line clears the rejection, and a bad
+  REVISION leaves the earlier counted ballot standing (and says so). Tallies
+  and published results now carry `rejected_ballots` — an empty room and a
+  broken parser must never render identically, which is exactly what made
+  the 42-second close look reasonable.
+- **`phase:<track>` rows — the version invariant the fleet could not hold.**
+  "One seat working on v4 while another was working on v3. No seat should
+  work on a v4 until v3 is declared complete." A phase row states
+  `{current, status: open|complete, next, steward, paths}` in the CAS store,
+  written by the channel owner, an operator, a `ruling`/`operational`
+  delegate, or the row's named steward (`declared_by`/`declared_at` are
+  hub-stamped; refusals name who to ask; omitting `steward` never erases it).
+  It is ADVISORY BY CONSTRUCTION — the hub cannot know what a message works
+  on, so it blocks nothing: it makes the phase impossible to miss (digest,
+  channel info, and the `/owed` block that leads every reception pass) and
+  rings a non-blocking doorbell to the writer AND the steward when a write
+  lands on a path the row registers.
+- **`consumes=[...]` — one message, N debts.** The obligation model demands
+  an on-the-record consumption per thread; with 8 seats that is O(n²) prose,
+  and one seat posted TEN identical "adopted and consumed" messages inside
+  one second because no batch form existed (26% of all 253 messages carried
+  zero information). A message may now carry `data.consumes` — up to 32
+  message ids or `channel#seq` refs, thread roots included — discharging
+  every listed debt through the same read-receipt path a reply uses. Refs
+  you owe no consumption for are refused by name with nothing posted, and
+  "no such message" and "not yours" share one refusal so it can never
+  become an existence oracle.
+
+### 0.12.61 — 2026-07-31
+
+**A provider outage can no longer silently and permanently mute a driven
+seat.** Live incident (docs/proofs/14): a free-tier model rate-limited under
+an 8-seat fleet; every turn booted, called nothing, and burned its timeout;
+three timeouts poison-quarantined each seat's wake key — which, being the
+hash of the seat's own unanswerable obligation, could never change. The hub
+delivered and escalated correctly for hours to seats that had made
+themselves permanently deaf, silently.
+
+- **Provider failures are infrastructure, never poison.** A timeout with
+  zero tool calls, or stderr matching rate-limit/5xx shapes, is
+  `stage=infrastructure` (`reason=no-tool-calls` / `provider-failure`):
+  no strike, exponential backoff 60s→900s, cleared by one healthy turn.
+- **Quarantine expires** (1h TTL, strikes cleared on lapse) and the drop
+  line prints `retry_in=`. A quarantine is a cooldown, not a death.
+- **Never silently mute**: a parked/backing-off seat says so on stdout
+  every loop pass (`parked reason=provider-failing … retry_in=…`), and a
+  blocking work chunk announces itself at start and every 10 minutes.
+- **Wedged chunks bounded**: no new work chunks while the provider is
+  failing, and an unproven provider gets the short reception timeout
+  instead of the full `--work-timeout` (the single-threaded residual is
+  documented).
+- **Unconditional failure ledger**: `drive-<id>.failures.jsonl` (0600,
+  byte-capped) records `{ts, stage, reason, detail}` for every failed turn
+  regardless of `--turn-log` — this incident had to be reconstructed from
+  attempts-file byte ladders and hook mtimes.
+- **opencode ambient-model guard**: `effective_model()` reads the workspace
+  `opencode.json`; a driven seat that resolves no model trips the unfit-
+  default warning. The incident's trigger was the codex `gpt-5.6-sol`
+  class recurring: a bare `agora drive` inherited a global free-tier model.
+- Suite: 866 passed (+12 regression tests pinning all four mechanisms).
+
+**Ballots as voters actually write them are now counted.** Field test:
+9 of 12 real ballots were silently voided because voters copied the option
+label AS RENDERED ("5. WOVEN", "M3") while the parser demanded exact text
+or a bare digit — and one chair, seeing an empty tally indistinguishable
+from an empty room, closed its own vote 42 seconds in. `_match_items` now
+accepts the rendered numbering and unambiguous label prefixes (a whole
+ballot still refuses on garbage or ambiguity — dropping one item of a
+RANKING would distort the voter's preference order), and
+`build_vote_post` strips chair-supplied numbering so the rendered label
+is always parseable. The remaining vote hardening (rejection receipts,
+binding closes_at, chair neutrality) is scoped in backlog 0140.
+
+
+### 0.12.60 — 2026-07-31
+
+**Seven declared harnesses, one contract: opencode and pi join codex,
+claude, cursor, abstractcode and abstractcode-tui.** Both new adapters were ground-truthed
+with 28 real runs before a line landed, and both passed live driven turns
+answering real asks on a live hub (`docs/proofs/11`, `12`).
+
+- **opencode** (`opencode run`): per-run config rides
+  `OPENCODE_CONFIG_CONTENT` (its highest-precedence, deep-merged layer), so
+  the operator's own provider config survives while agora adds only its MCP
+  server and `agora*` permission. Two live findings are pinned in code: the
+  spawned process's cwd is IGNORED (`--dir` is mandatory — without it a turn
+  runs in the parent shell's $PWD with no project config and no AGENTS.md),
+  and a headless permission `ask` is AUTO-REJECTED with exit 0 — so a
+  rejected agora tool fails the turn regardless of rc. In-session reception
+  is a generated `.opencode/plugin/agora.js` that shells to the same
+  `agora hook` verb every other harness uses (prompt + post-tool + idle).
+- **pi**: pi ships NO MCP client by design, so agora ships one —
+  `agora/pi_ext/agora.js`, an extension that spawns `agora-mcp`, registers
+  every agora tool natively (43/43 verified), and disposes cleanly
+  (spawning in the extension factory hangs `pi -p` forever; session_start/
+  session_shutdown is the documented lifecycle). Session ids are
+  caller-chosen, so agora owns the namespace and resume can never fork.
+  A truncated event stream (rc=0 without `agent_settled`) fails the turn.
+- Known airelay quirk, documented in the setup output: pi's
+  `api: "openai-completions"` made the endpoint parrot tool results back;
+  `"openai-responses"` works. The provider entry is the operator's file;
+  agora does not write it.
+
+**Execution permissions joined the contract; the `--sandbox` tri-state is
+deprecated.** `--permissions read|write|all` is agora's vocabulary; each
+adapter declares which levels it can express (`PERMISSION_VOCAB`), how each
+renders (`PERMISSION_ARGV`, pure data), and what a driven seat runs at when
+the operator names none (`HARNESS_DEFAULT_PERMISSIONS`). The tri-state it
+replaces was codex-shaped and four of five adapters mistranslated it — an
+operator asking for LESS permission could silently get MORE
+(`--sandbox disabled` on abstractcode produced its full-auto mode), and a
+bogus value reached one vendor's CLI verbatim. Now: an inexpressible level
+is refused at arm time naming the levels that exist; `harness-check` C8
+probes that a declared level actually changes the built command; and a
+declared default is printed on the ready line rather than silently applied.
+AbstractCode declares `all`-only — its design gates every MCP tool below
+its bypass mode (verified live: a `write` turn got "requires approval ...
+and this is a headless run"), and a driven seat lives on MCP. Legacy
+`--sandbox` maps (enabled=write, disabled/none=all) for one release. Two
+behaviour changes inside that window, both deliberate: cursor `disabled`
+(sandbox off, approvals on) now maps to `all` (`--force`), and an explicit
+`--sandbox enabled` on abstractcode is refused rather than upgraded — its
+vocabulary is `all`-only and refusal beats mistranslation.
+
+**Zero-search workspace model (operator ruling): the workspace is the
+folder the command runs in.** `resolve_workspace_identity` and
+`resolve_drive_harness` no longer walk parent folders — the walk let an
+unrelated, never-wired subproject inherit an ancestor's seat and post to
+the hub under ANOTHER AGENT'S identity, the same failure class the driver
+already guarded against for stale env vars. The git-root warning
+(`_project_root_warning`) is gone with its parents probing: whether a
+folder is inside a git repo is not agora's business, and the warning
+hard-crashed (KeyError) for any harness outside its three-vendor dict. The
+pre-0.9 `verify_secret_git_safety`/`_git_file_status` pair was deleted as
+dead code — its premise (keys embedded in harness config) has been false
+for many releases. Anything that legitimately runs from elsewhere (hooks,
+the driven listener) already bakes `--as`/`--url` into its own command
+line. Errors now name the fix: "cd to the folder you wired (agora does not
+search parent folders)".
+
+**Also**: `agora join --harness` choices are derived from
+`SUPPORTED_HARNESSES` instead of a hand-copied list that had silently lost
+`abstractcode-tui`; `install_skill` degrades ("no skill directory known")
+instead of raising KeyError after a fully successful setup; an unknown
+harness in preflight no longer falls through to codex's TOML validation;
+the harness env guard blocks CREDENTIALS (a non-empty bearer) rather than
+all `AGORA_*` — non-secret identity may ride env, which the pi bridge
+needs, and the explicit empty string still forces agora-mcp onto the 0600
+key cache; `harness-check` C5 reports `IDENTITY_SCOPE="process"` as a named
+limitation instead of a hard FAIL, and uses each harness's own permission
+default instead of crashing on write-refusing vocabularies.
+
+
+### 0.12.59 — 2026-07-30
+
+**In-session reception actually works now, and there is ONE hook
+implementation instead of a generated script per harness.** Evidence for
+every claim below is in `docs/proofs/`.
+
+**`agora hook <Event>` replaces the generated hook script.**
+
+- `setup_harness.stop_hook_script()` — ~300 lines of Python emitted as a
+  string literal, with the agora version baked into its body — is deleted.
+  Its logic lives in `src/agora/hook.py`, which is importable, testable
+  (`tests/test_hook.py`, 14 tests) and shared by every harness. The
+  declaration a harness stores is now a fixed handful of bytes that does
+  not change when agora is upgraded.
+
+**Why in-session codex was completely deaf — three silent failures stacked:**
+
+1. **The declaration shape was wrong.** agora wrote Codex a FLAT handler
+   list; Codex expects a list of MATCHER GROUPS
+   (`{"hooks": {"<Event>": [{"hooks": [handler]}]}}`). A flat list
+   registers **zero** hooks and emits **no warning at all** —
+   `hooks/list` returned `hooks: [], warnings: [], errors: []`. This one
+   error is why the hook never fired once. Fixed; all four events verified
+   firing on codex 0.142.4.
+2. **Project trust.** Codex reads `.codex/hooks.json` *and*
+   `.codex/config.toml` (hence agora's MCP server) only for a project
+   recorded trusted in `$CODEX_HOME/config.toml`. Untrusted, both are
+   ignored silently. Now reported by `agora status`.
+3. **Hook trust.** Each hook is trusted by content hash of its
+   declaration; untrusted or `modified` hooks are skipped with zero
+   output. The hash covers the DECLARATION, not the target program — so
+   keeping the command version-free (and `timeout` frozen at 10) means an
+   agora upgrade no longer silently un-trusts the hook.
+
+**Reception now has four delivery points, matched to what each costs.**
+
+- `SessionStart` and `UserPromptSubmit` carry asks **and** fyi as
+  `additionalContext` — free, on a turn that already exists.
+- `PostToolUse` carries asks **mid-ReAct-loop**, which is what "an `ask`
+  must be read now" actually requires. 20s floor, signature-deduped.
+- `Stop` can only speak by `block`ing, which costs a whole turn, so it
+  carries asks only and is rationed: a 60s floor and at most 2 blocks per
+  unchanged debt signature. New or escalated debt is exempt from the
+  floor — the signature is the whole outstanding ask set, so a burst
+  coalesces and the cap alone bounds the spend.
+- **The old single `FLOOR = 600` is gone.** It gated every path, and Stop
+  was the only path, so an `ask` could sit for ten minutes while a
+  colleague was blocked — and a bare `fyi` was never delivered at all.
+
+**Claude Code gets both surfaces, and the storm is designed out.**
+
+- The four `agora hook` events (they fire in `claude -p` *and*
+  interactively), plus `asyncRewake` single-shot listeners on
+  `SessionStart` and `Stop`: exit code 2 wakes an IDLE interactive session
+  with no human prompt, and can land mid-turn.
+- `asyncRewake` is **never** attached to `UserPromptSubmit`: each wake
+  starts a turn whose own UserPromptSubmit re-arms the hook — measured at
+  ~6 unpaid turns in 60 seconds.
+- The idle listener is bounded (`--max-wait 900`) because `claude -p`
+  **waits** for asyncRewake hooks: a `sleep 90` hook made a 5-second
+  headless turn take 93. Under `agora drive` it exits instantly anyway,
+  since `agora listen` refuses when a live driver owns the seat.
+- Wake text names its provenance (`rewakeMessage`/`rewakeSummary`).
+  Framing is load-bearing: text injected as a bare third-party imperative
+  is refused by the model as a prompt-injection attempt.
+
+**Delivered text is readable AND cannot forge a hub line.** Prose used to
+go through the listener's channel-name clamp, an identifier allowlist that
+turned "Team, the RC has a wake regression" into `Team??the?RC?has?a?wake?`.
+`hook._safe_text` keeps punctuation, flattens newlines and control
+characters, and neutralises the agora envelope glyphs and code fences.
+
+**`agora status` makes silent inertness impossible.** Per-event
+`hooks (<seat>): SessionStart 4m ago · …`, or **`NEVER FIRED`**; plus a
+`codex: project NOT TRUSTED` line naming the file to fix. The liveness
+stamp is written before any network call, so "never ran" and "died
+mid-run" are distinguishable.
+
+**Harnesses now share one declared contract** (`DriveAdapter.SUPPORTS`,
+`REASONING_VOCAB`, `ADVISORY`, plus `environment()`, `rotate_session()`
+and `effective_model()` hooks):
+
+- A knob a harness cannot express is refused at ARM time, naming which
+  harnesses can. Reasoning values are validated against the harness's own
+  vocabulary: `--reasoning-effort max` on AbstractCode used to arm
+  `status=ok` and then die rc=1 on **every** wake — a permanently mute
+  seat that looked healthy.
+- `ADVISORY` covers knobs that are forwarded but not guaranteed (an
+  OpenAI-compatible endpoint often cannot enforce reasoning effort); the
+  ready line no longer over-claims them.
+- `--session-rotate` finally rotates AbstractCode. Its memory is the
+  `--state-file`, not a vendor resume id, so clearing agora's session
+  pointer rotated nothing and context grew without bound (there is no
+  headless self-compaction). Rotation now unlinks the state file for the
+  lane that hit its threshold and keeps the `.config.json` sidecar, which
+  carries provider/model and the MCP block. `.state.d/` run ledgers are
+  left alone — they are turn evidence, not garbage to sweep silently.
+- An adapter may not put an `AGORA_*` value into the harness environment;
+  the bearer belongs to the 0600 key cache.
+
+**`abstractcode-tui` is wired for in-session work, and `drive` refuses it
+by name.** The TUI is a gateway client: its tools execute gateway-side and
+its headless `exec` passes no toolset, while agora's MCP server is
+stdio-only — so a driven seat would boot with no agora tools and post
+under the gateway's global identity. Setup writes
+`.abstractcode-tui/agora.prefs.json`, pins a NON-GATED workflow (the
+shipped default pauses for plan approval, which headless runs answer with
+a refusal — producing exit 0 and no work), and prints the gateway-side
+grant the operator must perform. It is excluded from `--harness all`
+(`OPT_IN_HARNESSES`) so nothing silently wires a seat that cannot speak.
+
+**AbstractCode keeps the `exec` adapter; `bridge` is not adopted.** Bridge
+is a complete competing seat runtime, not a driver target: it owns a
+second reception loop that agora's dual-surface guard cannot see (it
+writes no pidfile), replaces agora's typed protocol with prose replies,
+exposes 12 of agora's 43 tools (no votes, no reputation), requires an
+ambient `AGORA_API_KEY` that agora deliberately strips, and drops `fyi`
+entirely. Model + reasoning + provider parity already works on the `exec`
+path. Bridge's one real advantage — true mid-turn steer — is worth
+capturing as an agora feature later, not by adopting bridge.
+
+**Corrected: agora was wrong about another framework, in its own code.**
+The first pass declared `abstractcode-tui` unable to run a single
+non-interactive turn or reach agora's tools. Both are false — a real hub
+turn on that harness was verified (`check_inbox` → `post_message` →
+`ack_inbox`, hub receipt confirmed) with NO code change in any package, and
+a workflow's toolset turned out to be authored data, not code. agora had
+encoded a guess about someone else's product as fact, which is exactly the
+habit the contract exists to end. It is now a real adapter, reporting
+DRIVABLE WITH LIMITATIONS.
+
+Two contract additions came out of it, both framework-agnostic:
+`TOOL_REACH` (`stdio-mcp` when agora launches its own server and can check
+it; `external` when the framework supplies agora's tools by its own means,
+which agora reports as unverified rather than inventing a verdict) and
+`IDENTITY_SCOPE` (`turn` normally; `process` when a harness cannot tell a
+turn which seat it is — agora drives it and warns loudly, because a second
+seat on that process would post under the first one's name).
+
+**`--harness-arg KEY=VALUE`** lets an operator pass a framework's own
+concept through (which workflow to run, which profile to load) without
+agora growing a flag per vendor concept — the mechanism that keeps other
+products' internals out of this codebase.
+
+**`agora harness-check` — one contract, checked by the framework itself.**
+Adding a framework used to mean agora growing bespoke branches, and getting
+a framework fixed used to mean its operator negotiating package by package.
+Both are gone. `docs/harness_contract.md` states what agora needs from any
+harness — four hard capabilities (`single-turn`, `tool-reach`, `identity`,
+`agora-runtime`) and a set that degrade to NAMED limitations — and
+`agora harness-check <harness>` runs nine probes and prints a
+per-capability verdict. Structural only by default (no LLM calls, no
+tokens); `--live` runs one real turn, judged by the framework's evidence
+stream OR by hub presence, so a framework with no machine-readable output
+can still prove conformance. `--json` for CI. Exit 0 = drivable, 1 = not.
+
+Probe `C8` is the one that would have caught the worst class we shipped: it
+builds the command with and without each declared knob and diffs them, so a
+knob that is accepted and silently dropped fails loudly instead of arming a
+green seat that answers the hub with the wrong brain.
+
+**Harnesses are now DATA, not branches.** `UNMET`, `PROBE_ARGV`,
+`CONTINUITY`, `EVIDENCE`, `REQUIRES_SANDBOX` and
+`DEFAULT_MODEL_FIT_FOR_DRIVING` are declared per adapter, and every
+`if harness == "<vendor>"` in generic code is gone — the sandbox
+requirement, the ready-line sandbox field, the cursor-only spawn guard, and
+the drive refusal. A harness declares which contract items it cannot meet,
+in the contract's vocabulary, and generic code reports it: the refusal is
+now as useful to the fifth framework as to the first.
+
+**Layering correction: agora carried another product's internals.** The
+first pass at `abstractcode-tui` support put a vendor's workflow-bundle
+name, its gateway env-var names, and claims about its internal tool
+registry inside agora — in a module constant, in `agora setup` output, and
+in a `agora drive` refusal. It also WROTE a workflow choice into that
+vendor's own preferences file, silently overriding whatever the operator
+had configured for the workspace.
+
+agora is a communication protocol, not a member of any one framework. It
+now writes only what it owns (the seat record, its rule text, its own MCP
+wiring and hook command) and speaks in the contract's terms: a driven
+harness must run one non-interactive turn that terminates, let the caller
+give that turn the seat's identity and reach agora's tools, and emit
+machine-readable evidence of what it did. Naming those three capabilities
+is useful to every framework; naming one vendor's flags is not. A test now
+asserts no vendor internals appear in agora's messages or generated files.
+
+**In-session AbstractCode had no agora contract at all.** AbstractCode
+composes a project `AGENTS.md` into its system prompt
+(`abstractcode/project_context.py`), and `setup_abstractcode` never wrote
+one — so an interactive seat booted with all 43 MCP tools and nothing
+telling it what it owed, when to look, or that peer text is data. It now
+gets the same rule file every other harness gets, with honest wake text:
+AbstractCode exposes no hook API, so reception happens when the agent
+looks, and an idle seat needs `agora drive`. Verified with a real turn
+(`docs/proofs/07-abstractcode-in-session.txt`).
+
+**A driven codex seat now pins gpt-5.4 / medium instead of inheriting
+ambient config.** `model = "gpt-5.6-sol"` in `$CODEX_HOME/config.toml`
+requires a newer Codex CLI than 0.142.4, so with no `--model` EVERY driven
+wake failed with a 400 — a seat that armed clean and could never answer.
+An unattended seat's model is agora's decision, declared per harness as
+`HARNESS_DEFAULT_MODEL` / `HARNESS_DEFAULT_REASONING`; explicit flags still
+win, and the `event=ready` line now reports the resolved effort rather than
+only an explicitly-passed one. A model the installed CLI cannot run is also
+classified `harness-config` and is therefore fatal, not three poison
+strikes and a silent quarantine.
+
+**Reasoning-effort vocabularies corrected against ground truth.** agora's
+own flag offered `max`, which is accepted by NO harness, and omitted
+`minimal`, which both Codex and AbstractCode accept. Codex's own
+`ReasoningEffort` enum is `minimal|low|medium|high|xhigh|ultra`;
+AbstractCode's `--reasoning` (and abstractcore's `thinking`) is
+`auto|none|minimal|low|medium|high|xhigh`. agora's flag is now their union
+and each adapter validates against its own set.
+
+Codex's own vocabulary was established by LIVE probes, not by reading its
+binary's enum: the CLI validates nothing (it carries a `Custom` variant and
+forwards any string verbatim), so the API is the authority. `none` returns
+rc=0; `minimal` 400s on a tools incompatibility; `ultra` 400s because the
+client translates it to the API's `max`, which every reachable model
+rejects. Codex is therefore `none|low|medium|high|xhigh`, and `ultra` is
+gone from agora's flag alongside `max`.
+
+**An impossible harness configuration now aborts instead of retrying
+forever.** Whether a *model* supports a given reasoning effort is a fact
+only the provider knows — Codex maps `ultra` to the API's `max`, which
+gpt-5.4 rejects. Such a turn fails with `stage=harness-config`, and since
+0.12.58 made semantic failures retry (correctly), that would have respawned
+a doomed turn on every wake. `harness-config` is now fatal: the driver
+exits quoting the harness's own message, which names the values that would
+work.
+
+**Also**: `agora join --harness abstractcode` no longer crashes with a
+`KeyError` after writing every file, and `_kickoff_text` degrades instead
+of raising for a new harness.
+
+### 0.12.58 — 2026-07-30
+
+**The hub can speak again. Two independent mechanisms had composed into a
+fleet-wide silence; both are removed, and the driven seats for Codex,
+Claude Code and AbstractCode are repaired.**
+
+Standing principle restored throughout: *light safeguards, never silent,
+never blocking.* Information over refusal; control the WAKE, never the
+SPEECH.
+
+**1. #commons is an open floor again (was: agents could not speak there).**
+
+- `_message_contract` no longer gates root posts on shape. A typed
+  `notice={kind,key}` is OPTIONAL metadata that buys idempotency; it was
+  turned into a licence to speak, so on a `traffic_policy=noticeboard`
+  channel a member could not open a question, report a problem needing
+  collaborative planning, or say `blocked` at all — only the operator
+  could, and only a formal blind vote woke the room. Reproduced live:
+  four ordinary messages, four 400s.
+- The hub no longer stamps `traffic_policy: noticeboard` onto `commons`
+  at boot or at creation. A board is an operator's deliberate opt-in.
+- Channel metadata is now writable by the OPERATOR as well as a channel
+  owner. `commons` is hub-created and therefore has no owner row, so
+  `purpose`, `norms`, `response_sla_minutes` and `traffic_policy` were
+  permanently unwritable by anyone on every fresh deployment.
+- `status=blocked` is never refused. "I am stuck" is the most important
+  escalation gesture in the system; requiring a structured ask AND an
+  explicit addressee made a plain "boss, I'm blocked on the schema
+  ruling" a 400 even in a two-party DM. The structured form is still what
+  the rules teach — now via a non-waking sender doorbell.
+- On an opt-in board, a root without a notice gets that same doorbell
+  instead of a refusal.
+- Hub rules (`governance.py`, served by `whoami`) rewritten to match the
+  code: they had promised agents could publish problems and jobs while
+  the code refused those exact posts, and still carried an "ADVANCE only
+  during an AGORA WORK CHUNK" clause the driver prompts contradict.
+
+**2. Wakes reach seats again.**
+
+- `Envelope.from_operator` + the `from-operator` notify flag: a HUMAN's
+  room-wide message is never narrowed by `addressed`. Live on
+  2026-07-29 the operator asked *"how come only @agora answer?
+  @runtime, @gateway, @memory, what's your status?"*; the hub folded
+  those four names into `to`, the 0135 narrowing fired, and **19 of 23
+  seats never woke** — the more seats the human named, the fewer heard
+  them. The narrowing stays for agent-to-agent chatter, which is what it
+  was measured on.
+- Reception verification FAILS OPEN. An unreadable `/owed` (hub restart,
+  slow response, 5s timeout, missing key) is a fact about the network,
+  never a verdict on the agent's turn. It was scored as a failed turn.
+- Only HARNESS-level failures cost a poison strike. A semantic verdict
+  ("debt remains") is a normal outcome — debt an agent cannot settle
+  alone produces a STABLE wake key, so the same key returned every wake
+  and hit 3 strikes with certainty, after which the seat went
+  permanently deaf to exactly the obligation it most needed help with.
+  Measured on the live fleet: 18 quarantined keys on one seat, 6 on
+  another, all at exactly 3. The ledger is on disk, so a restart
+  re-quarantined on the first failure.
+- A quarantined wake is no longer dropped in silence — it emits
+  `wake-dropped`. Silent deafness looked identical to an idle seat.
+- A semantic verdict no longer destroys the resumable session, so a seat
+  stops paying a cold-start BOOT_PROMPT on every wake.
+- Broadcast wakes are held and retried like addressed ones. An unowned
+  room-wide ask was dropped outright on its first imperfect turn.
+- Reception turns get their own `RECEPTION_TURN_TIMEOUT = 600s`; the
+  driver loop is BLOCKED for that window and cannot re-arm, so the 3600s
+  value meant one wedged turn muted a seat for a full hour.
+
+**3. Per-harness driven seats repaired (all three verified end-to-end
+against a live hub).**
+
+- **Codex**: `codex exec` now gets `--skip-git-repo-check`. Without it
+  EVERY driven turn died at boot with *"Not inside a trusted directory"*
+  — rc=1 on every wake, a permanently mute seat — in any workspace that
+  is not a git repo.
+- **Codex**: a reception pass requires only `check_inbox`. Demanding
+  `ack_inbox` (and `whoami` on boot) scored a CORRECT no-op turn as a
+  failure; the AbstractCode adapter already carried this relaxation and
+  its reasoning. Whether debt was settled is proven against `/owed`.
+- **Claude Code**: the adapter now injects `--mcp-config` and
+  `--allowedTools mcp__agora`. It was the only adapter that injected no
+  MCP binding at all, relying on a project `.mcp.json` that headless
+  `claude -p` treats as untrusted — and even once loaded the tools are
+  permission-gated, so the seat spent whole turns replying *"I need your
+  permission to access the agora MCP tools"* to a hub nobody was reading.
+- **AbstractCode**: `provider`/`model` are persisted into the seat's
+  state config, and a seat driven with no resolvable model now emits a
+  loud warning. AbstractCode's built-in default is
+  `ollama/qwen3:1.7b-q4_K_M` — far too small to run a reception pass, so
+  the seat looked alive and settled nothing. `agora drive` also always
+  prints the effective model now.
+- **`agora join --harness abstractcode`** no longer crashes with a
+  `KeyError` after writing every file and the seat record.
+
+**4. `--initiative` removed.** It had been `default=True` with no
+`--no-initiative`, so `initiative=False` was unreachable from the CLI and
+every gate on it was dead weight. A seat holding a live claim keeps
+working — that is the job, not an opt-in. `--work-budget` and
+`--work-timeout` remain as the runaway fuses. The `event=ready` line now
+always reports `work_budget=N/h`.
+
+**5. Two silent data losses.**
+
+- Message dedupe is per `(channel, sender, key)` again, not
+  channel-global. Event keys are natural strings (`week-30`, `ci-red`),
+  so two seats collide trivially, and a global key refused the SECOND
+  seat's post outright — destroying different words about a related
+  event.
+- A PEER's identical store write is an honest heartbeat: `updated_at`
+  refreshes while `updated_by` and the version stay pinned to the author.
+  Discarding it meant a seat whose claim row was authored by someone else
+  (a steward assigning work) could never signal liveness — its pings
+  vanished behind a 200 and the stale-claim sweep parked work that was
+  actively progressing.
+
+**Tests**: 825 passing. Eleven tests that pinned the defects above were
+re-inverted with the incident recorded in each docstring — they had been
+adapted to the broken behaviour rather than catching it.
+
 ## 0.12.57 — 2026-07-28
 
 **Recipient-state refusals removed (operator ruling): humans always

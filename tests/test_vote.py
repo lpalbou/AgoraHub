@@ -10,6 +10,7 @@ machine-readable payload the transcript view re-derives from).
 """
 
 import asyncio
+import re
 import time
 
 from agora.chat import ChatApp
@@ -635,3 +636,455 @@ def test_cmd_tally_rejects_non_vote_messages():
 
     asyncio.run(app.cmd_tally("5"))
     assert any("not a vote" in line for line in out)
+
+
+def test_ballots_as_voters_actually_write_them_are_counted():
+    """Live incident (at-test, 2026-07-31): 9 of 12 real ballots were silently
+    voided. Voters copied the option label AS RENDERED — the vote body's own
+    numbering ("5. WOVEN"), a rationale after the choice, or the option's
+    short label ("M3") — and _match_items demanded exact text or a bare
+    digit. One chair, seeing an empty tally indistinguishable from an empty
+    room, closed its vote 42 seconds in. A ballot's job is to be counted."""
+    from agora.vote import _match_items, build_vote_post
+
+    opts = ["THE MESSAGE — the found transmission", "THE SHORE — arrival day",
+            "THE REDACTION — registry gaps", "THE WATCH — the vigil",
+            "WOVEN — all interleaved"]
+    # rendered-numbering copies (the exact voided shapes)
+    assert _match_items(["1. THE MESSAGE", "5. WOVEN"], opts) == [0, 4]
+    assert _match_items(["5 WOVEN — all interleaved, best structure"],
+                        opts) == [4]
+    # short-label prefixes
+    m = ["M1 — archivist", "M2 — ledger", "M3 — first name", "M4 — silence"]
+    assert _match_items(["M3", "M1", "M4", "M2"], m) == [2, 0, 3, 1]
+    # a WHOLE ballot still refuses on garbage or ambiguity — dropping one item
+    # of a RANKING would distort the voter's preference order
+    assert _match_items(["M3", "banana"], m) is None
+    assert _match_items(["M"], m) is None
+    # chair-supplied numbering is stripped so the rendered label IS parseable
+    post = build_vote_post("chair", "spine?", ["1. A — x", "2. B — y"])
+    assert post["data"]["vote"]["options"] == ["A — x", "B — y"]
+
+
+# -- the announced window BINDS the chair (the 42-second incident) -----------------
+
+def _chair_app(vote, dm_pages, members=MEMBERS):
+    """A chat app chairing `vote`, with post() captured."""
+    app = ChatApp("http://127.0.0.1:1", "k", "laurent")
+    app.current = "commons"
+    out = _wire(app, vote, [], dm_pages, members)
+    posts: list = []
+
+    async def post(channel, body, **kw):
+        posts.append((channel, body, kw))
+        return Message(id=f"01HP{len(posts)}", channel=channel, seq=900 + len(posts),
+                       sender="laurent", body=body,
+                       status=kw.get("status", Status.fyi))
+    app.client.post = post
+    return app, out, posts
+
+
+def _three_of_six():
+    """The incident's shape: a 5-minute window, 42 seconds elapsed, three of
+    the six seats heard (three ballots still in flight)."""
+    vote = _vote_msg(closes_at=time.time() + 300 - 42)
+    dm_pages = {
+        "dm:gateway--laurent": [
+            _dm("dm:gateway--laurent", "gateway", 3, f"vote {TAG}: 1")],
+        "dm:laurent--memory": [
+            _dm("dm:laurent--memory", "memory", 4, f"vote {TAG}: 2")],
+        "dm:laurent--uic": [
+            _dm("dm:laurent--uic", "uic", 5, f"vote {TAG}: 3")],
+    }
+    return vote, dm_pages
+
+
+def test_early_close_refused_inside_the_announced_window():
+    """THE operator-confirmed incident (at-test, 2026-07-31): 'I requested
+    5mn and I am pretty sure it closed after 1mn with only 3 votes.' The
+    window a chair announces is a promise to the voters; closing at 42s
+    killed three ballots in flight. The refusal must name the time left and
+    how many seats are unheard — the COUNT, never the names (blindness)."""
+    vote, dm_pages = _three_of_six()
+    app, out, posts = _chair_app(vote, dm_pages)
+
+    asyncio.run(app.cmd_tally("731 close"))
+    text = "\n".join(out)
+    assert posts == []                        # nothing published
+    assert "NOT closed" in text
+    # ~4m18s of the 5m window remains (second-precision; the clock moves)
+    assert re.search(r"4m1\ds left", text), text
+    assert "2 of 5 eligible voter(s) have not balloted" in text
+    assert "force" in text
+    # Blindness: the outstanding seats are counted, never named.
+    assert "flow" not in text and "observer" not in text
+
+
+def test_force_close_publishes_with_the_early_close_marker():
+    """An override is legitimate — a silent one is not. The published result
+    must tell every voter their window was cut and by how much."""
+    vote, dm_pages = _three_of_six()
+    app, out, posts = _chair_app(vote, dm_pages)
+
+    asyncio.run(app.cmd_tally("731 close force"))
+    assert posts, "force must publish"
+    _, body, kw = posts[0]
+    assert kw["status"] == Status.resolved
+    assert "CLOSED EARLY BY THE CHAIR" in body
+    assert re.search(r"4m1\ds of the announced window was cut", body), body
+    assert "2 of 5 eligible voter(s) unheard" in body
+    assert kw["data"]["vote_result"]["closed"].startswith(
+        "CLOSED EARLY BY THE CHAIR")
+
+
+def test_early_close_allowed_once_the_window_or_turnout_says_so():
+    """The block exists to protect the announced window, nothing more: a
+    passed deadline, a full turnout, or a vote with no deadline at all
+    (pre-deadline clients) all close on request without force."""
+    from agora.vote import VoteChair, vote_info
+
+    info = vote_info(_vote_msg(closes_at=2000.0), "commons")
+    members = ["laurent", "gateway", "memory"]
+    assert VoteChair.early_close_block(info, {}, members, now=2001.0) is None
+    full = {"gateway": [0], "memory": [1]}
+    assert VoteChair.early_close_block(info, full, members, now=1.0) is None
+    assert VoteChair.early_close_block(info, {}, members, now=1.0) is not None
+    no_deadline = vote_info(_vote_msg(), "commons")
+    assert VoteChair.early_close_block(no_deadline, {}, members) is None
+    # Unreadable membership does not UNBIND the window: an unverifiable
+    # turnout is exactly the case the deadline exists to cover.
+    blocked = VoteChair.early_close_block(info, full, [], now=1.0)
+    assert blocked is not None and "membership could not be read" in blocked
+
+
+# -- rejection receipts: an unreadable ballot never vanishes -----------------------
+
+def test_unreadable_ballot_bounces_a_receipt_to_its_voter():
+    """The other half of the incident: 9 of 12 ballots were voided silently.
+    A tagged line that matches no option must come straight back to the
+    voter, quoting the exact item that failed and the accepted spellings —
+    while the window is still open, so they can fix it."""
+    vote = _vote_msg(closes_at=time.time() + 300)
+    dm_pages = {
+        "dm:laurent--memory": [
+            _dm("dm:laurent--memory", "memory", 8, f"vote {TAG}: mongodb")],
+        "dm:gateway--laurent": [
+            _dm("dm:gateway--laurent", "gateway", 3, f"vote {TAG}: sqlite")],
+    }
+    app, out, posts = _chair_app(vote, dm_pages)
+
+    asyncio.run(app.cmd_tally("731"))
+    assert len(posts) == 1, "exactly one receipt, to the one bad ballot"
+    channel, body, kw = posts[0]
+    assert channel == "dm:laurent--memory" and kw["to"] == ["memory"]
+    assert kw["status"] == Status.fyi          # a receipt owes no reply
+    assert "BALLOT NOT COUNTED" in body and TAG in body
+    assert '"mongodb"' in body                  # the exact unmatched item
+    assert "1. sqlite" in body                  # the accepted spellings
+    assert f"vote {TAG}: 2 > 1" in body         # the ranking form
+    # The tally must not read as an empty room.
+    text = "\n".join(out)
+    assert "1 unreadable ballot(s) NOT counted" in text
+    assert "memory wrote 'mongodb'" in text
+
+
+def test_receipt_is_not_resent_after_a_chair_restart():
+    """Idempotency is derived from the DM thread, not from chair memory: a
+    chair that restarts mid-vote must not re-bounce ballots it answered."""
+    from agora.vote import receipt_marker
+    vote = _vote_msg(closes_at=time.time() + 300)
+    thread = [
+        _dm("dm:laurent--memory", "memory", 8, f"vote {TAG}: mongodb"),
+        _dm("dm:laurent--memory", "laurent", 9,
+            f"{receipt_marker(TAG)} (pick a db)\n…"),
+    ]
+    app, out, posts = _chair_app(vote, {"dm:laurent--memory": thread})
+
+    asyncio.run(app.cmd_tally("731"))
+    assert posts == []                          # already receipted
+    assert "receipts already sent" in "\n".join(out)
+
+
+def test_a_later_readable_line_clears_the_rejection_and_never_voids_a_ballot():
+    """'Your latest ballot line counts' applies to corrections: a readable
+    line after a bad one clears the rejection. The reverse — a bad line
+    after a good one — leaves the counted ballot standing and says so in the
+    receipt; voiding it over a typo would disenfranchise the voter twice."""
+    from agora.vote import dm_ballot_outcome, rejection_receipt
+    refs = {TAG}
+    ranking, line, item = dm_ballot_outcome(f"vote {TAG}: mongodb", refs, OPTS)
+    assert ranking is None and item == "mongodb" and TAG in line
+    assert dm_ballot_outcome(f"vote {TAG}: 2", refs, OPTS)[0] == [1]
+    # a DM about something else entirely is not a ballot attempt at all
+    assert dm_ballot_outcome("morning!", refs, OPTS) == (None, "", "")
+
+    vote = _vote_msg(closes_at=time.time() + 300)
+    fixed = {"dm:laurent--memory": [
+        _dm("dm:laurent--memory", "memory", 8, f"vote {TAG}: mongodb"),
+        _dm("dm:laurent--memory", "memory", 9, f"vote {TAG}: sqlite")]}
+    app, out, posts = _chair_app(vote, fixed)
+    asyncio.run(app.cmd_tally("731"))
+    assert posts == [] and "unreadable" not in "\n".join(out)
+    assert "1  memory" in "\n".join(out)
+
+    receipt = rejection_receipt("pick a db", TAG, OPTS,
+                                f"vote {TAG}: mongo", "mongo", standing=[0])
+    assert "Your PREVIOUS ballot still stands" in receipt and "sqlite" in receipt
+
+
+def test_rejected_count_rides_the_published_result():
+    """A turnout of 2/6 means something different when two more ballots
+    arrived unreadable. The room is owed that number, not just the count."""
+    vote = _vote_msg(closes_at=time.time() - 1)          # deadline passed
+    dm_pages = {
+        "dm:gateway--laurent": [
+            _dm("dm:gateway--laurent", "gateway", 3, f"vote {TAG}: 1")],
+        "dm:laurent--memory": [
+            _dm("dm:laurent--memory", "memory", 8, f"vote {TAG}: mongodb")],
+    }
+    app, out, posts = _chair_app(vote, dm_pages)
+    asyncio.run(app.cmd_tally("731"))
+    bodies = [b for _, b, kw in posts if kw.get("status") == Status.resolved]
+    assert bodies and "1 ballot(s) arrived UNREADABLE" in bodies[0]
+    assert "turnout 1/6" in bodies[0]
+    result = [kw for _, _, kw in posts
+              if kw.get("status") == Status.resolved][0]
+    assert result["data"]["vote_result"]["rejected"] == 1
+
+
+def test_vote_operation_refuses_early_close_and_reports_rejections():
+    """Same contract on the MCP surface: a 409 that teaches, and a
+    `rejected_ballots` count so a tool-driven chair can never mistake a
+    broken parser for an empty room."""
+    from agora.vote import vote_operation
+
+    vote = _vote_msg(closes_at=time.time() + 258)
+
+    class FakeClient:
+        def __init__(self):
+            self.posted = []
+
+        async def read(self, channel, mid):
+            return [vote]
+
+        async def history(self, channel, since=0, limit=200):
+            if channel == "dm:laurent--memory" and since == 0:
+                return [_dm(channel, "memory", 8, f"vote {TAG}: mongodb")]
+            return []
+
+        async def list_channels(self):
+            return [{"name": "dm:laurent--memory", "member": True}]
+
+        async def channel_info(self, channel):
+            return {"members": [{"agent_id": a} for a in
+                                ["laurent", "memory", "flow"]]}
+
+        async def post(self, channel, body, **kw):
+            self.posted.append((channel, body, kw))
+            return Message(id="01HX", channel=channel, seq=760,
+                           sender="laurent", body=body)
+
+    chair = FakeClient()
+    refused = asyncio.run(vote_operation(chair, "laurent", "commons", vote.id,
+                                         close=True))
+    assert refused["ok"] is False and refused["error"] == 409
+    assert re.search(r"4m1\ds left", refused["detail"]), refused["detail"]
+    assert "2 of 2 eligible voter(s) have not balloted" in refused["detail"]
+    assert refused["rejected_ballots"] == 1
+    assert not any(kw.get("status") == Status.resolved
+                   for _, _, kw in chair.posted)
+    # The receipt went out on the refused pass, not at close time.
+    assert any("BALLOT NOT COUNTED" in b for _, b, _ in chair.posted)
+
+    forced = asyncio.run(vote_operation(chair, "laurent", "commons", vote.id,
+                                        close=True, force=True))
+    assert forced["closed"] is True
+    assert forced["reason"].startswith("CLOSED EARLY BY THE CHAIR")
+    assert forced["rejected_ballots"] == 1
+
+
+# -- tally reconciliation: a lost ballot must be impossible AND detectable --------
+
+def _paged_client(vote, dm_threads, channel_rows=(), members=MEMBERS,
+                  page=200):
+    """A client whose history() obeys the REAL hub semantics — seq > since,
+    ORDER BY seq, LIMIT n — so a multi-page thread is paged, not stubbed."""
+    everything = dict(dm_threads)
+    everything["commons"] = [vote, *channel_rows]
+
+    class Paged:
+        def __init__(self):
+            self.posted = []
+
+        async def list_channels(self):
+            return ([{"name": "commons", "member": True}]
+                    + [{"name": n, "member": True} for n in dm_threads]
+                    + [{"name": "dm:elsewhere--nobody", "member": False}])
+
+        async def history(self, channel, since=0, limit=200):
+            rows = [m for m in everything.get(channel, []) if m.seq > since]
+            return rows[:min(limit, page)]
+
+        async def read(self, channel, mid):
+            return [vote]
+
+        async def channel_info(self, channel):
+            return {"members": [{"agent_id": a} for a in members]}
+
+        async def post(self, channel, body, **kw):
+            self.posted.append((channel, body, kw))
+            return Message(id=f"01HP{len(self.posted)}", channel=channel,
+                           seq=800 + len(self.posted), sender="laurent",
+                           body=body, status=kw.get("status", Status.fyi))
+
+    return Paged()
+
+
+def test_seven_ballots_across_threads_and_pages_are_all_counted():
+    """Live incident (field test 2): 7 in-window ballot DMs all parsed
+    offline and the published tally counted 6. Every shape a real voter used
+    must land — plain line, structured `data` payload, a fresh in-channel
+    message that is NOT a reply to the root, and a ballot sitting past the
+    first history page — and the result must carry the reconciliation counts
+    that make a future loss visible instead of silent."""
+    from agora.vote import VoteChair, vote_info
+
+    voters = ["gateway", "memory", "uic", "flow", "observer", "scribe", "core"]
+    vote = _vote_msg(closes_at=time.time() - 1)          # due: deadline passed
+    threads: dict[str, list] = {}
+    # 1-3: ordinary tagged DM lines.
+    for i, who in enumerate(voters[:3]):
+        name = f"dm:laurent--{who}"
+        threads[name] = [_dm(name, who, 1, f"vote {TAG}: {1 + i % 3}")]
+    # 4: the ballot sits on page TWO of a long DM thread.
+    long_thread = f"dm:laurent--{voters[3]}"
+    threads[long_thread] = [
+        _dm(long_thread, voters[3] if s % 2 else "laurent", s, f"chatter {s}")
+        for s in range(1, 205)]
+    threads[long_thread].append(
+        _dm(long_thread, voters[3], 205, f"vote {TAG}: 2"))
+    # 5: the STRUCTURED form the module promises tool-first agents.
+    structured = f"dm:laurent--{voters[4]}"
+    threads[structured] = [Message(
+        id="01HS1", channel=structured, seq=1, sender=voters[4],
+        body=f"my ballot for {TAG}", created_at=time.time(),
+        data={"vote": "3"})]
+    # 6: an in-channel message naming the chair, NOT a reply to the root.
+    loose = Message(id="01HL1", channel="commons", seq=735, sender=voters[5],
+                    body=f"vote {TAG}: 1", to=["laurent"],
+                    created_at=time.time())
+    # 7: a reply to the root using the untagged form (the thread says which
+    #    vote it answers).
+    leak = _reply(voters[6], 736, "posting mine openly:\nvote: sqlite")
+
+    client = _paged_client(vote, threads, [loose, leak],
+                           members=["laurent", *voters])
+    chair = VoteChair(client, "laurent", lambda _t: None)
+    info = vote_info(vote, "commons")
+    data = asyncio.run(chair.collect(info))
+    assert sorted(data["ballots"]) == sorted(voters), data["ballots"]
+    assert data["scan"].counts == {"ballots_seen": 7, "ballots_counted": 7,
+                                   "ballots_rejected": 0}
+
+    chair.register(vote, "commons")
+    asyncio.run(chair.check_due())
+    _, body, kw = client.posted[0]
+    assert kw["status"] == Status.resolved
+    payload = kw["data"]["vote_result"]
+    assert payload["ballots_seen"] == 7 and payload["ballots_counted"] == 7
+    assert payload["ballots_rejected"] == 0
+    assert len(payload["ballots"]) == 7
+    assert "ballots: 7 seen · 7 counted · 0 rejected" in body
+    assert "turnout 7/8" in body
+    assert "MISMATCH" not in body
+
+
+def test_reconciliation_counts_a_rejected_ballot_as_seen():
+    """seen == counted + rejected is the invariant a reader checks. An
+    unreadable ballot is SEEN and not counted — that is the difference
+    between 'nobody voted' and 'nobody was counted'."""
+    from agora.vote import VoteChair
+
+    vote = _vote_msg(closes_at=time.time() - 1)
+    threads = {
+        "dm:gateway--laurent": [
+            _dm("dm:gateway--laurent", "gateway", 1, f"vote {TAG}: 1")],
+        "dm:laurent--memory": [
+            _dm("dm:laurent--memory", "memory", 1, f"vote {TAG}: mongodb")],
+    }
+    client = _paged_client(vote, threads,
+                           members=["laurent", "gateway", "memory"])
+    chair = VoteChair(client, "laurent", lambda _t: None)
+    chair.register(vote, "commons")
+    asyncio.run(chair.check_due())
+    results = [(b, kw) for _, b, kw in client.posted
+               if kw.get("status") == Status.resolved]
+    body, kw = results[0]
+    payload = kw["data"]["vote_result"]
+    assert payload == {**payload, "ballots_seen": 2, "ballots_counted": 1,
+                       "ballots_rejected": 1}
+    assert "ballots: 2 seen · 1 counted · 1 rejected" in body
+    assert "MISMATCH" not in body
+
+
+def test_a_standing_ballot_plus_a_bad_revision_is_not_a_mismatch():
+    """One voter can be both counted AND rejected: a bad revision after a
+    readable line leaves the earlier ballot standing. So the invariant is
+    seen <= counted + rejected — the alarm must fire on a LOST ballot, never
+    on a voter who typo'd their correction."""
+    from agora.vote import VoteChair
+
+    vote = _vote_msg(closes_at=time.time() - 1)
+    threads = {"dm:laurent--memory": [
+        _dm("dm:laurent--memory", "memory", 1, f"vote {TAG}: 1"),
+        _dm("dm:laurent--memory", "memory", 2, f"vote {TAG}: mongodb")]}
+    client = _paged_client(vote, threads, members=["laurent", "memory"])
+    chair = VoteChair(client, "laurent", lambda _t: None)
+    chair.register(vote, "commons")
+    asyncio.run(chair.check_due())
+    body, kw = [(b, k) for _, b, k in client.posted
+                if k.get("status") == Status.resolved][0]
+    assert kw["data"]["vote_result"]["ballots"] == {"memory": [0]}
+    assert "ballots: 1 seen · 1 counted · 1 rejected" in body
+    assert "MISMATCH" not in body
+    # And the alarm DOES fire when a seen ballot reaches neither column.
+    from agora.vote import result_body, tally_ballots
+    tally = tally_ballots(OPTS, {"memory": [0]})
+    assert "MISMATCH" in result_body("t", OPTS, tally, 6, "x", 0, seen=2)
+
+
+def test_a_structured_ballot_that_names_no_vote_is_not_guessed():
+    """The structured form carries a choice but no tag. Counting it for
+    whichever vote happens to be tallying would MIScount a concurrent poll —
+    worse than not counting it — so attribution requires the message to name
+    this vote (in `data.vote_tag`, in the payload, or in the prose)."""
+    from agora.vote import dm_ballot_outcome
+    refs = {TAG, "731@commons"}
+    assert dm_ballot_outcome("here you go", refs, OPTS,
+                             {"vote": "2"}) == (None, "", "")
+    assert dm_ballot_outcome(f"for {TAG}", refs, OPTS,
+                             {"vote": "2"})[0] == [1]
+    assert dm_ballot_outcome("mine", refs, OPTS,
+                             {"vote": "2", "vote_tag": TAG})[0] == [1]
+    assert dm_ballot_outcome("mine", refs, OPTS,
+                             {"vote": {"tag": TAG, "choice": "sqlite"}})[0] == [0]
+    # Named but unmatchable: REJECTED (a receipt follows), never silent.
+    ranking, line, item = dm_ballot_outcome(f"for {TAG}", refs, OPTS,
+                                            {"vote": "mongodb"})
+    assert ranking is None and item == "mongodb" and line
+
+
+def test_the_hub_is_an_authoritative_publisher_and_a_stranger_is_not():
+    """The hub's deadline sweep publishes when the chair's process is not
+    alive, so both publishers must recognise each other's result — while a
+    forged `vote_result` from a third party still closes nothing."""
+    from agora.vote import published_result
+    vote = _vote_msg(sender="laurent")
+    forged = _reply("uic", 738, "hah", data={"vote_result": {"ballots": {}}})
+    assert published_result(vote, [forged]) is None
+    by_hub = _reply("hub", 739, "VOTE RESULT",
+                    data={"vote_result": {"ballots": {}}})
+    assert published_result(vote, [forged, by_hub]) is by_hub
+    by_chair = _reply("laurent", 740, "VOTE RESULT",
+                      data={"vote_result": {"ballots": {}}})
+    assert published_result(vote, [by_hub, by_chair]) is by_chair

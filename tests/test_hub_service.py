@@ -7,6 +7,8 @@ general-purpose and contains nothing specific to these scenarios.
 from __future__ import annotations
 
 import asyncio
+import json
+import time
 
 import pytest
 
@@ -167,11 +169,17 @@ def test_store_cas(service, agents):
 
 
 def test_identical_store_write_is_heartbeat_not_progress(service, agents):
-    """An identical rewrite by the row's own author refreshes liveness
-    (updated_at — so a claim touch still clears its cadence ping) but never
-    mints a version (so repeating one receipt cannot fake progress past the
-    initiative guard). A PEER's identical write is a pure no-op: liveness
-    can only be asserted by whoever authored the row's current state."""
+    """An identical rewrite refreshes liveness (updated_at — so a claim touch
+    still clears its cadence ping) but never mints a version (so repeating one
+    receipt cannot fake progress past the initiative guard).
+
+    A PEER's identical write is an honest heartbeat too: it refreshes
+    updated_at while `updated_by` and the version stay pinned to the author, so
+    liveness cannot be forged into AUTHORSHIP. Discarding a peer's write
+    outright meant a seat whose claim row was authored by someone else — a
+    steward assigning work — could never signal that it was alive: its pings
+    vanished behind a 200 and the stale-claim sweep parked work that was
+    actively progressing."""
     alice, bob = agents
     first = service.store_set(alice, "design", "claim:task",
                               {"owner": "alice", "status": "building"})
@@ -189,8 +197,8 @@ def test_identical_store_write_is_heartbeat_not_progress(service, agents):
     forged = service.store_set(bob, "design", "claim:task",
                                {"owner": "alice", "status": "building"})
     assert forged.version == first.version
-    assert forged.updated_by == alice.id          # bob asserted nothing
-    assert forged.updated_at == fetched.updated_at
+    assert forged.updated_by == alice.id          # authorship is untouched
+    assert forged.updated_at >= fetched.updated_at   # liveness IS recorded
 
 
 def test_rate_limit_arrests_reply_loops(agents):
@@ -339,3 +347,138 @@ def test_open_dm_is_idempotent_and_rejoinable(service, agents):
     assert not service.db.is_member(dm, "bob")
     service.open_dm(bob, "alice")
     assert service.db.is_member(dm, "bob")
+
+
+# -- the hub owns the vote deadline (0140 field test 2) --------------------------
+
+def _open_vote(service, chair, channel, *, ttl=300.0, topic="pick a db"):
+    from agora.vote import build_vote_post
+    post = build_vote_post(chair.id, topic, ["sqlite", "postgres", "duckdb"],
+                           ttl=ttl)
+    root = service.post_message(chair, channel, PostMessage(
+        body=post["body"], title=post["title"], status=Status.open,
+        data=post["data"]))
+    return root, post["data"]["vote"]["tag"]
+
+
+@pytest.fixture()
+def poll(service):
+    """A chair, five voters and a public room they all sit in."""
+    chair, _ = service.register_agent("chair", "")
+    voters = []
+    service.create_channel(chair, "room", private=False)
+    for name in ("gateway", "memory", "uic", "flow", "observer"):
+        info, _ = service.register_agent(name, "")
+        service.join_channel(info, "room", None)
+        voters.append(info)
+    return chair, voters
+
+
+def _results(service, chair, channel):
+    from agora.vote import VOTE_RESULT_KEY
+    return [m for m in service.db.get_messages(channel, 0, 500)
+            if isinstance((m.data or {}).get(VOTE_RESULT_KEY), dict)]
+
+
+def test_hub_publishes_a_vote_whose_deadline_passed(service, poll):
+    """Operator ruling: when a vote closes the results MUST be broadcast on
+    the channel it was requested, for all to see. The chair's watcher rides
+    the chair's process, and a driven seat only owns one during a turn — so
+    the HUB is the guarantee. The published result carries the counts AND
+    the roll call the vote body promised."""
+    chair, voters = poll
+    root, tag = _open_vote(service, chair, "room", ttl=300.0)
+    for i, voter in enumerate(voters[:3]):
+        service.post_dm(voter, "chair", PostMessage(body=f"vote {tag}: {i + 1}"))
+    assert service.vote_sweep() == []                 # window still running
+    # The announced window passes with the chair's process nowhere in sight.
+    root.data["vote"]["closes_at"] = 0.0
+    with service.db._lock:
+        service.db._conn.execute("UPDATE messages SET data = ? WHERE id = ?",
+                                 (json.dumps(root.data), root.id))
+        service.db._conn.commit()
+    assert service.vote_sweep() == [f"vote:room#{root.seq}"]
+    results = _results(service, chair, "room")
+    assert len(results) == 1
+    published = results[0]
+    assert published.reply_to == root.id
+    assert published.status == Status.resolved
+    payload = published.data["vote_result"]
+    assert payload["ballots"] == {"gateway": [0], "memory": [1], "uic": [2]}
+    assert payload["ballots_seen"] == 3 and payload["ballots_counted"] == 3
+    assert "deadline reached — published by the hub" in payload["closed"]
+    assert "sqlite: 1  (gateway)" in published.body
+    assert "turnout 3/6" in published.body
+    # Idempotent: a second tick finds the thread already resolved.
+    assert service.vote_sweep() == []
+    assert len(_results(service, chair, "room")) == 1
+
+
+def test_hub_publishes_as_soon_as_every_eligible_seat_has_voted(service, poll):
+    """All-voted is the other close condition: blindness protects nothing
+    once the last ballot lands, so the sweep publishes on the next tick
+    rather than making the room wait out the window."""
+    chair, voters = poll
+    root, tag = _open_vote(service, chair, "room", ttl=3600.0)
+    for voter in voters[:-1]:
+        service.post_dm(voter, "chair", PostMessage(body=f"vote {tag}: 1"))
+    assert service.vote_sweep() == []                 # one seat still unheard
+    service.post_dm(voters[-1], "chair", PostMessage(body=f"vote {tag}: 2"))
+    assert service.vote_sweep() == [f"vote:room#{root.seq}"]
+    payload = _results(service, chair, "room")[0].data["vote_result"]
+    assert payload["closed"].startswith("every member voted")
+    assert payload["ballots_counted"] == 5
+
+
+def test_hub_sweep_never_double_publishes_after_the_chair(service, poll):
+    """Both publishers read the thread first, so whoever gets there first
+    wins — the chair closing early-with-force stays valid and the hub does
+    not post a second, contradictory result."""
+    chair, voters = poll
+    root, tag = _open_vote(service, chair, "room", ttl=1.0)
+    service.post_dm(voters[0], "chair", PostMessage(body=f"vote {tag}: 1"))
+    service.post_message(chair, "room", PostMessage(
+        body="VOTE RESULT — pick a db\n\nturnout 1/6 · closed by the chair",
+        status=Status.resolved, reply_to=root.id,
+        data={"vote_result": {"topic": "pick a db", "ballots": {"gateway": [0]},
+                              "closed": "closed by the chair"}}))
+    time.sleep(1.1)
+    assert service.vote_sweep() == []
+    assert len(_results(service, chair, "room")) == 1
+
+
+def test_hub_sweep_is_silent_while_the_hub_is_paused(service, poll):
+    """The 0069 clock rule: a pause never ages anything toward its deadline,
+    and a stood-down hub speaks to nobody."""
+    chair, voters = poll
+    root, _tag = _open_vote(service, chair, "room", ttl=0.5)
+    time.sleep(0.6)
+    service.set_pause("maintenance")
+    assert service.vote_sweep() == []
+    assert _results(service, chair, "room") == []
+    service.clear_pause()
+    assert service.vote_sweep() == [f"vote:room#{root.seq}"]
+
+
+def test_hub_sweep_counts_every_ballot_shape_the_chair_counts(service, poll):
+    """One tally implementation: the hub folds the same threads through the
+    same code, so a ballot the chair would count is never lost because the
+    hub published instead."""
+    chair, voters = poll
+    root, tag = _open_vote(service, chair, "room", ttl=0.5)
+    service.post_dm(voters[0], "chair", PostMessage(body=f"vote {tag}: 1"))
+    service.post_dm(voters[1], "chair", PostMessage(
+        body=f"my ballot for {tag}", data={"vote": "2"}))
+    service.post_message(voters[2], "room", PostMessage(
+        body=f"vote {tag}: 3", to=["chair"]))          # not a reply to the root
+    service.post_message(voters[3], "room", PostMessage(
+        body="posting openly:\nvote: sqlite", status=Status.reply,
+        reply_to=root.id))
+    service.post_dm(voters[4], "chair", PostMessage(body=f"vote {tag}: mongodb"))
+    time.sleep(0.6)
+    assert service.vote_sweep() == [f"vote:room#{root.seq}"]
+    payload = _results(service, chair, "room")[0].data["vote_result"]
+    assert sorted(payload["ballots"]) == ["flow", "gateway", "memory", "uic"]
+    assert payload["ballots_seen"] == 5
+    assert payload["ballots_counted"] == 4
+    assert payload["ballots_rejected"] == 1

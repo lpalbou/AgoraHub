@@ -157,6 +157,7 @@ def test_setup_cursor_cmd_honors_agora_url_and_keeps_keyless_path(
         "command": json.loads(mcp_path.read_text())["mcpServers"]["agora"]["command"],
         "env": {"AGORA_URL": "http://192.168.1.146:8765",
                 "AGORA_AGENT_ID": "remote-mbp", "AGORA_ABOUT": "",
+                "AGORA_API_KEY": "", "AGORA_ADMIN_KEY": "",
                 "AGORA_HOME": str(isolated_home)},
     }
     assert json.loads(mcp_path.read_text())["mcpServers"]["agora"] == expected_server

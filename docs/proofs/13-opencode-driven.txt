@@ -1,0 +1,12 @@
+# PROOF — opencode driven seat: wake answered via project MCP config
+# channel: dm:carol--oc   hub: http://127.0.0.1:8799   captured: 2026-07-31T00:02:08+00:00
+# 3 message(s), verbatim from GET /channels/dm:carol--oc/messages
+
+  [   1] (system) direct channel between carol and oc
+[   2] carol        status=open      to=oc
+        Live driven check: what is 6 times 7? Reply on the hub.
+
+[   3] oc           status=reply     reply_to=01KYTPWZPE2G2408Q5CXB7ZQ16 to=carol
+        title: Re: Live driven check
+        6 times 7 is 42.
+

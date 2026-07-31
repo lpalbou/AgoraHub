@@ -116,6 +116,8 @@ CREATE TABLE IF NOT EXISTS message_dedupe (
     created_at  REAL NOT NULL,
     PRIMARY KEY (channel, sender, dedupe_key)
 );
+CREATE INDEX IF NOT EXISTS idx_message_dedupe_channel_key
+    ON message_dedupe (channel, dedupe_key);
 CREATE TABLE IF NOT EXISTS reads (
     message_id  TEXT NOT NULL,
     agent_id    TEXT NOT NULL,
@@ -1167,6 +1169,15 @@ class Database:
         to = to or []
         with self._lock:
             if dedupe_key:
+                # Dedupe is per (channel, SENDER, key) — genuine idempotency: a
+                # seat retrying its own post must not double-announce.
+                #
+                # It is deliberately NOT channel-global. Event keys are natural
+                # strings (`week-30`, `ci-red`, `release`), so two seats collide
+                # trivially — and a global key refused the SECOND seat's post
+                # outright, destroying different words about a related event and
+                # telling that seat only "409 duplicate". Two near-identical
+                # notices are cheap; a silenced colleague is not.
                 prior = self._conn.execute(
                     "SELECT message_id FROM message_dedupe"
                     " WHERE channel = ? AND sender = ? AND dedupe_key = ?",
@@ -1678,9 +1689,24 @@ class Database:
                         channel=channel, key=key, value=value, version=current,
                         updated_by=updated_by, updated_at=now,
                     )
+                # A PEER writing the identical value is an honest heartbeat, so
+                # refresh `updated_at` — but keep `updated_by` and the version
+                # pinned to the author, so liveness cannot be forged INTO
+                # authorship and the no-progress guard still sees no new
+                # version. Discarding the write entirely (the previous
+                # behaviour) meant a seat whose claim row was authored by
+                # someone else — a steward assigning work — could never signal
+                # that it was alive: its pings vanished behind a 200 and the
+                # stale-claim sweep parked work that was actively progressing.
+                self._conn.execute(
+                    "UPDATE store SET updated_at = ?"
+                    " WHERE channel = ? AND key = ?",
+                    (now, channel, key),
+                )
+                self._conn.commit()
                 return StoreEntry(
                     channel=channel, key=key, value=value, version=current,
-                    updated_by=row["updated_by"], updated_at=row["updated_at"],
+                    updated_by=row["updated_by"], updated_at=now,
                 )
             new_version = current + 1
             self._conn.execute(

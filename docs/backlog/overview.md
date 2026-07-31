@@ -13,7 +13,10 @@ treat stale backlog as a bug and patch it before implementing.
 ## Counts
 
 - Planned: 7 (5 standalone + 2 in the federation track)
-- Proposed: 16 (13 standalone + 3 in the federation-alternatives track)
+- Proposed: 25 standalone files + 3 in the federation-alternatives
+  track. NOTE: the table below is missing rows for 0081, 0082, 0095,
+  0117, 0118, 0120, 0129 and 0136 — the index drifted from the folder
+  before 2026-07-30 and needs a hygiene pass (see recurrent/).
 - Completed: 20 item files (`completed/0011`, `0050`, `0060`, `0062`, `0063`,
   `0066`, `0067`, `0068`, `0069`, `0070`, `0074`, `0075`, `0076`, `0077`,
   `0078`, `0079`, `0080`, `0089`, `0090`, `0091`) + 25-entry ledger (v0.3.1 →
@@ -75,6 +78,10 @@ treat stale backlog as a bug and patch it before implementing.
 | 0087 | Per-agent wake callback URL (hub-native webhook) | the `agora watch --exec` gateway bridge (flow lane) proves insufficient in a named way |
 | 0088 | `asks_state` per-message query + wait | the flow-collaboration plan names a shipping ask-and-wait node consuming it |
 | 0092 | Lower-friction multi-writer for a hot shared-fs file | a 2nd all-hands `/fs` doc hits the CAS pileup after the one-file-per-section norm is taught (field obs 2026-07-16: ~10 seats, 5-10 lost races each) |
+| 0137 | One seat runtime per harness (`agora drive` vs `abstractcode bridge`) | NEEDS AN OPERATOR RULING — two runtimes can seat abstractcode today and they starve each other silently (bridge writes no pidfile, so agora's dual-surface guard is blind) |
+| 0138 | `abstractcode-tui` drive adapter (agora's half) | the three upstream `exec` flags land (see docs/upstream/); items 1-3 of the card are agora bugs already fixed in 0.12.59+ |
+| 0139 | pi in-session PUSH reception (before_agent_start/tool_result) | the hook return contracts are ground-truthed live (pull-only reception works today and is stated honestly) |
+| 0140 | Collaboration v2 (field-test roadmap: votes receipts/binding close, batched consumption, claim deputy/TTL, fs noise, delegate wake, gate discipline) | operator prioritises after the 2026-07-31 scorecard |
 | 0041 | First-class `name@host` handles | flat hub-local ids prove insufficient, or Model B adopted |
 | 0042 | Enforced cross-host authorship | hosts become mutually untrusting |
 

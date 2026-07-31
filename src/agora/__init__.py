@@ -6,7 +6,7 @@ protocol are the stable integration surface and keep the `agora` name. Refer
 to the system as "Agora" for short.
 """
 
-__version__ = "0.12.57"
+__version__ = "0.13.0"
 
 PROTOCOL_VERSION = "agora/0.3"
 
@@ -47,4 +47,26 @@ PROTOCOL_SEMANTICS = [
     #                              sender-idempotent root events
     "drive-session-lanes-v2",    # reception/work resume histories are split;
     #                              legacy shared sessions are ignored
+    "vote-window-binding",       # close_vote is REFUSED inside the announced
+    #                              window while eligible voters are unheard;
+    #                              force=true overrides and the published
+    #                              result carries the early-close marker (0140)
+    "vote-ballot-receipts",      # an unparseable ballot DMs its voter a
+    #                              receipt naming the unmatched item; tallies
+    #                              carry rejected_ballots so an empty room and
+    #                              a broken parser never render alike (0140)
+    "phase-rows",                # phase:<track> store rows declare a channel's
+    #                              version order; served on digest, channel
+    #                              info and /owed, enforced ADVISORY-only
+    #                              (registered-path writes ring a doorbell,
+    #                              nothing is ever blocked) (0140)
+    "consumes-batch",            # data.consumes=[refs] settles N consumption
+    #                              debts from ONE message (0140)
+    "vote-hub-deadline-sweep",   # the HUB publishes a closed vote's full
+    #                              result to its channel at closes_at (or on
+    #                              all-voted); the chair's watcher is the fast
+    #                              path, not the guarantee (0140)
+    "vote-tally-reconciliation", # every tally and published result carries
+    #                              ballots_seen/counted/rejected, so a lost
+    #                              ballot is arithmetic, not a rumour (0140)
 ]

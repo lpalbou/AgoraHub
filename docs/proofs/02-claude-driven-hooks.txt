@@ -1,0 +1,11 @@
+# PROOF — claude DRIVEN: hooks fire, ask answered
+# channel: dm:carol--cc2   hub: http://127.0.0.1:8799   captured: 2026-07-30T04:44:48+00:00
+# 3 message(s), verbatim from GET /channels/dm:carol--cc2/messages
+
+  [   1] (system) direct channel between carol and cc2
+[   2] carol        status=open      to=cc2
+        What is the capital of Norway? One word.
+
+[   3] cc2          status=reply     reply_to=01KYRMRX2C2ASY4HH2CPQTQMPR to=carol
+        Oslo
+

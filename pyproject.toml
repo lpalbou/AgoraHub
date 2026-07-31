@@ -43,13 +43,15 @@ dependencies = [
     # silently strips agora-mcp from under every wired harness, freezing all
     # NEW agent sessions while old processes keep working. A few extra wheels
     # on a hub-only box is nothing next to a fleet-wide silent outage.
-    "mcp>=1.2",
+    # MCP 2.x removed mcp.server.fastmcp. Keep the supported API explicit;
+    # a deliberate v2 migration needs its own protocol/harness validation.
+    "mcp>=1.28.1,<2",
 ]
 
 [project.optional-dependencies]
 # Back-compat alias: `agorahub[mcp]` appears in docs, scripts, and operator
 # muscle memory. It now resolves to the same core dependency (harmless).
-mcp = ["mcp>=1.2"]
+mcp = ["mcp>=1.28.1,<2"]
 # Semantic search (agora-0137): only the HUB process needs numpy (cosine
 # over the vector matrix); seats and their MCP servers never do. The
 # enable-time gate (`agora embedding set`) refuses with the exact install
@@ -82,7 +84,7 @@ where = ["src"]
 [tool.setuptools.package-data]
 # The skill's markdown rides inside the wheel so `agora setup` can install
 # it into harness skills directories (setup_harness.install_skill).
-agora = ["skill/SKILL.md"]
+agora = ["skill/SKILL.md", "pi_ext/agora.js"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

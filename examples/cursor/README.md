@@ -4,7 +4,7 @@ The files that wire a Cursor workspace as an agora agent are **generated** by
 the CLI. Do not hand-copy templates; run, in the agent's workspace:
 
 ```bash
-agora setup cursor <agent-id> --with-hook
+agora setup <agent-id> --harness cursor
 ```
 
 This writes, project-scoped (nothing global):
@@ -15,7 +15,8 @@ This writes, project-scoped (nothing global):
   RECEPTION (the session starts one monitored background shell looping
   `agora listen --once --max-wait 240`; the anchored `^AGORA_WAKE` output
   monitor turns each landing message into a notification).
-- `.cursor/hooks.json` + `.cursor/hooks/agora_wait.sh` (with `--with-hook`) —
+- `.cursor/hooks.json` + `.cursor/hooks/agora_wait.sh` (default; use
+  `--no-hook` to skip and remove prior Agora hook wiring on re-run) —
   the turn-end stop-hook backstop that re-prompts while unread messages wait.
 
 Re-running the command refreshes all of it in place (idempotent merge: your
@@ -29,7 +30,7 @@ To inspect what would be generated without touching a real workspace:
 
 ```bash
 tmp=$(mktemp -d)
-agora setup cursor demo --workspace "$tmp" --with-hook --url http://127.0.0.1:8899
+agora setup demo --workspace "$tmp" --harness cursor --url http://127.0.0.1:8899
 find "$tmp" -type f   # then read them; rm -rf "$tmp" when done
 ```
 

@@ -22,6 +22,16 @@ the full outcome — counts AND the roll call — plus a {"vote_result": …}
 payload, so afterwards any tally renders it straight from the transcript
 and every voter can verify their listed ballot.
 
+The chair loop is the FAST path, never the guarantee. A driven seat only
+owns a process during a turn, so a chair asleep at `closes_at` used to
+leave a closed vote unpublished indefinitely (field test 2: a 5-minute
+window sat open through 15 minutes of fleet silence). The HUB therefore
+sweeps vote deadlines itself and publishes the same result from the same
+tally code (`gather_ballots` + `tally_ballots` + `result_body`), so a
+chair's liveness is an optimisation and publication is a guarantee. Both
+publishers first look for an existing result in the thread, which is why
+`published_result` accepts the hub as an authoritative publisher.
+
 The TAG exists because the ballot line needs a reference that is unique
 and known BEFORE the vote message is posted (seqs are hub-assigned at post
 time): a short client-minted token agents copy verbatim. Ballot lines
@@ -125,6 +135,16 @@ def parse_vote_arg(arg: str) -> tuple[str, list[str]] | None:
     return topic, options
 
 
+def _strip_chair_numbering(option: str) -> str:
+    """Drop a chair's own leading "1." / "2)" from an option.
+
+    The vote body renders options with ITS numbering; a chair who supplied
+    pre-numbered options produced "1. 1. THE MESSAGE — ..." live, and voters
+    who copied the label they saw cast unparseable ballots.
+    """
+    return re.sub(r"^\s*\d+\s*[.)]\s+", "", option.strip())
+
+
 def build_vote_post(author: str, topic: str, options: list[str],
                     ttl: float = DEFAULT_VOTE_TTL) -> dict[str, Any] | None:
     """The complete post payload for opening a blind vote — the ONE
@@ -132,7 +152,7 @@ def build_vote_post(author: str, topic: str, options: list[str],
     open_vote), so the contract voters see never drifts between surfaces.
     None when the inputs are unusable."""
     topic = topic.strip()
-    options = dedupe_options(options)
+    options = dedupe_options([_strip_chair_numbering(o) for o in options])
     if not topic or len(options) < 2:
         return None
     tag = new_vote_tag()
@@ -165,10 +185,36 @@ def vote_body(topic: str, options: list[str], author: str, tag: str,
 
 
 def _match_items(items: list[str], options: list[str]) -> list[int] | None:
-    """Map ballot items to option indices: exact normalized text or 1-based
-    number. Unknown item -> None (refuse, never guess); repeats keep the
-    first occurrence."""
+    """Map ballot items to option indices, or None when any item is unknown.
+    Thin wrapper over `match_items_detail` for callers that only need the
+    ranking; the detail form exists so a rejection can NAME what failed."""
+    return match_items_detail(items, options)[0]
+
+
+def match_items_detail(items: list[str],
+                       options: list[str]) -> tuple[list[int] | None, str]:
+    """(ranking, unmatched_item). Unknown item -> None for the WHOLE
+    ballot (refuse, never guess: silently dropping one item of a RANKING would
+    distort the voter's preference order); repeats keep the first occurrence.
+    The unmatched item travels so the voter's rejection receipt can quote the
+    exact word that failed instead of a generic 'unparseable'.
+
+    Matching is deliberately more generous than exact-text-or-digit. Live
+    incident (at-test, 2026-07-31): 9 of 12 real ballots were voided because
+    voters copied the option label AS RENDERED — "5. WOVEN" (the vote body's
+    own numbering), or the option's short label ("M3") — and one chair,
+    seeing an empty tally indistinguishable from an empty room, closed its
+    vote 42 seconds in, killing three more ballots in flight. A ballot's job
+    is to be counted; the accepted spellings are exactly the ones the vote
+    post itself puts in front of a voter:
+      - the 1-based number, bare ("5") or as the rendered prefix ("5. WOVEN",
+        "5 WOVEN — rationale...")
+      - the exact normalized option text
+      - an unambiguous PREFIX of exactly one option (covers short labels like
+        "M3" for "M3 — the archivist thread"; ambiguity refuses)
+    """
     lookup = {_norm(o): i for i, o in enumerate(options)}
+    normed = [_norm(o) for o in options]
     ranking: list[int] = []
     for item in items:
         raw = item.strip()
@@ -179,10 +225,24 @@ def _match_items(items: list[str], options: list[str]) -> list[int] | None:
         if idx is None and key.isdigit() and 1 <= int(key) <= len(options):
             idx = int(key) - 1
         if idx is None:
-            return None
+            head = re.match(r"^(\d+)[.):\s-]\s*", raw)
+            if head and 1 <= int(head.group(1)) <= len(options):
+                candidate = int(head.group(1)) - 1
+                rest = _norm(raw[head.end():])
+                # The digit decides; any trailing text must not contradict a
+                # DIFFERENT option's text outright.
+                if not rest or normed[candidate].startswith(rest)                         or rest.split(" ")[0] in normed[candidate]:
+                    idx = candidate
+        if idx is None and len(key) >= 2:
+            prefix_hits = [i for i, text in enumerate(normed)
+                           if text.startswith(key)]
+            if len(prefix_hits) == 1:
+                idx = prefix_hits[0]
+        if idx is None:
+            return None, raw
         if idx not in ranking:
             ranking.append(idx)
-    return ranking or None
+    return (ranking, "") if ranking else (None, "")
 
 
 def parse_ballot(body: str, options: list[str]) -> list[int] | None:
@@ -204,11 +264,120 @@ def parse_dm_ballot(body: str, refs: set[str],
     tag or its qualified seq, case-insensitive, tolerant of a leading '#').
     Lines tagged for other votes are ignored — one DM thread may carry
     ballots for several concurrent polls."""
+    return dm_ballot_outcome(body, refs, options)[0]
+
+
+def _names_this_vote(body: str, data: dict[str, Any] | None,
+                     refs: set[str]) -> bool:
+    """Does this message SAY which vote it is about? A structured ballot
+    carries the choice but no tag, so it is attributable only when the
+    sender named the vote somewhere: `data.vote_tag`, a tag inside the vote
+    payload, or the tag written in the prose beside it."""
+    data = data or {}
+    stated = {str(data.get("vote_tag") or "").lstrip("#").casefold()}
+    payload = data.get(VOTE_DATA_KEY)
+    if isinstance(payload, dict):
+        stated.add(str(payload.get("tag") or "").lstrip("#").casefold())
+    if stated & refs:
+        return True
+    lowered = (body or "").casefold()
+    return any(ref and ref in lowered for ref in refs)
+
+
+def dm_ballot_outcome(body: str, refs: set[str], options: list[str],
+                      data: dict[str, Any] | None = None
+                      ) -> tuple[list[int] | None, str, str]:
+    """(ranking, line, unmatched) for a message addressed to THIS vote.
+
+    Three outcomes, and the caller MUST be able to tell them apart — an
+    unreadable ballot that silently becomes "no ballot" is exactly how nine
+    of twelve real ballots vanished in the at-test incident:
+      - counted:  (ranking, the line, "")
+      - REJECTED: (None, the line, the item that matched no option)
+      - not a ballot for this vote at all: (None, "", "")
+
+    `data` carries the STRUCTURED ballot (`data.vote`, the form the module
+    promises tool-first agents), which wins over prose exactly as it does
+    for in-channel replies — but only once the message NAMES this vote,
+    since a structured choice alone cannot say which of several concurrent
+    polls it answers. Ignoring `data` here was a silent-loss path: a
+    structured DM ballot was neither counted nor receipted.
+    """
+    structured = (data or {}).get(VOTE_DATA_KEY) if data else None
+    if isinstance(structured, dict):
+        structured = structured.get("choice", structured.get("ballot"))
+    if isinstance(structured, str):
+        structured = [structured]
+    if (isinstance(structured, list) and structured
+            and _names_this_vote(body, data, refs)):
+        items = [str(x) for x in structured]
+        ranking, unmatched = match_items_detail(items, options)
+        line = "vote (structured): " + " > ".join(items)[:160]
+        if ranking is not None:
+            return ranking, line, ""
+        return None, line, unmatched or items[0]
     for tag, payload in reversed(_TAGGED_LINE.findall(body or "")):
         if tag.lstrip("#").casefold() in refs:
             items = payload.split(">") if ">" in payload else [payload]
-            return _match_items(items, options)
-    return None
+            ranking, unmatched = match_items_detail(items, options)
+            line = f"vote {tag}: {payload}"
+            if ranking is not None:
+                return ranking, line, ""
+            # A tagged line that parsed to nothing (blank payload) is still
+            # an attempt at THIS vote: report it as rejected, quoting what
+            # the voter actually wrote.
+            return None, line, unmatched or payload.strip()
+    return None, "", ""
+
+
+def fmt_window(seconds: float) -> str:
+    """Time left on a voting window, at the precision a deadline needs.
+    `fmt_age` rounds ('42s' renders as 'now', '4m18s' as '4m') — fine for
+    "how old is this", useless for "how long may I still not close"."""
+    total = max(0, int(seconds))
+    if total < 60:
+        return f"{total}s"
+    if total < 3600:
+        return f"{total // 60}m{total % 60:02d}s"
+    return f"{total // 3600}h{(total % 3600) // 60:02d}m"
+
+
+def receipt_marker(tag: str) -> str:
+    """The idempotency fingerprint a rejection receipt carries. The chair
+    re-derives 'already bounced' from the DM thread instead of remembering
+    it, so a restarted chair never re-bounces a ballot it already answered."""
+    return f"BALLOT NOT COUNTED — vote {tag}" if tag else ""
+
+
+def rejection_receipt(topic: str, tag: str, options: list[str],
+                      line: str, unmatched: str,
+                      standing: list[int] | None = None) -> str:
+    """The DM a voter gets back when their ballot did not parse. It quotes
+    the line, names the exact item that matched nothing, and prints the
+    accepted spellings for every option — the three forms the vote post
+    itself puts in front of them. Never destructive: a failed REVISION
+    leaves the earlier valid ballot standing and says so, because voiding a
+    counted ballot over a typo would disenfranchise the voter twice."""
+    shown = options[:12]
+    spellings = "\n".join(
+        f"  {i + 1}. {o[:60]}"
+        f"   → \"{i + 1}\"  or  \"{i + 1}. {o[:28]}\"  or  \"{o[:40]}\""
+        for i, o in enumerate(shown))
+    more = (f"\n  … and {len(options) - len(shown)} more option(s)"
+            if len(options) > len(shown) else "")
+    stands = ""
+    if standing:
+        picks = " > ".join(options[i][:40] for i in standing)
+        stands = ("\nYour PREVIOUS ballot still stands and is being counted: "
+                  f"{picks}. Re-send a readable line to change it.")
+    return (f"{receipt_marker(tag)} ({topic})\n\n"
+            f"Your line: {line.strip()[:200]}\n"
+            f"I could not match \"{unmatched.strip()[:80]}\" to any option, "
+            "so the whole ballot was refused (dropping one item of a ranking "
+            "would distort your order).\n\n"
+            f"Accepted spellings — any ONE of these per item:\n{spellings}{more}\n"
+            f"Ranking:  vote {tag}: 2 > 1\n"
+            f"Send ONE corrected line and it counts.{stands}")
 
 
 def ballot_from(body: str, data: dict[str, Any] | None,
@@ -222,6 +391,84 @@ def ballot_from(body: str, data: dict[str, Any] | None,
     if isinstance(structured, list) and structured:
         return _match_items([str(x) for x in structured], options)
     return parse_ballot(body, options)
+
+
+@dataclass
+class BallotScan:
+    """What ONE pass over the ballot-bearing threads found. `seen` is the
+    reconciliation number: every identity that put a ballot ATTEMPT for this
+    vote in front of the chair, counted or not. `seen <= counted + rejected`
+    is the invariant a reader of the published result can check — when it
+    fails, a ballot was SEEN and then lost on the way to the roll call, which
+    is precisely the failure a bare turnout number cannot show. (It is <=,
+    not ==, because one voter can be both: a bad revision after a readable
+    line is rejected while its earlier ballot still stands.)"""
+
+    ballots: dict[str, list[int]]                     # voter -> ranking
+    rejected: list[dict[str, Any]]                    # unparseable attempts
+    seen: set[str]                                    # voters who attempted
+
+    @property
+    def counts(self) -> dict[str, int]:
+        return {"ballots_seen": len(self.seen),
+                "ballots_counted": len(self.ballots),
+                "ballots_rejected": len(self.rejected)}
+
+
+def fold_ballot_thread(rows: list[Any], scan: BallotScan, *, chair: str,
+                       refs: set[str], options: list[str], since_ts: float,
+                       marker: str = "", channel: str = "", root_id: str = "",
+                       reject: bool = True) -> None:
+    """Fold ONE thread's messages into `scan` — the single tally
+    implementation the chair's client-side watcher and the hub's deadline
+    sweep both run, so the two publishers can never disagree about what a
+    thread contained.
+
+    Peer-sent messages only (never the chair's own lines — quoting the
+    template back must not cast a vote for it) carrying a ballot for THIS
+    vote; latest per sender wins; only messages newer than the vote count
+    (small clock slack), because ballot threads are long-lived. A reply to
+    `root_id` needs no tag: the thread already says which vote it answers.
+
+    A rejection is dropped the moment the same voter sends a readable line
+    AFTER it — 'your latest ballot line counts' applies to corrections too —
+    and receipt-already-sent is derived from the thread itself (a later
+    chair message carrying `marker`), never from chair memory, so a
+    restarted chair never double-bounces. `reject=False` for the vote's own
+    CHANNEL: receipts are DM'd, and bouncing a public unparseable line would
+    post 'your ballot did not count' into the room.
+    """
+    rejects: dict[str, dict[str, Any]] = {}
+    receipt_seq = -1
+    for m in rows:
+        if getattr(m.kind, "value", m.kind) != "message":
+            continue
+        if m.sender == chair:
+            if marker and marker in (m.body or ""):
+                receipt_seq = max(receipt_seq, m.seq)
+            continue
+        if m.created_at < since_ts - 60:
+            continue
+        ballot, line, unmatched = dm_ballot_outcome(
+            m.body, refs, options, m.data)
+        if ballot is None and not line and root_id and m.reply_to == root_id:
+            ballot = ballot_from(m.body, m.data, options)
+        if ballot is not None:
+            scan.ballots[m.sender] = ballot
+            scan.seen.add(m.sender)
+            rejects.pop(m.sender, None)   # a later readable line corrects
+        elif line:
+            scan.seen.add(m.sender)
+            rejects[m.sender] = {"voter": m.sender,
+                                 "channel": channel or m.channel,
+                                 "seq": m.seq, "line": line,
+                                 "item": unmatched}
+    if not reject:
+        return
+    for row in rejects.values():
+        row["receipted"] = receipt_seq > row["seq"]
+        row["standing"] = scan.ballots.get(row["voter"])
+        scan.rejected.append(row)
 
 
 @dataclass
@@ -301,10 +548,13 @@ def vote_block(s: Style, *, ref: str, topic: str, options: list[str],
 
 
 def result_body(topic: str, options: list[str], tally: VoteTally,
-                total_members: int, reason: str = "closed by the chair") -> str:
+                total_members: int, reason: str = "closed by the chair",
+                rejected: int = 0, seen: int | None = None) -> str:
     """The published close message — the full, auditable outcome in plain
     text: counts, the roll call (every voter can verify their listed
-    ballot), the borda order when ballots ranked, and why it closed."""
+    ballot), the borda order when ballots ranked, the RECONCILIATION line
+    (seen/counted/rejected — a voter whose ballot existed but is missing
+    from the roll call can now prove it), and why it closed."""
     lines = [f"VOTE RESULT — {topic}", ""]
     order = sorted(range(len(options)), key=lambda i: -tally.first[i])
     for i in order:
@@ -317,7 +567,17 @@ def result_body(topic: str, options: list[str], tally: VoteTally,
             f"{options[i]} {tally.borda[i]}" for i in ranked
             if tally.borda[i] > 0))
     lines.append("")
-    lines.append(f"turnout {sum(tally.first)}/{total_members} · {reason}")
+    if rejected:
+        lines.append(f"  {rejected} ballot(s) arrived UNREADABLE and were not "
+                     "counted (each voter was sent a receipt by DM)")
+    counted = sum(tally.first)
+    if seen is not None:
+        lines.append(f"  ballots: {seen} seen · {counted} counted · "
+                     f"{rejected} rejected"
+                     + ("  — MISMATCH: a ballot was seen and neither counted "
+                        "nor rejected; tell the chair"
+                        if seen > counted + rejected else ""))
+    lines.append(f"turnout {counted}/{total_members} · {reason}")
     return "\n".join(lines)
 
 
@@ -338,6 +598,42 @@ def result_ballots(payload: dict[str, Any],
         if clean:
             ballots[str(agent)] = clean
     return ballots
+
+
+HUB_PUBLISHER = "hub"
+
+
+def published_result(root: Any, replies: list[Any]) -> Any | None:
+    """The authoritative published result in this thread, latest wins, or
+    None. Authority is the CHAIR or the HUB and nobody else: a forged
+    `vote_result` from a third party must never close a vote (it would let
+    any member fake an outcome), and the hub is admitted because the hub
+    deadline sweep is what guarantees publication when the chair's process
+    is not alive at `closes_at`. Both publishers read this before posting,
+    which is the whole double-publish guard — restart-safe, because it is
+    FOUND in the channel rather than remembered."""
+    return next(
+        (r for r in reversed(replies)
+         if r.sender in (root.sender, HUB_PUBLISHER)
+         and isinstance((r.data or {}).get(VOTE_RESULT_KEY), dict)),
+        None)
+
+
+def result_payload(info: dict[str, Any], ballots: dict[str, list[int]],
+                   total_members: int, reason: str,
+                   scan: BallotScan | None = None,
+                   rejected: int = 0) -> dict[str, Any]:
+    """The machine-readable `vote_result` — built in ONE place so the
+    chair's close and the hub's deadline sweep publish the same shape."""
+    counts = (scan.counts if scan is not None
+              else {"ballots_seen": len(ballots) + rejected,
+                    "ballots_counted": len(ballots),
+                    "ballots_rejected": rejected})
+    return {"topic": info["topic"], "options": info["options"],
+            "ballots": ballots, "total_members": total_members,
+            "closed": reason, **counts,
+            **({"rejected": counts["ballots_rejected"]}
+               if counts["ballots_rejected"] else {})}
 
 
 def vote_info(root: Any, channel: str) -> dict[str, Any] | None:
@@ -381,83 +677,99 @@ class VoteChair:
 
     # -- gathering ----------------------------------------------------------
 
-    async def replies_to(self, channel: str, root: Any) -> list[Any]:
-        """All replies to `root`, oldest first — pages forward from the
-        root's seq over the existing history endpoint (no hub extension;
-        channels at human scale are a few pages)."""
-        replies: list[Any] = []
+    async def since_root(self, channel: str, root: Any) -> list[Any]:
+        """Every channel message after `root`, oldest first — pages forward
+        from the root's seq over the existing history endpoint (no hub
+        extension; channels at human scale are a few pages). NOT narrowed to
+        replies: a ballot posted as a fresh channel message naming the chair
+        parses like any other and used to be invisible to the tally, which
+        is one of the silent-loss paths behind the 7-DM'd/6-counted
+        incident."""
+        rows: list[Any] = []
         cursor = root.seq
         while True:
             page = await self.client.history(channel, since=cursor, limit=200)
             if not page:
-                return replies
-            replies.extend(m for m in page if m.reply_to == root.id)
+                return rows
+            rows.extend(page)
             cursor = page[-1].seq
             if len(page) < 200:
-                return replies
+                return rows
+
+    async def replies_to(self, channel: str, root: Any) -> list[Any]:
+        """All replies to `root`, oldest first."""
+        return [m for m in await self.since_root(channel, root)
+                if m.reply_to == root.id]
 
     async def _dm_ballots(self, refs: set[str], options: list[str],
-                          since_ts: float) -> dict[str, list[int]]:
-        """Blind ballots from the chair's DM threads: peer-sent messages
-        (never my own lines — quoting the template back must not cast a
-        vote for me) carrying a 'vote TAG: …' line for THIS vote. Latest
-        per peer wins; only messages newer than the vote count (small
-        clock slack) — DM threads are long-lived."""
-        ballots: dict[str, list[int]] = {}
+                          since_ts: float, tag: str = "",
+                          scan: BallotScan | None = None) -> tuple[
+                              dict[str, list[int]], list[dict[str, Any]]]:
+        """Blind ballots from the chair's DM threads, folded by the shared
+        `fold_ballot_thread` the hub sweep also runs. Pages each thread
+        forward over the history endpoint; the per-thread rules (peer lines
+        only, latest wins, receipts derived from the thread) live in the
+        fold, so chair and hub cannot drift."""
+        scan = scan if scan is not None else BallotScan({}, [], set())
+        marker = receipt_marker(tag)
         names = [c["name"] for c in await self.client.list_channels()
                  if c["member"] and c["name"].startswith("dm:")]
         for name in names:
+            rows: list[Any] = []
             cursor = 0
             while True:
                 page = await self.client.history(name, since=cursor, limit=200)
                 if not page:
                     break
-                for m in page:
-                    if (m.kind.value == "message" and m.sender != self.me
-                            and m.created_at >= since_ts - 60):
-                        ballot = parse_dm_ballot(m.body, refs, options)
-                        if ballot is not None:
-                            ballots[m.sender] = ballot
+                rows.extend(page)
                 cursor = page[-1].seq
                 if len(page) < 200:
                     break
-        return ballots
+            fold_ballot_thread(rows, scan, chair=self.me, refs=refs,
+                               options=options, since_ts=since_ts,
+                               marker=marker, channel=name)
+        return scan.ballots, scan.rejected
 
     async def collect(self, info: dict[str, Any]) -> dict[str, Any]:
         """Everything /tally and the watcher need, in one pass: the
-        published result if any (author's, latest wins — forged results
-        from others are ignored), public ballots leaked into the channel
-        (counted, flagged), DM ballots when I am the chair, commenters,
-        and the current member list."""
+        published result if any (the chair's or the hub's — forged results
+        from anyone else are ignored), public ballots posted in the channel
+        (counted, flagged), DM ballots when I am the chair, REJECTED ballots
+        (chair-side only, where the blind ballots live), commenters, the
+        current member list, and the `scan` reconciliation counts.
+
+        `rejected` is not cosmetic: without it an empty tally reads the same
+        whether the room stayed silent or the parser ate every ballot, and a
+        chair cannot tell 'nobody voted' from 'nobody was counted'."""
         root, channel, options = info["root"], info["channel"], info["options"]
         refs = {r for r in (info["tag"].casefold(),
                             f"{root.seq}@{channel}".casefold()) if r}
-        replies = await self.replies_to(channel, root)
-        published = next(
-            (r for r in reversed(replies) if r.sender == root.sender
-             and isinstance((r.data or {}).get(VOTE_RESULT_KEY), dict)),
-            None)
-        public: dict[str, list[int]] = {}
-        commenters: set[str] = set()
-        for r in replies:
-            if r.kind.value != "message" or r is published:
-                continue
-            ballot = parse_dm_ballot(r.body, refs, options) \
-                or ballot_from(r.body, r.data, options)
-            if ballot is not None:
-                public[r.sender] = ballot      # seq order: latest wins
-            else:
-                commenters.add(r.sender)
-        ballots = dict(public)
+        rows = await self.since_root(channel, root)
+        replies = [m for m in rows if m.reply_to == root.id]
+        published = published_result(root, replies)
+        scan = BallotScan({}, [], set())
+        # The CHAIR is excluded from the in-room fold (its own vote body and
+        # nudges are not ballots, and it does not vote in its own poll) —
+        # never the viewer, or a voter reading the tally would erase itself.
+        fold_ballot_thread([r for r in rows if r is not published], scan,
+                           chair=root.sender, refs=refs, options=options,
+                           since_ts=root.created_at, channel=channel,
+                           root_id=root.id, reject=False)
+        public = dict(scan.ballots)            # everything so far is IN-ROOM
+        commenters = {r.sender for r in replies
+                      if r.kind.value == "message" and r is not published
+                      and r.sender not in public}
         if self.me == root.sender:
-            ballots.update(
-                await self._dm_ballots(refs, options, root.created_at))
+            await self._dm_ballots(refs, options, root.created_at,
+                                   info.get("tag", ""), scan)
         members: list[str] = []
         with contextlib.suppress(Exception):
             data = await self.client.channel_info(channel)
             members = [m["agent_id"] for m in data.get("members", [])]
-        return {"published": published, "public": public, "ballots": ballots,
-                "commenters": commenters - set(ballots), "members": members}
+        return {"published": published, "public": public,
+                "ballots": scan.ballots,
+                "commenters": commenters - set(scan.ballots),
+                "members": members, "rejected": scan.rejected, "scan": scan}
 
     # -- closing --------------------------------------------------------------
 
@@ -478,24 +790,112 @@ class VoteChair:
             return "every member voted"
         return None
 
+    @staticmethod
+    def early_close_block(info: dict[str, Any], ballots: dict[str, list[int]],
+                          members: list[str],
+                          now: float | None = None) -> str | None:
+        """Why the chair may NOT close this vote yet — the announced window
+        is a PROMISE to the voters, not a chair preference.
+
+        The at-test incident: a chair announced a five-minute window and
+        closed its own vote at 42 seconds with 3 of 6 seats heard; three
+        ballots were in flight and died. `closes_at` now BINDS: while the
+        announced window is still running AND some eligible seat has not
+        balloted, an early close is refused with the remaining time and the
+        outstanding COUNT (never the names — that is the blindness the poll
+        is for). `force=True` overrides, loudly and on the record.
+
+        Never binding when: the window has passed, every eligible seat has
+        voted (blindness protects nothing anymore), or the vote carries no
+        deadline at all (pre-deadline clients). Unreadable membership does
+        NOT unbind it — an unverifiable turnout is exactly the state the
+        window exists to cover."""
+        now = time.time() if now is None else now
+        closes_at = info.get("closes_at")
+        if closes_at is None or now >= closes_at:
+            return None
+        eligible = {m for m in members if m != info["root"].sender}
+        outstanding = eligible - set(ballots)
+        if eligible and not outstanding:
+            return None
+        left = fmt_window(closes_at - now)
+        if not eligible:
+            who = ("membership could not be read, so full turnout cannot be "
+                   "confirmed")
+        else:
+            who = (f"{len(outstanding)} of {len(eligible)} eligible voter(s) "
+                   f"have not balloted")
+        return (f"the announced voting window has {left} left and {who}. "
+                "Closing now would void ballots in flight — the window you "
+                "published is a promise to the voters. The result publishes "
+                "ITSELF at the deadline or as soon as everyone has voted; "
+                "nothing is required of you. To override anyway, close with "
+                "force=true — the published result will say it was closed "
+                "early by the chair.")
+
+    @staticmethod
+    def forced_reason(info: dict[str, Any], ballots: dict[str, list[int]],
+                      members: list[str], now: float | None = None) -> str:
+        """The close reason a FORCED early close publishes. It is loud on
+        purpose: every voter reading the result must see that the window
+        they were promised was cut short, and by how much."""
+        now = time.time() if now is None else now
+        closes_at = info.get("closes_at")
+        left = (fmt_window(closes_at - now)
+                if closes_at is not None and closes_at > now else "0s")
+        eligible = {m for m in members if m != info["root"].sender}
+        silent = len(eligible - set(ballots))
+        tail = (f", {silent} of {len(eligible)} eligible voter(s) unheard"
+                if eligible else "")
+        return (f"CLOSED EARLY BY THE CHAIR — {left} of the announced window "
+                f"was cut{tail}")
+
     async def publish(self, info: dict[str, Any],
                       ballots: dict[str, list[int]], members: list[str],
-                      reason: str) -> Any:
+                      reason: str, rejected: int = 0,
+                      scan: BallotScan | None = None) -> Any:
         """Post the result into the channel (resolved reply + machine
         payload) and forget the vote. From here on, every /tally renders
-        from the transcript."""
+        from the transcript. `rejected` rides the result because a turnout
+        of 3/6 means something different when two more ballots arrived and
+        could not be read — the room is owed that number, not just the count."""
         root, channel, options = info["root"], info["channel"], info["options"]
         tally = tally_ballots(options, ballots)
         total = len(members) or len(ballots)
+        payload = result_payload(info, ballots, total, reason, scan, rejected)
         posted = await self.client.post(
-            channel, result_body(info["topic"], options, tally, total, reason),
+            channel, result_body(info["topic"], options, tally, total, reason,
+                                 payload["ballots_rejected"],
+                                 payload["ballots_seen"]),
             title=f"VOTE RESULT: {info['topic']}", status=Status.resolved,
-            reply_to=root.id,
-            data={VOTE_RESULT_KEY: {"topic": info["topic"], "options": options,
-                                    "ballots": ballots, "total_members": total,
-                                    "closed": reason}})
+            reply_to=root.id, data={VOTE_RESULT_KEY: payload})
         self.open.pop(root.id, None)
         return posted
+
+    async def bounce_rejected(self, info: dict[str, Any],
+                              rejected: list[dict[str, Any]]) -> int:
+        """DM a rejection receipt for every unparseable ballot not yet
+        answered. Reception-time in the only sense this architecture has
+        one: the hub knows nothing about votes, so the chair's own watcher
+        tick IS the reception path (VOTE_WATCH_INTERVAL, 30s) — the voter
+        learns their ballot did not count while the window is still open,
+        instead of discovering it in the published roll call. Best-effort
+        per receipt: a DM that fails must never stop the tally."""
+        sent = 0
+        for row in rejected:
+            if row.get("receipted"):
+                continue
+            body = rejection_receipt(info["topic"], info.get("tag", ""),
+                                     info["options"], row["line"], row["item"],
+                                     row.get("standing"))
+            with contextlib.suppress(Exception):
+                await self.client.post(
+                    row["channel"], body, status=Status.fyi,
+                    title=f"ballot not counted — vote {info.get('tag', '')}",
+                    to=[row["voter"]])
+                row["receipted"] = True
+                sent += 1
+        return sent
 
     async def check_due(self) -> None:
         """One watcher tick: publish every chaired vote whose blindness no
@@ -507,11 +907,20 @@ class VoteChair:
                 if data["published"] is not None:
                     self.open.pop(info["root"].id, None)
                     continue
+                rejected = data.get("rejected") or []
+                # Bounce FIRST, then consider closing: a voter whose ballot
+                # did not parse must get the news while they can still fix it.
+                sent = await self.bounce_rejected(info, rejected)
+                if sent:
+                    self.announce(
+                        f"(vote #{info['root'].seq}: {sent} unreadable "
+                        "ballot(s) bounced back to their voters by DM)")
                 reason = self.due(info, data["ballots"], data["members"])
                 if reason is None:
                     continue
                 posted = await self.publish(info, data["ballots"],
-                                            data["members"], reason)
+                                            data["members"], reason,
+                                            len(rejected), data.get("scan"))
                 self.announce(
                     f"(vote #{info['root'].seq} in {info['channel']} closed"
                     f" — {reason}; result published as #{posted.seq})")
@@ -570,11 +979,16 @@ async def watch_votes(chair: VoteChair, *,
 
 
 async def vote_operation(client: Any, me: str, channel: str, message_id: str,
-                         *, close: bool = False) -> dict[str, Any]:
+                         *, close: bool = False,
+                         force: bool = False) -> dict[str, Any]:
     """Surface-neutral tally/close returning machine-shaped state (the MCP
     tools' backend; the chat /tally renders its own richer view). Honors
     ballot secrecy: only the chair sees counts before publication — and a
-    finished vote publishes on sight rather than reporting a stale state."""
+    finished vote publishes on sight rather than reporting a stale state.
+
+    The announced window BINDS the chair (`early_close_block`): `close`
+    inside it with voters unheard is refused with the time left and the
+    outstanding count; `force` overrides and marks the published result."""
     rows = await client.read(channel, message_id)
     root = next((m for m in rows if m.id == message_id), None)
     info = vote_info(root, channel) if root else None
@@ -599,18 +1013,41 @@ async def vote_operation(client: Any, me: str, channel: str, message_id: str,
                 "closes_at": info["closes_at"],
                 "note": "ballots go to the chair by DM; the full result is"
                         " published to the channel when the vote closes"}
-    reason = "closed by the chair" if close \
-        else VoteChair.due(info, gathered["ballots"], gathered["members"])
+    rejected = gathered.get("rejected") or []
+    # Receipts ride every chair-side pass, close or not: the chair looking at
+    # the tally is the moment the fleet has a live process to send them from.
+    await chair.bounce_rejected(info, rejected)
+    ballots, members = gathered["ballots"], gathered["members"]
+    reason = VoteChair.due(info, ballots, members)
+    if close and reason is None:
+        blocked = VoteChair.early_close_block(info, ballots, members)
+        if blocked is not None and not force:
+            return {"ok": False, "error": 409,
+                    "detail": f"early close refused: {blocked}",
+                    "closes_at": info["closes_at"],
+                    "rejected_ballots": len(rejected),
+                    "action": "REQUEST FAILED — the vote is still open and "
+                              "nothing was published"}
+        reason = (VoteChair.forced_reason(info, ballots, members)
+                  if blocked is not None else "closed by the chair")
+    scan = gathered.get("scan")
     if reason is not None:
-        posted = await chair.publish(info, gathered["ballots"],
-                                     gathered["members"], reason)
+        posted = await chair.publish(info, ballots, members, reason,
+                                     len(rejected), scan)
         return {"closed": True, "reason": reason, "published_seq": posted.seq,
-                "ballots": gathered["ballots"]}
+                "ballots": ballots,
+                **(scan.counts if scan is not None else {}),
+                **({"rejected_ballots": len(rejected)} if rejected else {})}
     counts = dict(zip(info["options"],
-                      tally_ballots(info["options"], gathered["ballots"]).first))
-    waiting = sorted(set(gathered["members"]) - set(gathered["ballots"])
-                     - {root.sender})
+                      tally_ballots(info["options"], ballots).first))
+    waiting = sorted(set(members) - set(ballots) - {root.sender})
     return {"closed": False, "chair": me, "counts": counts,
-            "ballots": gathered["ballots"], "waiting": waiting,
+            "ballots": ballots, "waiting": waiting,
             "closes_at": info["closes_at"],
+            # 0 ballots and N rejected must never render identically — the
+            # empty-room misreading is what closed a vote at 42 seconds.
+            "rejected_ballots": len(rejected),
+            "rejected_detail": [{"voter": r["voter"], "item": r["item"]}
+                                for r in rejected],
+            **(scan.counts if scan is not None else {}),
             "commenters": sorted(gathered["commenters"])}

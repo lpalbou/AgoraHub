@@ -174,12 +174,14 @@ class AgoraClient:
                    data: dict[str, Any] | None = None, reply_to: str | None = None,
                    asks: list[dict[str, Any]] | None = None,
                    answers: list[str] | None = None,
+                   consumes: list[str] | None = None,
                    attachments: list[dict[str, Any]] | None = None,
                    signature: str | None = None,
                    notice: dict[str, str] | None = None) -> Message:
         payload = PostMessage(body=body, title=title, status=status, urgency=urgency,
                               to=to or [], critical=critical, data=data, reply_to=reply_to,
-                              asks=asks, answers=answers, attachments=attachments,
+                              asks=asks, answers=answers, consumes=consumes,
+                              attachments=attachments,
                               signature=signature, notice=notice)
         row = self._json(await self._http.post(
             f"/channels/{channel}/messages", json=payload.model_dump(mode="json"),

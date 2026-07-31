@@ -32,6 +32,7 @@ from fastapi.testclient import TestClient
 from agora import config as _config
 from agora.hub.app import create_app
 from agora.join import decode_artifact, encode_artifact, parse_ttl, run_join
+from agora.mcp.runtime import MCPRuntimeProbe
 
 ADMIN_KEY = "test-admin-join"
 
@@ -373,7 +374,7 @@ def test_invite_then_join_end_to_end(live_hub, isolated_home, tmp_path, capsys):
 
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    _run_cli(["join", blob, "--workspace", str(workspace), "--with-hook"])
+    _run_cli(["join", blob, "--workspace", str(workspace), "--harness", "all"])
     out = capsys.readouterr().out
 
     # keys.json: the ONE url-qualified entry every CLI surface reads, 0600
@@ -388,18 +389,27 @@ def test_invite_then_join_end_to_end(live_hub, isolated_home, tmp_path, capsys):
     assert cfg == {"url": live_hub.url}
     assert (isolated_home / "config.json").stat().st_mode & 0o077 == 0
 
-    # workspace wiring: env block carries the key (the scrubbed-env channel)
+    # Workspace wiring carries identity only. keys.json above is the sole
+    # bearer source, including for scrubbed harness MCP subprocesses.
     mcp_path = workspace / ".cursor" / "mcp.json"
     env = json.loads(mcp_path.read_text())["mcpServers"]["agora"]["env"]
     assert env["AGORA_URL"] == live_hub.url          # the SAME normalized string
     assert env["AGORA_AGENT_ID"] == "castor"
-    assert env["AGORA_API_KEY"] == api_key
-    assert mcp_path.stat().st_mode & 0o077 == 0
+    assert env["AGORA_API_KEY"] == ""
+    assert env["AGORA_ADMIN_KEY"] == ""
     assert (workspace / ".cursor" / "rules" / "agora.mdc").exists()
     assert (workspace / ".cursor" / "hooks.json").exists()
+    root_env = json.loads((workspace / ".mcp.json").read_text()
+                          )["mcpServers"]["agora"]["env"]
+    assert root_env["AGORA_AGENT_ID"] == "castor"
+    assert (workspace / ".claude" / "settings.json").exists()
+    codex = (workspace / ".codex" / "config.toml").read_text()
+    assert 'AGORA_AGENT_ID = "castor"' in codex
+    assert (workspace / ".codex" / "hooks.json").exists()
+    assert (workspace / "AGENTS.md").exists()
 
     assert "verified    -> GET /whoami as 'castor' OK (channels: general)" in out
-    assert "gitignore" in out
+    assert "harness config contains no bearer" in out
     assert "Do not run `agora up` on this machine" in out
 
     # the hub agrees end to end: key authenticates, membership landed
@@ -408,7 +418,7 @@ def test_invite_then_join_end_to_end(live_hub, isolated_home, tmp_path, capsys):
     assert who.json()["id"] == "castor" and who.json()["operator"] is False
 
     # re-running the SAME (now spent) blob is a repair, not an error
-    _run_cli(["join", blob, "--workspace", str(workspace), "--with-hook"])
+    _run_cli(["join", blob, "--workspace", str(workspace), "--harness", "all"])
     rerun = capsys.readouterr().out
     assert "skipping redemption" in rerun
     assert json.loads(keys_path.read_text())[f"{live_hub.url}::castor"] == api_key
@@ -542,11 +552,11 @@ def test_register_and_seed_key_roundtrip(live_hub, isolated_home, capsys):
                   "--key", "agora_truncated"])
 
 
-def test_setup_cursor_with_key_seeds_caches_and_embeds(live_hub, isolated_home,
-                                                       tmp_path, capsys):
+def test_setup_cursor_with_key_seeds_cache_without_embedding(
+        live_hub, isolated_home, tmp_path, capsys):
     """`setup-* --key` is the no-new-infrastructure remote path: seed the
-    operator-minted key, verify it, and land it in BOTH sinks (keys.json for
-    CLI/hook, the env block for the scrubbed MCP server)."""
+    operator-minted key, verify it, and keep it only in keys.json. Harness
+    config carries the home needed to find that cache, never the bearer."""
     minted = httpx.post(f"{live_hub.url}/agents", json={"id": "helios"},
                         headers=_admin(), timeout=5).json()
     workspace = tmp_path / "ws2"
@@ -554,14 +564,15 @@ def test_setup_cursor_with_key_seeds_caches_and_embeds(live_hub, isolated_home,
     _run_cli(["setup-cursor", "helios", "--workspace", str(workspace),
               "--url", live_hub.url, "--key", minted["api_key"]])
     out = capsys.readouterr().out
-    assert "authenticates immediately" in out and "gitignore" in out
+    assert "authenticates immediately" in out
+    assert "harness config contains no bearer" in out
 
     assert _config.get_cached_key(live_hub.url, "helios") == minted["api_key"]
     mcp_path = workspace / ".cursor" / "mcp.json"
     env = json.loads(mcp_path.read_text())["mcpServers"]["agora"]["env"]
-    assert env["AGORA_API_KEY"] == minted["api_key"]
+    assert env["AGORA_API_KEY"] == ""
+    assert env["AGORA_ADMIN_KEY"] == ""
     assert env["AGORA_URL"] == live_hub.url
-    assert mcp_path.stat().st_mode & 0o077 == 0
 
     with pytest.raises(SystemExit, match="rejected this key"):
         _run_cli(["setup-cursor", "helios", "--workspace", str(workspace),
@@ -570,17 +581,17 @@ def test_setup_cursor_with_key_seeds_caches_and_embeds(live_hub, isolated_home,
 
 def test_scrubbed_env_mcp_resolution_after_join(live_hub, isolated_home,
                                                 tmp_path, monkeypatch, capsys):
-    """Simulate cursor-agent's env scrub: ONLY the mcp.json env block plus an
-    EMPTY home survive. The MCP server must still resolve credentials —
-    that is what embedding AGORA_API_KEY buys."""
+    """Simulate cursor-agent's env scrub: only the mcp.json identity/home env
+    survives. The MCP server must resolve auth from that home's key cache."""
     minted = httpx.post(f"{live_hub.url}/join-tokens",
                         json={"agent_id": "scrub"}, headers=_admin(),
                         timeout=5).json()
     workspace = tmp_path / "ws3"
     workspace.mkdir()
-    run_join(url=live_hub.url, token=minted["token"], agent_id=None, about="",
-             harness="cursor", workspace=str(workspace), with_hook=False,
-             listen=False, mcp_command="agora-mcp")
+    result = run_join(url=live_hub.url, token=minted["token"], agent_id=None, about="",
+                      harness="cursor", workspace=str(workspace), with_hook=False,
+                      listen=False, mcp_command="agora-mcp")
+    assert result.code == 0
     env = json.loads((workspace / ".cursor" / "mcp.json").read_text()
                      )["mcpServers"]["agora"]["env"]
 
@@ -597,6 +608,67 @@ def test_scrubbed_env_mcp_resolution_after_join(live_hub, isolated_home,
     r = httpx.get(f"{base_url}/whoami",
                   headers={"Authorization": f"Bearer {api_key}"}, timeout=5)
     assert r.status_code == 200 and r.json()["id"] == "scrub"
+
+
+def test_join_preflights_workspace_before_redeem(live_hub, isolated_home,
+                                                 tmp_path):
+    minted = httpx.post(f"{live_hub.url}/join-tokens",
+                        json={"agent_id": "broken"}, headers=_admin(),
+                        timeout=5).json()
+    workspace = tmp_path / "ws-bad"
+    (workspace / ".claude").mkdir(parents=True)
+    (workspace / ".claude" / "settings.json").write_text("{ not json")
+
+    with pytest.raises(SystemExit, match=r"\.claude/settings\.json"):
+        _run_cli(["join", encode_artifact(live_hub.url, minted["token"], "broken"),
+                  "--workspace", str(workspace), "--harness", "all"])
+
+    assert not (isolated_home / "keys.json").exists()
+
+
+def test_join_rejects_broken_mcp_runtime_before_redeeming_invite(
+        live_hub, isolated_home, tmp_path, monkeypatch):
+    workspace = tmp_path / "runtime-broken"
+    workspace.mkdir()
+    called = {"redeem": False}
+
+    def never_redeem(*_args, **_kwargs):
+        called["redeem"] = True
+        raise AssertionError("invite must not be redeemed")
+
+    monkeypatch.setattr("agora.join._redeem", never_redeem)
+    monkeypatch.setattr(
+        "agora.join.probe_mcp_runtime",
+        lambda command: MCPRuntimeProbe(
+            ok=False, command=command, reason="runtime-incompatible",
+            detail="missing mcp.server.fastmcp.FastMCP",
+        ),
+    )
+    with pytest.raises(SystemExit, match="before invite redemption") as exc:
+        run_join(
+            url=live_hub.url, token="unused", agent_id="broken", about="",
+            harness="codex", workspace=str(workspace), with_hook=False,
+            listen=False, mcp_command="stale-agora-mcp",
+        )
+    assert "stage: mcp-runtime" in str(exc.value)
+    assert called["redeem"] is False
+    assert not (isolated_home / "keys.json").exists()
+
+
+def test_join_preflight_rejects_invalid_mcp_servers_shape_before_redeem(
+        live_hub, isolated_home, tmp_path):
+    minted = httpx.post(f"{live_hub.url}/join-tokens",
+                        json={"agent_id": "broken2"}, headers=_admin(),
+                        timeout=5).json()
+    workspace = tmp_path / "ws-bad2"
+    workspace.mkdir()
+    (workspace / ".mcp.json").write_text(json.dumps({"mcpServers": []}))
+
+    with pytest.raises(SystemExit, match=r"field 'mcpServers' must be a JSON object"):
+        _run_cli(["join", encode_artifact(live_hub.url, minted["token"], "broken2"),
+                  "--workspace", str(workspace), "--harness", "claude"])
+
+    assert not (isolated_home / "keys.json").exists()
 
 
 def test_mcp_no_key_error_is_surface_aware(isolated_home, monkeypatch):

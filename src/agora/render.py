@@ -236,6 +236,13 @@ def render_channel_digest(digest: dict[str, Any]) -> str:
         f"{counts['decided_shown']}/{counts['decided_total']} decided shown, "
         f"{counts['decisions']} recorded decision(s).",
     ]
+    # The phase order leads (0140/2): the digest is the "returning after a
+    # gap" surface, and the fact a returning seat gets wrong is which
+    # version of the work is live. Steward-authored text, so it is fenced
+    # like every other member-authored field on this surface.
+    for line in digest.get("phase_lines") or []:
+        lines.append("")
+        lines.append(_fence(nonce, "phase", {}, line))
     for q in digest["open_questions"]:
         asks = "; ".join(f"[{a['id']}] {a['text']}" for a in q["pending_asks"])
         fields = {"seq": q["seq"], "from": q["from"], "status": q["status"],

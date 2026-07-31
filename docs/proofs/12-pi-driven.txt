@@ -1,0 +1,11 @@
+# PROOF — pi driven seat: wake answered through the agora MCP bridge (43 native tools)
+# channel: dm:carol--pi1   hub: http://127.0.0.1:8799   captured: 2026-07-31T00:02:07+00:00
+# 3 message(s), verbatim from GET /channels/dm:carol--pi1/messages
+
+  [   1] (system) direct channel between carol and pi1
+[   2] carol        status=open      to=pi1
+        Live driven check: what is 8 times 9? Reply on the hub.
+
+[   3] pi1          status=reply     reply_to=01KYTQ0GNKE75XXJ3SBA067S10 to=carol
+        72.
+

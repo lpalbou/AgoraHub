@@ -41,6 +41,12 @@ _HUB_UNREACHABLE = 3                   # internal: ws arm gave up (hub down) —
 #                                        NOT widen on it, and map to exit 0
 _DRIVER_BROADCAST_WAKE = 4              # internal: pure room-wide wake; native
 #                                        driver applies its smaller storm fuse
+_DRIVER_UNOWNED_WAKE = 5                # internal: room-wide wake AND the hub
+#                                        says this seat owes nothing. The mail
+#                                        is delivered and waits; the DRIVER
+#                                        declines to buy a turn for it (0140:
+#                                        a wake must carry work, or the seat
+#                                        manufactures a receipt to justify it).
 _IMPORTANT_FLAGS = {"to-me", "reply-to-me", "critical", "escalated"}
 _FLAG_ORDER = ("to-me", "reply-to-me", "open", "blocked", "critical", "escalated", "dm")
 
@@ -118,7 +124,7 @@ def next_backoff(current: float, rc: int, cap: float) -> float:
     a clean idle timeout (exit 0) widens ×FACTOR up to the cap; anything else
     (signal, hub-unreachable, error) leaves it unchanged — only a genuine
     'nothing happened for the whole window' earns a widen."""
-    if rc in (2, _DRIVER_BROADCAST_WAKE):
+    if rc in (2, _DRIVER_BROADCAST_WAKE, _DRIVER_UNOWNED_WAKE):
         return ADAPT_MIN
     if rc == 0:
         return max(ADAPT_MIN, min(current * ADAPT_FACTOR, cap))
@@ -134,25 +140,21 @@ def write_backoff(path: Path, ceiling: float) -> None:
         os.replace(tmp, path)
 
 
-def resolve_identity(agent_id: str | None, url: str | None, cwd: Path) -> tuple[str, str]:
-    """(agent_id, hub_url). Id: --as, $AGORA_AGENT_ID, nearest .cursor/mcp.json
-    walking UP from cwd; url: --url, $AGORA_URL, same mcp.json, config.json,
-    local default. No resolvable id is a loud exit 1."""
-    env: dict[str, Any] = {}
-    for folder in (cwd, *cwd.parents):
-        path = folder / ".cursor" / "mcp.json"
-        if path.is_file():
-            with contextlib.suppress(ValueError, KeyError, TypeError, OSError):
-                found = json.loads(path.read_text())["mcpServers"]["agora"]["env"]
-                if isinstance(found, dict):  # malformed configs: keep walking up
-                    env = found
-                    break
+def resolve_identity(agent_id: str | None, url: str | None, cwd: Path,
+                     *, harness: str | None = None) -> tuple[str, str]:
+    """(agent_id, hub_url). Id: --as, $AGORA_AGENT_ID, then THIS folder's seat
+    record or harness config (zero search — agora never reads parent folders);
+    url: --url, $AGORA_URL, the same folder, config.json, local default. No
+    resolvable id is a loud exit 1."""
+    from .setup_harness import resolve_workspace_identity
+
+    env: dict[str, Any] = resolve_workspace_identity(cwd, harness=harness) or {}
     aid = agent_id or os.environ.get("AGORA_AGENT_ID") or env.get("AGORA_AGENT_ID")
     if not aid:
         raise SystemExit(
             "agora listen: cannot determine the agent id. Pass --as <id>, set "
-            "$AGORA_AGENT_ID, or run from a workspace whose .cursor/mcp.json "
-            "declares mcpServers.agora.env.AGORA_AGENT_ID.")
+            "$AGORA_AGENT_ID, or cd to the folder you wired with `agora "
+            "setup` (agora does not search parent folders).")
     hub = (url or os.environ.get("AGORA_URL") or env.get("AGORA_URL")
            or _config.load_config().get("url") or "http://127.0.0.1:8765")
     return aid, str(hub).rstrip("/")
@@ -217,7 +219,15 @@ def qualifies(event: dict[str, Any], agent_id: str, important_only: bool = False
         # 2026-07-14 falsification: a broadcast ask that woke nobody was
         # dead air). Notify lines without the `addressed` flag (older
         # hubs) keep waking room-wide — status quo, never deafness.
-        if "addressed" in tokens and "to-me" not in tokens:
+        if ("addressed" in tokens and "to-me" not in tokens
+                and "from-operator" not in tokens):
+            # from-operator is exempt: a human addressing SOME seats by name
+            # is still talking to the room. On 2026-07-29 the operator asked
+            # "how come only @agora answer? @runtime, @gateway, @memory,
+            # what's your status?" — the hub folded those 4 names into `to`,
+            # this narrowing fired, and 19 of 23 seats never woke. The
+            # narrowing exists for agent-to-agent chatter, which is what the
+            # 62%-of-commons-wakes measurement was made of.
             return bool(tokens & _IMPORTANT_FLAGS)
         return True
     return bool(tokens & _IMPORTANT_FLAGS)
@@ -555,6 +565,12 @@ def once_digest(events: list[dict[str, Any]],
         text += (f" You currently owe {owed[0]} answer(s) and {owed[1]} "
                  "unconsumed answer(s) to your own asks — check_inbox lists "
                  "them; settle those before new work.")
+    else:
+        # Never let an empty wake read as "say something". A seat that woke
+        # owing nothing and posted a receipt anyway is 50% of the traffic a
+        # measured fleet produced in that state (0140 field test 2).
+        text += (" Nothing is owed by you: if no ask names you, ack and end "
+                 "your turn WITHOUT posting — silence is the correct answer.")
     return text
 
 
@@ -584,6 +600,21 @@ def _deliver_wake(batch, agent_id, *, preview: bool, once: bool,
                 if token
             }
             if not (flags & _IMPORTANT_FLAGS):
+                # Two grades of unowned wake, and the driver pays differently
+                # for each. `owed` is the hub's own answer to "does this seat
+                # hold work?"; zero owed with no to-me flag is agent-to-agent
+                # room traffic that obliges this seat nothing, so a turn on
+                # it can only produce ceremony (measured: 50% of such turns).
+                #
+                # TWO exemptions keep it honest. `from-operator`: a HUMAN
+                # talking to the room always buys a turn — the 2026-07-14
+                # falsification (a room-wide operator /ask that woke NOBODY)
+                # is the exact dead air this must never recreate, and it is
+                # the same carve-out `qualifies` already makes. Unreadable
+                # /owed (None): absence of an answer is never read as zero.
+                if (owed is not None and not (owed[0] or owed[1])
+                        and "from-operator" not in flags):
+                    return _DRIVER_UNOWNED_WAKE
                 return _DRIVER_BROADCAST_WAKE
         return 2
     return None

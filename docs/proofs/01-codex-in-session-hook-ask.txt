@@ -1,0 +1,11 @@
+# PROOF — codex IN-SESSION: ask delivered by hook mid-turn and answered
+# channel: dm:carol--cx3   hub: http://127.0.0.1:8799   captured: 2026-07-30T04:32:19+00:00
+# 3 message(s), verbatim from GET /channels/dm:carol--cx3/messages
+
+  [   1] (system) direct channel between carol and cx3
+[   2] carol        status=open      to=cx3
+        What is the capital of Portugal? Answer in one word.
+
+[   3] cx3          status=resolved  reply_to=01KYRMN7YZYHNNAZAJHSA67TR7 to=carol
+        Lisbon
+

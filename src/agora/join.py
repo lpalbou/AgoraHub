@@ -9,12 +9,12 @@ another). This module removes the assembly step:
   mints a scoped join token (POST /join-tokens) and prints ONE paste line;
 - remote (agent machine):  `agora join AGORA1.<blob>`
   decodes it, redeems the token (POST /join), and lands the minted key in
-  EVERY place a surface reads: keys.json (CLI/listener/stop-hook),
-  config.json url (bare CLI from any folder), and the harness config's env
-  block as AGORA_API_KEY (the only channel that survives the harness's env
-  scrub). One normalized url string is used for the redeem call, the cache
-  key and the config write — the url-qualified cache means a mismatch is a
-  silent auth failure, so normalization happens exactly once, here.
+  the single 0600 key cache. config.json carries the bare CLI's default URL;
+  harness config carries only URL, agent id, and a non-default AGORA_HOME so
+  the MCP server finds the cache after a harness environment scrub. One
+  normalized url string is used for the redeem call, the cache key, and the
+  config write — the url-qualified cache means a mismatch is a silent auth
+  failure, so normalization happens exactly once, here.
 
 The artifact is `AGORA1.<base64url(minified json, padding stripped)>` with
 payload {"u": url, "t": token, "a": agent_id?, "c": [channels]?, "e": expiry?}.
@@ -29,15 +29,24 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 import time
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
 from . import config as _config
+from .mcp.runtime import format_probe_failure, probe_mcp_runtime
 
 ARTIFACT_PREFIX = "AGORA1."
 _TTL_UNITS = {"s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}
+
+
+@dataclass
+class JoinResult:
+    code: int
+    agent_id: str
+    harnesses: tuple[str, ...]
+    issues: list[str] = field(default_factory=list)
 
 
 # -- artifact codec -------------------------------------------------------------
@@ -219,9 +228,10 @@ def _detail(response) -> str:
 
 
 def run_join(url: str, token: str, agent_id: str | None, about: str,
-             harness: str, workspace: str, with_hook: bool, listen: bool,
+             harness: str | tuple[str, ...], workspace: str, with_hook: bool, listen: bool,
              mcp_command: str, pinned_id: str | None = None,
-             expires_hint: float | None = None) -> int:
+             expires_hint: float | None = None,
+             vendor_bootstrap: bool = False) -> JoinResult:
     """The whole remote onboarding, fail-loud at each step:
     redeem -> cache key -> pin url -> verify -> wire workspace [-> listen].
 
@@ -240,6 +250,30 @@ def run_join(url: str, token: str, agent_id: str | None, about: str,
     if expires_hint and expires_hint < time.time():
         print(f"note: the artifact says it expired {_fmt_time(expires_hint)}; "
               "trying anyway (the hub's clock is the truth).")
+
+    workspace_path = Path(workspace).expanduser().resolve()
+    if not workspace_path.is_dir():
+        raise SystemExit(f"workspace not found: {workspace_path}")
+    from . import setup_harness as _sh
+    harnesses = (harness if isinstance(harness, tuple)
+                 else _sh.expand_harness_selection(harness, allow_none=True))
+    try:
+        _sh.preflight_workspace_harnesses(workspace_path, harnesses)
+    except ValueError as exc:
+        raise SystemExit(f"agora join: {exc}") from exc
+    if harnesses:
+        probe = probe_mcp_runtime(mcp_command)
+        if not probe.ok:
+            action = (
+                "reinstall Agora and its supported MCP runtime with "
+                "`uv tool install --force --reinstall agorahub` "
+                "(development checkout: `uv tool install --force "
+                "--reinstall .`), then rerun this join artifact"
+            )
+            raise SystemExit(
+                "agora join: required MCP runtime failed before invite "
+                "redemption\n" + format_probe_failure(probe, action=action)
+            )
 
     cached = _config.get_cached_key(url, effective_id) if effective_id else None
     if cached:
@@ -262,11 +296,13 @@ def run_join(url: str, token: str, agent_id: str | None, about: str,
     suffix = f" (channels: {', '.join(joined)})" if joined else ""
     print(f"  verified    -> GET /whoami as '{identity['id']}' OK{suffix}")
 
-    if harness != "none":
-        _wire_workspace(harness, Path(workspace).expanduser().resolve(),
-                        effective_id, url, identity.get("about") or "",
-                        mcp_command, with_hook, api_key)
+    if harnesses:
+        issues = _wire_workspace(harnesses, workspace_path,
+                                 effective_id, url, identity.get("about") or "",
+                                 mcp_command, with_hook,
+                                 vendor_bootstrap=vendor_bootstrap)
     else:
+        issues = []
         print("  workspace   -> not wired (--harness none); CLI + listener "
               "auth via the cached key")
 
@@ -276,8 +312,9 @@ def run_join(url: str, token: str, agent_id: str | None, about: str,
         # Foreground by design: a detached process outliving the command would
         # violate the fleet's no-machine-persistence etiquette.
         from .listen import run_listen
-        return run_listen(agent_id=effective_id, url=url, source="ws")
-    return 0
+        return JoinResult(run_listen(agent_id=effective_id, url=url, source="ws"),
+                          effective_id, harnesses, issues)
+    return JoinResult(0, effective_id, harnesses, issues)
 
 
 def _redeem(url: str, token: str, agent_id: str | None, about: str,
@@ -334,48 +371,87 @@ def _verify_whoami(url: str, api_key: str, agent_id: str) -> dict:
     return r.json()
 
 
-def _wire_workspace(harness: str, workspace: Path, agent_id: str, url: str,
+def _wire_workspace(harness: str | tuple[str, ...], workspace: Path, agent_id: str, url: str,
                     about: str, mcp_command: str, with_hook: bool,
-                    api_key: str) -> None:
-    """Call the existing harness writers WITH the api key, so the env block —
-    the only credential channel that survives the harness env scrub — carries
-    AGORA_API_KEY, and the secret-bearing file is 0600. For the CLI harnesses
-    the project file alone is gated behind trust/approval prompts, so the
-    harness's own `mcp add` CLI is ALSO called (best-effort) — that is what
-    makes the server actually visible at the next `claude`/`codex` launch."""
+                    *, vendor_bootstrap: bool) -> list[str]:
+    """Write non-secret harness identity/home config for the cached seat key.
+
+    Framework-neutral onboarding (`harness="all"`) writes all supported
+    project-scoped footprints without guessing which front-end the human will
+    launch next. Single-harness onboarding keeps the extra vendor bootstrap
+    calls for Claude/Codex, because those mutate per-user/global state."""
     from . import setup_harness as _sh
 
-    if not workspace.is_dir():
-        raise SystemExit(f"workspace not found: {workspace}")
-    writer = {"cursor": _sh.setup_cursor, "claude": _sh.setup_claude,
-              "codex": _sh.setup_codex}[harness]
-    written = writer(workspace, agent_id, url, about, mcp_command,
-                     with_hook, api_key=api_key)
-    for path in written:
-        print(f"  wired       -> {path}")
-    secret_files = [p for p in written
-                    if p.name in ("mcp.json", ".mcp.json", "config.toml")]
-    if secret_files:
-        names = ", ".join(str(p.relative_to(workspace)) for p in secret_files)
-        print(f"  key embedded as AGORA_API_KEY in {names} (0600) — keep that "
-              "file out of version control (gitignore it).")
-    registered = False
-    if harness == "claude":
-        registered, detail = _sh.register_claude_local(
-            workspace, mcp_command, url, agent_id, about,
-            api_key=api_key, home=_sh.custom_home_env())
-        print(f"  harness     -> {detail}")
-    elif harness == "codex":
-        registered, detail = _sh.register_codex_global(
-            mcp_command, url, agent_id, about,
-            api_key=api_key, home=_sh.custom_home_env())
-        print(f"  harness     -> {detail}")
-    opener = {"cursor": "open this folder in Cursor",
-              "claude": ("run `claude` here"
-                         if registered else
-                         "run `claude` here and approve the 'agora' MCP "
-                         "server (/mcp)"),
-              "codex": ("run `codex` here"
-                        if registered else
-                        "run `codex` here and trust the project")}[harness]
+    harnesses = (harness if isinstance(harness, tuple)
+                 else _sh.expand_harness_selection(harness, allow_none=True))
+    if not harnesses:
+        return []
+    explicit_single = len(harnesses) == 1
+    issues: list[str] = []
+    writers = {
+        "cursor": lambda: _sh.setup_cursor(workspace, agent_id, url, about,
+                                           mcp_command, with_hook),
+        "claude": lambda: _sh.setup_claude(workspace, agent_id, url, about,
+                                           mcp_command, with_hook),
+        "codex": lambda: _sh.setup_codex(workspace, agent_id, url, about,
+                                         mcp_command, with_hook=with_hook),
+        "abstractcode": lambda: _sh.setup_abstractcode(
+            workspace, agent_id, url, about, mcp_command, with_hook=with_hook
+        ),
+        "abstractcode-tui": lambda: _sh.setup_abstractcode_tui(
+            workspace, agent_id, url, about, mcp_command, with_hook=with_hook
+        ),
+        "opencode": lambda: _sh.setup_opencode(
+            workspace, agent_id, url, about, mcp_command, with_hook=with_hook
+        ),
+        "pi": lambda: _sh.setup_pi(
+            workspace, agent_id, url, about, mcp_command, with_hook=with_hook
+        ),
+    }
+    for name in harnesses:
+        print(f"  harness     -> {name}")
+        written = writers[name]()
+        for path in written:
+            print(f"  wired       -> {path}")
+        if vendor_bootstrap and explicit_single and name == "claude":
+            ok, detail = _sh.register_claude_local(
+                workspace, mcp_command, url, agent_id, about,
+                home=_sh.custom_home_env())
+            print(f"  bootstrap   -> {detail}")
+            if not ok:
+                issues.append(f"Claude Code vendor bootstrap needs action: {detail}")
+        elif vendor_bootstrap and explicit_single and name == "codex":
+            ok, detail = _sh.register_codex_global(
+                mcp_command, url, agent_id, about,
+                home=_sh.custom_home_env())
+            print(f"  bootstrap   -> {detail}")
+            if not ok:
+                issues.append(f"Codex vendor bootstrap needs action: {detail}")
+    print(f"  key          -> cached only in {_config.home() / 'keys.json'} "
+          "(0600); harness config contains no bearer")
+    default_drive = harnesses[0] if len(harnesses) == 1 else None
+    seat_record = _sh.write_workspace_seat(
+        workspace, agent_id=agent_id, url=url, about=about,
+        harnesses=harnesses, default_drive_harness=default_drive)
+    print(f"  wired       -> {seat_record}")
+    if explicit_single:
+        # `.get`, never `[]`: `abstractcode` is a supported harness and reached
+        # this line, so a missing entry crashed `agora join` with a KeyError
+        # AFTER every file and the seat record had already been written — the
+        # operator saw a traceback on a fully successful join. A new harness
+        # must never be able to do that again.
+        opener = {
+            "cursor": "open this folder in Cursor",
+            "claude": "run `claude` here",
+            "codex": "run `codex` here and trust the project",
+            "abstractcode": "run `abstractcode` here",
+            "abstractcode-tui": "run `abstractcode-tui` here",
+            "opencode": "run `opencode` here",
+            "pi": "run `pi` here",
+        }.get(harnesses[0], f"start {harnesses[0]} in this folder")
+    else:
+        opener = ("open this folder in your harness (Cursor, Claude Code, "
+                  "Codex, or AbstractCode) and let it trust/approve the "
+                  "project the first time")
     print(f"next: {opener} — the agent authenticates immediately.")
+    return issues

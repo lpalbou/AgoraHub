@@ -11,7 +11,7 @@ from fastapi import FastAPI, HTTPException, Request
 from .. import PROTOCOL_VERSION, __version__
 from ..db import Database
 from . import http_api, ws
-from .service import HubService
+from .service import VOTE_SWEEP_SECONDS, HubService
 
 
 def create_app(db_path: str = "agora.db", admin_key: str = "",
@@ -19,6 +19,7 @@ def create_app(db_path: str = "agora.db", admin_key: str = "",
                notify_dir: str | None = None,
                notify_rotate_mb: float = 8.0,
                dark_watch_seconds: float = 300.0,
+               vote_watch_seconds: float = VOTE_SWEEP_SECONDS,
                max_attachment_bytes: int | None = None,
                max_channel_attachment_bytes: int | None = None,
                embedding: dict[str, str] | None = None) -> FastAPI:
@@ -55,11 +56,17 @@ def create_app(db_path: str = "agora.db", admin_key: str = "",
         # when a seat is offline holding SLA-breached obligations. 0 disables.
         watchdog = (asyncio.create_task(service.dark_watchdog(dark_watch_seconds))
                     if dark_watch_seconds > 0 else None)
+        # Vote deadlines (0140): the HUB publishes a closed vote's result, so
+        # a chair whose process is not alive at closes_at cannot leave the
+        # room waiting on an outcome it was promised. 0 disables.
+        votewatch = (asyncio.create_task(service.vote_watchdog(vote_watch_seconds))
+                     if vote_watch_seconds > 0 else None)
         try:
             yield
         finally:
-            if watchdog is not None:
-                watchdog.cancel()
+            for task in (watchdog, votewatch):
+                if task is not None:
+                    task.cancel()
             # Graceful shutdown: stop the embedder before the db closes
             # (its corpus reads ride the read pool), checkpoint the WAL
             # and close SQLite so a long-lived remote hub restarts cleanly

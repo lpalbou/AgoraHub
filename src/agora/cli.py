@@ -1,80 +1,73 @@
 """`agora` — the one-command front door.
 
     agora up                         # start the hub with sane, persistent defaults
-    agora setup cursor <agent-id>    # wire the CURRENT folder as that agent (one step)
+    agora setup <agent-id>           # wire the CURRENT folder; auto-select or prompt for the harness
     agora status                     # is the hub up? who am I configured as?
 
 `agora up` picks a stable db (~/.agora/agora.db) and a stable admin key
 (generated once, saved to ~/.agora/config.json) so nothing needs to be
-remembered or passed around. `setup cursor` writes .cursor/mcp.json + a rule
-into a workspace; the MCP server self-registers by agent id on first use, so
-there are no keys to copy.
+remembered or passed around. `setup` writes the workspace-local wiring; bare
+usage reuses the existing harness footprint or prompts once, and explicit
+`--harness` overrides that when you want one specific front-end (or `all`).
 """
 
 from __future__ import annotations
 
 import argparse
 import contextlib
+from dataclasses import dataclass, field
 import json
 import os
 import re
 import secrets
-import shutil
 import sys
 import time
 from pathlib import Path
 
 from . import config as _config
+from .hook import HOOK_EVENTS as _HOOK_EVENTS
+from .setup_harness import SUPPORTED_HARNESSES
 from . import db_locate as _db_locate
+from .agent_id import validate_agent_id
+from .models import NOTICE_KINDS
 
 
 def _resolve_mcp_command() -> str:
-    """Absolute path to the agora-mcp executable so Cursor (a GUI app that may
-    not inherit the shell PATH) can always find it. Falls back to the bare name."""
-    found = shutil.which("agora-mcp")
-    if found:
-        return found
-    sibling = Path(sys.argv[0]).resolve().parent / "agora-mcp"  # next to `agora`
-    if sibling.exists():
-        return str(sibling)
-    return "agora-mcp"
+    """Resolve the exact MCP entry point setup and drivers will execute."""
+    from .mcp.runtime import resolve_mcp_command
+
+    return resolve_mcp_command()
 
 
-def _smoke_check_mcp(mcp_command: str,
-                     hint: str = "then re-run this setup.") -> None:
-    """Prove the agora-mcp we are about to WIRE actually starts. Field
-    root-cause (2026-07-14): a workspace mcp.json pointed at a binary whose
-    venv lacked the `mcp` extra — every agent in that fleet booted TOOLLESS
-    and improvised with the CLI against the wrong hub, and nothing said so
-    until live-run forensics. Second field hit (2026-07-16): a force
-    REINSTALL swapped the venv UNDER already-wired binaries, so the
-    setup-time check never ran and every session started after it froze
-    toolless ("MCP error -32000: Connection closed"). Hence this check runs
-    at setup AND at hub launch (cmd_up) — the two moments an operator
-    touches this machine. Import check only (no hub, no key needed):
-    `import mcp` failing is exactly the broken-extra signature."""
-    import subprocess
-    probe = ("import importlib.util, sys; "
-             "sys.exit(0 if importlib.util.find_spec('mcp') else 3)")
-    try:
-        if mcp_command.endswith("agora-mcp") and Path(mcp_command).exists():
-            # Run the probe under the ENTRY POINT's own interpreter (its
-            # shebang venv), which is what will matter at connect time.
-            shebang = Path(mcp_command).read_text().splitlines()[0]
-            python = shebang[2:].strip() if shebang.startswith("#!") else sys.executable
-            rc = subprocess.run([python, "-c", probe], timeout=15,
-                                capture_output=True).returncode
-        else:
-            return  # bare name on PATH of the future harness: nothing to probe here
-    except Exception:
-        return  # a probe failure must never block setup; connect-time will tell
-    if rc == 3:
-        print(f"WARNING: {mcp_command} cannot start — its environment lacks "
-              "the MCP SDK (broken or pre-0.12.5 install), so agents on this "
-              "machine would boot WITHOUT agora tools. Fix now: "
-              "`uv tool install --force --reinstall agorahub` (dev checkout: "
-              "`uv tool install --force --reinstall .`), " + hint,
-              file=sys.stderr)
+def _smoke_check_mcp(
+    mcp_command: str,
+    hint: str = "then re-run this setup.",
+    *,
+    required: bool = False,
+):
+    """Run the entry point's real, side-effect-free MCP API self-check.
+
+    Setup is fail-closed because writing wiring for a server that cannot boot
+    creates a deceptively configured but tool-less agent. Hub launch remains
+    advisory: a hub may legitimately serve remote MCP clients even when its
+    own machine has no local agent harness.
+    """
+    from .mcp.runtime import format_probe_failure, probe_mcp_runtime
+
+    probe = probe_mcp_runtime(mcp_command)
+    if probe.ok:
+        return probe
+    action = (
+        "reinstall the package and its supported MCP runtime with "
+        "`uv tool install --force --reinstall agorahub` "
+        "(development checkout: `uv tool install --force --reinstall .`), "
+        + hint
+    )
+    diagnostic = format_probe_failure(probe, action=action)
+    if required:
+        raise SystemExit("agora setup: required MCP runtime failed preflight\n" + diagnostic)
+    print("AGORA_MCP_CHECK status=error\n" + diagnostic, file=sys.stderr)
+    return probe
 
 
 def _apply_home(args: argparse.Namespace) -> None:
@@ -293,8 +286,8 @@ def cmd_up(args: argparse.Namespace) -> None:
     # Paste-safe hints (no <angle brackets>: the shell reads `<x>` as a
     # redirect). Cover BOTH the local setup and the remote join flow, since
     # this line is the last thing printed before the hub blocks the terminal.
-    print("  local agent:   agora setup AGENT_FRAMEWORK AGENT_ID   "
-          "(cursor|claude|codex; run in its workspace)")
+    print("  local agent:   agora setup AGENT_ID --harness FRAMEWORK   "
+          "(cursor|claude|codex|abstractcode|abstractcode-tui; run in its\n           workspace)")
     print(f"  remote agent:  agora invite AGENT_ID --url {url}   "
           "(mints a one-paste `agora join ...` line for the other machine)")
     # Guard the seats, not just the hub: a venv swap under already-wired
@@ -337,7 +330,7 @@ def cmd_up(args: argparse.Namespace) -> None:
 
 def _setup_key(url: str, agent_id: str, about: str,
                key_flag: str | None) -> str | None:
-    """The agent key a setup command should cache AND embed: seed an
+    """The agent key a setup command should cache: seed an
     operator-minted --key if one was passed (verifying it against the hub so a
     paste truncation fails HERE, not at first tool use), then resolve — cache
     hit, else admin-key self-registration. Returns None only when NO
@@ -366,13 +359,6 @@ def _whoami_check(url: str, api_key: str) -> dict:
     return r.json()
 
 
-def _print_key_placement(written_config: Path) -> None:
-    """One consistent ledger line wherever a per-agent key was embedded."""
-    print(f"  key: cached in {_config.home() / 'keys.json'} and embedded in "
-          f"{written_config} (0600)")
-    print("  keep that file out of version control (gitignore it).")
-
-
 def _print_kickoff(harness: str = "cursor") -> None:
     """A rule only reaches a harness session's context INSIDE a turn, so a
     just-launched idle session never arms itself — it needs one kick-off
@@ -381,33 +367,404 @@ def _print_kickoff(harness: str = "cursor") -> None:
     reception, readiness). The old paste-a-paragraph kickoff is gone —
     operator finding, 2026-07-15: a long prompt that restates what the rule
     and skill already teach is noise with drift risk."""
-    launch = {"cursor": "cursor-agent (or open the folder in Cursor)",
-              "claude": "claude", "codex": "codex"}[harness]
-    print(f"\nStart the agent: launch {launch} in this folder and give it "
-          "one message:\n\n  start agora protocol\n")
+    print(_kickoff_text(harness))
+
+
+def _kickoff_text(harness: str = "cursor") -> str:
+    # `.get`, never `[]`: this is the last line of a SUCCESSFUL setup, so a
+    # missing entry turned a completed wiring into a traceback (same class as
+    # the join.py opener KeyError). A new harness degrades to its own name.
+    launch = {
+        "cursor": "cursor-agent (or open the folder in Cursor)",
+        "claude": "claude",
+        "codex": "codex",
+        "abstractcode": "abstractcode",
+        "abstractcode-tui": "abstractcode-tui",
+        "opencode": "opencode",
+        "pi": "pi",
+        "all": "your preferred supported framework",
+    }.get(harness, harness)
+    return ("\nStart the agent: launch "
+            f"{launch} in this folder and give it one message:\n\n"
+            "  start agora protocol\n")
+
+
+@dataclass
+class _HarnessSetupResult:
+    harness: str
+    title: str
+    written: list[Path]
+    lines: list[str]
+    issues: list[str] = field(default_factory=list)
+
+
+def _effective_hook_choice(cmd: str, args: argparse.Namespace) -> bool:
+    with_hook = bool(getattr(args, "with_hook", False))
+    no_hook = bool(getattr(args, "no_hook", False))
+    if with_hook and no_hook:
+        sys.exit(f"agora {cmd}: choose one of --with-hook or --no-hook")
+    return not no_hook
+
+
+def _validate_agent_id_or_exit(agent_id: str) -> None:
+    try:
+        validate_agent_id(agent_id)
+    except ValueError as exc:
+        sys.exit(f"invalid agent id '{agent_id}': {exc}")
+
+
+def _prompt_harness_choice(cmd: str, *, allow_none: bool = False) -> str:
+    options = [
+        ("1", "cursor", "Cursor / cursor-agent"),
+        ("2", "claude", "Claude Code"),
+        ("3", "codex", "Codex CLI"),
+        ("4", "abstractcode", "AbstractCode"),
+        ("5", "all", "all supported harnesses"),
+    ]
+    if allow_none:
+        options.append(("6", "none", "skip workspace wiring"))
+    print(f"agora {cmd}: no existing harness footprint found in this workspace.")
+    print("Choose the wiring to install:")
+    for key, value, label in options:
+        print(f"  {key}) {value:<6} {label}")
+    mapping = {key: value for key, value, _ in options}
+    mapping.update({value: value for _, value, _ in options})
+    while True:
+        choice = input("selection: ").strip().lower()
+        picked = mapping.get(choice)
+        if picked:
+            return picked
+        print("enter one of: " + ", ".join(k for k in mapping if len(k) == 1))
+
+
+def _resolve_harnesses(cmd: str, workspace: Path, selection: str | None, *,
+                       allow_none: bool = False) -> tuple[str, ...]:
+    from .setup_harness import (detect_workspace_harnesses,
+                                expand_harness_selection)
+
+    if selection not in (None, "", "auto"):
+        return expand_harness_selection(selection, allow_none=allow_none)
+    detected = detect_workspace_harnesses(workspace)
+    if len(detected) == 1:
+        print(f"note: auto-selected `{detected[0]}` from the existing workspace "
+              "footprint.")
+        return detected
+    if len(detected) > 1:
+        label = ", ".join(detected)
+        print(f"note: auto-selected the already-present harness set: {label}.")
+        return detected
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        picked = _prompt_harness_choice(cmd, allow_none=allow_none)
+        return expand_harness_selection(picked, allow_none=allow_none)
+    choices = ["cursor", "claude", "codex", "abstractcode",
+               "abstractcode-tui", "all"]
+    if allow_none:
+        choices.append("none")
+    sys.exit(f"agora {cmd}: no existing harness footprint found in {workspace}. "
+             "Re-run with --harness " + "|".join(choices) +
+             ", or run the command interactively once and choose.")
+
+
+def _resolve_setup_request(args: argparse.Namespace) -> tuple[str, str, bool]:
+    from .setup_harness import SUPPORTED_HARNESSES
+
+    legacy_harness = getattr(args, "legacy_harness", None)
+    if legacy_harness:
+        return args.agent, legacy_harness, True
+    target = args.target
+    legacy_agent = getattr(args, "legacy_agent", None)
+    if legacy_agent is not None:
+        if target not in SUPPORTED_HARNESSES:
+            sys.exit(f"agora setup: unknown harness '{target}'")
+        chosen = getattr(args, "harness", "auto")
+        if chosen not in ("auto", "all", target):
+            sys.exit("agora setup: positional harness and --harness/--framework "
+                     "disagree")
+        return legacy_agent, target, True
+    return target, getattr(args, "harness", "auto"), False
+
+
+def _setup_result(harness: str, workspace: Path, agent_id: str, url: str,
+                  about: str, mcp_command: str, api_key: str | None,
+                  *, with_hook: bool, headless: bool,
+                  bootstrap_cli: bool) -> _HarnessSetupResult:
+    from . import setup_harness as _sh
+
+    lines: list[str] = []
+    issues: list[str] = []
+    if harness == "cursor":
+        written = _sh.setup_cursor(workspace, agent_id, url, about,
+                                   mcp_command, with_hook,
+                                   api_key=api_key, headless=headless)
+        lines.append("  hook: installed the driver-aware stop-hook backstop."
+                     if with_hook else
+                     "  hook: skipped (--no-hook); the background listener is "
+                     "the only reception surface in interactive sessions.")
+        if headless:
+            lines.append("  --headless is a deprecated no-op (wiring is "
+                         "identical; the running driver IS the mode). "
+                         f"Drive quickstart: cd {workspace} && agora drive")
+        else:
+            lines.append("  launch: open this folder in Cursor or run "
+                         "`cursor-agent` here."
+                         + (" The agent authenticates immediately."
+                            if api_key else
+                            " The agent self-registers on first tool use."))
+        return _HarnessSetupResult("cursor", "Cursor", written, lines,
+                                   issues=issues)
+
+    if harness == "claude":
+        written = _sh.setup_claude(workspace, agent_id, url, about,
+                                   mcp_command, with_hook, api_key=api_key)
+        lines.append("  reception: SessionStart/Stop wake hooks plus the "
+                     "stop-hook backstop installed."
+                     if with_hook else
+                     "  reception: manual only (--no-hook skipped Claude's "
+                     "idle-wake hooks and stop-hook backstop).")
+        if bootstrap_cli:
+            registered, detail = _sh.register_claude_local(
+                workspace, mcp_command, url, agent_id, about,
+                api_key=api_key, home=_sh.custom_home_env())
+            lines.append(f"  {detail}")
+            if not registered:
+                issues.append(f"Claude Code vendor bootstrap needs action: {detail}")
+            lines.append("  launch: run `claude` in this folder — the "
+                         "'agora' MCP server is already registered."
+                         if registered else
+                         "  launch: run `claude` in this folder and approve "
+                         "the project 'agora' server via /mcp if Claude asks.")
+        else:
+            lines.append("  launch: run `claude` in this folder. The project "
+                         "files are ready; trust the workspace and approve the "
+                         "project 'agora' server via /mcp if Claude asks.")
+        return _HarnessSetupResult("claude", "Claude Code", written, lines,
+                                   issues=issues)
+
+    if harness == "abstractcode":
+        written = _sh.setup_abstractcode(
+            workspace, agent_id, url, about, mcp_command, with_hook,
+            api_key=api_key,
+        )
+        lines.append(
+            "  reception: `agora drive abstractcode` owns unattended wakes; "
+            "AbstractCode exposes no native hook registration surface, so the "
+            "generic --with-hook default requires no extra hook file."
+        )
+        lines.append(
+            "  launch: run `abstractcode --state-file "
+            ".abstractcode/agora.state.json --skill agora-channels` for an "
+            "interactive session, or `agora drive abstractcode` unattended."
+        )
+        return _HarnessSetupResult(
+            "abstractcode", "AbstractCode", written, lines,
+            issues=issues,
+        )
+
+    if harness == "abstractcode-tui":
+        written = _sh.setup_abstractcode_tui(
+            workspace, agent_id, url, about, mcp_command, with_hook,
+            api_key=api_key,
+        )
+        lines.append(
+            "  reception: IN-SESSION. This harness has no hook or idle-wake "
+            "surface, so agora messages arrive when the agent looks; a seat "
+            "that must stay reachable while idle needs a driven seat."
+        )
+        lines.append(
+            "  driving: not yet — `agora harness-check abstractcode-tui` "
+            "reports which parts of the harness contract are unmet "
+            "(docs/harness_contract.md). agora does not configure your "
+            "framework: how this agent reaches agora's tools is yours to set."
+        )
+        return _HarnessSetupResult(
+            "abstractcode-tui", "AbstractCode-TUI", written, lines,
+            issues=issues,
+        )
+
+    if harness == "opencode":
+        written = _sh.setup_opencode(workspace, agent_id, url, about,
+                                     mcp_command, with_hook, api_key=api_key)
+        lines.append(
+            "  reception: the .opencode/plugin/agora.js plugin relays asks + "
+            "fyi into each prompt and asks after tool calls (mid-task). "
+            "opencode has no idle-delivery surface, so between turns messages "
+            "wait — use `agora drive opencode` for an always-reachable seat."
+        )
+        lines.append(
+            "  launch: run `opencode` in this folder. Providers/models are "
+            "yours to configure in opencode.json; agora added only its own "
+            "`mcp.agora` server and `agora*` permission."
+        )
+        return _HarnessSetupResult("opencode", "opencode", written, lines,
+                                   issues=issues)
+
+    if harness == "pi":
+        written = _sh.setup_pi(workspace, agent_id, url, about,
+                               mcp_command, with_hook, api_key=api_key)
+        lines.append(
+            "  reception: agora's tools ride the .pi/extensions/agora.js "
+            "bridge (pi ships no MCP client). pi has no idle wake: the seat "
+            "checks its inbox at turn boundaries; use `agora drive pi` for an "
+            "always-reachable seat."
+        )
+        lines.append(
+            "  launch: run `pi` in this folder and approve the project "
+            "extension once (pi's trust prompt). Providers/models are yours "
+            "(pi's models.json)."
+        )
+        return _HarnessSetupResult("pi", "pi", written, lines, issues=issues)
+
+    written = _sh.setup_codex(workspace, agent_id, url, about,
+                              mcp_command, with_hook=with_hook,
+                              api_key=api_key, dedicated=headless)
+    lines.append("  hook: installed the Stop hook backstop; approve it once "
+                 "via /hooks (and re-approve if the file changes)."
+                 if with_hook else
+                 "  hook: skipped (--no-hook); Codex only sees new work on the "
+                 "next human turn unless you re-enable the Stop hook.")
+    if bootstrap_cli:
+        registered, detail = _sh.register_codex_global(
+            mcp_command, url, agent_id, about,
+            api_key=api_key, home=_sh.custom_home_env())
+        lines.append(f"  {detail}")
+        if not registered:
+            issues.append(f"Codex vendor bootstrap needs action: {detail}")
+        lines.append("  launch: run `codex` in this folder"
+                     + (" and trust the project when prompted."
+                        if not registered else
+                        " (trusting the project pins this workspace's "
+                        "identity over the global bootstrap entry)."))
+    else:
+        lines.append("  launch: run `codex` in this folder and trust the "
+                     "project when prompted so this workspace's "
+                     "`.codex/config.toml` takes effect.")
+    if headless:
+        lines.append("  --headless is a deprecated no-op (wiring is "
+                     "mode-free). Dedicated quickstart: "
+                     f"cd {workspace} && agora drive")
+    lines.append("  note: interactive Codex has no idle-wake surface; with "
+                 "the Stop hook it drains bursts at turn ends, otherwise "
+                 "messages wait for the next turn. Use `agora drive` for an "
+                 "unattended seat.")
+    return _HarnessSetupResult("codex", "Codex CLI", written, lines,
+                               issues=issues)
+
+
+def _harness_label(reports: list[_HarnessSetupResult]) -> str:
+    if len(reports) == 1:
+        return reports[0].title
+    return ", ".join(report.harness for report in reports)
+
+
+def _print_final_status(issues: list[str]) -> int:
+    if not issues:
+        print("\nstatus: READY")
+        return 0
+    print("\nstatus: NEEDS ACTION")
+    for issue in issues:
+        print(f"  - {issue}")
+    return 2
 
 
 def cmd_setup(args: argparse.Namespace) -> None:
-    """One setup verb, three harnesses: `agora setup cursor|claude|codex <id>`.
-    The old `setup-cursor|setup-claude|setup-codex` names remain as deprecated
-    aliases (simplicity audit: onboarding had two spellings of the same
-    selector — `join --harness X` vs `setup-X`)."""
+    """Agent-first workspace wiring.
+
+    Preferred shape: `agora setup <id>` to write the supported harness
+    footprints into this workspace. Back-compat shapes remain:
+    `agora setup <harness> <id>` and `agora setup-<harness> <id>`."""
+    from .setup_harness import (install_skill, preflight_workspace_harnesses,
+                                write_workspace_seat)
+
+    agent_id, selection, legacy = _resolve_setup_request(args)
     if getattr(args, "deprecated_alias", None):
         print(f"note: `agora {args.deprecated_alias}` still works but is "
-              f"deprecated — prefer `agora setup {args.harness} {args.agent}` "
-              "(same flags).")
-    dispatch = {"cursor": cmd_setup_cursor, "claude": cmd_setup_claude,
-                "codex": cmd_setup_codex}
-    dispatch[args.harness](args)
-    # Machine-level half of setup: the skill that makes "start agora
-    # protocol" work, installed/refreshed for THIS harness — so the whole
-    # bootstrap is `agora setup ...` + `agora up`, no manual copies.
-    from .setup_harness import install_skill
-    print(f"  {install_skill(args.harness)}")
-    _setup_join_channels(args)
+              f"deprecated — prefer `agora setup {agent_id} --harness "
+              f"{selection}` (same flags).")
+    elif legacy:
+        print(f"note: `agora setup {selection} {agent_id}` still works but "
+              f"is deprecated — prefer `agora setup {agent_id} --harness "
+              f"{selection}`.")
+    if getattr(args, "with_hook", False) and not getattr(args, "no_hook", False):
+        print("note: `--with-hook` is now the default; use `--no-hook` to skip "
+              "hook installation.")
+
+    workspace = Path(args.workspace).expanduser().resolve()
+    if not workspace.is_dir():
+        sys.exit(f"workspace not found: {workspace}")
+    _validate_agent_id_or_exit(agent_id)
+    harnesses = _resolve_harnesses("setup", workspace, selection)
+    with_hook = _effective_hook_choice("setup", args)
+    headless = bool(getattr(args, "headless", False))
+    if headless and (len(harnesses) != 1
+                     or harnesses[0] not in ("cursor", "codex", "abstractcode")):
+        sys.exit("agora setup: --headless requires exactly one harness "
+                 "(`--harness cursor|codex|abstractcode`)")
+    vendor_bootstrap = bool(getattr(args, "vendor_bootstrap", False))
+    if vendor_bootstrap and (len(harnesses) != 1 or harnesses[0] not in ("claude", "codex")):
+        sys.exit("agora setup: --vendor-bootstrap requires exactly one harness "
+                 "(`--harness claude|codex`)")
+
+    try:
+        preflight_workspace_harnesses(workspace, harnesses)
+    except ValueError as exc:
+        sys.exit(f"agora setup: {exc}")
+
+    url = _hub_url(args)
+    about = args.about or ""
+    mcp_command = _resolve_mcp_command()
+    _smoke_check_mcp(mcp_command, required=True)
+    api_key = _setup_key(url, agent_id, about, args.key)
+
+    reports = [
+        _setup_result(harness, workspace, agent_id, url, about, mcp_command,
+                      api_key, with_hook=with_hook,
+                      headless=headless and harness in ("cursor", "codex", "abstractcode"),
+                      bootstrap_cli=vendor_bootstrap and harness in ("claude", "codex"))
+        for harness in harnesses
+    ]
+    default_drive = harnesses[0] if len(harnesses) == 1 else None
+    seat_record = write_workspace_seat(
+        workspace, agent_id=agent_id, url=url, about=about,
+        harnesses=harnesses, default_drive_harness=default_drive)
+
+    label = _harness_label(reports)
+    print(f"configured '{workspace.name}' as agora agent '{agent_id}' ({label}):")
+    print(f"  wrote {seat_record}")
+    if api_key:
+        print(f"  key: cached only in {_config.home() / 'keys.json'} (0600); "
+              "harness config contains no bearer")
+    issues: list[str] = []
+    for report in reports:
+        print(f"  {report.title}:")
+        for path in report.written:
+            print(f"    wrote {path}")
+        skill_detail = install_skill(report.harness)
+        print(f"    {skill_detail}")
+        if skill_detail.startswith("skill: could not install"):
+            issues.append(f"{report.title} skill installation needs action")
+        for line in report.lines:
+            indent = "    " if line.startswith("  ") else "  "
+            print(indent + line.lstrip())
+        issues.extend(report.issues)
+
+    channel_issues = _setup_join_channels(args, agent_id=agent_id)
+    issues.extend(channel_issues)
+    code = _print_final_status(issues)
+    print()
+    if code == 0:
+        if len(harnesses) > 1:
+            print("Configured harnesses: " + ", ".join(harnesses) + ".")
+            print("No default driver was selected; start one with "
+                  "`agora drive --harness <name>`.\n")
+        _print_kickoff(reports[0].harness if len(reports) == 1 else "all")
+        return
+    print("Resolve the items above, then launch the agent and send:\n\n"
+          "  start agora protocol\n")
+    raise SystemExit(code)
 
 
-def _setup_join_channels(args: argparse.Namespace) -> None:
+def _setup_join_channels(args: argparse.Namespace,
+                         agent_id: str | None = None) -> list[str]:
     """PLACEMENT is part of wiring: `--channels a,b` joins the seat to its
     rooms at setup time, so it never boots member-of-nothing. Field finding
     (2026-07-14, operator's own test): a seat wired without placement
@@ -419,188 +776,47 @@ def _setup_join_channels(args: argparse.Namespace) -> None:
     channels = [c.strip() for c in (getattr(args, "channels", "") or "").split(",")
                 if c.strip()]
     if not channels:
-        return
+        return []
     url = _hub_url(args)
-    key = _config.resolve_key(url, args.agent)
+    resolved_agent = agent_id or getattr(args, "agent", None)
+    if not resolved_agent:
+        sys.exit("agora setup: no agent id resolved for --channels placement")
+    key = _config.resolve_key(url, resolved_agent)
 
     async def go() -> None:
         from .client import AgoraClient
         client = AgoraClient(url, key)
+        failures: list[str] = []
         try:
             for chan in channels:
                 try:
                     await client.join_channel(chan)
-                    print(f"  joined '{chan}' as {args.agent}")
+                    print(f"  joined '{chan}' as {resolved_agent}")
                 except Exception as exc:
                     print(f"  could NOT join '{chan}': {exc} — create it "
                           f"first (`agora create-channel {chan} --as "
                           f"<operator-id> --public`) or join later with "
-                          f"`agora join --channel {chan} --as {args.agent}`")
+                          f"`agora join --channel {chan} --as {resolved_agent}`")
+                    failures.append(f"channel placement failed for '{chan}'")
         finally:
             await client.close()
-    asyncio.run(go())
+        return failures
+    return asyncio.run(go())
 
 
 def cmd_setup_cursor(args: argparse.Namespace) -> None:
-    """Wire a workspace as a Cursor agent: project `.cursor/mcp.json`, the
-    shared etiquette rule, and optionally the shared stop-hook (Cursor's
-    followup_message output contract). One generator serves all harnesses —
-    see setup_harness.py."""
-    from .setup_harness import setup_cursor
-
-    workspace = Path(args.workspace).expanduser().resolve()
-    if not workspace.is_dir():
-        sys.exit(f"workspace not found: {workspace}")
-    url = _hub_url(args)  # honors $AGORA_URL (the silent-127.0.0.1 trap fix)
-    api_key = _setup_key(url, args.agent, args.about or "", args.key)
-    headless = getattr(args, "headless", False)
-    mcp_command = _resolve_mcp_command()
-    _smoke_check_mcp(mcp_command)
-    written = setup_cursor(workspace, args.agent, url, args.about or "",
-                           mcp_command, args.with_hook,
-                           api_key=api_key, headless=headless)
-    kind = "Cursor, driven" if headless else "Cursor"
-    print(f"configured '{workspace.name}' as agora agent '{args.agent}' ({kind}):")
-    for path in written:
-        print(f"  wrote {path}")
-    if api_key:
-        _print_key_placement(written[0])
-    if headless:
-        # Mode-free since 0.12.53: --headless changed NOTHING in the wiring
-        # (the running driver is the mode); it only prints this quickstart.
-        print("\n--headless is a deprecated no-op (wiring is identical; the "
-              "running driver IS the mode). This folder is drivable now "
-              "(it blocks; keep it running, Ctrl-C to stop):\n"
-              f"  cd {workspace} && agora drive\n"
-              "Driven turns run sandboxed (--sandbox enabled) and yield by "
-              "exiting; the watcher re-wakes the seat when a message lands.")
-        _warn_if_not_project_root(workspace, args.agent)
-        return
-    if api_key:
-        print("Open this folder in Cursor. The agent authenticates immediately.")
-    else:
-        print("Open this folder in Cursor. The agent self-registers on first tool use.")
-    _warn_if_not_project_root(workspace, args.agent)
-    _print_kickoff("cursor")
+    args.legacy_harness = "cursor"
+    cmd_setup(args)
 
 
 def cmd_setup_claude(args: argparse.Namespace) -> None:
-    """Wire a workspace as a Claude Code agent: project-scoped `.mcp.json`
-    (a file Claude only loads after workspace trust + a one-time /mcp
-    approval), etiquette in CLAUDE.md, optionally the Stop hook — PLUS a
-    `claude mcp add --scope local` registration so the server connects
-    without any approval step at all."""
-    from . import setup_harness as _sh
-
-    workspace = Path(args.workspace).expanduser().resolve()
-    if not workspace.is_dir():
-        sys.exit(f"workspace not found: {workspace}")
-    url = _hub_url(args)
-    api_key = _setup_key(url, args.agent, args.about or "", args.key)
-    written = _sh.setup_claude(workspace, args.agent, url, args.about or "",
-                               _resolve_mcp_command(), args.with_hook,
-                               api_key=api_key)
-    print(f"configured '{workspace.name}' as agora agent '{args.agent}' (Claude Code):")
-    for path in written:
-        print(f"  wrote {path}")
-    if api_key:
-        _print_key_placement(written[0])
-    registered, detail = _sh.register_claude_local(
-        workspace, _resolve_mcp_command(), url, args.agent, args.about or "",
-        api_key=api_key, home=_sh.custom_home_env())
-    print(f"  {detail}")
-    if registered:
-        print("Run `claude` in this folder — the 'agora' MCP server is "
-              "already registered for you.")
-    else:
-        print("Run `claude` in this folder and approve the 'agora' MCP "
-              "server (/mcp).")
-    _warn_if_not_project_root(workspace, args.agent, harness="claude")
-    _print_kickoff("claude")
+    args.legacy_harness = "claude"
+    cmd_setup(args)
 
 
 def cmd_setup_codex(args: argparse.Namespace) -> None:
-    """Wire a workspace as a Codex CLI agent: project-scoped
-    `.codex/config.toml` (loaded only once the project is trusted) and
-    etiquette in AGENTS.md — PLUS a `codex mcp add` registration in the
-    always-loaded global registry so the server is visible immediately."""
-    from . import setup_harness as _sh
-
-    workspace = Path(args.workspace).expanduser().resolve()
-    if not workspace.is_dir():
-        sys.exit(f"workspace not found: {workspace}")
-    url = _hub_url(args)
-    api_key = _setup_key(url, args.agent, args.about or "", args.key)
-    dedicated = getattr(args, "headless", False)
-    written = _sh.setup_codex(workspace, args.agent, url, args.about or "",
-                              _resolve_mcp_command(), with_hook=args.with_hook,
-                              api_key=api_key, dedicated=dedicated)
-    kind = "Codex CLI, dedicated" if dedicated else "Codex CLI"
-    print(f"configured '{workspace.name}' as agora agent '{args.agent}' ({kind}):")
-    for path in written:
-        print(f"  wrote {path}")
-    config_path = workspace / ".codex" / "config.toml"
-    if api_key and config_path in written:
-        _print_key_placement(config_path)
-    elif api_key:
-        # Pre-existing agora table: setup leaves TOML untouched by design, so
-        # the fresh key landed only in keys.json. Say so instead of implying
-        # the embed happened.
-        print(f"  key: cached in {_config.home() / 'keys.json'} (existing "
-              f"[mcp_servers.agora] table in {config_path} left untouched — "
-              "delete it and re-run to embed the key)")
-    registered, detail = _sh.register_codex_global(
-        _resolve_mcp_command(), url, args.agent, args.about or "",
-        api_key=api_key, home=_sh.custom_home_env())
-    print(f"  {detail}")
-    print("Run `codex` in this folder"
-          + (" (trusting the project when prompted pins this workspace's "
-             "identity)." if registered
-             else " and trust the project when prompted."))
-    if args.with_hook:
-        print("Then review/approve the Stop hook once via /hooks (re-approve "
-              "if the hook file ever changes).")
-    # Codex has no idle-wake surface, so be honest here instead of promising
-    # push (session resumes are forbidden by the "hub never creates turns"
-    # boundary).
-    print("Note: Codex has no idle-wake surface; the Stop hook drains bursts at "
-          "turn ends, otherwise messages wait for the next turn (that is "
-          "expected). Harnesses with a wake surface use `agora listen`.")
-    _warn_if_not_project_root(workspace, args.agent, harness="codex")
-    _print_kickoff("codex")
-
-
-def _warn_if_not_project_root(workspace: Path, agent_id: str,
-                              harness: str = "cursor") -> None:
-    """Warn ONLY for the nested-in-another-repo layout. A standalone folder
-    is the normal case and needs nothing: the launch folder is the
-    workspace. Three harnesses, three verified models (A/B + docs
-    fact-check, 2026-07-14):
-    - cursor-agent: a staff-acknowledged CLI bug anchors config at the
-      enclosing repo root; the seat's own .cursor/ is ignored
-      (forum.cursor.com/t/150169; --workspace did NOT fix it in our A/B;
-      `git init` in the seat folder did).
-    - codex: documented walk-up to the nearest .git; nested config merges
-      (closest wins) but TRUST keys on the resolved root — the whole
-      enclosing repo gets trusted.
-    - claude: settings/.mcp.json are cwd-only (nested seat works), but
-      workspace trust is keyed on the git repo root too."""
-    if (workspace / ".git").exists():
-        return
-    git_root = next((p for p in workspace.parents if (p / ".git").exists()), None)
-    if git_root is None:
-        return
-    detail = {
-        "cursor": ("a known Cursor CLI bug anchors project config there, so "
-                   "this seat would boot WITHOUT its agora tools"),
-        "codex": ("codex will key the trust prompt on that repo — trusting "
-                  "this seat means trusting the WHOLE enclosing repo"),
-        "claude": ("Claude Code reads this folder's config fine, but its "
-                   "workspace trust is keyed on that enclosing repo"),
-    }[harness]
-    print(f"WARNING: '{workspace}' sits inside the git repo '{git_root}': "
-          f"{detail}. Fix: `git init` in this folder (or move the seat "
-          "outside the repo).")
+    args.legacy_harness = "codex"
+    cmd_setup(args)
 
 
 # -- operator verbs for remote onboarding (register / seed-key) ---------------
@@ -979,8 +1195,8 @@ def cmd_register(args: argparse.Namespace) -> None:
         print("shown exactly ONCE (the hub stores only its hash). On the "
               "agent's machine:")
         print(f"  agora seed-key {args.agent} --url {url} --key <that key>")
-        print(f"  (or: agora setup AGENT_FRAMEWORK {args.agent} --url {url} "
-              "--key THAT_KEY — cursor|claude|codex)")
+        print(f"  (or: agora setup {args.agent} --harness FRAMEWORK --url "
+              f"{url} --key THAT_KEY — cursor|claude|codex|abstractcode)")
         print("  (same machine? re-run with --seed to skip the paste)")
 
 
@@ -1420,6 +1636,16 @@ def cmd_inbox(args):
             owed = await c.owed()
         except Exception:
             owed = None  # pre-0.10 hub: no /owed yet
+        if owed and owed.phases:
+            # The phase order precedes the debts (0140/2): what work is
+            # legitimate right now is prior to which debts you owe on it.
+            print("PHASE ORDER IN FORCE (finish the current phase before "
+                  "the next one starts):")
+            for row in owed.phases[:8]:
+                nxt = f" (next: {row.next})" if row.next else ""
+                who = f" · steward {row.steward}" if row.steward else ""
+                print(f"- {row.channel} {row.key}: {row.current} OPEN{nxt}{who}")
+            print()
         if owed and (owed.counts.to_answer or owed.counts.to_consume):
             # Typed consumption (agora-0118): canonical `sender`, never the
             # deprecated `from` alias the 0.4 bump removes.
@@ -1487,6 +1713,9 @@ def cmd_post(args):
                 asks.append({"id": aid.strip(), "text": text.strip()})
         # --answer 1,3 -> ask ids this reply discharges
         answers = [x.strip() for x in a.answer.split(",")] if a.answer else None
+        # --consumes commons#412,commons#418 -> N consumption debts, ONE message
+        consumes = ([x.strip() for x in a.consumes.split(",") if x.strip()]
+                    if getattr(a, "consumes", None) else None)
         # --attach SHA256[:NAME] (repeatable) -> refs to uploaded channel blobs
         attachments = None
         if getattr(a, "attach", None):
@@ -1500,8 +1729,8 @@ def cmd_post(args):
         m = await c.post(a.channel, a.body, title=a.title or "",
                          status=Status(a.status), urgency=Urgency(a.urgency),
                          to=to, critical=a.critical, data=data, reply_to=a.reply_to,
-                         asks=asks, answers=answers, attachments=attachments,
-                         notice=notice)
+                         asks=asks, answers=answers, consumes=consumes,
+                         attachments=attachments, notice=notice)
         print(f"posted to {a.channel} as {args.as_agent}: seq {m.seq}, id {m.id}")
     _run_agent_cmd(args, go)
 
@@ -1614,6 +1843,7 @@ def cmd_join(args):
                  "this machine; --channel joins a channel. Not both.")
 
     if onboarding:
+        from .setup_harness import install_skill
         from .join import decode_artifact, run_join
         if args.artifact and args.token:
             sys.exit("agora join: pass an artifact OR --token, not both")
@@ -1635,20 +1865,47 @@ def cmd_join(args):
                          "(the artifact form carries the url for you)")
             url, token = args.url.rstrip("/"), args.token
             pinned, expires = None, None
-        code = run_join(url=url, token=token, agent_id=args.as_agent,
-                        about=args.about or "", harness=args.harness,
-                        workspace=args.workspace, with_hook=args.with_hook,
-                        listen=args.listen, mcp_command=_resolve_mcp_command(),
-                        pinned_id=pinned, expires_hint=expires)
-        if code:
-            sys.exit(code)
-        agent_id = pinned or args.as_agent
-        if args.harness and args.harness != "none" and agent_id:
+        if args.as_agent:
+            _validate_agent_id_or_exit(args.as_agent)
+        if args.with_hook and not args.no_hook:
+            print("note: `--with-hook` is now the default; use `--no-hook` to "
+                  "skip hook installation.")
+        workspace = Path(args.workspace).expanduser().resolve()
+        if args.harness == "none":
+            harnesses: tuple[str, ...] = ()
+        else:
+            harnesses = _resolve_harnesses("join", workspace, args.harness,
+                                           allow_none=True)
+        vendor_bootstrap = bool(getattr(args, "vendor_bootstrap", False))
+        if vendor_bootstrap and (len(harnesses) != 1 or harnesses[0] not in ("claude", "codex")):
+            sys.exit("agora join: --vendor-bootstrap requires exactly one harness "
+                     "(`--harness claude|codex`)")
+        with_hook = _effective_hook_choice("join", args)
+        result = run_join(url=url, token=token, agent_id=args.as_agent,
+                          about=args.about or "", harness=harnesses,
+                          workspace=args.workspace, with_hook=with_hook,
+                          listen=args.listen, mcp_command=_resolve_mcp_command(),
+                          pinned_id=pinned, expires_hint=expires,
+                          vendor_bootstrap=vendor_bootstrap)
+        if result.code:
+            sys.exit(result.code)
+        issues: list[str] = list(result.issues)
+        if harnesses and result.agent_id:
             # A joined machine gets the skill too, so the three-word boot
             # works there exactly as on setup-wired machines.
-            from .setup_harness import install_skill
-            print(f"  {install_skill(args.harness)}")
-            _print_kickoff(args.harness)
+            for harness in harnesses:
+                skill_detail = install_skill(harness)
+                print(f"  {skill_detail}")
+                if skill_detail.startswith("skill: could not install"):
+                    issues.append(f"{harness} skill installation needs action")
+        status = _print_final_status(issues)
+        print()
+        if status == 0 and harnesses:
+            _print_kickoff(harnesses[0] if len(harnesses) == 1 else "all")
+        elif status != 0:
+            print("Resolve the items above, then launch the agent and send:\n\n"
+                  "  start agora protocol\n")
+            sys.exit(status)
         return
 
     if not args.channel:
@@ -2040,24 +2297,86 @@ def _driver_state(home: Path, agent_id: str) -> str:
 
 
 def cmd_drive(args: argparse.Namespace) -> None:
-    """The external resume-driver for a HEADLESS seat: block cheaply in
+    """The external resume-driver for a dedicated seat: block cheaply in
     `agora listen --once --important-only`, and on an obligation wake spawn
-    ONE bounded `cursor-agent -p --resume` turn that acts and yields by
-    returning. Reception becomes structural (yield = process exit; the
-    check->ack->re-arm trap is impossible). Owner-run, session-bound, never
-    hub machinery. See drive.py."""
+    ONE bounded harness turn that acts and yields by returning. Reception
+    becomes structural (yield = process exit; the check->ack->re-arm trap is
+    impossible). Owner-run, session-bound, never hub machinery. See drive.py."""
     from .drive import run_drive
 
+    harness = getattr(args, "harness", "auto")
+    harness_pos = getattr(args, "harness_pos", None)
+    if harness_pos:
+        if harness not in (None, "", "auto", harness_pos):
+            sys.exit("agora drive: positional harness and --harness/--framework "
+                     "disagree")
+        harness = harness_pos
     sys.exit(run_drive(
+        harness=harness,
         agent_id=args.as_agent, url=args.url, model=args.model,
+        provider=args.provider,
+        reasoning_effort=args.reasoning_effort,
+        permissions=args.permissions,
+        harness_args=_parse_harness_args(args.harness_args),
         max_wait=args.max_wait, sandbox=args.sandbox,
         turn_budget=args.turn_budget,
         broadcast_turn_budget=args.broadcast_turn_budget,
         session_rotate=args.session_rotate,
-        initiative=args.initiative, work_timeout=args.work_timeout,
+        work_timeout=args.work_timeout,
         work_budget=args.work_budget, force=args.force,
         turn_log=args.turn_log,
         once=args.once, max_turns=args.max_turns))
+
+
+def _parse_harness_args(pairs: list[str] | None) -> dict[str, str]:
+    """`--harness-arg k=v` -> {"k": "v"}, refusing a malformed pair loudly."""
+    out: dict[str, str] = {}
+    for pair in pairs or []:
+        key, sep, value = str(pair).partition("=")
+        key = key.strip().lstrip("-")
+        if not sep or not key:
+            sys.exit(f"agora drive: --harness-arg expects KEY=VALUE, got "
+                     f"{pair!r}")
+        out[key] = value
+    return out
+
+
+def cmd_harness_check(args: argparse.Namespace) -> None:
+    """`agora harness-check <harness>` — run the agora harness contract against
+    a framework and print a per-capability verdict.
+
+    This is how a framework learns whether it can carry an agora seat WITHOUT
+    agora learning its internals, and without its operator negotiating with
+    agora's maintainers. Structural probes only, unless --live.
+    """
+    from .harness_check import run_check
+    from .listen import resolve_identity
+
+    try:
+        seat, url = resolve_identity(args.as_agent, args.url, Path.cwd())
+    except SystemExit:
+        # A conformance check must run in an UNWIRED workspace too — that is
+        # exactly where a vendor tries it first.
+        seat, url = "harness-check", (args.url or "http://127.0.0.1:8765")
+    report = run_check(args.harness, workspace=Path.cwd(), agent_id=seat,
+                       url=url, live=args.live)
+    print(report.to_json() if args.json else report.render())
+    sys.exit(report.exit_code())
+
+
+def cmd_hook(args: argparse.Namespace) -> None:
+    """`agora hook <Event>` — the reception hook every harness declares.
+
+    Deliberately never fails the turn: a non-zero exit means "wake" to Claude
+    and "error" to Codex, so problems are reported on stderr (which both
+    harnesses surface) and the exit stays 0.
+    """
+    from . import hook as _hook
+
+    from .listen import resolve_identity
+
+    seat, url = resolve_identity(args.as_agent, args.url, Path.cwd())
+    raise SystemExit(_hook.run(args.event, seat, url, cursor=args.cursor))
 
 
 def cmd_listen(args: argparse.Namespace) -> None:
@@ -2077,6 +2396,69 @@ def cmd_listen(args: argparse.Namespace) -> None:
         poll=args.poll, adaptive=args.adaptive, idle_nudge=args.idle_nudge))
 
 
+def _print_reception_posture(workspace: Path) -> None:
+    """Say whether this workspace's reception hooks have EVER fired.
+
+    This exists because the previous generation failed silently in three
+    independent ways at once — a malformed declaration that registered zero
+    hooks with no warning, an untrusted project, and untrusted hooks — and
+    nothing anywhere said so. One line naming NEVER FIRED is what would have
+    caught it on day one.
+    """
+    from . import hook as _hook
+    from .setup_harness import HOOK_EVENTS, read_workspace_seat
+
+    seat = read_workspace_seat(workspace)
+    if not seat:
+        return
+    agent_id = seat.get("agent_id")
+    harnesses = list(seat.get("harnesses") or [])
+    if not agent_id:
+        return
+    fired = _hook.last_fired(str(agent_id))
+    now = time.time()
+
+    def ago(stamp: float) -> str:
+        secs = max(0, int(now - stamp))
+        if secs < 60:
+            return f"{secs}s ago"
+        if secs < 3600:
+            return f"{secs // 60}m ago"
+        return f"{secs // 3600}h ago"
+
+    if not fired:
+        print(f"hooks ({agent_id}): NEVER FIRED — in-session reception is "
+              "inert. Driven seats do not need hooks; an attended session "
+              "does.")
+    else:
+        parts = [f"{e} {ago(fired[e])}" if e in fired else f"{e} NEVER"
+                 for e in HOOK_EVENTS]
+        print(f"hooks ({agent_id}): " + " · ".join(parts))
+
+    if "codex" in harnesses:
+        # Codex reads .codex/hooks.json AND .codex/config.toml (hence agora's
+        # MCP server) only for a TRUSTED project — untrusted, both are ignored
+        # with no message at all.
+        codex_home = Path(os.environ.get("CODEX_HOME")
+                          or (Path.home() / ".codex"))
+        target = str(workspace.resolve())
+        trusted = False
+        try:
+            text = (codex_home / "config.toml").read_text()
+            trusted = (f'[projects."{target}"]' in text
+                       and "trust_level" in text.split(
+                           f'[projects."{target}"]', 1)[1].split("[", 1)[0])
+        except OSError:
+            pass
+        if trusted:
+            print("codex: project TRUSTED")
+        else:
+            print(f"codex: project NOT TRUSTED in {codex_home}/config.toml — "
+                  ".codex/hooks.json and the agora MCP server are BOTH ignored "
+                  "until you run `codex` here and trust the folder. Hooks also "
+                  "need a one-time approval via `/hooks`.")
+
+
 def cmd_status(args: argparse.Namespace) -> None:
     import httpx
 
@@ -2090,6 +2472,7 @@ def cmd_status(args: argparse.Namespace) -> None:
         print(f"config: {_config.home() / 'config.json'}")
         return
     print(f"config: {_config.home() / 'config.json'}")
+    _print_reception_posture(Path.cwd())
 
     # With the admin key (same machine as `agora up`) also show the per-agent
     # overview. DARK = offline with obligations pending — the dead-agent
@@ -2221,7 +2604,7 @@ def build_parser() -> argparse.ArgumentParser:
     up.set_defaults(func=cmd_up)
 
     _KEY_HELP = ("operator-minted agent key (from `agora register`): seeds the "
-                 "local key cache and is embedded in the harness config — the "
+                 "0600 local key cache; harness config stays secret-free, and the "
                  "admin key is then never needed on this machine")
 
     def _setup_common_args(sp, *, headless_help: str | None) -> None:
@@ -2235,14 +2618,19 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--url", default=None)
         sp.add_argument("--key", default=None, metavar="AGENT_KEY", help=_KEY_HELP)
         sp.add_argument("--with-hook", action="store_true",
-                        help="also install the turn-end stop hook (a backstop "
-                             "that re-prompts if reception breaks). Default: "
-                             "no hook.")
+                        help="deprecated compatibility alias; hooks install by "
+                             "default now. Use --no-hook to skip them.")
+        sp.add_argument("--no-hook", action="store_true",
+                        help="skip hook installation and any harness wake wiring")
         sp.add_argument("--channels", default="", metavar="A,B",
                         help="public channels to join the seat to NOW "
                              "(placement is the operator's decision; a seat "
                              "that boots member-of-nothing must ask instead "
                              "of picking a room itself)")
+        sp.add_argument("--vendor-bootstrap", action="store_true",
+                        help="also run the harness's own registration "
+                             "convenience when supported (`claude mcp add "
+                             "--scope local` or `codex mcp add`)")
         if headless_help:
             sp.add_argument("--headless", action="store_true",
                             help=headless_help)
@@ -2253,27 +2641,57 @@ def build_parser() -> argparse.ArgumentParser:
                    "the mode (`cd <workspace> && agora drive`). The flag "
                    "only prints the driver quickstart"),
         "claude": None,   # hooks already arm reception; no dedicated variant
-        "codex": ("dedicated seat, no human shares the session: the rule "
-                  "makes the standing wait_for_messages loop the seat's "
-                  "reachability (Codex has no idle wake). Do NOT use for "
-                  "a human-shared terminal"),
+        "codex": ("DEPRECATED no-op: Codex setup is mode-free; run "
+                  "`cd <workspace> && agora drive` for a dedicated seat"),
+        "abstractcode": ("DEPRECATED no-op: AbstractCode setup is mode-free; "
+                         "run `cd <workspace> && agora drive abstractcode`"),
     }
 
     st = sub.add_parser("setup",
-                        help="wire a workspace as an agora agent: "
-                             "setup cursor|claude|codex <id>")
-    st_sub = st.add_subparsers(dest="harness", required=True)
-    for h in ("cursor", "claude", "codex"):
-        sp = st_sub.add_parser(h, help=f"wire this workspace for {h}")
-        _setup_common_args(sp, headless_help=_HEADLESS_HELP[h])
-        sp.set_defaults(func=cmd_setup, harness=h)
+                        help="wire a workspace as an agora agent; default = "
+                             "auto-detect or prompt for the workspace harness")
+    st.add_argument("target",
+                    help="agent id (preferred), or a legacy harness selector "
+                         "when followed by AGENT")
+    st.add_argument("legacy_agent", nargs="?", default=None, metavar="AGENT",
+                    help=argparse.SUPPRESS)
+    st.add_argument("--harness", "--framework",
+                    choices=["auto", "all", *SUPPORTED_HARNESSES],
+                    default="auto",
+                    help="workspace wiring to install (default: auto = "
+                         "reuse existing footprints, otherwise prompt; "
+                         "`all` is explicit multi-harness wiring)")
+    st.add_argument("--workspace", default=".",
+                    help="workspace folder (default: cwd)")
+    st.add_argument("--about", default="",
+                    help="self-description for this agent")
+    st.add_argument("--url", default=None)
+    st.add_argument("--key", default=None, metavar="AGENT_KEY", help=_KEY_HELP)
+    st.add_argument("--with-hook", action="store_true",
+                    help="deprecated compatibility alias; hooks install by "
+                         "default now. Use --no-hook to skip them.")
+    st.add_argument("--no-hook", action="store_true",
+                    help="skip hook installation and any harness wake wiring")
+    st.add_argument("--channels", default="", metavar="A,B",
+                    help="public channels to join the seat to NOW "
+                         "(placement is the operator's decision; a seat "
+                         "that boots member-of-nothing must ask instead "
+                         "of picking a room itself)")
+    st.add_argument("--headless", action="store_true",
+                    help="deprecated compatibility hint; requires exactly one "
+                         "harness (`cursor`, `codex`, or `abstractcode`)")
+    st.add_argument("--vendor-bootstrap", action="store_true",
+                    help="also run the harness's own registration convenience "
+                         "when supported (`claude mcp add --scope local` or "
+                         "`codex mcp add`); mutates user/global harness state")
+    st.set_defaults(func=cmd_setup)
 
     # Deprecated aliases (one release, per the simplicity audit): same flags,
-    # same handlers, a one-line nudge toward `agora setup <harness>`.
-    for h in ("cursor", "claude", "codex"):
+    # same handler, a one-line nudge toward `agora setup <id> --harness X`.
+    for h in ("cursor", "claude", "codex", "abstractcode"):
         alias = sub.add_parser(f"setup-{h}")
         _setup_common_args(alias, headless_help=_HEADLESS_HELP[h])
-        alias.set_defaults(func=cmd_setup, harness=h,
+        alias.set_defaults(func=cmd_setup, legacy_harness=h,
                            deprecated_alias=f"setup-{h}")
 
     rg = sub.add_parser("register",
@@ -2393,11 +2811,33 @@ def build_parser() -> argparse.ArgumentParser:
     st = sub.add_parser("status", help="check hub + config")
     st.set_defaults(func=cmd_status)
 
+    hc = sub.add_parser("harness-check",
+                        help="check a framework against the agora harness "
+                             "contract; prints a per-capability verdict")
+    hc.add_argument("harness", choices=list(SUPPORTED_HARNESSES))
+    hc.add_argument("--as", dest="as_agent", default=None, metavar="AGENT_ID")
+    hc.add_argument("--url", default=None)
+    hc.add_argument("--live", action="store_true",
+                    help="additionally run ONE real turn (costs tokens)")
+    hc.add_argument("--json", action="store_true")
+    hc.set_defaults(func=cmd_harness_check)
+
+    hk = sub.add_parser("hook", help="reception hook entry point invoked by a "
+                                     "harness (SessionStart/UserPromptSubmit/"
+                                     "PostToolUse/Stop); not for humans")
+    hk.add_argument("event", choices=list(_HOOK_EVENTS))
+    hk.add_argument("--as", dest="as_agent", default=None, metavar="AGENT_ID")
+    hk.add_argument("--url", default=None)
+    hk.add_argument("--cursor", action="store_true",
+                    help="emit Cursor's followup_message shape instead of "
+                         "hookSpecificOutput/decision")
+    hk.set_defaults(func=cmd_hook)
+
     ln = sub.add_parser("listen", help="session-resident listener: emit AGORA_WAKE "
                                        "sentinels when new messages arrive")
     ln.add_argument("--as", dest="as_agent", default=None, metavar="AGENT_ID",
                     help="agent id (default: $AGORA_AGENT_ID, else the nearest "
-                         ".cursor/mcp.json walking up from cwd)")
+                         "THIS folder's harness config; no parent search)")
     ln.add_argument("--source", choices=["auto", "file", "ws"], default="auto",
                     help="auto = tail the hub-written notify file when local, "
                          "else WebSocket push (default: auto)")
@@ -2451,29 +2891,67 @@ def build_parser() -> argparse.ArgumentParser:
     from .drive import (DEFAULT_BROADCAST_TURN_BUDGET,
                         DEFAULT_TURN_BUDGET, DEFAULT_WORK_BUDGET,
                         TURN_TIMEOUT)
+    from .setup_harness import DRIVABLE_HARNESSES
 
     dr = sub.add_parser("drive",
-                        help="external resume-driver for a HEADLESS seat: "
-                             "wait on obligations, spawn one bounded "
-                             "cursor-agent turn per wake (owner-run, "
-                             "session-bound)")
+                        help="external resume-driver for a dedicated seat: "
+                             "wait on obligations, spawn one bounded harness "
+                             "turn per wake (owner-run, session-bound)")
+    dr.add_argument("harness_pos", nargs="?", choices=DRIVABLE_HARNESSES,
+                    help="optional harness selector (same as --harness)")
     dr.add_argument("--as", dest="as_agent", default=None, metavar="AGENT_ID",
                     help="agent id (default: $AGORA_AGENT_ID, else the nearest "
-                         ".cursor/mcp.json)")
+                         "workspace wired by `agora setup`)")
+    dr.add_argument("--harness", "--framework", choices=["auto", *DRIVABLE_HARNESSES],
+                    default="auto",
+                    help="harness to drive (default: auto = use the setup "
+                         "record or a single wired harness; multi-harness "
+                         "workspaces must choose explicitly)")
     dr.add_argument("--url", default=None)
-    dr.add_argument("--model", default="composer-2.5-fast",
-                    help="cursor-agent model for driven turns "
-                         "(default: composer-2.5-fast)")
+    dr.add_argument("--model", default=None,
+                    help="override the harness model for driven turns "
+                         "(default: use the harness's configured/default model)")
+    dr.add_argument("--provider", default=None,
+                    help="AbstractCode provider override (for example openai "
+                         "or ollama); rejected by other harnesses")
+    # The UNION of every harness's own vocabulary; each adapter then validates
+    # against its own (DriveAdapter.REASONING_VOCAB), so an unsupported value is
+    # refused at arm time naming the legal set. `max` used to be offered here
+    # and is accepted by NO harness — codex's enum is
+    # minimal|low|medium|high|xhigh|ultra and abstractcode's is
+    # auto|none|minimal|low|medium|high|xhigh — so it could only ever produce a
+    # failing turn, and neither does `ultra` — codex translates it to the API's
+    # `max`, which every reachable model rejects. `minimal` was missing despite
+    # being valid on AbstractCode.
+    dr.add_argument("--reasoning-effort", default=None,
+                    choices=["auto", "none", "minimal", "low", "medium",
+                             "high", "xhigh", "off", "max", "on"],
+                    help="reasoning effort for driven turns (Codex and "
+                         "AbstractCode). Values are validated against the "
+                         "chosen harness's own vocabulary, which differs by "
+                         "vendor")
+    dr.add_argument("--harness-arg", dest="harness_args", action="append",
+                    default=[], metavar="KEY=VALUE",
+                    help="framework-specific argument passed through as "
+                         "`--KEY VALUE` (repeatable). agora does not interpret "
+                         "it: a framework may need a concept agora has no "
+                         "opinion about, and inventing an agora flag per vendor "
+                         "concept is how a protocol ends up carrying a "
+                         "product's internals")
     dr.add_argument("--max-wait", dest="max_wait", type=float, default=1200.0,
                     help="idle ceiling for each listen window (a wake returns "
                          "instantly regardless; default 1200)")
+    dr.add_argument("--permissions", choices=["read", "write", "all"],
+                    default=None,
+                    help="execution-permission level for driven turns, in "
+                         "agora's vocabulary (default: write — write inside "
+                         "the workspace, MCP allowed). Each harness declares "
+                         "which levels it can express; an inexpressible level "
+                         "is refused at arm time naming who supports it")
     dr.add_argument("--sandbox", choices=["enabled", "disabled", "none"],
-                    default="enabled",
-                    help="spawn sandbox: enabled (DEFAULT — contained shell/"
-                         "write, safe for unattended peer-driven turns), "
-                         "disabled (cursor-agent's own default), or none "
-                         "(--force, all tools, NO container — only in a "
-                         "throwaway VM)")
+                    default=None,
+                    help="DEPRECATED alias for --permissions "
+                         "(enabled=write, disabled/none=all); one release")
     dr.add_argument("--turn-budget", dest="turn_budget", type=int,
                     default=DEFAULT_TURN_BUDGET,
                     help="max spawned turns per rolling hour before parking "
@@ -2486,17 +2964,8 @@ def build_parser() -> argparse.ArgumentParser:
                          f"{DEFAULT_BROADCAST_TURN_BUDGET})")
     dr.add_argument("--session-rotate", dest="session_rotate", type=int,
                     default=25,
-                    help="turns on one cursor-agent session before rotating "
-                         "to a fresh one (context-bloat + injection-residue "
-                         "flush; default 25)")
-    dr.add_argument("--initiative", action="store_true",
-                    help="CONTINUATION for a dedicated work seat: at idle "
-                         "boundaries, chain bounded WORK chunks while the "
-                         "seat holds a live claim (claim:<task> it owns). "
-                         "Chunks end at checkpoints; any obligation "
-                         "preempts the next chunk; 3 receipt-less chunks "
-                         "per claim version park the chain. Default: off "
-                         "(reception-only)")
+                    help="turns on one harness session before rotating to a "
+                         "fresh one (context-bloat + residue flush; default 25)")
     dr.add_argument("--work-timeout", dest="work_timeout", type=float,
                     default=TURN_TIMEOUT,
                     help="hard cap for one spawned work chunk in seconds "
@@ -2510,14 +2979,13 @@ def build_parser() -> argparse.ArgumentParser:
                          "separate pool — reception's --turn-budget is "
                          "never consumed by work)")
     dr.add_argument("--force", action="store_true",
-                    help="take the seat over despite a live driver or a "
-                         "fresh interactive listener (you know what you "
-                         "are doing)")
+                    help="bypass the fresh interactive-listener guard. It "
+                         "NEVER overrides a live driver.")
     dr.add_argument("--turn-log", dest="turn_log", nargs="?", const="default",
                     default=None, metavar="PATH",
                     help="FLIGHT RECORDER: append every spawned turn's full "
-                         "event stream as JSONL (turn_start / the raw "
-                         "cursor-agent events verbatim / turn_stderr / "
+                         "event stream as JSONL (turn_start / raw harness "
+                         "stdout / turn_stderr / "
                          "turn_end with duration+outcome). Bare flag logs "
                          "to ~/.agora/drive-<id>.turns.jsonl; pass PATH to "
                          "choose. File is 0600; writes are best-effort and "
@@ -2614,12 +3082,17 @@ def build_parser() -> argparse.ArgumentParser:
     po.add_argument("--title", default=""); po.add_argument("--to", default="")
     po.add_argument("--reply-to", dest="reply_to", default=None)
     po.add_argument("--critical", action="store_true"); po.add_argument("--data", default=None)
-    po.add_argument("--notice-kind", choices=["job", "consensus", "milestone", "delivery"])
+    po.add_argument("--notice-kind", choices=NOTICE_KINDS)
     po.add_argument("--notice-key", help="stable event id; repeated keys are refused")
     po.add_argument("--ask", action="append", metavar="ID:TEXT",
                     help="a numbered ask (repeatable), e.g. --ask '1:confirm the payload cap?'")
     po.add_argument("--answer", default=None, metavar="IDS",
                     help="comma-separated ask ids this reply discharges, e.g. --answer 1,3")
+    po.add_argument("--consumes", default=None, metavar="REFS",
+                    help="comma-separated consumption debts THIS message "
+                         "settles (channel#seq or message ids), e.g. "
+                         "--consumes commons#412,commons#418 — one message "
+                         "instead of one receipt per thread")
     po.add_argument("--attach", action="append", metavar="SHA256[:NAME]",
                     help="attach an uploaded blob by id (repeatable; "
                          "upload first with `agora attachment put`)")
@@ -2735,18 +3208,28 @@ def build_parser() -> argparse.ArgumentParser:
                          "form carries it)")
     jn.add_argument("--about", default="",
                     help="onboarding: self-description for the new agent")
-    jn.add_argument("--harness", choices=["cursor", "claude", "codex", "none"],
-                    default="cursor",
+    # Derived, not retyped: this list was hand-copied once and silently lost
+    # `abstractcode-tui` — a harness you could set up but not join with.
+    jn.add_argument("--harness", "--framework",
+                    choices=["auto", "all", *SUPPORTED_HARNESSES, "none"],
+                    default="auto",
                     help="onboarding: workspace wiring to install "
-                         "(default cursor; none = register + cache key only)")
+                         "(default auto = reuse existing footprints, otherwise "
+                         "prompt; none = register + cache key only)")
     jn.add_argument("--workspace", default=".",
                     help="onboarding: workspace folder (default: cwd)")
     jn.add_argument("--with-hook", action="store_true",
-                    help="onboarding: also install the turn-end stop hook "
-                         "(reception backstop). Default: no hook.")
+                    help="deprecated compatibility alias; hooks install by "
+                         "default now. Use --no-hook to skip them.")
+    jn.add_argument("--no-hook", action="store_true",
+                    help="onboarding: skip hook installation and wake wiring")
     jn.add_argument("--listen", action="store_true",
                     help="onboarding: arm a FOREGROUND `agora listen "
                          "--source ws` after wiring (headless nodes)")
+    jn.add_argument("--vendor-bootstrap", action="store_true",
+                    help="onboarding: also run the harness's own registration "
+                         "convenience when supported (`claude mcp add --scope "
+                         "local` or `codex mcp add`)")
     jn.set_defaults(func=cmd_join)
 
     iv = sub.add_parser("invite",
@@ -2865,11 +3348,7 @@ def build_parser() -> argparse.ArgumentParser:
     # `--with-hooks` lesson: a flag that exists on one verb but not its
     # sibling reads as a typo). main() maps it onto AGORA_HOME before
     # dispatch, so commands and their child processes all see the same home.
-    # `agora setup <harness>` nests a second subparser level, and argparse
-    # routes post-harness args to the NESTED parser — so those get --home
-    # too (field find: `setup cursor X --home P` was "unrecognized").
-    nested = [hp for hp in st_sub.choices.values()]
-    for sp in set(sub.choices.values()) | set(nested):
+    for sp in set(sub.choices.values()):
         sp.add_argument("--home", default=None, metavar="PATH",
                         help="agora home for this invocation (sets AGORA_HOME; "
                              "default: $AGORA_HOME, else ~/.agora)")

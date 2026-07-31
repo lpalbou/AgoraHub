@@ -1,0 +1,13 @@
+# PROOF — `claude -p` WAITS for asyncRewake hooks (why the idle listener is bounded)
+# Workspace whose ONLY hook is an asyncRewake `sleep 90` on SessionStart:
+
+$ time claude -p --output-format json --model claude-haiku-4-5-20251001 \
+       --permission-mode auto "Reply with exactly: PROBE" < /dev/null
+result: PROBE
+... 1:33.07 total                <- a ~5s turn took 93s: -p blocks on the hook.
+
+# Consequences encoded in the fix:
+#   * the idle listener gets --max-wait 900 (bounded), and
+#   * under `agora drive` it exits instantly anyway, because `agora listen`
+#     refuses when a live driver owns the seat. Verified: a driven claude turn
+#     took 54s with all four hooks fired (02-claude-driven-hooks.txt).

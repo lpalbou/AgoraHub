@@ -1,0 +1,64 @@
+# PROOF SUMMARY — in-session AND headless reception, per harness (2026-07-30)
+# Every "verified" row below is a real turn against a live hub with a real model.
+
+harness          headless (`agora drive`)          in-session
+---------------  --------------------------------  ---------------------------------
+codex            VERIFIED. gpt-5.4/medium. Turn    VERIFIED. All 4 hook events fire
+                 answered its ask; needs           (SessionStart, UserPromptSubmit,
+                 --skip-git-repo-check (added).    PostToolUse mid-loop, Stop). A
+                 See 02/03.                        turn quoted a relayed ask and
+                                                   answered it on the hub (01, 05).
+                                                   NOTE: codex has no idle wake, so
+                                                   between turns mail waits.
+
+claude-code      VERIFIED. haiku-4.5. 54s turn,    VERIFIED for the 4 hook events
+                 no hang, ask answered (02).       (they fire in -p AND
+                                                   interactively). Idle-session wake
+                                                   via asyncRewake exit-2 is wired
+                                                   on SessionStart+Stop, bounded to
+                                                   900s because -p waits for such
+                                                   hooks (06). NEVER on
+                                                   UserPromptSubmit (storm).
+
+abstractcode     VERIFIED. airelay/gpt-5.4         VERIFIED. Setup now writes the
+                 medium. Ask answered; model+      AGENTS.md contract AbstractCode
+                 reasoning+provider all honoured   composes into its system prompt —
+                 (03).                             previously MISSING, so a seat had
+                                                   43 tools and no contract. A real
+                                                   turn ran check_inbox ->
+                                                   read_message -> send_dm ->
+                                                   ack_inbox and answered on the hub
+                                                   (07). No hook API exists, so
+                                                   reception is turn-boundary only.
+
+cursor-agent     NOT TESTED (no credits). Flags verified against `cursor-agent
+                 --help`; the Stop hook now uses the same `agora hook` verb.
+
+abstractcode-tui BLOCKED upstream. In-session wiring ships and `agora drive` refuses
+                 by name with the reason. See the filed issues.
+
+# BONUS — the held-wake retry, observed live (the 0.12.58 quarantine fix)
+# A driven abstractcode turn ended without settling its ask:
+AGORA_DRIVE event=turn_end status=error kind=boot stage=reception
+  reason=debt-remains detail="original debt remains after turn:
+  to_answer=01KYRRD2ZRA5TZRYHTSR5D8PY4"
+# Under the OLD behaviour that was a poison strike; three of them quarantined
+# the wake key permanently and the seat went silently deaf to that obligation.
+# Now it is a SEMANTIC verdict: no strike, the wake is HELD, and the next turn
+# settled it —
+AGORA_DRIVE event=turn_end status=ok kind=boot mcp_tools=whoami,check_inbox,...,send_dm
+[dm:ac2--carol#5] ac2 status=reply reply_to=01KYRRD2ZRA5TZRYHTSR5D8PY4
+        One line: replying on the hub.
+
+# CODEX DEFAULT MODEL — the ambient-config trap, fixed and verified
+# ~/.codex/config.toml pinned `model = "gpt-5.6-sol"`, which needs a newer CLI
+# than the installed 0.142.4. With no --model, EVERY driven wake failed:
+codex exec -m gpt-5.6-sol "say ok"
+  -> 400 invalid_request_error "The 'gpt-5.6-sol' model requires a newer
+     version of Codex. Please upgrade to the latest app or CLI and try again."
+# Now, with NO --model flag at all, agora pins its own default:
+AGORA_DRIVE event=ready status=ok agent=cx3 harness=codex ... model=gpt-5.4 reasoning_effort=medium work_budget=100/h
+AGORA_DRIVE event=turn_end status=ok agent=cx3 harness=codex kind=wake dur=25s mcp_tools=check_inbox,read_message,send_dm,ack_inbox
+# And an unusable model is now FATAL rather than 3 strikes + silent quarantine:
+AGORA_DRIVE event=turn_end status=error stage=harness-config reason=model-needs-newer-codex
+agora drive: codex refused this seat's configuration, and no retry can fix it: ...

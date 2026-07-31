@@ -22,6 +22,7 @@ import json
 import os
 import re
 import socket
+import sys
 import threading
 import time
 from pathlib import Path
@@ -224,11 +225,11 @@ def test_apply_home_expands_tilde(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_join_claude_and_codex_invoke_harness_registration(live_hub,
-                                                           isolated_home,
-                                                           tmp_path,
-                                                           monkeypatch,
-                                                           capsys):
+def test_join_vendor_bootstrap_invokes_harness_registration(live_hub,
+                                                            isolated_home,
+                                                            tmp_path,
+                                                            monkeypatch,
+                                                            capsys):
     """The read-side fix must fire from the ONE-paste onboarding too: after
     the project files are written, join calls the vendor's own `mcp add`
     (stubbed here) and reports the outcome in the ledger. A registration
@@ -254,11 +255,11 @@ def test_join_claude_and_codex_invoke_harness_registration(live_hub,
                             headers=_bearer(ADMIN_KEY), timeout=5).json()
         ws = tmp_path / f"ws-{harness}"
         ws.mkdir()
-        code = run_join(url=live_hub.url, token=minted["token"], agent_id=None,
-                        about="", harness=harness, workspace=str(ws),
-                        with_hook=False, listen=False, mcp_command="agora-mcp",
-                        pinned_id=agent)
-        assert code == 0
+        result = run_join(url=live_hub.url, token=minted["token"], agent_id=None,
+                          about="", harness=harness, workspace=str(ws),
+                          with_hook=False, listen=False, mcp_command="agora-mcp",
+                          pinned_id=agent, vendor_bootstrap=True)
+        assert result.code == 0
 
     out = capsys.readouterr().out
     assert "claude stub registered" in out
@@ -267,10 +268,231 @@ def test_join_claude_and_codex_invoke_harness_registration(live_hub,
 
     claude_call = next(c for c in calls if c[0] == "claude")
     assert claude_call[2] == live_hub.url and claude_call[3] == "cl-agent"
-    assert claude_call[4].startswith("agora_")           # minted key threaded
+    assert claude_call[4] is None                         # bearer stays in cache
     assert claude_call[5] == str(isolated_home)          # custom home threaded
     codex_call = next(c for c in calls if c[0] == "codex")
     assert codex_call[2] == "cx-agent"
+
+
+def test_setup_all_is_explicit_and_skips_vendor_bootstrap(isolated_home,
+                                                          tmp_path,
+                                                          monkeypatch,
+                                                          capsys):
+    """The framework-neutral path is local and deterministic: `agora setup X`
+    writes all supported workspace footprints, installs hooks by default, and
+    does NOT mutate Claude/Codex user-level bootstrap state unless a single
+    harness was explicitly selected."""
+    import agora.setup_harness as _sh
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        _sh, "register_claude_local",
+        lambda *args, **kwargs: calls.append("claude") or (True, "claude stub"))
+    monkeypatch.setattr(
+        _sh, "register_codex_global",
+        lambda *args, **kwargs: calls.append("codex") or (True, "codex stub"))
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    workspace = tmp_path / "seat"
+    workspace.mkdir()
+    _run_cli(["setup", "janus", "--workspace", str(workspace), "--harness", "all"])
+    out = capsys.readouterr().out
+
+    assert calls == []
+    assert (workspace / ".cursor" / "mcp.json").exists()
+    assert (workspace / ".cursor" / "hooks.json").exists()
+    assert (workspace / ".mcp.json").exists()
+    assert (workspace / ".claude" / "settings.json").exists()
+    assert (workspace / ".codex" / "config.toml").exists()
+    assert (workspace / ".codex" / "hooks.json").exists()
+    seat = json.loads((workspace / ".agora" / "seat.json").read_text())
+    # `all` = every harness agora can wire with its OWN files alone.
+    # abstractcode-tui stays out (needs a server-side grant agora cannot make);
+    # opencode and pi are in (project config / bridge extension suffice).
+    assert seat["harnesses"] == ["cursor", "claude", "codex", "abstractcode",
+                                 "opencode", "pi"]
+    assert (workspace / ".abstractcode" / "agora.state.config.json").exists()
+    assert seat["default_drive_harness"] is None
+    assert "cursor, claude, codex" in out
+    assert "start agora protocol" in out
+
+
+def test_setup_prompt_selects_harness_on_empty_workspace(isolated_home,
+                                                         tmp_path,
+                                                         monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "3")
+
+    workspace = tmp_path / "seat"
+    workspace.mkdir()
+    _run_cli(["setup", "janus", "--workspace", str(workspace)])
+
+    assert (workspace / ".codex" / "config.toml").exists()
+    seat = json.loads((workspace / ".agora" / "seat.json").read_text())
+    assert seat["harnesses"] == ["codex"]
+    assert seat["default_drive_harness"] == "codex"
+    assert not (workspace / ".cursor" / "mcp.json").exists()
+    assert not (workspace / ".mcp.json").exists()
+
+
+def test_setup_single_harness_writes_default_drive_harness(isolated_home,
+                                                           tmp_path,
+                                                           monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    workspace = tmp_path / "seat"
+    workspace.mkdir()
+
+    _run_cli(["setup", "laurent", "--workspace", str(workspace),
+              "--harness", "claude"])
+
+    seat = json.loads((workspace / ".agora" / "seat.json").read_text())
+    assert seat["agent_id"] == "laurent"
+    assert seat["harnesses"] == ["claude"]
+    assert seat["default_drive_harness"] == "claude"
+
+
+def test_setup_preflights_all_harnesses_before_any_write(isolated_home,
+                                                         tmp_path,
+                                                         monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    workspace = tmp_path / "seat"
+    (workspace / ".claude").mkdir(parents=True)
+    (workspace / ".claude" / "settings.json").write_text("{ not json")
+
+    with pytest.raises(SystemExit, match=r"\.claude/settings\.json"):
+        _run_cli(["setup", "janus", "--workspace", str(workspace),
+                  "--harness", "all"])
+
+    assert not (workspace / ".cursor" / "mcp.json").exists()
+
+
+def test_setup_preflight_rejects_invalid_mcp_servers_shape(isolated_home,
+                                                           tmp_path,
+                                                           monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    workspace = tmp_path / "seat"
+    workspace.mkdir()
+    (workspace / ".mcp.json").write_text(json.dumps({"mcpServers": []}))
+
+    with pytest.raises(SystemExit, match=r"field 'mcpServers' must be a JSON object"):
+        _run_cli(["setup", "janus", "--workspace", str(workspace),
+                  "--harness", "claude"])
+
+
+def test_setup_preflight_rejects_invalid_codex_hooks_shape(isolated_home,
+                                                           tmp_path,
+                                                           monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    workspace = tmp_path / "seat"
+    (workspace / ".codex").mkdir(parents=True)
+    (workspace / ".codex" / "hooks.json").write_text("[]")
+
+    with pytest.raises(SystemExit, match=r"\.codex/hooks\.json must contain a JSON object"):
+        _run_cli(["setup", "janus", "--workspace", str(workspace),
+                  "--harness", "codex"])
+
+
+def test_setup_rejects_invalid_agent_id_before_writing(isolated_home,
+                                                       tmp_path,
+                                                       monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    workspace = tmp_path / "seat"
+    workspace.mkdir()
+
+    with pytest.raises(SystemExit, match="invalid agent id 'Alice!'"):
+        _run_cli(["setup", "Alice!", "--workspace", str(workspace),
+                  "--harness", "cursor"])
+
+    assert not (workspace / ".cursor" / "mcp.json").exists()
+
+
+def test_setup_harness_config_is_not_secret_and_needs_no_gitignore(
+        live_hub, isolated_home, tmp_path, monkeypatch, capsys):
+    minted = _register(live_hub.url, "helios")
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    os.system(f"git -C {workspace} init -q")
+
+    _run_cli(["setup", "helios", "--workspace", str(workspace),
+              "--harness", "cursor", "--url", live_hub.url,
+              "--key", minted])
+    out = capsys.readouterr().out
+    assert "status: READY" in out
+    assert "harness config contains no bearer" in out
+    env = json.loads((workspace / ".cursor" / "mcp.json").read_text(
+    ))["mcpServers"]["agora"]["env"]
+    assert env["AGORA_API_KEY"] == ""
+    assert env["AGORA_ADMIN_KEY"] == ""
+
+
+def test_setup_in_a_nested_folder_needs_no_git_and_gets_no_warning(
+        live_hub, isolated_home, tmp_path, monkeypatch, capsys):
+    """Zero-search ruling (2026-07-31): the workspace is the folder the command
+    runs in. agora no longer probes parent folders for `.git` or warns about
+    "the enclosing repo" — whether a folder is a git repo is not agora's
+    business, and the old warning hard-crashed (KeyError) for any harness
+    outside its three-vendor dict."""
+    minted = _register(live_hub.url, "janus")
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    repo = tmp_path / "repo"
+    seat = repo / "seat"
+    seat.mkdir(parents=True)
+    os.system(f"git -C {repo} init -q")
+
+    _run_cli(["setup", "janus", "--workspace", str(seat),
+              "--harness", "cursor", "--url", live_hub.url, "--key", minted])
+    out = capsys.readouterr().out
+    assert "status: READY" in out
+    assert "WARNING" not in out
+    assert "git init" not in out
+
+
+def test_join_vendor_bootstrap_failure_sets_needs_action(live_hub,
+                                                         isolated_home,
+                                                         tmp_path,
+                                                         monkeypatch,
+                                                         capsys):
+    import agora.setup_harness as _sh
+    from agora.join import encode_artifact
+
+    monkeypatch.setattr(
+        _sh, "register_codex_global",
+        lambda *args, **kwargs: (False, "codex CLI not found on PATH"))
+    minted = httpx.post(f"{live_hub.url}/join-tokens",
+                        json={"agent_id": "cx-agent"},
+                        headers=_bearer(ADMIN_KEY), timeout=5).json()
+    workspace = tmp_path / "ws-codex"
+    workspace.mkdir()
+
+    with pytest.raises(SystemExit) as exc:
+        _run_cli(["join", encode_artifact(live_hub.url, minted["token"], "cx-agent"),
+                  "--workspace", str(workspace), "--harness", "codex",
+                  "--vendor-bootstrap"])
+    assert exc.value.code == 2
+    out = capsys.readouterr().out
+    assert "status: NEEDS ACTION" in out
+    assert "Codex vendor bootstrap needs action" in out
 
 
 # ---------------------------------------------------------------------------

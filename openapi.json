@@ -435,6 +435,11 @@
       "title": "Escalated",
       "type": "boolean"
      },
+     "from_operator": {
+      "default": false,
+      "title": "From Operator",
+      "type": "boolean"
+     },
      "has_resolved_reply": {
       "default": false,
       "title": "Has Resolved Reply",
@@ -924,6 +929,9 @@
      "kind": {
       "enum": [
        "job",
+       "announcement",
+       "problem",
+       "resolution",
        "consensus",
        "milestone",
        "delivery"
@@ -1043,6 +1051,13 @@
      "counts": {
       "$ref": "#/components/schemas/OwedCounts"
      },
+     "phases": {
+      "items": {
+       "$ref": "#/components/schemas/PhaseRow"
+      },
+      "title": "Phases",
+      "type": "array"
+     },
      "to_answer": {
       "items": {
        "$ref": "#/components/schemas/ObligationRow"
@@ -1073,6 +1088,77 @@
      }
     },
     "title": "OwedReport",
+    "type": "object"
+   },
+   "PhaseRow": {
+    "description": "A channel's declared phase order (agora-0140/2): `phase:<track>` says\nwhich version of the work is in force and whether the next one may start.\nAdvisory by construction \u2014 the hub cannot know what a message works on \u2014\nso its whole power is being IMPOSSIBLE TO MISS on every reception pass.",
+    "properties": {
+     "channel": {
+      "title": "Channel",
+      "type": "string"
+     },
+     "current": {
+      "title": "Current",
+      "type": "string"
+     },
+     "declared_at": {
+      "default": 0.0,
+      "title": "Declared At",
+      "type": "number"
+     },
+     "declared_by": {
+      "default": "",
+      "title": "Declared By",
+      "type": "string"
+     },
+     "key": {
+      "title": "Key",
+      "type": "string"
+     },
+     "next": {
+      "default": "",
+      "title": "Next",
+      "type": "string"
+     },
+     "note": {
+      "default": "",
+      "title": "Note",
+      "type": "string"
+     },
+     "paths": {
+      "items": {
+       "type": "string"
+      },
+      "title": "Paths",
+      "type": "array"
+     },
+     "status": {
+      "default": "open",
+      "title": "Status",
+      "type": "string"
+     },
+     "steward": {
+      "default": "",
+      "title": "Steward",
+      "type": "string"
+     },
+     "track": {
+      "title": "Track",
+      "type": "string"
+     },
+     "version": {
+      "default": 0,
+      "title": "Version",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "channel",
+     "key",
+     "track",
+     "current"
+    ],
+    "title": "PhaseRow",
     "type": "object"
    },
    "PostMessage": {
@@ -1129,6 +1215,20 @@
       "default": "",
       "title": "Body",
       "type": "string"
+     },
+     "consumes": {
+      "anyOf": [
+       {
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Consumes"
      },
      "critical": {
       "default": false,
@@ -1831,8 +1931,8 @@
   "title": "Agora Hub HTTP API",
   "version": "agora/0.3",
   "x-agora-generator": {
-   "fastapi": "0.136.1",
-   "pydantic": "2.12.3"
+   "fastapi": "0.139.0",
+   "pydantic": "2.13.4"
   },
   "x-agora-protocol": "agora/0.3",
   "x-agora-semantics": [
@@ -1854,7 +1954,13 @@
    "claim-due-pings",
    "blocked-addressed-asks",
    "noticeboard-typed-roots",
-   "drive-session-lanes-v2"
+   "drive-session-lanes-v2",
+   "vote-window-binding",
+   "vote-ballot-receipts",
+   "phase-rows",
+   "consumes-batch",
+   "vote-hub-deadline-sweep",
+   "vote-tally-reconciliation"
   ]
  },
  "openapi": "3.1.0",

@@ -682,7 +682,8 @@ class ChatApp:
             f"(blind vote #{msg.seq} opened in {self.current} — ballots"
             f" arrive as DMs tagged '{tag}'; auto-publishes in"
             f" {fmt_age(ttl)} or when everyone voted; watch: /tally"
-            f" {msg.seq}; close early: /tally {msg.seq} close)"))
+            f" {msg.seq}; close early: /tally {msg.seq} close — refused"
+            " inside the window you just announced unless you add 'force')"))
 
     async def cmd_tally(self, arg: str) -> None:
         """The vote's state, honoring ballot secrecy. Before the close only
@@ -690,14 +691,17 @@ class ChatApp:
         blind notice. Publication happens automatically when the vote is
         finished (deadline reached, or every member voted — checked here
         too, so a chair's /tally never shows a stale 'still open' state);
-        '/tally REF close' publishes early. From then on anyone's /tally
-        renders the result straight from the transcript, and each voter
-        can verify their listed ballot."""
+        '/tally REF close' publishes early — refused while the announced
+        window still runs and voters are unheard, unless you add 'force'.
+        From then on anyone's /tally renders the result straight from the
+        transcript, and each voter can verify their listed ballot."""
         ref, _, sub = arg.partition(" ")
-        close = sub.strip().lower() == "close"
+        words = sub.strip().lower().split()
+        close = "close" in words
+        force = "force" in words
         if not ref:
-            self._print("usage: /tally SEQ|ID [close] — the vote message"
-                        " (SEQ@CHANNEL from another room)")
+            self._print("usage: /tally SEQ|ID [close [force]] — the vote"
+                        " message (SEQ@CHANNEL from another room)")
             return
         located = await self._locate(ref)
         if located is None:
@@ -754,15 +758,35 @@ class ChatApp:
 
         # Chair view. If the vote is finished — or the chair asked — publish
         # now; blindness only ever protected the voting window.
-        reason = "closed by the chair" if close \
-            else self.votes.due(info, ballots, members)
+        rejected = gathered.get("rejected") or []
+        sent = await self.votes.bounce_rejected(info, rejected)
+        reason = self.votes.due(info, ballots, members)
+        if close and reason is None:
+            blocked = self.votes.early_close_block(info, ballots, members)
+            if blocked is not None and not force:
+                self._print(self.style.yellow(
+                    f"vote #{ref_disp} NOT closed — {blocked}"))
+                self._print(self.style.dim(
+                    f"  /tally {ref_disp} close force  overrides"))
+                return
+            reason = (self.votes.forced_reason(info, ballots, members)
+                      if blocked is not None else "closed by the chair")
         tally = tally_ballots(options, ballots)
         notes = ["public ballot (visible to everyone): "
                  + ", ".join(sorted(public))] if public else []
+        if rejected:
+            # An empty tally must never look like an empty room (the 42-second
+            # close): say how many ballots arrived and could not be read.
+            notes.append(
+                f"{len(rejected)} unreadable ballot(s) NOT counted: "
+                + ", ".join(f"{r['voter']} wrote '{r['item'][:24]}'"
+                            for r in rejected)
+                + (f" — {sent} receipt(s) DMed just now" if sent
+                   else " — receipts already sent"))
         if reason is not None:
             try:
                 posted = await self.votes.publish(info, ballots, members,
-                                                  reason)
+                                                  reason, len(rejected))
             except Exception as exc:
                 self._print(self.style.red(f"close failed: {exc}"))
                 return
@@ -786,7 +810,7 @@ class ChatApp:
             left = f"closes in {fmt_age(remaining)}" \
                 if remaining is not None else "no deadline"
             footer = (f"chair view (only you see this) — {left} ·"
-                      f" /tally {ref_disp} close publishes now")
+                      f" it publishes ITSELF at the deadline or full turnout")
         self._print(vote_block(
             self.style, ref=ref_disp, topic=topic, options=options,
             tally=tally, total_members=len(members) or len(ballots),

@@ -47,6 +47,10 @@ def notify_line(envelope: Envelope) -> str:
         # flag and keep today's behavior: degradation = status quo noise,
         # never deafness.
         ("addressed", envelope.addressed),
+        # from-operator: a HUMAN wrote this. Listeners must not apply the
+        # `addressed` narrowing to it — the operator naming 4 seats in prose
+        # deafened the other 19 to their own operator (live, 2026-07-29).
+        ("from-operator", envelope.from_operator),
         ("retracted", envelope.retracted),
         (envelope.status.value, envelope.status.value in ("open", "blocked")),
     ] if on)

@@ -1,0 +1,72 @@
+# INCIDENT — the two live-hub silences of 2026-07-31 (at-fleet, opencode)
+# Forensics: read-only reconstruction from the live DB, notify logs, hook
+# ledgers, attempts files, /status, and opencode's own log. Hub untouched.
+
+VERDICT: neither silence was a hub fault. One provider outage, two driver-side
+regimes. The hub delivered wakes and escalated correctly the entire time.
+
+## The chain
+
+1. The 8 at-fleet seats (at1-at5, editor, reader, reviewer) are opencode
+   harness seats driven by bare `agora drive` — no --model. The workspace
+   opencode.json pins NO model, so opencode resolved its GLOBAL config:
+   ~/.config/opencode/opencode.json -> "opencode/deepseek-v4-flash-free",
+   a FREE tier. (The codex ambient-config trap, recurred on a new harness.)
+2. 03:15-04:59 the fleet ran a healthy collaborative-story test: 190 messages,
+   correct ask/reply/resolve semantics, claims at version 8, one editorial
+   pass from completion.
+3. 04:59:04 the free tier rate-limited (opencode.log: "AI_APICallError: Rate
+   limit exceeded" — first occurrence in 12 days of log; 144 since). It never
+   recovered under continued fleet load.
+4. Every turn since: spawns, boots a session (SessionStart+UserPromptSubmit
+   hook stamps), makes ZERO tool calls, hangs, killed at the 600s reception
+   timeout -> stage=harness -> a poison strike.
+5. WINDOW 1 (~05:00-06:30): metronome-exact 600s retry thrash, then the
+   quarantine split the fleet:
+   - Seats with a stable owed-signature (at1, at2, at5, reader, reviewer):
+     _wake_key() hashes the owedsig, which for an unanswerable addressed
+     obligation CANNOT change -> 3 strikes -> PERMANENT quarantine keyed on
+     exactly the obligation the seat most needed to answer. Verified:
+     sha256("01KYV1RB530G6RXX20EGMG50QC!0")[:12] = 7ebc6e816de4 at 3 strikes
+     in three seats' attempts files; the hub's 07:52 re-rings were delivered
+     and DROPPED at the quarantine gate.
+   - Seats without an owedsig (at3, at4, editor): key = inbox byte size,
+     refreshed by every hub re-ring -> infinite 600s-timeout retry.
+6. WINDOW 2 (07:00-): laurent posts 07:23:54 ("Reader is in charge") — the
+   three byte-size seats spawn three more doomed turns each and quarantine at
+   07:54; the owedsig seats never spawn at all; at5 + reader are WEDGED in
+   3600s WORK CHUNKS against the dead provider — the single-threaded loop
+   means a running chunk blinds the seat's reception entirely (their
+   "reception: stale 33-35min" in /status matches the chunk spawn times to
+   the minute).
+7. Nobody read seq 212. Read cursors frozen at 179-204 vs head 212.
+
+## What the hub got RIGHT (all verified)
+- Wake delivery: notify files written throughout, incl. 18-19 escalation
+  re-rings per rotted obligation; last at 07:52:10.
+- Watchdog: FLEET DARK 03:23; AGENT DARK 05:56-06:26; DEAF 06:26 (the
+  "listener almost certainly dead" diagnosis was correct — a wedged work
+  chunk); LURKING 07:11/07:37 ("doorbell rings; nobody comes") — exactly
+  right. Cadence continuous, transitions genuine refinements.
+- Budgets: REFUTED as a cause. Busiest seat ~25-30 posts/h vs fuses of
+  100-250/h; traffic was tapering, not bursting, at death.
+
+## The four driver defects this exposed (fixed in 0.12.61)
+1. Poison quarantine was PERMANENT against a stable owed-signature, and
+   transient provider failures (429/timeout, zero tool calls) counted as
+   poison. -> Infrastructure failures are now classified separately with
+   backoff, quarantine expires, and a parked seat says so out loud.
+2. A turn with zero tool calls was indistinguishable from any other failure.
+   -> Named explicitly, with the provider/model line when present.
+3. A wedged work chunk blinded reception for its full 3600s, silently.
+   -> Infrastructure-failing seats fail chunks fast; chunk liveness is loud.
+4. The flight recorder (--turn-log) was off by default, so the outage had to
+   be reconstructed from attempts-file byte ladders and hook mtimes.
+   -> A minimal failure ledger is now unconditional.
+
+## Operator notes
+- ~/.agora/config.json admin_key ("af-admin-key") is REJECTED by the running
+  hub (/admin/status 403) — stale credential worth re-seeding.
+- The at-test story ("collaborative sci-fi") died one editorial pass from
+  completion; reader held delegation from 07:23. The obligations are still
+  on the board and will be settled by the recovered fleet.

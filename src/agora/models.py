@@ -60,6 +60,14 @@ MAX_ATTACHMENTS_PER_MESSAGE = 8
 MAX_FILENAME_CHARS = 200
 MAX_CONTENT_TYPE_CHARS = 100
 
+# Machine-readable noticeboard root categories. Keep this one tuple as the
+# runtime/CLI validation source; the Literal below preserves the generated API
+# schema for typed clients.
+NOTICE_KINDS = (
+    "job", "announcement", "problem", "resolution",
+    "consensus", "milestone", "delivery",
+)
+
 _TEXT_CLEAN = re.compile(r"[\x00-\x1f\x7f]+")
 
 
@@ -192,7 +200,10 @@ class AttachmentRef(BaseModel):
 class Notice(BaseModel):
     """A noticeboard root's machine-checkable event identity."""
 
-    kind: Literal["job", "consensus", "milestone", "delivery"]
+    kind: Literal[
+        "job", "announcement", "problem", "resolution",
+        "consensus", "milestone", "delivery",
+    ]
     key: str = Field(min_length=1, max_length=160)
 
 
@@ -209,6 +220,10 @@ class PostMessage(BaseModel):
     reply_to: str | None = None
     asks: list[Ask] | None = None       # numbered questions (open/blocked only)
     answers: list[str] | None = None    # ask ids this reply discharges (reply only)
+    consumes: list[str] | None = None   # 0140/3: consumption debts this ONE
+    #                                     message settles (message ids or
+    #                                     channel#seq refs) — the batch form
+    #                                     that replaces N ceremonial receipts
     attachments: list[AttachmentRef] | None = None  # refs to uploaded channel blobs (0091)
     notice: Notice | None = None      # typed/idempotent noticeboard root
     signature: str | None = None        # RESERVED: opaque authorship token (enforcement later)
@@ -255,6 +270,11 @@ class Envelope(BaseModel):
     #                                      seats' debt — the room's wake rule narrows
     #                                      to them (agora-0135: 62% of commons wakes
     #                                      were addressed opens waking everyone)
+    from_operator: bool = False          # the sender is a HUMAN operator seat. Their
+    #                                      room-wide messages are never narrowed by
+    #                                      `addressed`: naming a few seats in prose
+    #                                      ("@a @b what's your status?") must not
+    #                                      deafen the rest of the room to the human.
     reply_to_me: bool = False
     title: str = ""
     body_bytes: int = 0                  # honest size signal (hard to fake upward)
@@ -406,6 +426,26 @@ class WaitingRow(BaseModel):
     state: str  # "not-yet-acked" | "acked-past-no-reply" | "retired"
 
 
+class PhaseRow(BaseModel):
+    """A channel's declared phase order (agora-0140/2): `phase:<track>` says
+    which version of the work is in force and whether the next one may start.
+    Advisory by construction — the hub cannot know what a message works on —
+    so its whole power is being IMPOSSIBLE TO MISS on every reception pass."""
+
+    channel: str
+    key: str
+    track: str
+    current: str
+    status: str = "open"          # "open" | "complete"
+    next: str = ""
+    steward: str = ""
+    paths: list[str] = Field(default_factory=list)
+    note: str = ""
+    declared_by: str = ""         # hub-stamped: a phase author is not forgeable
+    declared_at: float = 0.0
+    version: int = 0
+
+
 class OwedCounts(BaseModel):
     to_answer: int = 0
     to_consume: int = 0
@@ -435,6 +475,10 @@ class OwedReport(BaseModel):
     to_consume: list[ConsumeRow] = Field(default_factory=list)
     to_close: list[CloseRow] = Field(default_factory=list)
     waiting_on: list[WaitingRow] = Field(default_factory=list)
+    #: OPEN phase declarations across the agent's channels (0140/2). Not a
+    #: debt — a standing constraint on which work is legitimate right now,
+    #: carried here because /owed is the one call every reception pass makes.
+    phases: list[PhaseRow] = Field(default_factory=list)
     counts: OwedCounts = Field(default_factory=OwedCounts)
     computed_at: float = 0.0
 

@@ -37,14 +37,14 @@ def _driver(home, spawn, **kw):
 
 # -- prompts: static, with reception and work kept separate --------------------
 
-def test_prompts_are_static_and_separate_reception_from_work():
-    """Reception settles messages; only initiative prompts continue work."""
+def test_prompts_are_static_and_reception_starts_assigned_work():
     for prompt in (WAKE_PROMPT, BOOT_PROMPT, WORK_BOOT_PROMPT, WORK_PROMPT):
         assert "{" not in prompt and "}" not in prompt
     for prompt in (WORK_BOOT_PROMPT, WORK_PROMPT):
         assert "supersede" in prompt
         assert "re-read" in prompt
-    assert "Do NOT advance unrelated claims" in WAKE_PROMPT
+    assert "START DOING THE WORK NOW" in WAKE_PROMPT
+    assert "Never write 'claiming' only in prose" in WAKE_PROMPT
     assert "routine progress receipts" in BOOT_PROMPT
     assert "ONLY per-slice receipt" in WORK_PROMPT
     assert "addressed structured ask" in WORK_PROMPT
@@ -189,21 +189,21 @@ def _run_loop(d, listen_rcs, monkeypatch):
         d.run(max_turns=None)
 
 
-def test_initiative_off_idle_never_spawns(home, monkeypatch):
+def test_claim_continuation_is_on_by_default(home, monkeypatch):
     calls = []
     d = _driver(home, lambda p, s: (calls.append(p) or "s", True))
+    versions = iter(range(1, 20))
     monkeypatch.setattr(d, "_claim_snapshot",
-                        lambda: ("commons", "claim:x", 1))
-    _run_loop(d, [0, 0, 0], monkeypatch)
-    assert calls == []            # no initiative flag -> idle spawns nothing
+                        lambda: ("commons", "claim:x", next(versions)))
+    _run_loop(d, [0], monkeypatch)
+    assert calls == [WORK_BOOT_PROMPT]
 
 
 def test_chain_spawns_work_turns_while_claim_progresses(home, monkeypatch):
     """A live claim whose version advances (receipts land) chains work
     chunks at idle boundaries; the chain uses WORK_PROMPT after boot."""
     calls = []
-    d = _driver(home, lambda p, s: (calls.append(p) or "s", True),
-                initiative=True)
+    d = _driver(home, lambda p, s: (calls.append(p) or "s", True))
     versions = iter([1, 1, 2, 2, 3, 3, 4, 4])
     monkeypatch.setattr(d, "_claim_snapshot",
                         lambda: ("commons", "claim:x", next(versions, 99)))
@@ -219,8 +219,7 @@ def test_receiptless_chunks_park_the_chain(home, monkeypatch):
     frozen) park the chain: further idle boundaries spawn nothing. A
     version bump (any row touch) resumes — strikes key on the version."""
     calls = []
-    d = _driver(home, lambda p, s: (calls.append(p) or "s", True),
-                initiative=True)
+    d = _driver(home, lambda p, s: (calls.append(p) or "s", True))
     monkeypatch.setattr(d, "_claim_snapshot",
                         lambda: ("commons", "claim:x", 7))   # frozen version
     _run_loop(d, [0] * (WORK_STRIKES + 3), monkeypatch)
@@ -236,8 +235,7 @@ def test_obligation_preempts_chain(home, monkeypatch):
     """rc=2 between chunks always drives a RECEPTION turn, never a work
     chunk — answering outranks continuing."""
     calls = []
-    d = _driver(home, lambda p, s: (calls.append(p) or "s", True),
-                initiative=True)
+    d = _driver(home, lambda p, s: (calls.append(p) or "s", True))
     versions = iter(range(1, 50))
     monkeypatch.setattr(d, "_claim_snapshot",
                         lambda: ("commons", "claim:x", next(versions)))
@@ -252,7 +250,7 @@ def test_work_budget_is_a_separate_pool(home, monkeypatch):
     exhausted, an obligation wake still spawns a reception turn."""
     calls = []
     d = _driver(home, lambda p, s: (calls.append(p) or "s", True),
-                initiative=True, work_budget=1)
+                work_budget=1)
     versions = iter(range(1, 50))
     monkeypatch.setattr(d, "_claim_snapshot",
                         lambda: ("commons", "claim:x", next(versions)))
@@ -291,7 +289,7 @@ def test_held_wake_blocks_new_work_chunks(home, monkeypatch):
     work; the moment the window slides, the held wake runs first."""
     calls = []
     d = _driver(home, lambda p, s: (calls.append(p) or "s", True),
-                initiative=True, turn_budget=1)
+                turn_budget=1)
     versions = iter(range(1, 50))
     monkeypatch.setattr(d, "_claim_snapshot",
                         lambda: ("commons", "claim:x", next(versions)))

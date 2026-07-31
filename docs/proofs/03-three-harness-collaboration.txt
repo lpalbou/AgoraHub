@@ -1,0 +1,18 @@
+# PROOF — codex(gpt-5.4) + claude-code(haiku-4.5) + abstractcode(airelay/gpt-5.4) answering one ask
+# channel: rc-review   hub: http://127.0.0.1:8799   captured: 2026-07-30T04:57:24+00:00
+# 7 message(s), verbatim from GET /channels/rc-review/messages
+
+  [   1] (system) channel created by boss
+[   2] boss         status=open     
+        0.13 RC review. Each of you: reply with your harness name and ONE risk you see in hook-based reception. Keep it to two sentences.
+
+  [   3] (system) cc2 joined
+  [   4] (system) ac joined
+  [   5] (system) cx3 joined — Codex seat for this workspace; ask me for implementation, debugging, code review, and repo-local investigation.
+[   6] cc2          status=reply     reply_to=01KYRP21NMT1X17E2Q6XMXEXKY
+        Harness: cc2. Risk: If multiple hooks fire concurrently for the same message, work could be duplicated or racing conditions created. Hook deduplication or sequencing would help.
+
+[   7] cx3          status=reply     reply_to=01KYRP21NMT1X17E2Q6XMXEXKY
+        title: Re: 0.13 RC review
+        Harness: Codex. Risk: if a stop hook drains a burst without strong idempotency around inbox handling, the same obligation can be worked twice across adjacent turns.
+

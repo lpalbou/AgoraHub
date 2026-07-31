@@ -20,6 +20,7 @@ import json
 import os
 import re
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -30,7 +31,7 @@ import httpx
 import pytest
 
 from agora.hub.notify_sink import NotifySink, notify_line
-from agora.listen import (ADAPT_CAP_DEFAULT, ADAPT_MIN, ARM_BANNER, DebounceBatcher,
+from agora.listen import (ADAPT_MIN, ARM_BANNER, DebounceBatcher,
                           _announce_armed, _read_offset, _resume_offset,
                           _write_offset, acquire_lock, follow_lines, next_backoff,
                           once_digest, parse_line, qualifies, read_backoff,
@@ -132,6 +133,62 @@ def test_native_driver_gets_explicit_broadcast_wake_classification(capsys):
     # Public CLI/harness contract remains exit 2 for every qualifying wake.
     assert _deliver_wake(broadcast, "bob", preview=False, once=True) == 2
     capsys.readouterr()
+
+
+def test_an_unowned_wake_on_a_seat_that_owes_nothing_is_its_own_class(
+        capsys, monkeypatch):
+    """0140: a wake must carry work. A room-wide batch that names nobody,
+    on a seat the hub says owes NOTHING, is mail that obliges nothing — the
+    driver must be able to tell it apart from a room-wide open that DOES
+    oblige every member, because the second one is real debt and the first
+    one buys a turn whose only possible output is ceremony."""
+    from agora.listen import (_DRIVER_BROADCAST_WAKE, _DRIVER_UNOWNED_WAKE,
+                              _deliver_wake)
+
+    owed = {"counts": (0, 0)}
+    monkeypatch.setattr("agora.listen._owed_snapshot",
+                        lambda hub, aid: (owed["counts"], None, {}))
+    broadcast = [_event(status="blocked", flags="blocked")]
+    addressed = [_event(status="open", flags="to-me,addressed")]
+    assert _deliver_wake(broadcast, "bob", preview=False, once=True,
+                         hub="http://h:1",
+                         classify_driver_wake=True) == _DRIVER_UNOWNED_WAKE
+    # Same batch, but the hub says this seat owes something: still a turn.
+    owed["counts"] = (1, 0)
+    assert _deliver_wake(broadcast, "bob", preview=False, once=True,
+                         hub="http://h:1",
+                         classify_driver_wake=True) == _DRIVER_BROADCAST_WAKE
+    # Addressed always wakes, owed or not.
+    owed["counts"] = (0, 0)
+    assert _deliver_wake(addressed, "bob", preview=False, once=True,
+                         hub="http://h:1", classify_driver_wake=True) == 2
+    # A HUMAN talking to the room always buys a turn: the 2026-07-14
+    # falsification (an operator's room-wide ask that woke NOBODY) is the
+    # dead air this gate must never recreate.
+    human = [_event(status="open", flags="open,from-operator")]
+    assert _deliver_wake(human, "bob", preview=False, once=True,
+                         hub="http://h:1",
+                         classify_driver_wake=True) == _DRIVER_BROADCAST_WAKE
+    # An UNREADABLE /owed is never read as zero: keep the old behavior.
+    monkeypatch.setattr("agora.listen._owed_snapshot",
+                        lambda hub, aid: (None, None, None))
+    assert _deliver_wake(broadcast, "bob", preview=False, once=True,
+                         hub="http://h:1",
+                         classify_driver_wake=True) == _DRIVER_BROADCAST_WAKE
+    capsys.readouterr()
+
+
+def test_an_empty_wake_digest_authorizes_silence():
+    """Ceremony is a driver phenomenon: a seat that wakes owing nothing and
+    is told only to 'triage and ack' posts a receipt to justify the wake
+    (measured 50% of such turns). The digest must name the empty outcome."""
+    from agora.listen import once_digest
+    events = [{"channel": "commons", "seq": 4}]
+    empty = once_digest(events, (0, 0))
+    assert "ack and end your turn WITHOUT posting" in empty
+    owing = once_digest(events, (2, 0))
+    assert "WITHOUT posting" not in owing
+    assert "settle those before new work" in owing
 
 
 def test_wake_line_carries_hub_age_from_ulid():
@@ -577,42 +634,93 @@ def test_arm_banner_cannot_itself_match_a_wake_monitor():
 # -- id/url/source resolution -----------------------------------------------------
 
 
-def test_resolve_identity_precedence_and_mcp_walk_up(tmp_path, monkeypatch):
+def test_resolve_identity_precedence_zero_search(tmp_path, monkeypatch):
+    """Zero search: identity comes from THIS folder's config, never a parent's."""
     monkeypatch.setenv("AGORA_HOME", str(tmp_path / "home"))
     monkeypatch.delenv("AGORA_AGENT_ID", raising=False)
     monkeypatch.delenv("AGORA_URL", raising=False)
     workspace = tmp_path / "repo"
-    nested = workspace / "src" / "deep"
-    nested.mkdir(parents=True)
+    workspace.mkdir()
     (workspace / ".cursor").mkdir()
     (workspace / ".cursor" / "mcp.json").write_text(json.dumps({
         "mcpServers": {"agora": {"env": {"AGORA_AGENT_ID": "wsbob",
                                          "AGORA_URL": "http://10.0.0.5:9999"}}}}))
-    # mcp.json found by walking UP from a nested cwd; url comes from the same file.
-    assert resolve_identity(None, None, nested) == ("wsbob", "http://10.0.0.5:9999")
+    # config in cwd itself resolves; url comes from the same file.
+    assert resolve_identity(None, None, workspace) == ("wsbob",
+                                                       "http://10.0.0.5:9999")
     # explicit flags beat everything.
-    assert resolve_identity("cli", "http://h:1/", nested) == ("cli", "http://h:1")
-    # env beats mcp.json.
+    assert resolve_identity("cli", "http://h:1/", workspace) == ("cli",
+                                                                 "http://h:1")
+    # env beats the folder config.
     monkeypatch.setenv("AGORA_AGENT_ID", "envbob")
     monkeypatch.setenv("AGORA_URL", "http://env:2")
-    assert resolve_identity(None, None, nested) == ("envbob", "http://env:2")
+    assert resolve_identity(None, None, workspace) == ("envbob", "http://env:2")
 
 
-def test_resolve_identity_malformed_mcp_keeps_walking_and_none_exits_1(tmp_path, monkeypatch):
+def test_resolve_identity_never_inherits_a_parents_seat(tmp_path, monkeypatch):
+    """The regression the zero-search ruling exists for: the old parent walk
+    let an unrelated, never-wired subproject inherit an ancestor's seat and
+    post to the hub under ANOTHER AGENT'S identity."""
     monkeypatch.setenv("AGORA_HOME", str(tmp_path / "home"))
     monkeypatch.delenv("AGORA_AGENT_ID", raising=False)
     monkeypatch.delenv("AGORA_URL", raising=False)
     outer = tmp_path / "outer"
-    inner = outer / "inner"
-    (inner / ".cursor").mkdir(parents=True)
-    (inner / ".cursor" / "mcp.json").write_text("{ not json")          # malformed
+    unrelated = outer / "totally" / "unrelated" / "project"
+    unrelated.mkdir(parents=True)
     (outer / ".cursor").mkdir()
     (outer / ".cursor" / "mcp.json").write_text(json.dumps({
         "mcpServers": {"agora": {"env": {"AGORA_AGENT_ID": "outerbob"}}}}))
-    aid, url = resolve_identity(None, None, inner)
-    assert aid == "outerbob" and url == "http://127.0.0.1:8765"        # default url
+    with pytest.raises(SystemExit) as excinfo:
+        resolve_identity(None, None, unrelated)
+    # ...and the error NAMES the fix instead of leaving a dead end.
+    assert "does not search parent folders" in str(excinfo.value)
+
+
+def test_resolve_identity_malformed_config_in_cwd_exits_1(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGORA_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("AGORA_AGENT_ID", raising=False)
+    monkeypatch.delenv("AGORA_URL", raising=False)
+    folder = tmp_path / "ws"
+    (folder / ".cursor").mkdir(parents=True)
+    (folder / ".cursor" / "mcp.json").write_text("{ not json")          # malformed
     with pytest.raises(SystemExit):
-        resolve_identity(None, None, tmp_path)                          # nothing anywhere
+        resolve_identity(None, None, folder)
+    with pytest.raises(SystemExit):
+        resolve_identity(None, None, tmp_path)                          # nothing here
+
+
+def test_resolve_identity_uses_canonical_seat_record(tmp_path, monkeypatch):
+    from agora.setup_harness import write_workspace_seat
+
+    monkeypatch.setenv("AGORA_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("AGORA_AGENT_ID", raising=False)
+    monkeypatch.delenv("AGORA_URL", raising=False)
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    write_workspace_seat(workspace, agent_id="janus", url="http://hub:7777",
+                         about="owns codex seat", harnesses=("codex",),
+                         default_drive_harness="codex")
+    assert resolve_identity(None, None, workspace) == ("janus",
+                                                       "http://hub:7777")
+    assert resolve_identity(None, None, workspace, harness="codex") == (
+        "janus", "http://hub:7777")
+
+
+def test_resolve_identity_reads_codex_config_without_cursor(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGORA_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("AGORA_AGENT_ID", raising=False)
+    monkeypatch.delenv("AGORA_URL", raising=False)
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    (workspace / ".codex").mkdir()
+    (workspace / ".codex" / "config.toml").write_text(
+        "[mcp_servers.agora]\n"
+        'command = "agora-mcp"\n\n'
+        "[mcp_servers.agora.env]\n"
+        'AGORA_AGENT_ID = "cx"\n'
+        'AGORA_URL = "http://codex:8765"\n')
+    assert resolve_identity(None, None, workspace) == ("cx",
+                                                       "http://codex:8765")
 
 
 def test_resolve_source_auto_matrix(tmp_path):
@@ -1420,11 +1528,19 @@ def test_ws_bad_notify_file_fails_at_arm_not_at_first_wake():
 def test_ws_hub_unreachable_once_max_wait_ends_hub_unreachable_exit_0(tmp_path, spawn):
     home = tmp_path / "home"
     home.mkdir()
-    url = "http://127.0.0.1:8893"                 # nothing listens here
-    (home / "keys.json").write_text(json.dumps({f"{url}::bob": "agora_dummy"}))
-    listener = spawn(["--as", "bob", "--source", "ws", "--url", url,
-                      "--once", "--max-wait", "1.5"], _proc_env(home))
-    assert listener.wait_exit() == 0
+    # Reserve an ephemeral port without listening on it. A fixed "unused"
+    # port collided with real developer hubs and made this test depend on
+    # unrelated machine state.
+    with socket.socket() as guard:
+        guard.bind(("127.0.0.1", 0))
+        port = guard.getsockname()[1]
+        url = f"http://127.0.0.1:{port}"
+        (home / "keys.json").write_text(
+            json.dumps({f"{url}::bob": "agora_dummy"})
+        )
+        listener = spawn(["--as", "bob", "--source", "ws", "--url", url,
+                          "--once", "--max-wait", "1.5"], _proc_env(home))
+        assert listener.wait_exit() == 0
     listener.wait_line("AGORA_LISTEN ended reason=hub-unreachable")
     assert not any(l.startswith("AGORA_LISTEN armed") for l in listener.out)
     assert not (home / "listen-bob.lock").exists()

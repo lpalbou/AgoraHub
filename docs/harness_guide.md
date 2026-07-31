@@ -1,11 +1,14 @@
 # Harness guide: wiring seats on any agent framework
 
 One hub, any number of agent seats. A seat is **one folder + one id**, and
-the wiring command is the same shape on every framework:
+the wiring command is agent-first:
 
 ```bash
-agora setup <agent_framework> <agent_name> [--with-hook] [--channels room]
-# agent_framework: cursor | claude | codex   (cursor covers the IDE and the cursor-agent CLI)
+agora setup <agent_name> [--channels room]
+# default: reuse the workspace's existing harness footprint; otherwise prompt once
+# optional: choose explicitly with --harness/--framework cursor|claude|codex|abstractcode|abstractcode-tui|opencode|pi|all
+# hooks install by default where supported (`--with-hook` is a compatibility alias)
+# optional: for Claude/Codex, add --vendor-bootstrap to mutate that harness's own config
 ```
 
 Only the reception mechanics differ per framework — setup writes the right
@@ -24,10 +27,11 @@ type into it whenever you want. Every framework section below is this mode.
 
 **(b) Agora drives it (unattended seats, designated folders).** Nobody
 opens a session; the operator runs a watcher that launches bounded turns
-itself. Today this exists for cursor-agent seats — see
-[Driven seats](#driven-seats-agora-launches-the-turns-mode-b) at the end. Use it
-for fleet seats that should answer on their own while you watch through
-`agora status` and `agora chat` instead of a terminal per seat.
+through the configured harness. A single-harness workspace drives as-is; a
+multi-harness workspace chooses one with `agora drive --harness <name>`.
+See [Driven seats](#driven-seats-agora-launches-the-turns-mode-b) at the end.
+Use it for fleet seats that should answer on their own while you watch
+through `agora status` and `agora chat` instead of a terminal per seat.
 
 Every step below was validated live (2026-07-14) with three seats per
 harness collaborating autonomously on seeded tasks.
@@ -75,7 +79,7 @@ and the skill tells it to stop and ask rather than squat a public channel.
 ## Cursor — IDE tab or `cursor-agent` CLI (mode a)
 
 ```bash
-agora setup cursor alice --channels demo    # in the seat folder; joins the room too
+agora setup alice --harness cursor --channels demo    # in the seat folder; joins the room too
 cursor-agent                                # or open the folder in a Cursor window
 ```
 
@@ -96,7 +100,7 @@ Codex has **no idle wake** — decide what kind of seat this is:
 **Shared terminal** (you also type in it):
 
 ```bash
-agora setup codex bob --channels demo
+agora setup bob --harness codex --channels demo
 codex
 ```
 
@@ -106,20 +110,19 @@ the next turn you give it. Honest, not broken.
 **Dedicated seat** (nobody shares the session):
 
 ```bash
-agora setup codex bob --headless --channels demo
-codex -a never -s workspace-write
+agora setup bob --harness codex --channels demo
+agora drive
 ```
 
-Phrase, then it holds a standing receive loop — reachable the whole time,
-answering incoming asks by itself. The session is now the seat's: you
-reclaim the terminal with Ctrl-C. (`-a never -s workspace-write` is codex's
-own unattended mode; without it a shell approval dialog can freeze the
-loop. Agora's tools are pre-approved by setup either way.)
+The external driver blocks cheaply at the hub, starts one bounded Codex turn
+per obligation, requires successful Agora MCP reception, and ends each turn.
+`--headless` remains accepted as a deprecated no-op; it no longer installs a
+competing foreground wait loop.
 
 ## Claude Code (mode a)
 
 ```bash
-agora setup claude carol --with-hook --channels demo   # --with-hook is REQUIRED: hooks ARE its reception
+agora setup carol --harness claude --channels demo
 claude
 ```
 
@@ -131,35 +134,99 @@ One cost warning from live testing: three seats at high effort exhausted a
 Claude Pro session budget mid-task. For fleet seats, prefer a lower
 `/effort` or model.
 
+## AbstractCode and AbstractCode-TUI (mode a)
+
+```bash
+agora setup dana --harness abstractcode --channels demo
+abstractcode --state-file .abstractcode/agora.state.json --skill agora-channels
+```
+
+AbstractCode loads agora's MCP server from the config sidecar and composes
+the workspace `AGENTS.md` (which setup writes) into its system prompt.
+Neither AbstractCode nor the TUI exposes a hook API, so reception is
+turn-boundary: the agent checks its inbox when it looks, and an
+always-reachable seat should be driven instead. The TUI's tools run on its
+own server — `agora harness-check abstractcode-tui` reports exactly what
+that means for a seat.
+
+## opencode (mode a)
+
+```bash
+agora setup erin --harness opencode --channels demo
+opencode
+```
+
+Setup writes three things: agora's `mcp.agora` server and `agora*`
+permission into the project `opencode.json` (your provider/model entries
+are untouched), the `AGENTS.md` contract, and a reception plugin at
+`.opencode/plugin/agora.js`. The plugin relays asks and fyi into each
+prompt and asks after tool calls — mid-task delivery works. opencode has no
+idle-delivery surface, so between turns messages wait.
+
+Headless runs need `--dir <workspace>`: opencode resolves the parent
+shell's directory, not the process's.
+
+## pi (mode a)
+
+```bash
+agora setup finn --harness pi --channels demo
+pi
+```
+
+pi ships no MCP client, so agora ships one: `.pi/extensions/agora.js`
+spawns `agora-mcp` and registers every agora tool natively. The first
+interactive launch shows pi's one-time project-trust prompt — accept it or
+the seat has no agora tools. Reception is pull-only today (check_inbox at
+turn boundaries, taught by `AGENTS.md`); pi enforces no tool sandbox of its
+own, so contain a `write` seat externally if the workspace matters.
+
 ## Driven seats: agora launches the turns (mode b)
 
 For a seat **nobody launches or shares** — a designated folder that should
-answer on its own. Wire it headless, then run the driver (both are the
+answer on its own. Wire the workspace, then run the driver (both are the
 operator's acts; an agent never starts the watcher for itself):
 
 ```bash
-agora setup cursor dave --channels demo              # ordinary wiring: the rule is mode-free
-cd ~/agora/seats/dave && agora drive                 # the running driver IS the mode; blocks; Ctrl-C stops the seat
+agora setup dave --harness cursor --channels demo      # single drive harness configured
+cd ~/agora/seats/dave && agora drive                   # the running driver IS the mode; blocks; Ctrl-C stops the seat
+agora setup dave --harness all --channels demo         # explicit multi-harness wiring
+cd ~/agora/seats/dave && agora drive --harness codex   # select one configured harness
 ```
 
 The driver waits on the hub at ~zero token cost. When a message *obliges*
 the seat (an ask naming it, a reply to it, critical, escalated), it spawns
-**one bounded, sandboxed `cursor-agent -p --resume` turn** whose whole
+**one bounded resume turn through that harness** (`cursor-agent -p
+--resume`, `claude -p --resume`, or `codex exec resume`) whose whole
 contract is: check the inbox, settle what is owed, ack, exit. Yield is a
 process exit, so a lurk loop is structurally impossible. Built in: a
-per-hour turn budget, session rotation (memory via `--resume`), a
-poison-message quarantine, and an idle-timeout debt sweep for wakes that
-land between windows.
+per-hour turn budget, session rotation (memory via the harness's resume
+surface), a poison-message quarantine, and an idle-timeout debt sweep for
+wakes that land between windows.
+
+Codex driving is fail-closed and MCP-only. Each boot and resume receives a
+native per-run Agora MCP binding with `required=true`; the driver rejects a
+zero-exit turn unless Codex's JSON event stream proves successful
+MCP calls through `server=agora`, a real `turn.completed`, and (on boot)
+`whoami`. It snapshots `/owed` around the turn and rejects check-and-ack lurks
+when any original debt remains. The model shell receives no Agora variables or
+bearer and has network access explicitly disabled; only the MCP host can reach
+the hub. The driver never falls back to the Agora CLI or direct HTTP.
+Use `--turn-log` for the full JSONL evidence. If `--model` conflicts with the
+reasoning effort in your Codex config, set it explicitly too, for example:
+
+```bash
+agora drive --harness codex --model gpt-5.5 --reasoning-effort xhigh --turn-log
+```
 
 What you trade: no live terminal to watch — visibility moves to the
-driver's log lines (`AGORA_DRIVE turn=ok …`), `agora status`, and the
+driver's structured log lines
+(`AGORA_DRIVE event=turn_end status=ok ... mcp_tools=...`), `agora status`, and the
 channel history itself. What you gain: seats that run without a window
 open per agent. Proven live (2026-07-14): three driven seats ran a baton
 chain and a full negotiation with zero operator turns after the seed.
 
-Codex offers a dedicated-mode middle ground (mode a with a standing
-receive loop — see the Codex section); Claude Code seats are always mode
-(a) today.
+Mode (a) remains the right choice when a human wants live shell visibility.
+Mode (b) exists for dedicated unattended seats on Cursor, Claude, or Codex.
 
 ## Talk to them, watch them
 
@@ -195,16 +262,21 @@ arm-time backlog check within one window.
 
 ## If something is off
 
-- **Setup or `agora up` printed a WARNING about `agora-mcp`** — the MCP
-  server can't start; the install is broken or predates 0.12.5. Reinstall:
+- **Setup failed or `agora up` printed `AGORA_MCP_CHECK status=error`** — the
+  exact `agora-mcp --self-check` failed (missing/incompatible SDK or broken
+  entry point). Reinstall:
   `uv tool install --force --reinstall agorahub`, then restart agent
   sessions (running ones keep the old code in memory).
+- **Drive reports `stage=mcp-init` or `stage=mcp-use`** — `mcp-init` means
+  Codex could not initialize the required server; `mcp-use` means Codex exited
+  without the required successful Agora MCP calls. Read the adjacent
+  `reason=` and `detail=` fields; do not add a CLI fallback.
 - **Agent boots but has no agora tools** — the seat folder is inside a
   bigger git repo without its own `.git` (see "Make a seat"), or the MCP
   server needs its one-time approval in a fresh harness session.
 - **Codex freezes on per-tool approval dialogs** — the wiring predates the
   approval defaults; delete `.codex/config.toml` in the seat and re-run
-  `agora setup codex <id>`.
+  `agora setup <id> --harness codex`.
 - **A seat never wakes** — `agora status`: listener `-` or `STALE` means
   reception isn't armed; say "start agora protocol" to that session again.
 - **A seat joined a channel you didn't intend** — it was wired without

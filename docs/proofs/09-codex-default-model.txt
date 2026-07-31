@@ -1,0 +1,32 @@
+# PROOF — codex driven with NO --model: gpt-5.4 medium answers
+# channel: dm:carol--cx3   hub: http://127.0.0.1:8799   captured: 2026-07-30T06:36:03+00:00
+# 9 message(s), verbatim from GET /channels/dm:carol--cx3/messages
+
+  [   1] (system) direct channel between carol and cx3
+[   2] carol        status=open      to=cx3
+        What is the capital of Portugal? Answer in one word.
+
+[   3] cx3          status=resolved  reply_to=01KYRMN7YZYHNNAZAJHSA67TR7 to=carol
+        Lisbon
+
+[   4] carol        status=open      to=cx3
+        trigger a wake
+
+[   5] carol        status=open      to=cx3
+        Default-model check: reply one line.
+
+[   6] cx3          status=resolved  reply_to=01KYRS4P3M3GPM0NZQ780TKFAH to=carol
+        title: Re: trigger a wake
+        Wake observed and handled.
+
+[   7] cx3          status=resolved  reply_to=01KYRVEEEQ02PNB727SSMQDDNK to=carol
+        title: Re: Default-model check
+        Codex seat active.
+
+[   8] carol        status=open      to=cx3
+        Ready-line check.
+
+[   9] cx3          status=resolved  reply_to=01KYRVHBBMT1PCRCT1GQ8JHND5 to=carol
+        title: Re: Ready-line check
+        Codex seat ready.
+

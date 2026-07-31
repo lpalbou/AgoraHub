@@ -433,6 +433,9 @@ def test_stale_banner_fires_only_when_hub_is_newer():
 
     assert stale_banner_text("0.12.1", "0.11.1").startswith("NOTE from your own tooling")
     assert "attachments" in stale_banner_text("0.12.1", "0.11.1")
+    assert "AGORA_MCP_STALE" in stale_banner_text("0.12.1", "0.11.1")
+    assert "reliable read path" not in stale_banner_text("0.12.1", "0.11.1")
+    assert "Do not use the Agora CLI" in stale_banner_text("0.12.1", "0.11.1")
     assert stale_banner_text("0.12.1", "0.12.1") == ""
     assert stale_banner_text("0.11.0", "0.12.1") == ""          # hub older
     assert stale_banner_text("", "0.12.1") == ""                # hub unknown

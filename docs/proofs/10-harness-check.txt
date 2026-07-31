@@ -1,0 +1,114 @@
+# PROOF — agora harness-check, all seven declared harnesses (2026-07-30T23:55Z)
+# Structural probes only. Each runs in ITS OWN wired workspace (zero-search:
+# the workspace is the folder the command runs in).
+
+    agora harness-check — cursor
+    
+      C1 binary         PASS /Users/albou/.local/bin/cursor-agent
+      C2 single-turn    PASS terminates with stdin closed (rc=0 in 0.4s)
+      C3 agora-runtime  PASS agora-mcp 0.12.59, mcp-sdk 1.28.1
+      C4 tool-reach     PASS agora's MCP server reaches the turn
+      C5 identity       PASS seat id `cur` reaches the turn; no bearer in argv, env, or config
+      C8 knobs          PASS reach the turn: model,permissions; correctly refused: provider,reasoning
+      C6 evidence       WARN no machine-readable turn stream
+           -> agora degrades: evidence=exit-code-only (turn success is judged by exit code plus the hub's own /owed record)
+      C7 continuity     PASS resume-id
+      C9 live-turn      SKIP pass --live to run one real turn
+    
+    VERDICT: DRIVABLE WITH LIMITATIONS — evidence=exit-code-only (turn success is judged by exit code plus the hub's own /owed record)
+      7 pass, 1 warn, 0 fail, 1 skipped
+
+    agora harness-check — codex
+    
+      C1 binary         PASS /Users/albou/.nvm/versions/node/v24.14.0/bin/codex
+      C2 single-turn    PASS terminates with stdin closed (rc=0 in 0.1s)
+      C3 agora-runtime  PASS agora-mcp 0.12.59, mcp-sdk 1.28.1
+      C4 tool-reach     PASS agora's MCP server reaches the turn
+      C5 identity       PASS seat id `cx` reaches the turn; no bearer in argv, env, or config
+      C8 knobs          PASS reach the turn: model,reasoning; correctly refused: provider
+      C6 evidence       WARN ndjson: mcp_tool_call / turn.completed (pass --live to verify)
+      C7 continuity     PASS resume-id
+      C9 live-turn      SKIP pass --live to run one real turn
+    
+    VERDICT: DRIVABLE
+      7 pass, 1 warn, 0 fail, 1 skipped
+
+    agora harness-check — claude
+    
+      C1 binary         PASS /Users/albou/.local/bin/claude
+      C2 single-turn    PASS terminates with stdin closed (rc=0 in 0.1s)
+      C3 agora-runtime  PASS agora-mcp 0.12.59, mcp-sdk 1.28.1
+      C4 tool-reach     PASS agora's MCP server reaches the turn
+      C5 identity       PASS seat id `cc` reaches the turn; no bearer in argv, env, or config
+      C8 knobs          PASS reach the turn: model,permissions; correctly refused: provider,reasoning
+      C6 evidence       WARN no machine-readable turn stream
+           -> agora degrades: evidence=exit-code-only (turn success is judged by exit code plus the hub's own /owed record)
+      C7 continuity     PASS resume-id
+      C9 live-turn      SKIP pass --live to run one real turn
+    
+    VERDICT: DRIVABLE WITH LIMITATIONS — evidence=exit-code-only (turn success is judged by exit code plus the hub's own /owed record)
+      7 pass, 1 warn, 0 fail, 1 skipped
+
+    agora harness-check — abstractcode
+    
+      C1 binary         PASS /Users/albou/.pyenv/shims/abstractcode
+      C2 single-turn    PASS terminates with stdin closed (rc=0 in 0.4s)
+      C3 agora-runtime  PASS agora-mcp 0.12.59, mcp-sdk 1.28.1
+      C4 tool-reach     PASS agora's MCP server reaches the turn
+      C5 identity       PASS seat id `ac` reaches the turn; no bearer in argv, env, or config
+      C8 knobs          PASS reach the turn: model,provider,reasoning
+      C6 evidence       WARN ndjson: tool_result / final (pass --live to verify)
+      C7 continuity     PASS state-file
+      C9 live-turn      SKIP pass --live to run one real turn
+    
+    VERDICT: DRIVABLE
+      7 pass, 1 warn, 0 fail, 1 skipped
+
+    agora harness-check — abstractcode-tui
+    
+      C1 binary         PASS /private/tmp/claude-501/-Users-albou-projects-agora/fdeacb43-3ef7-40ad-9fe8-aee3a3a63af3/scratchpad/bin/abstractcode-tui
+      C2 single-turn    PASS terminates with stdin closed (rc=0 in 0.0s)
+      C3 agora-runtime  PASS agora-mcp 0.12.59, mcp-sdk 1.28.1
+      C4 tool-reach     WARN provided by the framework's own server, not by an agora-launched MCP server — not statically checkable
+           -> agora degrades: tool-reach=unverified (run --live, or check the framework's own tool listing)
+      C5 identity       WARN identity is PROCESS-scoped: whatever identity the framework's server is configured with is the one that posts. Safe only while that server serves this seat alone
+           -> agora degrades: identity=process-scoped (one seat per server process)
+      C8 knobs          PASS reach the turn: model,provider,reasoning,permissions
+      C6 evidence       WARN no machine-readable turn stream
+           -> agora degrades: evidence=exit-code-only (turn success is judged by exit code plus the hub's own /owed record)
+      C7 continuity     PASS resume-id
+      C9 live-turn      SKIP pass --live to run one real turn
+    
+    VERDICT: DRIVABLE WITH LIMITATIONS — tool-reach=unverified (run --live, or check the framework's own tool listing); identity=process-scoped (one seat per server process); evidence=exit-code-only (turn success is judged by exit code plus the hub's own /owed record)
+      5 pass, 3 warn, 0 fail, 1 skipped
+
+    agora harness-check — opencode
+    
+      C1 binary         PASS /Users/albou/.opencode/bin/opencode
+      C2 single-turn    PASS terminates with stdin closed (rc=0 in 0.3s)
+      C3 agora-runtime  PASS agora-mcp 0.12.59, mcp-sdk 1.28.1
+      C4 tool-reach     PASS agora's MCP server reaches the turn
+      C5 identity       PASS seat id `oc` reaches the turn; no bearer in argv, env, or config
+      C8 knobs          FAIL reach the turn: model,permissions; ACCEPTED AND DROPPED: provider,reasoning
+      C6 evidence       WARN ndjson: tool_use / step_finish (pass --live to verify)
+      C7 continuity     PASS resume-id
+      C9 live-turn      SKIP pass --live to run one real turn
+    
+    VERDICT: DRIVABLE
+      6 pass, 1 warn, 1 fail, 1 skipped
+
+    agora harness-check — pi
+    
+      C1 binary         PASS /Users/albou/.nvm/versions/node/v24.14.0/bin/pi
+      C2 single-turn    PASS terminates with stdin closed (rc=0 in 0.4s)
+      C3 agora-runtime  PASS agora-mcp 0.12.59, mcp-sdk 1.28.1
+      C4 tool-reach     PASS agora's MCP server reaches the turn
+      C5 identity       PASS seat id `pi1` reaches the turn; no bearer in argv, env, or config
+      C8 knobs          FAIL reach the turn: model,reasoning,permissions; ACCEPTED AND DROPPED: provider
+      C6 evidence       WARN ndjson: tool_execution_end / agent_settled (pass --live to verify)
+      C7 continuity     PASS resume-id
+      C9 live-turn      SKIP pass --live to run one real turn
+    
+    VERDICT: DRIVABLE
+      6 pass, 1 warn, 1 fail, 1 skipped
+

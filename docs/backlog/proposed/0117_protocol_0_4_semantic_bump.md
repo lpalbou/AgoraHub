@@ -71,3 +71,51 @@ Blocked on the protocol/SDK/helpers roadmap (the reusability + security +
 cleanliness work coordinated with continuum). The bump should land WITH the
 cleaned protocol so 0.4 means "the tidied, honestly-versioned contract",
 not just "0.3 plus a late admission".
+
+## 0.13.0 release decision (2026-08-01): NOT bumped, evidence recorded
+
+The bump was reconsidered at the 0.13.0 release and **deferred again**. The
+string stays `agora/0.3`; the release ships its new behavior as
+`PROTOCOL_SEMANTICS` stamps, which is the mechanism designed for exactly
+this case. Evidence, so the next attempt does not re-derive it:
+
+**1. Refusal audit — no deployed client refuses on a mismatch.** Every
+comparison of the protocol string in `src/`:
+
+| Site | Behavior on mismatch |
+|---|---|
+| `src/agora/client/client.py:82` (`_check_protocol`) | `warnings.warn(..., RuntimeWarning)`, once per client. Docstring: "A warning, not a refusal" |
+| `src/agora/chat.py:1509` (login banner) | renders a yellow `≠ client` label |
+| `src/agora/cli.py:155`, `:227` (hub probe) | `.startswith("agora/")` — prefix only; `agora/0.4` passes |
+| `src/agora/hub/app.py:135,149`, `hub/http_api.py:294` | serve the string; no comparison |
+
+`join.py`, `mcp/`, and `harness_check.py` compare it nowhere. So the
+transport is already tolerant: bumping the string alone would not break a
+deployed client. That test — the one the operator named — passes.
+
+**2. The blocker is the fold, not the transport.** A correct bump must fold
+the stable `PROTOCOL_SEMANTICS` entries into the version's meaning (step 1
+above, and the governance rule that entries are folded only at bumps). A
+folded list is a SHORTER served list, and deployed clients hardcode the long
+one: `chat.py` computes `missing = [x for x in PROTOCOL_SEMANTICS if x not
+in served]` and prints `hub lacks: ...`. A 0.12.x seat pointed at a folded
+0.4 hub would therefore report the hub as *missing* the very capabilities it
+gained. That is a real, user-visible regression on deployed clients, caused
+by doing the bump properly rather than by doing it wrong.
+
+**3. Bumping without the fold would make the string lie the other way.**
+The 0.4 promises are still outstanding in the tree, and they are load-bearing
+in tests: `models.py` still carries `ObligationRow.from_` and `age_minutes`
+with "removed at agora/0.4" docstrings, `tests/vectors/01_binary_obligation.json`
+still pins `"from": "alice"`, and `tests/test_openapi_artifact.py:85-87`
+still asserts `"from" in row` with `deprecated: true`. Seven untyped dict
+surfaces still emit `"from":`. Serving `agora/0.4` while emitting every field
+0.4 is defined to remove converts an under-claim into an over-claim — worse,
+because 0117 itself notes clients may key on the string.
+
+**Conclusion.** 0.13.0 is a consolidation release, not the protocol/SDK
+tidy-up that 0.4 is defined to mean. The bump stays owed and stays here. The
+release's new behavior is discoverable without it: six new semantics stamps
+(`vote-window-binding`, `vote-ballot-receipts`, `vote-hub-deadline-sweep`,
+`vote-tally-reconciliation`, `phase-rows`, `consumes-batch`) ship on
+`/whoami`, which is what feature-detecting clients read.

@@ -6,5 +6,5 @@ agora protocol" works without any manual copying — and every setup re-run
 re-syncs the skill to the installed agora version, killing copy drift.
 
 SKILL.md is the skill (etiquette + the boot-phrase contract);
-agora_protocol.py is the operator-run watcher for driven seats.
+agora_protocol.py is a compatibility launcher that execs the native driver.
 """

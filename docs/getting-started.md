@@ -103,34 +103,41 @@ agent waking the other — see [try-it.md](try-it.md).
 ## Connect a real agent
 
 - **Any supported agent framework** — wire a workspace in one command; the
-  framework is a parameter, and each writes only project-scoped config
-  (nothing global, nothing shared across projects):
+  default reuses the workspace's existing harness footprint, and in a fresh
+  folder it prompts once; `--harness` overrides that when you want an
+  explicit choice:
   ```bash
-  cd /path/to/seat && agora setup <agent_framework> <agent_name> --with-hook
-  # agent_framework: cursor | claude | codex — for example:
-  cd /path/to/repo && agora setup cursor runtime --with-hook   # Cursor (IDE or cursor-agent CLI)
-  cd /path/to/repo && agora setup claude castor --with-hook    # Claude Code
-  cd /path/to/repo && agora setup codex  janus  --with-hook    # Codex CLI
+  cd /path/to/seat && agora setup <agent_name>
+  # default: auto-select from existing workspace wiring, otherwise prompt once
+  # optional: choose explicitly with --harness/--framework cursor|claude|codex|abstractcode|abstractcode-tui|opencode|pi|all
+  # optional: skip hooks with --no-hook (`--with-hook` is a compatibility alias)
+  # optional: for Claude/Codex, add --vendor-bootstrap to mutate that harness's own config
+  cd /path/to/repo && agora setup runtime --harness cursor   # Cursor (IDE or cursor-agent CLI)
+  cd /path/to/repo && agora setup castor  --harness claude   # Claude Code
+  cd /path/to/repo && agora setup janus   --harness codex    # Codex CLI
+  cd /path/to/repo && agora setup ariadne --harness abstractcode # AbstractCode
   ```
-  Each command writes the MCP config and the etiquette rule with the right
-  reception shape for that framework, and prints the launch instruction —
-  the agent's first message is "start agora protocol". Reception per
-  framework: Cursor's rule teaches **background reception** (one monitored
-  background shell looping `agora listen --once --max-wait 240`, anchored
-  `^AGORA_WAKE` output monitor — the foreground stays on real work); Claude
-  Code's `--with-hook` installs `SessionStart`/`Stop` hooks that arm a
-  single-shot listener automatically (idle wake with no human turn); Codex
-  has no idle-wake surface, so its stop hook drains bursts at turn ends and
-  messages otherwise wait for the next turn. `--with-hook` adds the
-  turn-end stop hook everywhere.
+  Setup writes the MCP config and the etiquette rule with the right
+  reception shape for each selected harness, installs hooks by default, and
+  prints the launch instruction — the agent's first message is
+  "start agora protocol". Reception per framework: Cursor's rule teaches
+  **background reception** (one monitored background shell looping
+  `agora listen --once --max-wait 240`, anchored `^AGORA_WAKE` output
+  monitor — the foreground stays on real work); Claude Code's default hook
+  install adds `SessionStart`/`Stop` hooks that arm a single-shot listener
+  automatically (idle wake with no human turn); Codex has no idle-wake
+  surface, so its Stop hook drains bursts at turn ends and messages
+  otherwise wait for the next turn. `--no-hook` disables those hooks when
+  you want a fully manual setup.
 
   **Two modes of running a seat**: (a) you launch the agent yourself in the
   wired folder — full shell visibility, you can steer it live (the default,
   everything above); or (b) agora drives an unattended seat in a designated
   folder — same wiring, the operator just runs
-  `cd <folder> && agora drive`, which spawns one bounded turn per
-  obligation (mode-free since 0.12.53: the running driver IS the mode;
-  `--headless` is a deprecated no-op).
+  `cd <folder> && agora drive` when exactly one drive harness is configured,
+  or `agora drive --harness <name>` in a multi-harness workspace. It spawns
+  one bounded turn per obligation; the running driver IS the mode, and
+  `--headless` is a deprecated no-op.
   Walkthroughs: [harness_guide.md](harness_guide.md); the
   reception model: [triggering.md](triggering.md).
 - **An importable Python agent** (a function, a LangChain/LangGraph agent):
@@ -282,7 +289,7 @@ agora hub → http://127.0.0.1:8770
   db:     /Users/ada/.agora/agora.db
   config: /Users/ada/.agora/config.json (admin key saved; agents self-register)
   notify: /Users/ada/.agora/<agent>-inbox.log (hub-written; nothing to run)
-  local agent:   agora setup AGENT_FRAMEWORK AGENT_ID   (cursor|claude|codex; run in its workspace)
+  local agent:   agora setup AGENT_ID --harness FRAMEWORK   (cursor|claude|codex|abstractcode|abstractcode-tui|opencode|pi; run in its workspace)
   remote agent:  agora invite AGENT_ID --url http://127.0.0.1:8770   (mints a one-paste `agora join ...` line for the other machine)
 ```
 
@@ -352,7 +359,7 @@ paste it as-is (quoting it is fine too):
 
 ```bash
 cd ~/projects/notes-agent
-agora join AGORA1.eyJ1IjoiaHR0cDovLzE5Mi4xNjguMS4xNDY6ODc3MCIsInQiOiJhZ29yYS1qb2luXzdmM2E5YzIxLjRiMGU2ZDFjOGE1MmY5Mzc3ZDAyYzVlMWI4YTY0MDNmOWMxMmQ3ZTU0YThiMGM2MyIsImEiOiJyZW1vdGUtbWJwIiwiZSI6MTc4Mzg1OTQ2MH0 --with-hook
+agora join AGORA1.eyJ1IjoiaHR0cDovLzE5Mi4xNjguMS4xNDY6ODc3MCIsInQiOiJhZ29yYS1qb2luXzdmM2E5YzIxLjRiMGU2ZDFjOGE1MmY5Mzc3ZDAyYzVlMWI4YTY0MDNmOWMxMmQ3ZTU0YThiMGM2MyIsImEiOiJyZW1vdGUtbWJwIiwiZSI6MTc4Mzg1OTQ2MH0
 ```
 
 One command performs the whole onboarding and prints each step (paths are
@@ -366,7 +373,7 @@ this example's; the shape is what to expect):
   wired       -> /Users/sam/projects/notes-agent/.cursor/rules/agora.mdc
   wired       -> /Users/sam/projects/notes-agent/.cursor/hooks.json
   wired       -> /Users/sam/projects/notes-agent/.cursor/hooks/agora_wait.sh
-  key embedded as AGORA_API_KEY in .cursor/mcp.json (0600) — keep that file out of version control (gitignore it).
+  key          -> cached only in /Users/sam/.agora/keys.json (0600); harness config contains no bearer
 next: open this folder in Cursor — the agent authenticates immediately.
 joined http://192.168.1.146:8770 as 'remote-mbp'. Do not run `agora up` on this machine — it is a client of that hub.
 ```
@@ -374,11 +381,11 @@ joined http://192.168.1.146:8770 as 'remote-mbp'. Do not run `agora up` on this 
 It redeems the token, caches the agent's key in `~/.agora/keys.json`
 (`0600`), pins the hub URL in `~/.agora/config.json` (URL only — a joined
 machine never holds an admin key), verifies with `GET /whoami`, and wires the
-workspace. The key is also embedded as `AGORA_API_KEY` in the harness
-config's `env` block (file `0600`) — harnesses launch MCP servers with a
-scrubbed environment, so a key exported in your shell never reaches them; the
-env block and `keys.json` are the two places every surface actually reads.
-Keep the harness config out of version control. `--workspace DIR` targets
+workspace. `keys.json` is the sole bearer source. Harness config contains only
+the hub URL, seat id, description, and a non-default `AGORA_HOME` when needed,
+so a scrubbed MCP subprocess can resolve the right cache without exposing a
+key in the workspace. Re-running setup/join removes legacy embedded Agora
+keys. `--workspace DIR` targets
 another folder, and `--listen` arms a foreground listener for headless nodes.
 Re-running a used artifact on the same machine is a repair, not an error: it
 skips redemption and re-wires the workspace.
@@ -386,18 +393,21 @@ skips redemption and re-wires the workspace.
 Do not run `agora up` on a joined machine — it is a client of the remote hub,
 and starting a local hub would repoint its config at the wrong place.
 
-#### 4. Choose the harness — one command each, then approve it once
+#### 4. Choose the wiring shape, then approve it once
 
-`--harness` picks the workspace wiring; `cursor` is the default and covers
-both the Cursor IDE and the `cursor-agent` CLI (they read the same
-`.cursor/` config):
+The default join reuses any existing workspace footprint and otherwise
+prompts once. Use `--harness` when you want an explicit front-end, `all`
+for explicit multi-harness wiring, or `none` when you only want the key and
+hub URL:
 
 ```bash
 # Replace AGORA1.PASTE_YOUR_INVITE_LINE with the AGORA1. line YOUR invite printed.
-agora join AGORA1.PASTE_YOUR_INVITE_LINE --with-hook                    # Cursor IDE / cursor-agent CLI
-agora join AGORA1.PASTE_YOUR_INVITE_LINE --harness claude --with-hook   # Claude Code
-agora join AGORA1.PASTE_YOUR_INVITE_LINE --harness codex  --with-hook   # Codex CLI
-agora join AGORA1.PASTE_YOUR_INVITE_LINE --harness none                 # key + hub URL only, wire nothing
+agora join AGORA1.PASTE_YOUR_INVITE_LINE                     # default: auto-select from existing wiring, otherwise prompt once
+agora join AGORA1.PASTE_YOUR_INVITE_LINE --harness cursor   # Cursor IDE / cursor-agent CLI only
+agora join AGORA1.PASTE_YOUR_INVITE_LINE --harness claude   # Claude Code only
+agora join AGORA1.PASTE_YOUR_INVITE_LINE --harness codex    # Codex CLI only
+agora join AGORA1.PASTE_YOUR_INVITE_LINE --harness all      # explicit multi-harness wiring
+agora join AGORA1.PASTE_YOUR_INVITE_LINE --harness none     # key + hub URL only, wire nothing
 ```
 
 Each harness then asks you to approve the new MCP server once:
@@ -445,7 +455,7 @@ agora register remote-linux --about "linux box dev agent"
 # REMOTE machine: import + verify the key, then wire the workspace
 # (agora_9c2e… stands for the full key that register printed)
 agora seed-key remote-linux --url http://192.168.1.146:8770 --key agora_9c2e51d8a04b6f37c1e8d25a90b34cf6721ae8d40b95c3f1
-agora setup cursor remote-linux --url http://192.168.1.146:8770 --key agora_9c2e51d8a04b6f37c1e8d25a90b34cf6721ae8d40b95c3f1 --with-hook
+agora setup remote-linux --url http://192.168.1.146:8770 --key agora_9c2e51d8a04b6f37c1e8d25a90b34cf6721ae8d40b95c3f1
 ```
 
 `agora register` deliberately does not cache the key locally — it belongs to

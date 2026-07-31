@@ -1,0 +1,28 @@
+# PROOF — all four codex hook events fire (0.142.4), and an ask lands mid-turn
+# The old declaration used a FLAT handler list: codex registered ZERO hooks and
+# printed no warning at all. The matcher-group shape fixes it.
+
+$ codex exec --skip-git-repo-check --dangerously-bypass-hook-trust \
+      -m gpt-5.4 -c model_reasoning_effort=medium "Reply with exactly: HOOKTEST2"
+hook: SessionStart
+hook: SessionStart Completed
+hook: UserPromptSubmit
+hook: UserPromptSubmit Completed
+hook: PostToolUse            <- mid-ReAct-loop delivery point
+hook: PostToolUse Completed
+...
+$ cat $AGORA_HOME/hook-cx3.json
+{"v": 5, "events": {"SessionStart": ..., "UserPromptSubmit": ...,
+                    "PostToolUse": ..., "Stop": ...}, ...}
+
+# And with a real ask waiting, the in-session turn RECEIVED and ACTED on it:
+$ codex exec ... "Say only READY. Then, if your agora hub relayed any message to
+                  you during this turn, quote the question it contained verbatim."
+mcp: agora/send_dm (completed)          <- it answered on the hub
+codex
+READY
+"What is the capital of Portugal? Answer in one word."   <- quoted the relayed ask
+hook: Stop
+hook: Stop Completed                    <- debt settled, so Stop did NOT block
+
+# Hub-side confirmation is in 01-codex-in-session-hook-ask.txt (answer: "Lisbon").

@@ -379,7 +379,7 @@ def test_channel_digest_folds_history_into_knowledge(client):
     digest = client.get("/channels/design/digest", headers=bob).json()
     assert digest["counts"] == {"open_questions": 1, "decided_shown": 1,
                                 "decided_total": 1, "decisions": 1,
-                                "rulings": 0,
+                                "rulings": 0, "phases": 0,
                                 "unacknowledged_rulings": 0}
     [openq] = digest["open_questions"]
     assert openq["title"] == "seam questions"
@@ -536,6 +536,28 @@ def test_create_group_invite_dm_is_fyi_with_redeemable_token(client):
     # The opening post is an OPEN obligation now visible to the joiner.
     msgs = client.get("/channels/room-x/messages", headers=gwkey).json()
     assert any(m["status"] == "open" and m["body"] == "o" for m in msgs)
+
+
+def test_group_invite_dm_body_carries_the_token_agents_read(client):
+    """0140 field test 2: the body said 'invite_token below' and the token
+    rode only in unrendered `data` — five driven seats were blocked at once,
+    because agents read bodies. The token is INLINE, in the CLI's own
+    join_channel(...) shape, and still in `data` for machine consumers."""
+    owner = register(client, "owner")
+    gwkey = register(client, "gw")
+    client.post("/groups", headers=owner, json={
+        "name": "room-z", "members": ["gw"], "purpose": "p"})
+    dm = client.get("/channels/dm:gw--owner/messages", headers=gwkey).json()
+    invite = next(m for m in dm if (m.get("data") or {}).get("invite_token"))
+    token = invite["data"]["invite_token"]
+    assert token in invite["body"]
+    assert "join_channel(channel='room-z'" in invite["body"]
+    assert "invite_token below" not in invite["body"]
+    # The token read STRAIGHT OUT OF THE BODY redeems.
+    quoted = invite["body"].split("invite_token=", 1)[1].split("'")[1]
+    assert client.post("/channels/room-z/join",
+                       json={"invite_token": quoted},
+                       headers=gwkey).status_code == 200
 
 
 def test_create_group_reports_partial_invite_failure(client):

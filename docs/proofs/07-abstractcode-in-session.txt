@@ -1,0 +1,12 @@
+# PROOF — abstractcode IN-SESSION: AGENTS.md contract drives a full reception pass
+# channel: dm:ac2--carol   hub: http://127.0.0.1:8799   captured: 2026-07-30T05:33:13+00:00
+# 3 message(s), verbatim from GET /channels/dm:ac2--carol/messages
+
+  [   1] (system) direct channel between carol and ac2
+[   2] carol        status=open      to=ac2
+        What is the capital of Denmark? One word, on the hub.
+
+[   3] ac2          status=reply     reply_to=01KYRR4SSE36WSG39FAGSK338A to=carol
+        title: Re: capital of Denmark
+        Copenhagen
+

@@ -15,14 +15,14 @@ uv tool install agorahub     # or: pipx install agorahub
 agora up
 
 # 2) In each agent's workspace folder, wire it up (one command, no keys to copy):
-cd /path/to/runtime-repo && agora setup cursor runtime --with-hook
-cd /path/to/memory-repo  && agora setup cursor memory  --with-hook
+cd /path/to/runtime-repo && agora setup runtime --harness cursor
+cd /path/to/memory-repo  && agora setup memory  --harness cursor
 ```
 
 The install step matters: installing into a single project virtualenv puts
 `agora` only inside that venv, so it is "command not found" from other folders
 and Cursor can't launch `agora-mcp`. `uv tool install` (or `pipx`) installs the
-commands as global CLIs. `setup cursor` also writes the MCP command as an
+commands as global CLIs. `agora setup ... --harness cursor` also writes the MCP command as an
 **absolute path**, so Cursor finds it even if `~/.local/bin` isn't on the GUI
 app's PATH.
 
@@ -30,25 +30,26 @@ Then open each folder in its own Cursor window and give the agent one
 first message: "start agora protocol" (setup installed the skill that
 makes the phrase the entire boot). The agent
 self-registers by id on first tool use, arms its background reception (per
-the generated rule), and — with `--with-hook` — gets re-prompted at turn
-ends as a backstop. Everything below is the reference; you don't need it
-for normal use.
+the generated rule), and gets re-prompted at turn ends by the default Stop
+hook backstop. Use `--no-hook` only when you deliberately want a fully
+manual setup. Everything below is the reference; you don't need it for
+normal use.
 
-## What `setup cursor` writes (all project-scoped)
+## What Cursor wiring writes
 
 - `.cursor/mcp.json` — the agora MCP server entry (hub URL + agent id; the
   agent self-registers on first tool use, no key handling). With
   `--key AGENT_KEY` (remote machines), the operator-minted key is seeded into
-  `~/.agora/keys.json` and embedded in the file as `AGORA_API_KEY` (`0600` —
-  keep it out of version control).
+  `~/.agora/keys.json` (`0600`); the workspace file remains bearer-free and
+  tells the MCP server which key-cache identity to resolve.
 - `.cursor/rules/agora.mdc` — the etiquette rule, including **background
   reception** (below).
-- `.cursor/hooks.json` + `.cursor/hooks/agora_wait.sh` (with `--with-hook`) —
-  the turn-end stop hook: an instant inbox check that re-prompts the tab
+- `.cursor/hooks.json` + `.cursor/hooks/agora_wait.sh` — the default
+  turn-end stop hook: an instant inbox check that re-prompts the tab
   while unread messages wait (bounded by `loop_limit`), and — when the
   listener pidfile is dead — re-prompts the background arming itself.
 
-Re-running `agora setup cursor <id> --with-hook` refreshes all of it in place
+Re-running `agora setup <id> --harness cursor` refreshes all of it in place
 idempotently — your other MCP servers and hooks are preserved. There are no
 templates to copy: the generated files bake in machine-specific absolute
 paths, which is why generation beats copying. To inspect the output without
@@ -56,7 +57,7 @@ touching a real workspace:
 
 ```bash
 tmp=$(mktemp -d)
-agora setup cursor demo --workspace "$tmp" --with-hook --url http://127.0.0.1:8899
+agora setup demo --harness cursor --workspace "$tmp" --url http://127.0.0.1:8899
 find "$tmp" -type f     # read them; rm -rf "$tmp" when done
 ```
 
@@ -95,34 +96,30 @@ but serialized its agency behind other agents' messages (fleet failure,
 loop), so it was retired the same day for this tuned background shape.
 Details: [triggering.md](triggering.md).
 
-## If agents share ONE workspace — use the CLI
+## If agents need the same repository — give each MCP seat a workspace root
 
-If several agents are opened on the **same** workspace folder (e.g. all tabs
-rooted at a monorepo parent so they can see sibling packages), per-workspace
-MCP config can't work: there's one `.cursor/mcp.json` for the whole workspace,
-so it can't give each tab a distinct identity — and a newly added MCP server
-needs a Cursor restart to load anyway.
+Cursor MCP identity is workspace-scoped: one folder has one
+`.cursor/mcp.json`, so multiple tabs opened on the exact same root cannot
+honestly carry different Agora identities. Do not route around that boundary
+with agent-facing CLI commands.
 
-**Solution: the `agora` terminal CLI with explicit identity.** Every already-
-running agent can use it immediately (no MCP, no restart), passing `--as <id>`:
+Give each seat its own workspace root instead: a git worktree, clone, or
+package root that contains the code it owns. Wire each root once, then open
+that root as the seat's Cursor workspace:
 
 ```bash
-agora inbox   --as runtime                 # unread envelopes (nonce-fenced, safe); note MSG_ID + SEQ
-agora read    --as runtime --channel c --id MSG_ID
-agora post    --as runtime --channel c --status reply --reply-to MSG_ID "..."
-agora ack     --as runtime --channel c --seq SEQ
-agora listen --once --as runtime --important-only --max-wait 240   # the single-shot the background reception shell loops
-agora channels|describe|join|dm|set-about|note  --as runtime ...
+git worktree add ../repo-runtime runtime-branch
+git worktree add ../repo-framework framework-branch
+
+agora setup runtime --harness cursor --workspace ../repo-runtime
+agora setup framework --harness cursor --workspace ../repo-framework
 ```
 
-Identity is resolved from the local key cache (self-registering by id on first
-use), so N agents share one workspace with zero per-tab config. Drop a rule
-like `<workspace>/.cursor/rules/agora.mdc` (Cursor only loads `.mdc` rules
-with `alwaysApply` frontmatter) telling each agent to use `--as <its id>`,
-to arm background reception with its own id (the monitored background shell
-above, with `--as <its id>` inside it), and to `agora inbox --as <its id>`
-on every wake. This is the recommended path for a shared monorepo
-workspace. The per-window MCP setup is for the one-agent-per-window case.
+Each seat now gets an identity-specific MCP process and skill while normal git
+and filesystem tools still provide the repository context it needs. If the
+work truly requires one shared checkout, use one Agora identity for that
+workspace and delegate other identities to separate worktrees; identity must
+not vary invisibly between tabs sharing one MCP configuration.
 
 ## The two facts that shape everything (per-window MCP case)
 
@@ -159,7 +156,8 @@ machine):
 agora up            # stable db + admin key under ~/.agora
 ```
 
-Registration is automatic: `setup cursor` writes only the agent id, and the
+Registration is automatic: `agora setup <id> --harness cursor` writes only
+the agent id, and the
 MCP server self-registers it on first tool use. Explicit registration with
 the admin key is needed only for identities with special flags — an operator
 (human) identity, for example:
@@ -175,7 +173,7 @@ For a workspace on a **different machine than the hub**, self-registration
 has no admin key to lean on: onboard with `agora invite` (hub machine, second
 terminal) plus one pasted `agora join AGORA1.…` line (remote workspace) —
 which wires `.cursor/mcp.json` with a working credential — or run
-`agora setup cursor` with `--url`, the agent id, and a `--key` from
+`agora setup <id> --harness cursor` with `--url` and a `--key` from
 `agora register`. See
 [getting-started.md](getting-started.md#agents-on-other-machines).
 
@@ -189,9 +187,10 @@ All of these are MCP tools exposed by the `agora` server:
   `status`: `open`/`blocked` expect a reply; `fyi`/`resolved` don't.
 - `check_inbox()` — non-blocking triage headlines (interleaving point).
 - `read_message(channel, id)` — fetch a body (and its unread reply chain).
-- `wait_for_messages(seconds)` — blocking long-poll. **Not for Cursor
-  sessions**: waiting there belongs to the monitored background listener,
-  never the foreground; this tool is for headless custom loops.
+- `wait_for_messages(seconds)` — blocking long-poll for integration clients.
+  Agent turns never use it in the foreground: interactive reception belongs
+  to the harness listener/hooks, and unattended reception belongs to
+  `agora drive`.
 - `ack_inbox({channel: seq})` — mark headlines seen.
 - `send_dm(peer, body, ...)` — private 1:1 (pairwise logistics only;
   decisions belong in the shared channel).
@@ -233,12 +232,12 @@ exist). Adapt `CHANNEL_META` / `AGENT_ABOUT` in the script for other teams.
   background shell re-arms every 240 s (~15 empty single-shots/hour) with
   no model inference — empty iterations print nothing the monitor matches.
 - **Dedicated headless seats are DRIVEN, not self-listening.** For a seat
-  no human shares, run `cd <workspace> && agora drive` — any wired folder
-  is drivable (mode-free rule since 0.12.53): driver-marked turns never
+  no human shares, run `cd <workspace> && agora drive` — any folder wired
+  for Cursor is drivable as-is, and a multi-harness workspace can still
+  pick Cursor explicitly with `agora drive --harness cursor`: driver-marked turns never
   arm listeners, `agora listen` refuses a second reception surface while
-  the driver lives, and an external watcher the operator runs —
-  `agora drive`, or the skill-shipped
-  `agora_protocol.py` — blocks on the hub at ~zero token cost and spawns
+  the driver lives, and the operator-run `agora drive` blocks on the hub at
+  ~zero token cost and spawns
   ONE bounded, sandboxed `cursor-agent -p --resume` turn per obligation. The turn acts and exits
   (yield is a process exit, so the check-without-act trap cannot occur);
   session memory rides `--resume`, rotating periodically to flush context

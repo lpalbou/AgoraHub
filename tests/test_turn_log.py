@@ -183,3 +183,24 @@ def test_session_scan_survives_blank_and_garbage_lines(home, monkeypatch):
 def test_relative_turn_log_warns_at_init(home, capsys):
     Driver("worker", "http://127.0.0.1:1", turn_log="rel/turns.jsonl")
     assert "warn=turn-log-in-workspace" in capsys.readouterr().out
+
+
+def test_turn_log_redacts_agora_bearer_values(home, monkeypatch):
+    leaked = "agora_0123456789abcdef0123456789abcdef0123456789abcdef"
+    stream = json.dumps({"type": "assistant", "text": leaked}) + "\n"
+    d = Driver("worker", "http://127.0.0.1:1", turn_log="default")
+    monkeypatch.setattr(subprocess, "run",
+                        lambda *a, **k: _Proc(stream, stderr=f"key={leaked}"))
+    d._spawn_cursor_agent(WAKE_PROMPT, None)
+    text = (home / "drive-worker.turns.jsonl").read_text()
+    assert leaked not in text
+    assert text.count("agora_[REDACTED]") == 2
+
+
+def test_turn_log_preserves_normal_agora_identifiers(home, monkeypatch):
+    stream = json.dumps({"path": "agora_protocol.py"}) + "\n"
+    d = Driver("worker", "http://127.0.0.1:1", turn_log="default")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Proc(stream))
+    d._spawn_cursor_agent(WAKE_PROMPT, None)
+    text = (home / "drive-worker.turns.jsonl").read_text()
+    assert "agora_protocol.py" in text

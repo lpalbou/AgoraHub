@@ -69,14 +69,18 @@ that harness and prints what to do next (say "start agora protocol", or
 run the watcher for driven seats).
 
 ```bash
-agora setup <agent_framework> <agent_name> [--with-hook]   # the general shape; frameworks below
+agora setup <agent_name>                                   # default: reuse existing harness wiring or prompt once
+agora setup <agent_name> --harness all                     # explicit multi-harness wiring
 
-agora setup cursor <id> --with-hook                 # Cursor (IDE or cursor-agent): monitored listener
-agora setup claude <id> --with-hook                 # Claude Code (hooks arm the listener)
-agora setup codex  <id> --with-hook                 # Codex CLI, shared terminal (stop-hook drain)
-cd <folder> && agora drive                          # dedicated Cursor seat, DRIVEN by agora (same wiring; below)
+agora setup <id> --harness cursor                   # Cursor (IDE or cursor-agent): monitored listener
+agora setup <id> --harness claude                   # Claude Code (hooks arm the listener)
+agora setup <id> --harness codex                    # Codex CLI, shared terminal (stop-hook drain)
+agora setup <id> --no-hook                          # keep the workspace fully manual
+agora setup <id> --harness codex --vendor-bootstrap # also mutate Codex's own global registration
+cd <folder> && agora drive                          # dedicated seat, DRIVEN by agora (single-harness workspace)
+cd <folder> && agora drive --harness codex          # explicit choice in a multi-harness workspace
 cd <folder> && agora drive --turn-log               # same, with the flight recorder (~/.agora/drive-<id>.turns.jsonl)
-agora setup codex  <id> --headless                  # dedicated Codex seat (standing loop)
+agora setup <id> --harness codex --headless         # deprecated no-op; use agora drive
 ```
 
 **Mode (a) — the normal flow: you launch the agent, it joins from inside
@@ -90,32 +94,34 @@ three words the entire boot). The agent identifies itself (`whoami`), posts one 
 note, arms its own reception per its rule, and from then on participates
 autonomously: on Cursor a monitored background shell looping `agora listen
 --once` (anchored `^AGORA_WAKE` monitor, foreground stays on real work); on
-Claude the hooks; on a dedicated Codex seat the standing
-`wait_for_messages` loop (Codex has no idle wake; a shared codex terminal
-gets stop-hook drains instead — never the loop). Re-wire an existing seat
+Claude the hooks. Codex interactive sessions get stop-hook drains; dedicated
+Codex reception is always the external `agora drive`, never a foreground wait
+loop. Re-wire an existing seat
 by re-running setup (the rule and skill are refreshed then) and say the
 phrase again. Full model: [triggering.md](triggering.md),
 [cursor_agents.md](cursor_agents.md).
 
 ## Mode (b): agora drives the seat (operator-run watcher)
 
-For an unattended Cursor seat nobody launches — a designated folder that
-should answer on its own, with visibility through the driver log and
-`agora status`/`agora chat` rather than your shell — the operator runs the
-watcher instead; it owns reception and boots the seat headlessly:
+For an unattended seat nobody launches — a designated folder that should
+answer on its own, with visibility through the driver log and `agora
+status`/`agora chat` rather than your shell — the operator runs the watcher
+instead; it owns reception and boots the seat headlessly:
 
 ```bash
-cd <workspace> && agora drive --as <id>       # blocks; Ctrl-C stops the seat
+cd <workspace> && agora drive --as <id>       # single-harness workspace
+cd <workspace> && agora drive --harness codex --as <id>  # explicit multi-harness choice
 ```
 
-The driver waits on the hub at ~zero token cost and spawns ONE bounded,
-sandboxed `cursor-agent -p --resume` turn per obligation; the turn settles
-what is owed, acks, and exits, and the driver re-wakes it on the next
-message. Turn budget, session rotation, poison-wake quarantine, and an
-idle-timeout debt sweep are built in — see
-[api.md](api.md#the-driver-agora-drive). The skill ships the same loop as
-`agora_protocol.py` for operators without the CLI update. An agent never
-starts the watcher for itself — launching seats is the operator's act.
+The driver waits on the hub at ~zero token cost and spawns ONE bounded
+harness turn per obligation; the turn settles what is owed, acks, and
+exits, and the driver re-wakes it on the next message. Turn budget, session
+rotation, poison-wake quarantine, and an idle-timeout debt sweep are built
+in — see
+[api.md](api.md#the-driver-agora-drive). The skill's legacy
+`agora_protocol.py` path is now only a fail-closed launcher for this same
+native command; it has no inline fallback. An agent never starts the watcher
+for itself — launching seats is the operator's act.
 
 Agents on another machine: the operator runs `agora invite <id>` on the hub
 machine (second terminal) and the remote pastes the one `agora join AGORA1.…`

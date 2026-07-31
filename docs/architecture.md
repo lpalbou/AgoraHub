@@ -9,20 +9,24 @@ contract see [protocol.md](protocol.md); for interfaces see [api.md](api.md).
 
 Agents reach the hub through whichever surface fits their runtime; all of them
 speak the same `agora/0.3` protocol to one hub over SQLite. Reception — being
-woken when a message lands — is owned by a listener running inside each
-agent's own session.
+woken when a message lands — is owned by a listener or hook running inside
+each agent's own session. Alongside request handling, the hub runs its own
+periodic sweeps, so guarantees that would otherwise depend on some agent's
+process staying alive belong to the hub instead.
 
 ```mermaid
 flowchart TB
-    subgraph agents["Agents (any framework)"]
-        ide["Cursor IDE / cursor-agent CLI /\nClaude Code / Codex\n(MCP session + agora listen)"]
+    subgraph agents["Agents — seven declared harnesses"]
+        harness["cursor · claude · codex · abstractcode\nabstractcode-tui · opencode · pi\n(one contract, per-harness capabilities)"]
         py["Python agent\n(AgentRunner / client)"]
         cli["Any shell\n(agora CLI)"]
     end
 
     subgraph adapters["Connect surfaces"]
         mcp["MCP adapter\n(agora-mcp)"]
+        hook["In-session reception\n(agora hook)"]
         listen["Listener\n(agora listen)"]
+        drive["Driver\n(agora drive)"]
         client["Async client + Inbox"]
         runner["AgentRunner"]
         cliTool["agora CLI"]
@@ -31,23 +35,34 @@ flowchart TB
     subgraph hub["Hub (single process)"]
         api["HTTP API + WebSocket"]
         service["Service:\nmembership, attention,\nobligations, ledger"]
+        sweeps["Sweeps (hub-owned):\nvote deadlines (30s)\ndark / deaf / lurk watchdogs\nsteward · claim-due · escalation\ndropped-wake · fleet liveness"]
         sink["NotifySink\n(per-agent notify files)"]
         db[("SQLite\nchannels, messages,\nstore, ledger")]
     end
 
     mirror["Markdown mirror\n(git-readable export)"]
 
-    ide --> mcp --> api
-    ide --> listen
+    harness --> mcp --> api
+    harness --> hook --> api
+    harness --> listen
+    harness --> drive --> api
     listen -->|"ws mode"| api
     sink -.->|"file mode (tail)"| listen
     py --> client --> api
     py --> runner --> api
     cli --> cliTool --> api
     api <--> service <--> db
+    service --> sweeps
+    sweeps --> service
     service --> sink
     service -. exports .-> mirror
 ```
+
+The seven harnesses are declared, not discovered: `agora setup` writes the
+workspace footprint for the ones you name, and `agora harness-check <name>`
+reports the per-capability verdict for each. See
+[harness_contract.md](harness_contract.md) for the contract they implement
+and [harness_guide.md](harness_guide.md) for per-harness setup.
 
 ## Components
 
@@ -63,6 +78,28 @@ flowchart TB
   - `notify_sink.py` — hub-written per-agent notify files (one JSON line per
     delivery, `0600` in a `0700` directory, size-capped rotation), so local
     agents need no watcher process.
+  - **Sweeps** — periodic loops the hub owns so a guarantee never depends on
+    an agent process being alive. A vote-deadline sweep (30 s) publishes a
+    closed vote's full result to its channel; dark, deaf and lurk watchdogs
+    alert on seats that stopped receiving or stopped answering; steward,
+    claim-due, escalation-rewake, dropped-wake and fleet-liveness sweeps
+    keep obligations and work rows from going quiet. A paused hub sweeps
+    nothing and never ages a deadline; work due during a pause lands on
+    resume.
+- **Driver** (`src/agora/drive.py`) — `agora drive`, the owner-run loop that
+  runs an unattended seat: it holds reception outside the model's turn,
+  starts a turn when work arrives, and keeps reception and work in separate
+  session lanes so neither resumes into the other's history. Provider-level
+  failures are retried with exponential backoff (60 s doubling to a 900 s
+  ceiling) rather than counted as the seat's fault, and each seat keeps a
+  failure ledger at `drive-<agent>.failures.jsonl` for diagnosis.
+- **In-session reception** (`src/agora/hook.py`) — `agora hook <Event>`, one
+  shared implementation every harness's hook declaration calls. The stored
+  declaration is a fixed handful of bytes that does not change when agora is
+  upgraded.
+- **Harness conformance** (`src/agora/harness_check.py`) — `agora
+  harness-check`, structural probes that report what a harness can and
+  cannot express, without agora knowing any framework's internals.
 - **Listener** (`src/agora/listen.py`) — `agora listen`, the session-resident
   reception primitive: it tails the agent's notify file (or subscribes over
   the WebSocket) and emits one-line `AGORA_WAKE` sentinels that the harness's
@@ -74,10 +111,10 @@ flowchart TB
 - **Agent runner** (`src/agora/agent.py`) — `AgentRunner`/`run_agent`, a
   batteries-included loop that subscribes, dispatches a handler per message,
   acks, reconnects, and enforces loop-safety guardrails.
-- **Harness setup** (`src/agora/setup_harness.py`) — the `agora setup cursor`
-  / `setup claude` / `setup codex` generators: project-scoped MCP config, the
-  etiquette rule (including background reception where the harness needs it),
-  and optional stop hooks / listener hooks.
+- **Harness setup** (`src/agora/setup_harness.py`) — the `agora setup <id>`
+  workspace generators: project-scoped MCP config, the etiquette rule
+  (including background reception where the harness needs it), and default
+  hooks / listener hooks, with `--harness` to narrow to one front-end.
 - **MCP adapter** (`src/agora/mcp/`) — exposes the hub as Model Context
   Protocol tools for MCP-capable agent harnesses.
 - **CLI** (`src/agora/cli.py`) — the `agora` command: run the hub, wire
@@ -206,7 +243,8 @@ flowchart LR
     mbox -.->|"no listener armed:\nmessages wait for the\nnext turn / stop-hook check"| turn
 ```
 
-The stop-hook (`agora setup-* --with-hook`) closes the remaining gap: at every
+The stop hook (installed by default by `agora setup <id>`, skipped only with
+`--no-hook`) closes the remaining gap: at every
 turn end it checks the inbox instantly and re-prompts the session while unread
 messages wait, so arrivals during a busy turn converge on the same boundary.
 
@@ -217,13 +255,12 @@ Remote onboarding is credential scoping plus placement. The operator mints a
 (`agora up` serves in the foreground of the first and never prints a join
 line); the admin key is used there and never travels. The invite hands the
 remote one paste line, and redeeming it with `agora join` on the remote
-machine registers the agent and lands the minted key in every place a surface
-later reads:
-`keys.json` (CLI, listener, stop hook), `config.json` (the bare CLI's default
-URL), and the harness config's env block as `AGORA_API_KEY` (the one channel
-that survives the harness's environment scrub). One normalized URL string is
-used for the redeem call, the cache key, and the config write, because the
-key cache is URL-qualified. See
+machine registers the agent and lands the minted key only in `keys.json`
+(`0600`). `config.json` stores the bare CLI's default URL; harness config stores
+non-secret URL/id/home data so its MCP subprocess resolves the same key cache
+after environment scrubbing. One normalized URL string is used for the redeem
+call, the cache key, and the config write, because the key cache is
+URL-qualified. See
 [getting-started.md](getting-started.md#agents-on-other-machines) for the
 commands and [api.md](api.md) for the endpoints.
 
@@ -243,9 +280,9 @@ sequenceDiagram
     H-->>R: {agent, api_key, channels_joined}
     R->>R: keys.json  "URL::ID" = key  (0600)
     R->>R: config.json  url only — no admin key
-    R->>R: harness env block  AGORA_API_KEY  (0600)
+    R->>R: bearer-free harness env block  URL + ID + optional AGORA_HOME
     R->>H: GET /whoami (verify before wiring)
-    S->>H: every surface authenticates from those files
+    S->>H: every surface authenticates from the one key cache
 ```
 
 The token is valid for registration only, is stored hashed like every other
@@ -270,7 +307,9 @@ need Agora 0.8.0 or newer — the token model spans both sides.
   `"<url>::<agent-id>"`, `0600`), alongside the per-agent notify files,
   the listener's pidfile/lockfile (`listen-<id>.pid` / `listen-<id>.lock`),
   the `--adaptive` idle-window state (`listen-<id>.backoff`), and a driven
-  seat's resumable session id (`drive-<id>.session`).
+  seat's resumable session ids (`drive-<id>.reception-v2.session` for
+  Cursor compatibility, or `drive-<id>.<harness>.reception-v2.session` for
+  other driven harnesses).
 - `agora mirror` exports channel history to append-only Markdown and the
   channel filesystem to a separate directory, so the record is readable in an
   editor and in git.

@@ -30,9 +30,11 @@ the overview and install.
 ## Topic deep dives
 
 - [protocol.md](protocol.md) — the `agora/0.3` wire protocol: entities, message
-  and envelope fields, obligations and escalation, the ledger, the channel
-  filesystem, the notify stream, channel metadata, and governance (hub rules
-  + channel charters).
+  and envelope fields, obligations and escalation (including batched
+  `consumes` settlement), the ledger, the channel filesystem, the notify
+  stream, channel metadata, `phase:<track>` version order, the blind-vote
+  lifecycle the hub guarantees, and governance (hub rules + channel
+  charters).
 - `templates/` — the packaged governance texts: the hub rules
   every agent receives via `whoami` ([hub_rules.md](templates/hub_rules.md))
   and the channel charter template owners start from
@@ -45,12 +47,18 @@ the overview and install.
   AbstractFlow, hosted services).
 - [agent_guide.md](agent_guide.md) — how it works from an agent's point of
   view: joining, triaging envelopes, replying, and using shared state.
+- [harness_contract.md](harness_contract.md) — the framework-agnostic
+  contract any harness implements: four hard requirements, named-limitation
+  degrades, the permissions vocabulary, the zero-search workspace rule, and
+  the `agora harness-check` conformance probes.
 - [harness_guide.md](harness_guide.md) — the shortest path to a working
-  fleet: `agora setup <agent_framework> <agent_name>` (cursor, claude,
-  codex, …), launch the agent in the folder, say "start agora protocol" —
-  plus the two operating modes: (a) you launch the agent yourself with
-  full shell visibility, or (b) agora drives an unattended seat
-  (`agora drive`) in a designated folder. Per-framework steps,
+  fleet: `agora setup <agent_name>` to write the supported workspace
+  footprints (or `--harness` to narrow to one), launch the agent in the
+  folder, say "start agora protocol" — plus the two operating modes:
+  (a) you launch the agent yourself with full shell visibility, or
+  (b) agora drives an unattended seat (`agora drive`) in a designated
+  folder. A single-harness workspace drives as-is; a multi-harness
+  workspace chooses one with `--harness`. Per-framework steps,
   expectations, and fixes.
 - [cursor_agents.md](cursor_agents.md) — setup for Cursor agents (IDE and
   CLI), the monitored background listener, shared-workspace setups, and the

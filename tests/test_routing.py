@@ -17,10 +17,10 @@ import json
 import time
 from pathlib import Path
 
-import pytest
 from fastapi.testclient import TestClient
 
 from agora.hub.app import create_app
+from agora.hub.service import CHANNEL_META_KEY
 from agora.listen import qualifies
 
 ADMIN_KEY = "test-admin"
@@ -33,8 +33,9 @@ def make_client(tmp_path: Path) -> TestClient:
     return TestClient(app)
 
 
-def register(client: TestClient, agent_id: str) -> dict[str, str]:
-    r = client.post("/agents", json={"id": agent_id},
+def register(client: TestClient, agent_id: str,
+             operator: bool = False) -> dict[str, str]:
+    r = client.post("/agents", json={"id": agent_id, "operator": operator},
                     headers={"Authorization": f"Bearer {ADMIN_KEY}"})
     return {"Authorization": f"Bearer {r.json()['api_key']}"}
 
@@ -43,7 +44,7 @@ def make_public_channel(client: TestClient, owner: dict, name: str,
                         *members: dict) -> None:
     client.post("/channels", json={"name": name, "private": False},
                 headers=owner)
-    for member in members:
+    for member in (owner, *members):
         client.post(f"/channels/{name}/join", json={}, headers=member)
 
 
@@ -79,29 +80,115 @@ def test_old_hubs_without_the_flag_keep_room_wide_wakes():
     assert qualifies(legacy, "me", important_only=True)
 
 
-def test_noticeboard_roots_are_typed_and_idempotent(tmp_path):
+def test_notice_is_optional_metadata_never_a_licence_to_speak(tmp_path):
+    """A typed notice buys IDEMPOTENCY, never permission.
+
+    0.12.55 made it permission: on a noticeboard channel an agent could not
+    open a question, report a problem, or say `blocked` — only the operator
+    could speak, and only a formal vote woke the room. That inverted the
+    hub's standing principle (light safeguards, never silent, never blocking)
+    on the one room built for open dialogue. These are the shapes that must
+    always be deliverable.
+    """
     client = make_client(tmp_path)
     alice = register(client, "alice")
     bob = register(client, "bob")
     make_public_channel(client, alice, "commons", bob)
+    # Make it a board explicitly — even then, speech is never gated. A traffic
+    # policy is an OPERATOR decision (hub-created commons has no owner row).
+    operator = register(client, "laurent", operator=True)
+    client.post("/channels/commons/join", json={}, headers=operator)
+    assert client.put(f"/channels/commons/store/{CHANNEL_META_KEY}",
+                      json={"value": {"traffic_policy": "noticeboard"}},
+                      headers=operator).status_code == 200
 
-    noisy = client.post("/channels/commons/messages",
-                        json={"body": "reception pass (no delta)"}, headers=bob)
-    assert noisy.status_code == 400
-    assert "noticeboard" in noisy.json()["detail"]
+    for body, extra in (
+        ("hey team, anyone seen the flaky test?", {"status": "fyi"}),
+        ("seam v2 breaks v1 writes — how should we sequence it?",
+         {"status": "open"}),
+        ("I'm stuck on the airelays key", {"status": "blocked"}),
+        ("problem: the RC has a wake regression",
+         {"status": "open", "notice": {"kind": "problem", "key": "wake-reg"}}),
+    ):
+        posted = client.post("/channels/commons/messages",
+                             json={"body": body, **extra}, headers=bob)
+        assert posted.status_code == 200, (body, posted.text)
 
     payload = {"body": "release is available", "status": "fyi",
                "notice": {"kind": "delivery", "key": "agora-0.13.0"}}
     first = client.post("/channels/commons/messages", json=payload, headers=bob)
     assert first.status_code == 200
+    # Same sender, same key = a true retry, still deduped.
     duplicate = client.post("/channels/commons/messages", json=payload, headers=bob)
     assert duplicate.status_code == 409
     assert "duplicate notice" in duplicate.json()["detail"]
 
+    # A DIFFERENT seat reusing a natural key is NOT silenced: event keys
+    # ("week-30", "ci-red", "release") collide trivially, and refusing the
+    # second seat destroyed its words to protect a cosmetic invariant.
+    cross_sender = client.post("/channels/commons/messages", json=payload,
+                               headers=alice)
+    assert cross_sender.status_code == 200, cross_sender.text
+
+    # Every member may add a substantive answer/update to a commons thread.
     reply = client.post("/channels/commons/messages",
-                        json={"body": "received", "status": "reply",
+                        json={"body": "gateway verification is green",
+                              "status": "reply",
                               "reply_to": first.json()["id"]}, headers=alice)
     assert reply.status_code == 200
+
+
+def test_noticeboard_supports_all_public_notice_categories(tmp_path):
+    client = make_client(tmp_path)
+    alice = register(client, "alice")
+    bob = register(client, "bob")
+    make_public_channel(client, alice, "commons", bob)
+
+    for kind in ("job", "announcement", "problem", "resolution",
+                 "consensus", "milestone", "delivery"):
+        posted = client.post(
+            "/channels/commons/messages",
+            json={"body": f"{kind} update", "status": "fyi",
+                  "notice": {"kind": kind, "key": f"public-{kind}-1"}},
+            headers=bob,
+        )
+        assert posted.status_code == 200, (kind, posted.text)
+
+
+def test_fresh_hub_commons_is_an_open_floor_not_a_board(tmp_path):
+    """commons exists on a fresh hub, and carries NO traffic_policy.
+
+    The hub used to stamp `noticeboard` on it at boot. Because the room is
+    hub-created it also has no owner row, and channel metadata was
+    owner-writable only — so the policy was unwritable by ANYONE on every
+    fresh deployment, and commons was permanently un-openable.
+    """
+    client = make_client(tmp_path)
+    service = client.app.state.service
+    channel = service.db.get_channel("commons")
+    assert channel is not None
+    assert channel.private is False
+    meta = service.db.store_get("commons", CHANNEL_META_KEY)
+    assert meta is None or "traffic_policy" not in (meta.value or {})
+
+    # And an ordinary member can just talk there.
+    alice = register(client, "alice")
+    client.post("/channels/commons/join", json={}, headers=alice)
+    spoken = client.post("/channels/commons/messages",
+                         json={"body": "found a bug, who wants to plan it?",
+                               "status": "open"}, headers=alice)
+    assert spoken.status_code == 200, spoken.text
+
+
+def test_operator_can_always_write_channel_metadata(tmp_path):
+    """An ownerless hub-created room must not lock the human out."""
+    client = make_client(tmp_path)
+    operator = register(client, "laurent", operator=True)
+    client.post("/channels/commons/join", json={}, headers=operator)
+    wrote = client.put(f"/channels/commons/store/{CHANNEL_META_KEY}",
+                       json={"value": {"traffic_policy": "noticeboard"}},
+                       headers=operator)
+    assert wrote.status_code == 200, wrote.text
 
 
 def test_noticeboard_votes_must_be_canonical(tmp_path):
@@ -112,6 +199,13 @@ def test_noticeboard_votes_must_be_canonical(tmp_path):
     alice = register(client, "alice")
     bob = register(client, "bob")
     make_public_channel(client, alice, "commons", bob)
+    # Vote WELL-FORMEDNESS is checked on board channels (where a vote root is
+    # the obliging shape). It is payload validation, never a speech gate.
+    operator = register(client, "laurent", operator=True)
+    client.post("/channels/commons/join", json={}, headers=operator)
+    assert client.put(f"/channels/commons/store/{CHANNEL_META_KEY}",
+                      json={"value": {"traffic_policy": "noticeboard"}},
+                      headers=operator).status_code == 200
 
     fake = client.post("/channels/commons/messages",
                        json={"body": "spam", "status": "open",
@@ -150,6 +244,35 @@ def test_noticeboard_votes_must_be_canonical(tmp_path):
                        headers=bob)
     assert real.status_code == 200
 
+    result = client.post(
+        "/channels/commons/messages",
+        json={"body": "redis wins", "status": "resolved",
+              "reply_to": real.json()["id"],
+              "data": {"vote_result": {"topic": "pick a queue backend",
+                                         "options": ["redis", "sqlite"],
+                                         "ballots": {}, "total_members": 2,
+                                         "closed": "deadline reached"}}},
+        headers=bob,
+    )
+    assert result.status_code == 200
+    forged_result = client.post(
+        "/channels/commons/messages",
+        json={"body": "forged result", "status": "resolved",
+              "reply_to": real.json()["id"],
+              "data": {"vote_result": {"closed": "forged"}}},
+        headers=alice,
+    )
+    assert forged_result.status_code == 400
+    assert "only the vote chair" in forged_result.json()["detail"]
+    duplicate_result = client.post(
+        "/channels/commons/messages",
+        json={"body": "redis wins again", "status": "resolved",
+              "reply_to": real.json()["id"],
+              "data": {"vote_result": {"closed": "deadline reached"}}},
+        headers=bob,
+    )
+    assert duplicate_result.status_code == 409
+
     # Same canonical vote, same tag, reposted: the dedupe key holds.
     again = client.post("/channels/commons/messages",
                         json={"body": payload["body"], "title": payload["title"],
@@ -184,13 +307,16 @@ def test_retraction_releases_the_notice_key(tmp_path):
 def test_noticeboard_policy_survives_unrelated_meta_edits(tmp_path):
     client = make_client(tmp_path)
     alice = register(client, "alice")
-    client.post("/channels", json={"name": "commons", "private": False},
+    client.post("/channels", json={"name": "board", "private": False},
                 headers=alice)
-    changed = client.put("/channels/commons/store/channel%3Ameta",
+    client.put("/channels/board/store/channel%3Ameta",
+               json={"value": {"traffic_policy": "noticeboard"}},
+               headers=alice)
+    changed = client.put("/channels/board/store/channel%3Ameta",
                          json={"value": {"purpose": "fleet decisions"}},
                          headers=alice)
     assert changed.status_code == 200
-    info = client.get("/channels/commons/info", headers=alice).json()
+    info = client.get("/channels/board/info", headers=alice).json()
     assert info["meta"]["purpose"] == "fleet decisions"
     assert info["meta"]["traffic_policy"] == "noticeboard"
 
@@ -333,6 +459,73 @@ def test_third_seat_sixth_message_draws_one_fork_nudge(tmp_path):
     nudges = [m for m in hist if m["kind"] == "system"
               and "outgrown the noticeboard" in (m["body"] or "")]
     assert len(nudges) == 1
+
+
+def test_orchestrated_fan_out_never_draws_the_fork_nudge(tmp_path):
+    """One seat fanning ADDRESSED asks out and the named seats answering
+    back in is orchestration WORKING (0140 field test 2): the nudge fired on
+    that shape, and its fork cost five blocked seats and put the artifact
+    owner outside the room. The nudge is for UNADDRESSED sprawl."""
+    client = make_client(tmp_path)
+    a = register(client, "alice")
+    seats = [register(client, f"seat{i}") for i in range(7)]
+    crowd = [register(client, f"lurker{i}") for i in range(3)]
+    make_public_channel(client, a, "board", *seats, *crowd)
+    names = [f"seat{i}" for i in range(7)]
+    root = client.post("/channels/board/messages",
+                       json={"body": "v7 review: each of you take your lane",
+                             "title": "v7 review", "status": "open",
+                             "to": names}, headers=a).json()
+    for i, who in enumerate(seats):
+        r = client.post("/channels/board/messages",
+                        json={"body": f"lane {i} done", "status": "reply",
+                              "reply_to": root["id"]}, headers=who)
+        assert r.status_code == 200
+    hist = client.get("/channels/board/messages", headers=a).json()
+    assert not any("outgrown the noticeboard" in (m["body"] or "")
+                   for m in hist if m["kind"] == "system")
+
+
+def test_unaddressed_sprawl_still_draws_the_fork_nudge(tmp_path):
+    """The other shape, unchanged: a root that names nobody plus a
+    many-to-many pile-on is what the nudge exists for."""
+    client = make_client(tmp_path)
+    a = register(client, "alice")
+    seats = [register(client, f"seat{i}") for i in range(7)]
+    crowd = [register(client, f"lurker{i}") for i in range(3)]
+    make_public_channel(client, a, "board", *seats, *crowd)
+    root = client.post("/channels/board/messages",
+                       json={"body": "thoughts on the queue tiers?",
+                             "title": "queue tiers", "status": "open"},
+                       headers=a).json()
+    for i, who in enumerate(seats[:5]):
+        client.post("/channels/board/messages",
+                    json={"body": f"opinion {i}", "status": "reply",
+                          "reply_to": root["id"]}, headers=who)
+    hist = client.get("/channels/board/messages", headers=a).json()
+    assert sum(1 for m in hist if m["kind"] == "system"
+               and "outgrown the noticeboard" in (m["body"] or "")) == 1
+
+
+def test_one_addressed_ask_does_not_exempt_a_room_wide_pile_on(tmp_path):
+    """Addressing ONE seat is not the orchestrator shape: six other seats
+    piling in unaddressed is exactly the sprawl the nudge is for."""
+    client = make_client(tmp_path)
+    a = register(client, "alice")
+    seats = [register(client, f"seat{i}") for i in range(7)]
+    crowd = [register(client, f"lurker{i}") for i in range(3)]
+    make_public_channel(client, a, "board", *seats, *crowd)
+    root = client.post("/channels/board/messages",
+                       json={"body": "seat0, can you take this?",
+                             "title": "the queue", "status": "open",
+                             "to": ["seat0"]}, headers=a).json()
+    for i, who in enumerate(seats[1:6]):
+        client.post("/channels/board/messages",
+                    json={"body": f"unasked opinion {i}", "status": "reply",
+                          "reply_to": root["id"]}, headers=who)
+    hist = client.get("/channels/board/messages", headers=a).json()
+    assert sum(1 for m in hist if m["kind"] == "system"
+               and "outgrown the noticeboard" in (m["body"] or "")) == 1
 
 
 def test_private_groups_and_small_rooms_never_get_nudged(tmp_path):

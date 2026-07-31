@@ -217,11 +217,22 @@ def test_non_reply_statuses_stand_alone(service, team):
         assert m.reply_to is None
 
 
-def test_blocked_requires_structured_ask_and_explicit_addressee(service, team):
+def test_blocked_is_never_refused(service, team):
+    """"I am stuck" is the single most important escalation gesture in the
+    system, so it is always delivered.
+
+    It used to require BOTH a structured ask and an explicit addressee, which
+    made a plain "boss, I'm blocked on the schema ruling" a 400 — even in a
+    two-party DM, where the addressee is structurally the only other party. The
+    structured form is better and is what the rules teach; the hub teaches it
+    with a non-waking sender doorbell rather than by refusing to carry the
+    message.
+    """
     alice, bob = team
-    with pytest.raises(HubError, match="structured ask"):
-        service.post_message(alice, "design", PostMessage(
-            status=Status.blocked, body="parked"))
+    bare = service.post_message(alice, "design", PostMessage(
+        status=Status.blocked, body="stuck on the airelays key"))
+    assert bare.status == Status.blocked
+
     m = service.post_message(alice, "design", PostMessage(
         status=Status.blocked, body="need a decision", to=[bob.id],
         asks=[{"id": "1", "text": "choose the compatible schema?"}]))

@@ -43,8 +43,9 @@ and 3.13 (see `.github/workflows/ci.yml`).
 - `src/agora/listen.py` — the session-resident listener (`agora listen`,
   the single-shot the background reception shell loops + the adaptive
   backoff).
-- `src/agora/setup_harness.py` — the `setup-cursor|claude|codex` generators
-  (rule text, hooks, kickoff prompt).
+- `src/agora/setup_harness.py` — the workspace harness generators behind
+  `agora setup` / `agora join` (rule text, hooks, kickoff prompt, harness
+  detection, secret safety).
 - `src/agora/governance.py` — the packaged hub-rules and charter texts.
 - `src/agora/summarize.py` — the client-side situation summarizer.
 - `src/agora/chat.py` / `chat_render.py` — the human `agora chat` REPL.

@@ -26,9 +26,12 @@ Configuration (environment, all optional if `agora up` has run):
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata
+import json
 import os
 import sys
 import threading
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -38,6 +41,8 @@ from ..render import render_envelopes as _render_envelopes
 from ..render import render_messages as _render_messages
 from ..vote import (VOTE_DATA_KEY, VoteChair, build_vote_post,
                     vote_operation, watch_votes)
+from .runtime import (MCP_SELF_CHECK_COMPONENT, MCP_SELF_CHECK_FLAG,
+                      SUPPORTED_MCP_SDK, supports_mcp_sdk)
 
 
 def _download_root() -> "Path":
@@ -45,7 +50,6 @@ def _download_root() -> "Path":
     override (AGORA_DOWNLOAD_DIR) else ~/.agora/downloads/<agent>. The
     root is where UNTRUSTED bytes from other agents may land, and nowhere
     else."""
-    from pathlib import Path
     env = os.environ.get("AGORA_DOWNLOAD_DIR", "").strip()
     if env:
         return Path(env).expanduser()
@@ -65,7 +69,6 @@ def _confined_download_target(download_path: str, attachment_id: str) -> "Path":
     - the fully-resolved target (symlinks included) must stay within the
       resolved root, else refuse.
     Pure except for resolve(); testable with a tmp root via the env var."""
-    from pathlib import Path
     root = _download_root().resolve()
     name = (download_path or "").strip() or attachment_id
     # Strip any leading separators/drive so join cannot escape upward; the
@@ -107,9 +110,10 @@ def stale_banner_text(hub_version: str, client_version: str) -> str:
             f"{client_version} and keeps that code. Newer message fields "
             f"(e.g. attachments) may be MISSING from these renders and "
             f"newer tools absent — do not treat absence here as absence in "
-            f"the record. Restart the session/MCP server to upgrade; until "
-            f"then the `agora` CLI (which runs current code) is the "
-            f"reliable read path.\n\n")
+            f"the record. Stop this turn and report AGORA_MCP_STALE; restart "
+            f"the session/MCP server before reading or acting on these "
+            f"renders. Do not use the Agora CLI or direct HTTP as a "
+            f"substitute.\n\n")
 
 
 def run_coro_blocking(coro) -> Any:
@@ -205,20 +209,36 @@ def _resolve_credentials() -> tuple[str, str]:
     raise SystemExit(f"self-registration failed: {r.status_code} {r.text}")
 
 
-def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cover - thin wiring, exercised manually
+def _load_fastmcp():
+    try:
+        found = importlib.metadata.version("mcp")
+    except importlib.metadata.PackageNotFoundError:
+        found = "not installed"
+    if not supports_mcp_sdk(found):
+        raise SystemExit(
+            "agora-mcp runtime is incompatible: Agora requires the MCP "
+            f"Python SDK {SUPPORTED_MCP_SDK}, found {found!r}. Fix: "
+            "`uv tool install --force --reinstall agorahub` (or `pipx "
+            "reinstall agorahub`), then restart agent sessions."
+        )
     try:
         from mcp.server.fastmcp import FastMCP
-    except ModuleNotFoundError as exc:
+    except (ImportError, ModuleNotFoundError) as exc:
         # The MCP SDK is a CORE dependency since 0.12.5 (it was an opt-in
         # extra before; that default froze the fleet twice when a reinstall
-        # dropped it). If this import fails the install itself is broken or
-        # predates 0.12.5. Fail with the fix, not a bare traceback in the
-        # harness's MCP logs.
+        # dropped it). SDK 2.x also removed this API. Name the ACTUAL contract
+        # failure instead of treating an incompatible installed major as a
+        # missing package.
         raise SystemExit(
-            "agora-mcp cannot import the MCP SDK, so this install is broken "
-            "or outdated (the SDK ships with agorahub since 0.12.5). Fix: "
+            "agora-mcp runtime is incompatible: Agora requires the MCP "
+            f"Python SDK {SUPPORTED_MCP_SDK} FastMCP API, found {found!r}. Fix: "
             "`uv tool install --force --reinstall agorahub` (or `pipx "
             "reinstall agorahub`), then restart agent sessions.") from exc
+    return FastMCP
+
+
+def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cover - thin wiring, exercised manually
+    FastMCP = _load_fastmcp()
 
     base_url, api_key = credentials or _resolve_credentials()
 
@@ -369,6 +389,7 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
                 urgency: str = "inbox", reply_to: str | None = None,
                 asks: list[dict] | None = None,
                 answers: list[str] | None = None,
+                consumes: list[str] | None = None,
                 attachments: list[dict] | None = None) -> dict:
         """Send a private 1:1 message to another agent (the direct channel is
         created automatically on first use; nobody else can ever join it).
@@ -383,7 +404,8 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
         return _call("POST", f"/dms/{peer}/messages", json={
             "body": body, "title": title, "status": status,
             "urgency": urgency, "reply_to": reply_to,
-            "asks": asks, "answers": answers, "attachments": attachments,
+            "asks": asks, "answers": answers, "consumes": consumes,
+            "attachments": attachments,
         })
 
     @mcp.tool()
@@ -399,6 +421,7 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
                      reply_to: str | None = None, critical: bool = False,
                      asks: list[dict] | None = None,
                      answers: list[str] | None = None,
+                     consumes: list[str] | None = None,
                      attachments: list[dict] | None = None,
                      notice_kind: str = "", notice_key: str = "") -> dict:
         """Post to a channel you belong to.
@@ -419,21 +442,29 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
               partial reply no longer silently closes it.
         answers: on a reply, the ask ids you are discharging, e.g. ["1"]. Say which
                  asks you answered so the sender's obligation state is exact.
+        consumes: consumption debts THIS ONE message settles — the answers you
+                 have now read and used, as ["commons#412", "commons#418", ...]
+                 or message ids (thread roots settle every unconsumed answer in
+                 them). One message, N debts cleared: posting a separate
+                 "adopted and consumed" receipt per thread is the anti-pattern
+                 this replaces. A ref you owe no consumption for is refused
+                 by name, and nothing is posted.
         attachments: refs to blobs already uploaded to THIS channel, e.g.
                      [{"id": "<sha256 from put_attachment>", "filename": "spec.pdf"}].
                      Recipients get the refs in every envelope and fetch bytes
                      with read_attachment.
         notice_kind/notice_key: required together for a noticeboard root;
-                     kind is job, consensus, milestone, or delivery, and key
-                     is a stable event id. Retrying the same pair is refused.
+                     kind is job, announcement, problem, resolution,
+                     consensus, milestone, or delivery, and key is a stable
+                     event id. Retrying the same pair is refused.
         """
         notice = ({"kind": notice_kind, "key": notice_key}
                   if notice_kind or notice_key else None)
         return _call("POST", f"/channels/{channel}/messages", json={
             "body": body, "title": title, "status": status, "urgency": urgency,
             "to": to or [], "reply_to": reply_to, "critical": critical,
-            "asks": asks, "answers": answers, "attachments": attachments,
-            "notice": notice,
+            "asks": asks, "answers": answers, "consumes": consumes,
+            "attachments": attachments, "notice": notice,
         })
 
     @mcp.tool()
@@ -445,7 +476,6 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
         Idempotent: identical bytes yield the same id. content_type defaults
         from the filename extension; it is display metadata, never trusted."""
         import mimetypes
-        from pathlib import Path
         p = Path(file_path).expanduser()
         data = p.read_bytes()
         declared = content_type or mimetypes.guess_type(p.name)[0] \
@@ -468,7 +498,6 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
         `..`, or a symlink out) is REFUSED — an injected message must never
         be able to write to `.cursor/rules/`, `~/.ssh/`, or a shell rc.
         Omit it to save under the id."""
-        from pathlib import Path
         r = http.get(f"/channels/{channel}/attachments/{attachment_id}")
         if r.status_code >= 400:
             try:
@@ -489,7 +518,8 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
                 "declared_content_type": r.headers.get("x-declared-content-type", ""),
                 "id": r.headers.get("x-attachment-id", attachment_id)}
 
-    def _run_vote_op(channel: str, message_id: str, *, close: bool) -> dict:
+    def _run_vote_op(channel: str, message_id: str, *, close: bool,
+                     force: bool = False) -> dict:
         """Bridge the sync tool surface to the async vote logic with a
         per-call client."""
         from ..client import AgoraClient
@@ -499,7 +529,7 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
             try:
                 me = (await client.whoami())["id"]
                 return await vote_operation(client, me, channel, message_id,
-                                            close=close)
+                                            close=close, force=force)
             finally:
                 await client.close()
         try:
@@ -542,16 +572,25 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
     @mcp.tool()
     def tally_vote(channel: str, message_id: str) -> dict:
         """State of a vote (message_id of the vote message). As the chair
-        you get live counts, ballots, and who is still waiting — and a
-        finished vote publishes on sight. As a voter you get the blind
-        notice until the result is published, then the published result."""
+        you get live counts, ballots, who is still waiting, and
+        `rejected_ballots` — ballots that arrived unreadable and were
+        bounced back to their voters by DM. Read that number before
+        concluding anything from a low count: zero ballots and N unreadable
+        ballots are different rooms. A finished vote publishes on sight.
+        As a voter you get the blind notice until the result is published."""
         return _run_vote_op(channel, message_id, close=False)
 
     @mcp.tool()
-    def close_vote(channel: str, message_id: str) -> dict:
+    def close_vote(channel: str, message_id: str, force: bool = False) -> dict:
         """Close a vote YOU opened, publishing the full result (counts and
-        roll call) to the channel now instead of waiting for the deadline."""
-        return _run_vote_op(channel, message_id, close=True)
+        roll call) to the channel now instead of waiting for the deadline.
+        The window you announced BINDS you: while it is still running and
+        any eligible seat has not balloted, this is refused (409) naming the
+        time left and how many are unheard — you do not need to close at
+        all, the result auto-publishes at the deadline or full turnout.
+        force=true overrides and stamps the published result 'CLOSED EARLY
+        BY THE CHAIR' with the amount of window cut."""
+        return _run_vote_op(channel, message_id, close=True, force=force)
 
     @mcp.tool()
     def read_ledger(channel: str) -> dict:
@@ -579,6 +618,27 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
         return (_stale_banner() + _render_messages(result)
                 ) if isinstance(result, list) else str(result)
 
+    def _phase_block(owed: dict) -> list[str]:
+        """Open phase declarations, ABOVE the debt block (0140/2). A seat
+        that starts next-phase work during the current one is not lurking —
+        it never learned which version was live. This is the line that tells
+        it, on every reception pass, before it picks anything up."""
+        phases = owed.get("phases") or []
+        if not phases:
+            return []
+        lines = ["PHASE ORDER IN FORCE (do not start the next phase until the "
+                 "steward declares this one complete):"]
+        for row in phases[:8]:
+            nxt = f" (next: {row['next']})" if row.get("next") else ""
+            who = f" · steward {row['steward']}" if row.get("steward") else ""
+            paths = (f" · governs {', '.join(row['paths'][:4])}"
+                     if row.get("paths") else "")
+            lines.append(f"- {row['channel']} {row['key']}: "
+                         f"{row['current']} OPEN{nxt}{who}{paths}")
+        if len(phases) > 8:
+            lines.append(f"  … +{len(phases) - 8} more — GET /owed for all")
+        return lines + [""]
+
     def _owed_header() -> str:
         """The debt block that leads every inbox render (anti-lurk, 0079):
         the woken turn must start knowing what it OWES, not just what
@@ -589,10 +649,12 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
             counts = owed.get("counts", {})
         except Exception:
             return ""
+        phase_lines = _phase_block(owed)
         if not (counts.get("to_answer") or counts.get("to_consume")
                 or counts.get("to_close")):
-            return ""
-        lines = ["YOU OWE (settle these before new work; ack clears none of it):"]
+            return ("\n".join(phase_lines) + "\n") if phase_lines else ""
+        lines = phase_lines + [
+            "YOU OWE (settle these before new work; ack clears none of it):"]
         to_answer = owed.get("to_answer", [])
         for row in to_answer[:10]:
             naming = (f" asks naming you: {row['asks_naming_you']}"
@@ -891,6 +953,22 @@ def _start_vote_watcher(base_url: str, api_key: str) -> None:  # pragma: no cove
 
 
 def main() -> None:  # pragma: no cover
+    if sys.argv[1:] == [MCP_SELF_CHECK_FLAG]:
+        _load_fastmcp()
+        from .. import __version__ as agora_version
+        print(json.dumps({
+            "component": MCP_SELF_CHECK_COMPONENT,
+            "status": "ok",
+            "agora": agora_version,
+            "mcp_sdk": importlib.metadata.version("mcp"),
+            "api": "mcp.server.fastmcp.FastMCP",
+        }))
+        return
+    if sys.argv[1:]:
+        raise SystemExit(
+            "usage: agora-mcp [--self-check] (normal operation uses MCP "
+            "over stdin/stdout)"
+        )
     credentials = _resolve_credentials()
     server = build_server(credentials)
     _start_vote_watcher(*credentials)

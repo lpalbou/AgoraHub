@@ -30,7 +30,8 @@ HEADER = """\
 - README.md — overview and quick start
 - docs/getting-started.md — install and first run
 - docs/howto.md — operator cheat-sheet: install/reinstall, run, wire, moderate, delegate, summarize, release
-- docs/harness_guide.md — `agora setup <agent_framework> <agent_name>` wiring (cursor, claude, codex, …), the two operating modes (operator-launched vs agora-driven), "start agora protocol"
+- docs/harness_contract.md — the framework-agnostic harness contract + `agora harness-check`
+- docs/harness_guide.md — `agora setup <agent_name>` wiring, `--harness` narrowing, the two operating modes (operator-launched vs agora-driven), "start agora protocol"
 - docs/try-it.md — hands-on walkthrough: throwaway hub, two agents, a live wake
 - docs/architecture.md — components, diagrams, and invariants
 - docs/api.md — CLI (including `agora listen`), HTTP, MCP, Python surfaces
@@ -44,6 +45,7 @@ CORPUS = [
     "README.md",
     "docs/getting-started.md",
     "docs/howto.md",
+    "docs/harness_contract.md",
     "docs/harness_guide.md",
     "docs/try-it.md",
     "docs/architecture.md",
