@@ -30,6 +30,7 @@ from __future__ import annotations
 import base64
 import json
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -227,11 +228,25 @@ def _detail(response) -> str:
 # -- remote side: the one-paste join ----------------------------------------------
 
 
+def check_id_pin(agent_id: str | None, pinned_id: str | None) -> None:
+    """The one client-side identity refusal, knowable from the artifact alone.
+
+    Lives here (not inline in the caller) because BOTH the CLI front door and
+    `run_join` must raise the identical refusal, and it must fire before
+    anything touches the network OR this folder: who you are is not a fact
+    about your workspace."""
+    if pinned_id and agent_id and agent_id != pinned_id:
+        raise SystemExit(f"this artifact is locked to '{pinned_id}' — drop "
+                         f"--as, or ask the operator for an --any-id invite.")
+
+
 def run_join(url: str, token: str, agent_id: str | None, about: str,
-             harness: str | tuple[str, ...], workspace: str, with_hook: bool, listen: bool,
+             harness: str | tuple[str, ...] | None, workspace: str,
+             with_hook: bool, listen: bool,
              mcp_command: str, pinned_id: str | None = None,
              expires_hint: float | None = None,
-             vendor_bootstrap: bool = False) -> JoinResult:
+             vendor_bootstrap: bool = False,
+             harness_resolver: Callable[[], tuple[str, ...]] | None = None) -> JoinResult:
     """The whole remote onboarding, fail-loud at each step:
     redeem -> cache key -> pin url -> verify -> wire workspace [-> listen].
 
@@ -239,10 +254,16 @@ def run_join(url: str, token: str, agent_id: str | None, about: str,
     key skips redemption and only re-wires (a repair, not an error). The url
     arrives normalized (rstripped once at decode/dispatch) and that ONE string
     is used for the POST, the keys.json entry and config.json — the three
-    lookups every surface later performs."""
-    if pinned_id and agent_id and agent_id != pinned_id:
-        raise SystemExit(f"this artifact is locked to '{pinned_id}' — drop "
-                         f"--as, or ask the operator for an --any-id invite.")
+    lookups every surface later performs.
+
+    Ordering contract (CI-caught, 0.13.1): identity is settled BEFORE workspace
+    wiring. A pin conflict, a revoked token or an unreachable hub must report
+    itself as such — never as "no harness footprint here" — so when the caller
+    cannot name the harness upfront it passes `harness_resolver` and we resolve
+    (detect/prompt/refuse) only once the token has actually redeemed. An
+    EXPLICIT selection still preflights and probes before redemption, so a
+    broken runtime never burns a single-use invite."""
+    check_id_pin(agent_id, pinned_id)
     # The id may be unknown upfront (raw --token form, pinned server-side):
     # then the redeem response names it. When it IS known, a cached key
     # short-circuits redemption (re-running a burned artifact = repair).
@@ -255,13 +276,14 @@ def run_join(url: str, token: str, agent_id: str | None, about: str,
     if not workspace_path.is_dir():
         raise SystemExit(f"workspace not found: {workspace_path}")
     from . import setup_harness as _sh
-    harnesses = (harness if isinstance(harness, tuple)
-                 else _sh.expand_harness_selection(harness, allow_none=True))
-    try:
-        _sh.preflight_workspace_harnesses(workspace_path, harnesses)
-    except ValueError as exc:
-        raise SystemExit(f"agora join: {exc}") from exc
-    if harnesses:
+
+    def _preflight(selected: tuple[str, ...]) -> None:
+        try:
+            _sh.preflight_workspace_harnesses(workspace_path, selected)
+        except ValueError as exc:
+            raise SystemExit(f"agora join: {exc}") from exc
+
+    def _probe_runtime() -> None:
         probe = probe_mcp_runtime(mcp_command)
         if not probe.ok:
             action = (
@@ -275,6 +297,21 @@ def run_join(url: str, token: str, agent_id: str | None, about: str,
                 "redemption\n" + format_probe_failure(probe, action=action)
             )
 
+    deferred = harness is None
+    if deferred:
+        if harness_resolver is None:
+            raise SystemExit("agora join: internal — a deferred harness "
+                             "selection needs a resolver")
+        harnesses: tuple[str, ...] = ()
+    else:
+        harnesses = (harness if isinstance(harness, tuple)
+                     else _sh.expand_harness_selection(harness, allow_none=True))
+        # A named harness is checkable now, so the invite is never spent on a
+        # workspace or a runtime that could not have been wired anyway.
+        _preflight(harnesses)
+        if harnesses:
+            _probe_runtime()
+
     cached = _config.get_cached_key(url, effective_id) if effective_id else None
     if cached:
         print(f"'{effective_id}' already holds a key for {url} — skipping "
@@ -287,6 +324,19 @@ def run_join(url: str, token: str, agent_id: str | None, about: str,
         _config.cache_key(url, effective_id, api_key)
     keys_path = _config.home() / "keys.json"
     print(f"  cached key  -> {keys_path} (0600)")
+
+    if deferred:
+        # The identity is now real and the key is cached: a refusal from here
+        # on names the workspace, and a re-run is a repair (the cached key
+        # short-circuits redemption above), so the invite is not lost. The
+        # runtime is proven here rather than earlier because until the harness
+        # is chosen there is nothing that needs it — probing sooner would let a
+        # wiring complaint mask the hub's own answer, which is the bug this
+        # ordering exists to prevent.
+        harnesses = harness_resolver()
+        _preflight(harnesses)
+        if harnesses:
+            _probe_runtime()
 
     _config.save_url(url)
     print(f"  pinned hub  -> {_config.home() / 'config.json'} (url only — "

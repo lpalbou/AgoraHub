@@ -483,10 +483,17 @@ def test_join_subparser_disambiguation(isolated_home):
         _run_cli(["join", blob[:-10]])
 
 
-def test_join_id_choice_errors_are_client_side(isolated_home):
+def test_join_id_choice_errors_are_client_side(isolated_home, tmp_path,
+                                               monkeypatch):
     """Pin conflicts and missing ids fail BEFORE any network call — the urls
     here point at a closed port, so reaching for the hub would error
-    differently ('cannot reach')."""
+    differently ('cannot reach').
+
+    `--workspace` defaults to the cwd, so these run from an EMPTY folder: the
+    Agora checkout carries gitignored harness wiring of its own, and running
+    from there once masked a real ordering bug (identity was reported as "no
+    harness footprint here" on a clean machine) until CI caught it."""
+    monkeypatch.chdir(tmp_path)
     pinned = encode_artifact("http://127.0.0.1:1", "agora-join_aa.bb",
                              agent_id="castor")
     with pytest.raises(SystemExit, match="locked to 'castor'"):
@@ -497,9 +504,14 @@ def test_join_id_choice_errors_are_client_side(isolated_home):
 
 
 def test_join_surfaces_hub_refusals_with_remedies(live_hub, isolated_home,
-                                                  tmp_path, capsys):
+                                                  tmp_path, capsys,
+                                                  monkeypatch):
     """Distinct hub 403/409 details reach the human with the next step
-    attached; a 409 tells them the token SURVIVED."""
+    attached; a 409 tells them the token SURVIVED.
+
+    Runs from an empty cwd on purpose: a hub refusal must out-rank workspace
+    harness selection, and only a folder with no footprint proves it."""
+    monkeypatch.chdir(tmp_path)
     minted = httpx.post(f"{live_hub.url}/join-tokens", json={"max_uses": 2},
                         headers=_admin(), timeout=5).json()
     httpx.post(f"{live_hub.url}/agents", json={"id": "taken"},

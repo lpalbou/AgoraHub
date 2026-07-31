@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 from dataclasses import dataclass, field
+import functools
 import json
 import os
 import re
@@ -1844,7 +1845,7 @@ def cmd_join(args):
 
     if onboarding:
         from .setup_harness import install_skill
-        from .join import decode_artifact, run_join
+        from .join import check_id_pin, decode_artifact, run_join
         if args.artifact and args.token:
             sys.exit("agora join: pass an artifact OR --token, not both")
         if args.artifact:
@@ -1867,17 +1868,34 @@ def cmd_join(args):
             pinned, expires = None, None
         if args.as_agent:
             _validate_agent_id_or_exit(args.as_agent)
+        # Identity before wiring: an artifact pinned to someone else is a
+        # client-side refusal and must say so, even in a folder that has never
+        # been wired for any harness.
+        check_id_pin(args.as_agent, pinned)
         if args.with_hook and not args.no_hook:
             print("note: `--with-hook` is now the default; use `--no-hook` to "
                   "skip hook installation.")
         workspace = Path(args.workspace).expanduser().resolve()
+        vendor_bootstrap = bool(getattr(args, "vendor_bootstrap", False))
+        harnesses: tuple[str, ...] | None
+        resolver = None
         if args.harness == "none":
-            harnesses: tuple[str, ...] = ()
-        else:
+            harnesses = ()
+        elif args.harness not in (None, "", "auto") or vendor_bootstrap:
+            # Named upfront (or pinned by --vendor-bootstrap, which needs a
+            # concrete single harness to validate): resolve now so the
+            # workspace preflight still guards the invite.
             harnesses = _resolve_harnesses("join", workspace, args.harness,
                                            allow_none=True)
-        vendor_bootstrap = bool(getattr(args, "vendor_bootstrap", False))
-        if vendor_bootstrap and (len(harnesses) != 1 or harnesses[0] not in ("claude", "codex")):
+        else:
+            # Detecting a footprint — or refusing for the lack of one, or
+            # prompting — is workspace wiring, and wiring only matters once the
+            # token has redeemed. Hand `run_join` the resolver, not an answer.
+            harnesses = None
+            resolver = functools.partial(_resolve_harnesses, "join", workspace,
+                                         args.harness, allow_none=True)
+        if vendor_bootstrap and (harnesses is None or len(harnesses) != 1
+                                 or harnesses[0] not in ("claude", "codex")):
             sys.exit("agora join: --vendor-bootstrap requires exactly one harness "
                      "(`--harness claude|codex`)")
         with_hook = _effective_hook_choice("join", args)
@@ -1886,7 +1904,9 @@ def cmd_join(args):
                           workspace=args.workspace, with_hook=with_hook,
                           listen=args.listen, mcp_command=_resolve_mcp_command(),
                           pinned_id=pinned, expires_hint=expires,
-                          vendor_bootstrap=vendor_bootstrap)
+                          vendor_bootstrap=vendor_bootstrap,
+                          harness_resolver=resolver)
+        harnesses = result.harnesses
         if result.code:
             sys.exit(result.code)
         issues: list[str] = list(result.issues)

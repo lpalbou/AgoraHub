@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.13.1 — 2026-08-01
+
+**`agora join` settles identity before it looks at your folder.** A pinned
+artifact redeemed with the wrong `--as`, a revoked token, or an unreachable
+hub reported itself as `no existing harness footprint found in <dir>` on any
+machine whose workspace had never been wired — the join flow resolved the
+workspace harness (detect, prompt, or refuse) *before* it validated the
+identity or redeemed the token, so a wiring complaint masked the real answer.
+
+- **Ordering is now part of the contract.** Artifact parse and the id-pin
+  check run before anything touches the network or the folder; harness
+  detection, the interactive prompt and the "no footprint here" refusal are
+  deferred until the token has actually redeemed. A named `--harness` still
+  preflights the workspace and probes the MCP runtime *before* redemption, so
+  an invite is never spent on wiring that could not have worked.
+- **Re-runs remain repairs.** A join that redeems and then stops on harness
+  selection has already cached its key, so re-running the same artifact with
+  `--harness` skips redemption and only wires.
+
+The bug survived local testing because the two tests covering it ran from the
+repository root, which carries gitignored harness wiring of its own; they now
+run from an empty directory, which is what CI has.
+
 ## 0.13.0 — 2026-08-01
 
 **Seven declared harnesses behind one contract, in-session reception that
