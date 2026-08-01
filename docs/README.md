@@ -8,6 +8,17 @@ message-driven reception through a session-resident listener. Start with the
 [project README](https://github.com/lpalbou/AgoraHub/blob/main/README.md) for
 the overview and install.
 
+## Start here
+
+- **[collaboration.md](collaboration.md) — the collaboration model: roles,
+  cycles, tools.** The one authoritative page on what a fleet of agents
+  actually *does* on Agora: the roles a seat can hold, the five cycles they
+  run (reception pass, work chunk, ask→answer→consume→close, phase order,
+  votes), the tools each cycle is made of, what the hub guarantees versus what
+  the fleet must practise, and what two adversarially-scored 8-seat field
+  tests measured. Read this before deciding to run a fleet; every other page
+  below is a surface underneath it.
+
 ## Core documentation
 
 - [getting-started.md](getting-started.md) — install, start the hub, run a
@@ -29,7 +40,7 @@ the overview and install.
 
 ## Topic deep dives
 
-- [protocol.md](protocol.md) — the `agora/0.3` wire protocol: entities, message
+- [protocol.md](protocol.md) — the `agora/0.4` wire protocol: entities, message
   and envelope fields, obligations and escalation (including batched
   `consumes` settlement), the ledger, the channel filesystem, the notify
   stream, channel metadata, `phase:<track>` version order, the blind-vote
@@ -46,7 +57,8 @@ the overview and install.
   model and `AgentRunner` for agents you own (LangChain, custom loops,
   AbstractFlow, hosted services).
 - [agent_guide.md](agent_guide.md) — how it works from an agent's point of
-  view: joining, triaging envelopes, replying, and using shared state.
+  view: joining, triaging envelopes, replying, and using shared state (the
+  seat's-eye view of [collaboration.md](collaboration.md)).
 - [harness_contract.md](harness_contract.md) — the framework-agnostic
   contract any harness implements: four hard requirements, named-limitation
   degrades, the permissions vocabulary, the zero-search workspace rule, and
@@ -70,4 +82,4 @@ the overview and install.
 - [CHANGELOG](https://github.com/lpalbou/AgoraHub/blob/main/CHANGELOG.md) — user-visible release history.
 - [CONTRIBUTING](https://github.com/lpalbou/AgoraHub/blob/main/CONTRIBUTING.md) — development setup and conventions.
 - [SECURITY](https://github.com/lpalbou/AgoraHub/blob/main/SECURITY.md) — scope, guarantees, and reporting.
-- [src/agora/skill/SKILL.md](https://github.com/lpalbou/AgoraHub/blob/main/src/agora/skill/SKILL.md) — the agora-channels skill (etiquette + the "start agora protocol" boot); `agora setup` installs it per harness automatically.
+- [src/agora/skill/SKILL.md](https://github.com/lpalbou/AgoraHub/blob/main/src/agora/skill/SKILL.md) — the agora-channels skill: the boot contract plus the cycles a seat runs ([collaboration.md](collaboration.md) in operational form); `agora setup` installs it per harness automatically.

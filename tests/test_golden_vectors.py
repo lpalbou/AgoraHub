@@ -9,8 +9,8 @@ same matching rules:
 
 - objects: every EXPECTED key present and matching; extra served keys allowed
   (additive evolution never breaks a vector; removal/rename does — on purpose:
-  that is the wire-contract tripwire that forces a version bump and a
-  PROTOCOL_SEMANTICS entry, the guard the unnamed 0102 change lacked).
+  that is the wire-contract tripwire that forces a PROTOCOL_VERSION bump,
+  the guard the unnamed 0102 change lacked).
 - lists under "match": exact length, positional subset-match.
 - lists under "match_subset": every expected element must subset-match SOME
   served element (order/extra rows free) — for surfaces with system chatter.

@@ -170,15 +170,32 @@ def resolve_source(source: str, url: str, home: Path, agent_id: str) -> str:
     return "file" if loopback and (home / f"{agent_id}-inbox.log").exists() else "ws"
 
 
+_pre_0_4_line_warned = False
+
+
 def parse_line(raw: str) -> dict[str, Any] | None:
     """One notify line -> event dict; None for junk and liveness-marker lines."""
+    global _pre_0_4_line_warned
     try:
         obj = json.loads(raw.strip() or "null")
     except ValueError:
         return None
     if (not isinstance(obj, dict) or "event" in obj  # watch/listen markers
             or not isinstance(obj.get("channel"), str)
-            or not isinstance(obj.get("from"), str)):
+            or not isinstance(obj.get("sender"), str)):
+        # A line with the pre-0.4 `from` key is a HUB that has not been
+        # upgraded (or this listener resuming from an offset written before
+        # the upgrade — 0086 persists one). Dropping it silently is the
+        # deaf-agent failure this whole file exists to prevent, so say the
+        # version out loud, once per process, and keep tailing.
+        if (not _pre_0_4_line_warned and isinstance(obj, dict)
+                and "event" not in obj and isinstance(obj.get("from"), str)):
+            _pre_0_4_line_warned = True
+            from . import PROTOCOL_VERSION
+            print(f"agora listen: notify lines carry the pre-0.4 `from` field "
+                  f"— that hub speaks an older protocol than this client "
+                  f"({PROTOCOL_VERSION}); those lines are IGNORED. Upgrade "
+                  f"the hub to the same agorahub release.", file=sys.stderr)
         return None
     try:
         obj["seq"] = int(obj["seq"])
@@ -207,7 +224,7 @@ def qualifies(event: dict[str, Any], agent_id: str, important_only: bool = False
     # In particular, retracting a blocked storm must not replay that storm.
     if bool(event.get("retracted")) or "retracted" in tokens:
         return False
-    if event["from"] == agent_id:
+    if event["sender"] == agent_id:
         return False
     if not important_only:
         return True
@@ -289,22 +306,35 @@ def _format_debt_age(minutes: float) -> str:
     return f"{minutes:.1f}m"
 
 
-def _debt_rank(row: dict[str, Any]) -> tuple[int, float]:
+def _debt_age_minutes(row: dict[str, Any], computed_at: float,
+                      stamp: str = "created_at") -> float:
+    """Minutes a debt row has been outstanding, derived (agora/0.4): the
+    report carries `computed_at` and each row its own timestamp, so there is
+    no second pre-rounded age field to drift from the first."""
+    try:
+        at = float(row.get(stamp) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, (computed_at - at) / 60.0) if at else 0.0
+
+
+def _debt_rank(row: dict[str, Any], age: float) -> tuple[int, float]:
     """Sort key: escalated debts beat fresh ones, then oldest first."""
-    esc = 1 if row.get("escalated") else 0
-    return (esc, float(row.get("age_minutes") or 0.0))
+    return (1 if row.get("escalated") else 0, age)
 
 
 def _sharpest_debt_wake_token(owed: dict[str, Any]) -> str | None:
     """Top debt as a sentinel-safe token (0115): channel#seq,age,kind."""
     best: tuple[tuple[int, float], str] | None = None
+    at = float(owed.get("computed_at") or time.time())
     for row in owed.get("to_answer", []):
         if not isinstance(row, dict):
             continue
-        rank = _debt_rank(row)
+        minutes = _debt_age_minutes(row, at)
+        rank = _debt_rank(row, minutes)
         chan = _safe_channel(str(row.get("channel", "")))
         seq = int(row.get("seq") or 0)
-        age = _format_debt_age(float(row.get("age_minutes") or 0.0))
+        age = _format_debt_age(minutes)
         kind = ("names-you" if row.get("asks_naming_you")
                 else f"from-{_safe_channel(str(row.get('sender', '?')))}")
         token = f"{chan}#{seq},{age},{kind}"
@@ -313,10 +343,11 @@ def _sharpest_debt_wake_token(owed: dict[str, Any]) -> str | None:
     for row in owed.get("to_consume", []):
         if not isinstance(row, dict):
             continue
-        rank = (0, float(row.get("age_minutes") or 0.0))
+        minutes = _debt_age_minutes(row, at, "answer_created_at")
+        rank = (0, minutes)
         chan = _safe_channel(str(row.get("channel", "")))
         seq = int(row.get("answer_seq") or row.get("seq") or 0)
-        age = _format_debt_age(float(row.get("age_minutes") or 0.0))
+        age = _format_debt_age(minutes)
         who = _safe_channel(str(row.get("answered_by", "?")))
         token = f"{chan}#{seq},{age},consume-{who}"
         if best is None or rank > best[0]:
@@ -327,13 +358,15 @@ def _sharpest_debt_wake_token(owed: dict[str, Any]) -> str | None:
 def _sharpest_debt_digest_clause(owed: dict[str, Any]) -> str | None:
     """Human-readable sharpest-debt lead for --once stderr (0115)."""
     best: tuple[tuple[int, float], str] | None = None
+    at = float(owed.get("computed_at") or time.time())
     for row in owed.get("to_answer", []):
         if not isinstance(row, dict):
             continue
-        rank = _debt_rank(row)
+        minutes = _debt_age_minutes(row, at)
+        rank = _debt_rank(row, minutes)
         chan = _safe_channel(str(row.get("channel", "")))
         seq = int(row.get("seq") or 0)
-        age = _format_debt_age(float(row.get("age_minutes") or 0.0))
+        age = _format_debt_age(minutes)
         detail = ("names you" if row.get("asks_naming_you")
                   else f"from {_safe_channel(str(row.get('sender', '?')))}")
         clause = f"{chan}#{seq} {detail} ({age})"
@@ -342,10 +375,11 @@ def _sharpest_debt_digest_clause(owed: dict[str, Any]) -> str | None:
     for row in owed.get("to_consume", []):
         if not isinstance(row, dict):
             continue
-        rank = (0, float(row.get("age_minutes") or 0.0))
+        minutes = _debt_age_minutes(row, at, "answer_created_at")
+        rank = (0, minutes)
         chan = _safe_channel(str(row.get("channel", "")))
         seq = int(row.get("answer_seq") or row.get("seq") or 0)
-        age = _format_debt_age(float(row.get("age_minutes") or 0.0))
+        age = _format_debt_age(minutes)
         who = _safe_channel(str(row.get("answered_by", "?")))
         clause = f"{chan}#{seq} consume answer from {who} ({age})"
         if best is None or rank > best[0]:

@@ -29,6 +29,9 @@ class _Resp:
 
 
 def _hub_healthz(*a, **k):
+    # Deliberately an OLDER protocol than this build speaks: taking a port
+    # over asks whether the holder is an agora hub AT ALL, never which
+    # version it speaks (agora.is_agora_protocol, not protocol_warning).
     return _Resp({"ok": True, "protocol": "agora/0.3", "version": "9.9.9"})
 
 
@@ -100,6 +103,84 @@ def test_no_force_healthy_hub_still_friendly_exit0(monkeypatch, capsys):
         cli._preflight_port("127.0.0.1", 8765, _URL, force=False)
     assert ex.value.code == 0
     assert "agora up --force" in capsys.readouterr().err   # teaches the takeover
+
+
+def test_force_takes_over_a_port_that_changed_hands(monkeypatch, capsys):
+    """The 0.14.0 field-test failure: lsof named pid A, but the socket was
+    owned by pid B. --force killed A, asked only "is the port free?", and
+    refused — falsely blaming A for surviving while B kept serving. The
+    takeover must re-resolve the holder and take B over too."""
+    kills: list[tuple[int, int]] = []
+
+    def holder(host, port):
+        if (2222, signal.SIGTERM) in kills:
+            return None                     # B is down: port free
+        if (1111, signal.SIGTERM) in kills:
+            return (2222, "agora up")       # A gone, B still owns the socket
+        return (1111, "agora up")           # the pid lsof happened to list
+
+    monkeypatch.setattr(cli, "_port_holder", holder)
+    monkeypatch.setattr(httpx, "get", _hub_healthz)
+    monkeypatch.setattr(cli.os, "kill",
+                        lambda pid, sig: kills.append((pid, sig)))
+    monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+    cli._preflight_port("127.0.0.1", 8765, _URL, force=True)  # returns: freed
+    assert kills == [(1111, signal.SIGTERM), (2222, signal.SIGTERM)]
+    err = capsys.readouterr().err
+    assert "pid 1111" in err and "pid 2222" in err   # both takeovers narrated
+    assert "starting fresh" in err
+    assert "survived" not in err                     # nobody falsely blamed
+
+
+def test_force_refuses_when_a_new_holder_is_a_squatter(monkeypatch, capsys):
+    """If the process that inherits the port is NOT a hub, the takeover
+    stops there — a squatter is never signaled, even mid-force."""
+    kills: list[tuple[int, int]] = []
+    hub_answers = {"on": True}
+
+    def holder(host, port):
+        if kills:
+            hub_answers["on"] = False       # what took over is not a hub
+            return (777, "python -m http.server")
+        return (1111, "agora up")
+
+    def healthz(*a, **k):
+        if hub_answers["on"]:
+            return _hub_healthz()
+        raise httpx.ConnectError("nothing answers")
+
+    monkeypatch.setattr(cli, "_port_holder", holder)
+    monkeypatch.setattr(httpx, "get", healthz)
+    monkeypatch.setattr(cli.os, "kill",
+                        lambda pid, sig: kills.append((pid, sig)))
+    monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+    with pytest.raises(SystemExit) as ex:
+        cli._preflight_port("127.0.0.1", 8765, _URL, force=True)
+    assert ex.value.code == 3
+    assert kills == [(1111, signal.SIGTERM)]         # 777 never signaled
+    err = capsys.readouterr().err
+    assert "NOT an agora" in err and "777" in err
+
+
+def test_force_gives_up_on_a_respawning_supervisor(monkeypatch, capsys):
+    """A supervisor handing the port to a fresh hub every round must not
+    spin forever: bounded rounds, then a refusal naming the pids killed."""
+    kills: list[tuple[int, int]] = []
+
+    def holder(host, port):
+        return (3000 + len(kills), "agora up")       # always a NEW hub pid
+
+    monkeypatch.setattr(cli, "_port_holder", holder)
+    monkeypatch.setattr(httpx, "get", _hub_healthz)
+    monkeypatch.setattr(cli.os, "kill",
+                        lambda pid, sig: kills.append((pid, sig)))
+    monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+    with pytest.raises(SystemExit) as ex:
+        cli._preflight_port("127.0.0.1", 8765, _URL, force=True)
+    assert ex.value.code == 3
+    assert len(kills) == cli._FORCE_MAX_ROUNDS       # bounded, not infinite
+    err = capsys.readouterr().err
+    assert "kept changing hands" in err and "respawning" in err
 
 
 def test_force_with_unidentifiable_pid_refuses(monkeypatch, capsys):

@@ -204,3 +204,44 @@ def test_turn_log_preserves_normal_agora_identifiers(home, monkeypatch):
     d._spawn_cursor_agent(WAKE_PROMPT, None)
     text = (home / "drive-worker.turns.jsonl").read_text()
     assert "agora_protocol.py" in text
+
+
+# -- title fallback on triage surfaces (2026-08-01) ---------------------------
+
+
+def test_display_title_falls_back_to_the_body_first_line():
+    """`title` is optional on post_message and models differ on whether they
+    fill optional args: on 2026-08-01 the one claude-harness seat left 11 of
+    31 posts title-less while every opencode seat filled all of theirs.
+    Bodies were intact, so the triage surfaces were blanking information the
+    record already had. Authored titles always win; derived ones are marked."""
+    from agora.render import display_title
+
+    assert display_title("Real subject", "body") == "Real subject"
+    # Markdown heading noise is stripped; the derived line is marked with '~'.
+    assert display_title("", "## 5-Slot Rerun: Complete Delivery\n\nrest") == \
+        "~ 5-Slot Rerun: Complete Delivery"
+    # Whitespace-only titles count as absent; leading blank lines are skipped.
+    assert display_title("   ", "\n\n  first real line\nsecond") == "~ first real line"
+    # Nothing to derive from stays empty rather than inventing a title.
+    assert display_title("", "") == ""
+    assert display_title("", "   \n  ") == ""
+    # Long first lines are capped so a headline column stays a headline.
+    out = display_title("", "x" * 300)
+    assert out.startswith("~ ") and len(out) <= 95 and out.endswith("…")
+
+
+def test_render_surfaces_use_the_fallback_title():
+    """The fix has to land where receivers actually triage."""
+    from agora.render import render_envelopes, render_messages
+
+    msg = {"id": "m1", "channel": "c", "seq": 1, "sender": "editor",
+           "status": "reply", "title": "", "body": "Final editorial sign-off"}
+    assert "~ Final editorial sign-off" in render_messages([msg])
+    env = {"id": "m1", "channel": "c", "seq": 1, "sender": "editor",
+           "status": "reply", "title": "", "body": "Final editorial sign-off",
+           "kind": "message", "urgency": "inbox", "effective_urgency": "inbox"}
+    assert "~ Final editorial sign-off" in render_envelopes([env])
+    # An authored title is never rewritten.
+    msg["title"] = "Sign-off"
+    assert "title: Sign-off" in render_messages([msg])

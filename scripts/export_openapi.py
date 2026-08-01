@@ -14,11 +14,11 @@ generate their types from it (`npx openapi-typescript openapi.json`).
 
 `--check` is the SHAPE-drift tripwire: a change to any typed route that is
 not reflected in the committed artifact fails CI, which is exactly the
-moment a version bump / PROTOCOL_SEMANTICS entry must be considered. Scope
-honesty (adversary P0-1): this catches SCHEMA changes only — a behavior
-change with an unchanged schema (the 0102 class) is invisible here and is
-the golden vectors' job (tests/vectors/). The two guards are complements,
-not substitutes.
+moment to ask whether the change is additive (ships inside the version) or
+breaking (bumps PROTOCOL_VERSION). Scope honesty (adversary P0-1): this
+catches SCHEMA changes only — a behavior change with an unchanged schema
+(the 0102 class) is invisible here and is the golden vectors' job
+(tests/vectors/). The two guards are complements, not substitutes.
 
 The compared document deliberately carries the WIRE-PROTOCOL version, not
 the app version (adversary P1-1): an artifact that churns on every release
@@ -42,7 +42,7 @@ except ImportError:
 
 
 def generate() -> dict:
-    from agora import PROTOCOL_SEMANTICS, PROTOCOL_VERSION
+    from agora import PROTOCOL_VERSION
     from agora.hub.app import create_app
 
     app = create_app(db_path=":memory:", admin_key="openapi-export")
@@ -61,7 +61,6 @@ def generate() -> dict:
         "behavioral conformance is pinned by tests/vectors/*.json."
     )
     doc["info"]["x-agora-protocol"] = PROTOCOL_VERSION
-    doc["info"]["x-agora-semantics"] = list(PROTOCOL_SEMANTICS)
     # Record the schema-emitting toolchain (impl adversary P2-4): pydantic/
     # FastAPI releases change JSON-schema rendering details (nullable
     # encodings etc.), so byte-exact comparison is only meaningful between
@@ -85,8 +84,8 @@ def main(argv: list[str]) -> int:
     if check:
         if not out.exists() or out.read_text() != text:
             print("openapi.json is STALE: run scripts/export_openapi.py, "
-                  "review the contract diff (does it need a version bump / "
-                  "PROTOCOL_SEMANTICS entry?), and commit the artifact",
+                  "review the contract diff (additive, or does it bump "
+                  "PROTOCOL_VERSION?), and commit the artifact",
                   file=sys.stderr)
             return 1
         print("openapi.json is current")

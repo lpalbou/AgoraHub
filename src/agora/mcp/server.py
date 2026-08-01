@@ -31,6 +31,7 @@ import json
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -655,13 +656,16 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
             return ("\n".join(phase_lines) + "\n") if phase_lines else ""
         lines = phase_lines + [
             "YOU OWE (settle these before new work; ack clears none of it):"]
+        # Ages derive from the report's own clock (agora/0.4 dropped the
+        # pre-rounded age fields): one fact, served once.
+        at = float(owed.get("computed_at") or time.time())
         to_answer = owed.get("to_answer", [])
         for row in to_answer[:10]:
             naming = (f" asks naming you: {row['asks_naming_you']}"
                       if row.get("asks_naming_you") else "")
             lines.append(f"- ANSWER {row['channel']}#{row['seq']} from "
-                         f"{row['from']} (pending {row['pending_asks']},"
-                         f"{naming} {row['age_minutes']}m"
+                         f"{row['sender']} (pending {row['pending_asks']},"
+                         f"{naming} {(at - row['created_at']) / 60:.0f}m"
                          f"{', ESCALATED' if row.get('escalated') else ''}) — "
                          f"read_message id={row['id']}, then reply with answers=[...]"
                          " and DO or claim any work it assigns")
@@ -675,7 +679,8 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
         for row in to_consume[:10]:
             lines.append(f"- CONSUME {row['channel']}#{row['answer_seq']}: "
                          f"{row['answered_by']} answered YOUR ask "
-                         f"{row['your_asks']} ({row['age_minutes']}m ago) — "
+                         f"{row['your_asks']} "
+                         f"({(at - row['answer_created_at']) / 60:.0f}m ago) — "
                          f"read_message id={row['answer_id']} and use it "
                          "(adopt/reject on the record, or close your thread)")
         if len(to_consume) > 10:
@@ -689,7 +694,8 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
             for row in to_close[:10]:
                 lines.append(
                     f"- CLOSE {row['channel']}#{row['seq']}: "
-                    f"{row['answered_by']} answered ({row['age_minutes']}m ago)"
+                    f"{row['answered_by']} answered "
+                    f"({(at - row['answered_at']) / 60:.0f}m ago)"
                     f" — read_message id={row['id']}, then post resolved")
             if len(to_close) > 10:
                 lines.append(f"  … +{len(to_close) - 10} more to close — "

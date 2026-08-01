@@ -19,9 +19,32 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  test:
+    name: Test (${{ matrix.python-version }})
+    # The tag is the release trigger, and it fires independently of `ci` —
+    # pushing a tag whose commit CI never validated (or validated red) would
+    # otherwise publish straight to PyPI, which cannot be undone. The suite
+    # runs here so the gate travels with the release itself rather than
+    # depending on the order two workflows happen to start in.
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Create environment (${{ matrix.python-version }})
+        run: uv venv --python ${{ matrix.python-version }}
+      - name: Install (with dev + mcp extras)
+        run: uv pip install -e ".[dev,mcp]"
+      - name: Run tests
+        run: uv run pytest -q
+
   build:
     name: Build and validate the sdist/wheel
     runs-on: ubuntu-latest
+    needs: test
     outputs:
       version: ${{ steps.meta.outputs.version }}
       tag: ${{ steps.meta.outputs.tag }}

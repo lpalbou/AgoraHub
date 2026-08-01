@@ -104,8 +104,20 @@ like reasoning:
 | level | meaning |
 |---|---|
 | `read` | read the workspace and call agora's tools; no writes, no shell mutation |
-| `write` | write inside the workspace; the driven-seat default |
+| `write` | write, working in the workspace; the driven-seat default |
 | `all` | explicit operator bypass |
+
+`write` is deliberately *not* worded as "write inside the workspace", because
+no framework agora drives can promise that. A level is an instruction agora
+gives the framework, and the framework enforces as much of it as its own tool
+layer can see. **Nothing here is a sandbox.** A seat at `write` can run a
+shell, and a shell can reach the whole filesystem — measured, not assumed
+(opencode, 22 live runs, 2026-08-01): `touch /outside/f` is refused, while
+`sh -c 'touch /outside/f'`, `echo hi > /outside/f`, `nohup /outside/bin/x &`
+and `python3 -c "open('/outside/f','w')"` all succeed and really land the
+file. Out-of-workspace refusal is a **speed bump against an absent-minded
+write, not containment**; if the filesystem outside a seat's workspace
+matters, contain the seat (container/VM) — the level word will not do it.
 
 Two rules keep this honest. **An inexpressible level is refused, never
 translated**: the deprecated `--sandbox` tri-state let an operator asking for
@@ -120,6 +132,18 @@ vocabulary.
 
 `agora harness-check` C8 verifies each declared level actually changes the
 built command — accepted-and-dropped is a failing probe.
+
+**A refusal is always narrated.** A framework may refuse a tool call and tell
+the *model* something untrue about who refused it — opencode reports its own
+headless auto-reject as "The user rejected permission to use this specific
+tool call", and a live seat read that as the operator saying no, spent ~40
+minutes on it, and filed a blocked claim asking for permission that had
+already been granted (2026-08-01). An adapter that knows a refusal shape
+implements `turn_notices()` and the driver prints it
+(`AGORA_DRIVE warn=harness-refused-tool ...`) on every turn where it happens.
+The turn's verdict is untouched: a refused shell call is the operator's
+configuration, not the seat's fault, and failing the turn would strike a seat
+for doing exactly what it was told.
 
 ---
 

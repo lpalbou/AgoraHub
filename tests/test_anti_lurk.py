@@ -51,6 +51,11 @@ def room(client):
     return keys
 
 
+def _info(service, agent_id):
+    from agora.models import AgentInfo
+    return AgentInfo(id=agent_id, name=agent_id)
+
+
 def _post(client, key, **kw):
     payload = {"title": kw.pop("title", "t"), "body": kw.pop("body", "b"), **kw}
     r = client.post("/channels/canvass/messages", headers=_auth(key), json=payload)
@@ -369,8 +374,87 @@ def test_stewardship_changed_set_supersedes_bounded_to_one(client, room):
                for r in service.db.replies_to(closed.id))
     # The delegate owes exactly ONE answer, not one per sweep.
     owed = client.get("/owed", headers=_auth(room["bystander"])).json()
-    hub_debts = [o for o in owed["to_answer"] if o["from"] == "hub"]
+    hub_debts = [o for o in owed["to_answer"] if o["sender"] == "hub"]
     assert len(hub_debts) == 1
+
+
+def test_stewardship_shrinking_set_does_not_re_ring_the_steward(client, room):
+    """THE JANITOR MUST IDLE (live regression, 2026-08-01). Reproduces the
+    measured loop exactly: an unclearable RESIDUE (owners offline for days,
+    no canvass can ever touch those rows) plus one TRANSIENT claim the
+    steward successfully chases. When the transient row was marked done the
+    live set shrank, and shrink alone superseded the standing alert and
+    minted a FRESH open obligation on the steward about the residue — so
+    finishing the work bought the steward its next alert, forever (28 alerts
+    in 24h on the live hub, at-test/claim:msg-382 done 18:04:20 -> new alert
+    18:07:47, then claim:msg-397-398 done 18:28:34 -> new alert 18:33:06).
+    A subset of what the standing alert already names is not news."""
+    service = client.app.state.service
+    key = room["named"]
+    client.put("/admin/delegation", headers={"Authorization": f"Bearer {ADMIN_KEY}"},
+               json={"agent_id": "bystander", "powers": ["reporting"]})
+
+    # Residue: claims owned by a seat that never comes back (the live ones
+    # had been idle four days behind offline owners). Nothing clears these.
+    gone = room["asker"]
+    for slug in ("residue-a", "residue-b"):
+        client.put(f"/channels/canvass/store/claim:{slug}", headers=_auth(gone),
+                   json={"value": {"owner": "asker"}, "expect_version": 0})
+    # Transient: the one claim the steward can actually get finished.
+    client.put("/channels/canvass/store/claim:transient", headers=_auth(key),
+               json={"value": {"owner": "named"}, "expect_version": 0})
+    service.db._conn.execute(
+        "UPDATE store SET updated_at = updated_at - 7200 "
+        "WHERE channel='canvass' AND key LIKE 'claim:%'")
+    service.db._conn.commit()
+
+    assert service._steward_sweep() == ["stale-claims:3"]
+    standing = service._standing_steward_alerts()
+    assert len(standing) == 1
+    first = standing[0]
+    assert "claim:transient" in first.body
+
+    # The steward's chase SUCCEEDS: the owner marks the transient row done,
+    # so the live set shrinks to the residue alone.
+    client.put("/channels/canvass/store/claim:transient", headers=_auth(key),
+               json={"value": {"owner": "named", "status": "done"}})
+
+    # THE REGRESSION: this shrink must post nothing at all. The standing
+    # alert already names both residue rows, so there is no new debt to
+    # state and no reason to hand the steward a second obligation.
+    assert service._steward_sweep() == []
+    assert [m.id for m in service._standing_steward_alerts()] == [first.id]
+    alerts = [m for m in service.db.get_messages("hub-alerts", 0, 100)
+              if "STALE CLAIMS" in m.body]
+    assert len(alerts) == 1, "shrink re-alerted: the janitor never idles"
+    # No supersede reply was written, so the first alert is still the ONE
+    # live obligation and the steward owes exactly one answer.
+    owed = client.get("/owed", headers=_auth(room["bystander"])).json()
+    hub_debts = [o for o in owed["to_answer"] if o["sender"] == "hub"]
+    assert len(hub_debts) == 1 and hub_debts[0]["id"] == first.id
+
+    # Idling is not deafness: genuinely NEW stale work still supersedes.
+    client.put("/channels/canvass/store/claim:brand-new", headers=_auth(key),
+               json={"value": {"owner": "named"}, "expect_version": 0})
+    service.db._conn.execute(
+        "UPDATE store SET updated_at = updated_at - 7200 "
+        "WHERE channel='canvass' AND key='claim:brand-new'")
+    service.db._conn.commit()
+    assert service._steward_sweep() == ["stale-claims:3"]
+    standing = service._standing_steward_alerts()
+    assert len(standing) == 1 and standing[0].id != first.id
+    assert "claim:brand-new" in standing[0].body
+    assert any(r.sender == "hub" and r.status.value == "resolved"
+               for r in service.db.replies_to(first.id))
+
+    # And emptying the set still CLOSES the episode outright.
+    for slug in ("residue-a", "residue-b"):
+        client.put(f"/channels/canvass/store/claim:{slug}", headers=_auth(gone),
+                   json={"value": {"owner": "asker", "status": "done"}})
+    client.put("/channels/canvass/store/claim:brand-new", headers=_auth(key),
+               json={"value": {"owner": "named", "status": "done"}})
+    assert service._steward_sweep() == ["stale-claims:cleared"]
+    assert service._standing_steward_alerts() == []
 
 
 def test_terminal_claims_never_go_stale(client, room):
@@ -599,3 +683,93 @@ def test_overview_silence_class_routes_sla_breach(client, room):
                       headers={"Authorization": f"Bearer {ADMIN_KEY}"}).json()["agents"]
     named = next(r for r in rows if r["agent_id"] == "named")
     assert named["silence_class"] == "dead"
+
+
+def test_blocked_claims_are_exempt_like_parked(client, room):
+    """The code must match the teaching (2026-08-01). SKILL.md groups
+    `blocked` with `parked`/`done` as a row you leave honest where it is, but
+    _PARKED_CLAIM_STATUSES omitted it — so 20 blocked rows on the live hub
+    were a permanent floor under every stale-claims alert, nagging owners to
+    re-answer a question their status already answered."""
+    service = client.app.state.service
+    key = room["named"]
+    client.put("/admin/delegation", headers={"Authorization": f"Bearer {ADMIN_KEY}"},
+               json={"agent_id": "bystander", "powers": ["reporting"]})
+    client.put("/channels/canvass/store/claim:waiting", headers=_auth(key),
+               json={"value": {"owner": "named", "status": "blocked on the "
+                               "vendor's export"}, "expect_version": 0})
+    client.put("/channels/canvass/store/claim:live", headers=_auth(key),
+               json={"value": {"owner": "named", "status": "working"},
+                     "expect_version": 0})
+    service.db._conn.execute(
+        "UPDATE store SET updated_at = updated_at - 7200 "
+        "WHERE channel='canvass' AND key LIKE 'claim:%'")
+    service.db._conn.commit()
+
+    assert service._steward_sweep() == ["stale-claims:1"]
+    alerts = service.db.get_messages("hub-alerts", 0, 50)
+    alert = next(m for m in reversed(alerts) if "STALE CLAIMS" in m.body)
+    assert "claim:live" in alert.body
+    assert "claim:waiting" not in alert.body
+    # Still LIVE work though: parking is not finishing, so the board keeps it
+    # in progress — exempt from NAGGING is not the same as done.
+    board = client.get("/board", headers=_auth(key)).json()
+    assert {r["task"] for r in board["in_progress"]} >= {"waiting", "live"}
+
+
+def test_steward_bookkeeping_rows_do_not_feed_their_own_sweep(client, room):
+    """Stewardship must not become its own backlog. The delegate opens claim
+    rows in hub-alerts to track the alerts it is answering; on the live hub
+    26 such rows existed, and every one of them aged into the very sweep that
+    writes those alerts."""
+    service = client.app.state.service
+    key = room["named"]
+    client.put("/admin/delegation", headers={"Authorization": f"Bearer {ADMIN_KEY}"},
+               json={"agent_id": "bystander", "powers": ["reporting"]})
+    # The steward's own tracking row, in the alerts channel, gone stale.
+    service._ensure_alerts_channel()
+    client.put("/channels/hub-alerts/store/claim:msg-999",
+               headers=_auth(room["bystander"]),
+               json={"value": {"owner": "bystander"}, "expect_version": 0})
+    service.db._conn.execute(
+        "UPDATE store SET updated_at = updated_at - 7200 "
+        "WHERE channel='hub-alerts' AND key LIKE 'claim:%'")
+    service.db._conn.commit()
+    assert service._steward_sweep() == []
+    assert not [m for m in service.db.get_messages("hub-alerts", 0, 50)
+                if "STALE CLAIMS" in m.body]
+
+
+def test_watchdogs_only_cite_debt_the_seat_actually_owes(client, room):
+    """FALSE-POSITIVE CLASS (live, 2026-08-01). The sweeps filtered a seat's
+    INBOX on `escalated` and called the result "obligations this seat is
+    holding" — but the inbox shows every escalated row in the seat's rooms,
+    including ones addressed to somebody else. at-test#363 was cited as
+    rotting debt for six seats that never held it, and the steward burned
+    turns canvassing seats about other seats' work."""
+    service = client.app.state.service
+    # An escalated ask that names ONLY `named`; `bystander` merely sees it.
+    msg = _post(client, room["asker"], status="open", title="do X",
+                asks=[{"id": "1", "text": "please do X", "to": ["named"]}])
+    service.db._conn.execute(
+        "UPDATE messages SET created_at = created_at - 86400 WHERE id = ?",
+        (msg["id"],))
+    service.db._conn.commit()
+
+    # The owner really does hold it; the bystander really does not.
+    assert [e.id for e in service._escalated_debts("named")] == [msg["id"]]
+    assert service._escalated_debts("bystander") == []
+    # And the bystander DOES see it in the inbox — which is exactly why the
+    # old `escalated`-only filter smeared them.
+    assert any(e.id == msg["id"] and e.escalated
+               for e in service.inbox(_info(service, "bystander")))
+
+    # So the lurk leg can name the owner and never the bystander.
+    service.presence.mark_reception("named")
+    service.presence.mark_reception("bystander")
+    for seat in ("named", "bystander"):
+        service._lurk_since[seat] = 0.0     # past the confirm window
+    alerted: list[str] = []
+    for seat in ("named", "bystander"):
+        service._lurk_sweep_one(seat, set(), alerted)
+    assert alerted == ["named"]

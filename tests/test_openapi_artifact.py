@@ -2,8 +2,8 @@
 their types from (agora-0118 move 1). This test is the SHAPE-drift tripwire:
 any route/model change that alters the served schema fails here until the
 artifact is regenerated (scripts/export_openapi.py) — which is exactly the
-moment to ask whether the change needs a version bump and a
-PROTOCOL_SEMANTICS entry.
+moment to ask whether the change is additive (ships inside the current
+PROTOCOL_VERSION) or breaking (bumps it).
 
 Scope honesty (adversary P0-1): shape only. A behavior change with an
 unchanged schema — the 0102 class — is invisible to this file and is pinned
@@ -50,8 +50,8 @@ def test_openapi_artifact_is_current():
                     "exact comparison not meaningful across toolchains")
     assert artifact.read_text() == _canonical_text(), (
         "openapi.json is STALE relative to the code. Run "
-        "scripts/export_openapi.py, review the contract diff (does it need "
-        "a version bump / PROTOCOL_SEMANTICS entry?), and commit the artifact.")
+        "scripts/export_openapi.py, review the contract diff (additive, or "
+        "does it bump PROTOCOL_VERSION?), and commit the artifact.")
 
 
 def test_artifact_versions_on_the_wire_contract_not_the_release():
@@ -77,14 +77,18 @@ def test_typed_surfaces_are_in_the_schema():
                  "MessageRow", "Envelope", "WhoamiReport"):
         assert name in schemas, f"{name} fell out of the served OpenAPI"
     row = schemas["ObligationRow"]["properties"]
-    # `sender` is canonical; `from` is served until the agora/0.4 bump and
-    # must be MARKED deprecated so generated TS types warn consumers off
-    # (adversary P1-2). The 0.4 coupled-edit inventory lives in
-    # docs/backlog/proposed/0117_protocol_0_4_semantic_bump.md — this
-    # assertion is on that list to FLIP (assert "from" not in row).
-    assert "sender" in row and "from" in row
-    assert row["from"].get("deprecated") is True
-    assert row["age_minutes"].get("deprecated") is True
-    # The capability ledger is IN the typed contract (adversary P1-4):
-    # feature detection from generated types is its whole point.
-    assert "semantics" in schemas["WhoamiReport"]["properties"]
+    # ONE name per fact (agora/0.4): `sender` is the author, `created_at` is
+    # what an age derives from. The `from` alias and the pre-rounded
+    # `age_minutes` are GONE from the wire — a client that still reads them
+    # must see a KeyError against a 0.4 hub, not a stale value.
+    assert "sender" in row
+    assert "from" not in row and "age_minutes" not in row
+    assert "created_at" in row
+    for name, gone, kept in (("ConsumeRow", "age_minutes", "answer_created_at"),
+                             ("CloseRow", "age_minutes", "answered_at")):
+        props = schemas[name]["properties"]
+        assert gone not in props and kept in props
+    # ONE protocol statement (agora/0.4): `protocol` names the whole
+    # contract. The `semantics` stamp list is deleted, not renamed —
+    # nothing may diff a served list of strings to decide what a hub does.
+    assert "semantics" not in schemas["WhoamiReport"]["properties"]

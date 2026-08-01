@@ -1,8 +1,10 @@
 # agora-0117 — bump the wire protocol to agora/0.4 (retroactive semantic break)
 
-- **Status**: PROPOSED, sequenced — do this AFTER the protocol/SDK/helpers
-  tidy-up (operator ruling 2026-07-21: "keep that as a todo task, once we
-  tidy up our protocol, sdk and helpers"). Not now.
+- **Status**: COMPLETED (0.14.0, 2026-08-01). Shipped as a UNIFICATION,
+  not just a bump: the operator ruled "we should only have ONE clear
+  protocol unless there is a clear reason to separate them", which
+  dissolved the blocker recorded below (the fold could not break clients
+  that no longer diff a stamp list, because the stamp list is gone).
 - **Origin**: protocol-honesty audit (2026-07-21). The wire contract is
   advertised `agora/0.3` (`src/agora/__init__.py` PROTOCOL_VERSION) with a
   documented policy (`docs/protocol.md`): additive changes ship without a
@@ -119,3 +121,44 @@ release's new behavior is discoverable without it: six new semantics stamps
 (`vote-window-binding`, `vote-ballot-receipts`, `vote-hub-deadline-sweep`,
 `vote-tally-reconciliation`, `phase-rows`, `consumes-batch`) ship on
 `/whoami`, which is what feature-detecting clients read.
+
+
+## What actually shipped (0.14.0, 2026-08-01)
+
+The bump landed together with the thing that had blocked it for three
+releases: **`PROTOCOL_SEMANTICS` was deleted, not folded.** The 2026-08-01
+operator ruling — one clear protocol unless there is a clear reason to
+separate — removed the premise of the "fold breaks deployed clients"
+blocker (§2 above): a shorter served list cannot mislead a client that
+compares no list at all.
+
+Done:
+
+1. `PROTOCOL_VERSION = "agora/0.4"`, plus `SUPPORTED_PROTOCOLS` and the
+   single `protocol_warning()` helper in `src/agora/__init__.py`. Every
+   comparison site now calls that one function; `is_agora_protocol()` holds
+   the port-preflight's IDENTITY test, which is a different question and is
+   now named as one.
+2. Removed from the wire: `ObligationRow.from_` (+ its `AliasChoices`
+   parse compat), `age_minutes` on ObligationRow/ConsumeRow **and CloseRow**
+   (uniformity inside one report beat the letter of the deprecation
+   markers), `WhoamiReport.semantics`, `info.x-agora-semantics` on the
+   OpenAPI artifact and the live doc. Added: `ConsumeRow.answer_created_at`,
+   `CloseRow.answered_at` — so every row still carries the timestamp its
+   age derives from.
+3. All seven untyped `"from":` dict surfaces renamed to `sender`
+   (render.py x4 — two emit, two read; notify_sink.py notify line;
+   service.py digest brief + board rows). `agora listen` refuses a
+   pre-0.4 `from` line OUT LOUD (one stderr line naming the version) —
+   the only place where the break could otherwise have been silent.
+4. Vectors + tripwires flipped: `tests/vectors/01_binary_obligation.json`
+   drops `"from"`, `test_openapi_artifact` asserts the removals, and one
+   new test pins the listener's version warning.
+
+Not done, deliberately: the `pending_asks` shape unification (rows serve
+`list[str]`, the digest's `open_questions[].pending_asks` serves
+`list[{id, text, to}]`). It is a real inconsistency and still owed, but it
+is a RENAME of a still-live surface with its own renderers, not one of the
+removals this task was scoped to. It is ADDITIVE to fix (serve the ids
+under a second key, retire the old one at the next break), so it does not
+need a version to wait for — it needs its own backlog item.

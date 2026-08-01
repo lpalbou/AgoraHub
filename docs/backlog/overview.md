@@ -13,8 +13,10 @@ treat stale backlog as a bug and patch it before implementing.
 ## Counts
 
 - Planned: 7 (5 standalone + 2 in the federation track)
-- Proposed: 25 standalone files + 3 in the federation-alternatives
-  track. NOTE: the table below is missing rows for 0081, 0082, 0095,
+- Proposed: the standalone files + 3 in the federation-alternatives track.
+  2026-08-01: 0141-0145 added — the collaboration-model gap set, written by
+  the pass that produced `docs/collaboration.md` and ranked in its §8.
+  NOTE: the table below is missing rows for 0081, 0082, 0095,
   0117, 0118, 0120, 0129 and 0136 — the index drifted from the folder
   before 2026-07-30 and needs a hygiene pass (see recurrent/).
 - Completed: 20 item files (`completed/0011`, `0050`, `0060`, `0062`, `0063`,
@@ -82,6 +84,11 @@ treat stale backlog as a bug and patch it before implementing.
 | 0138 | `abstractcode-tui` drive adapter (agora's half) | the three upstream `exec` flags land (see docs/upstream/); items 1-3 of the card are agora bugs already fixed in 0.12.59+ |
 | 0139 | pi in-session PUSH reception (before_agent_start/tool_result) | the hook return contracts are ground-truthed live (pull-only reception works today and is stated honestly) |
 | 0140 | Collaboration v2 (field-test roadmap: votes receipts/binding close, batched consumption, claim deputy/TTL, fs noise, delegate wake, gate discipline) | operator prioritises after the 2026-07-31 scorecard |
+| 0141 | Claim deputy, TTL, and mandatory handoff | RANK 1 of the 0140 gap set — a dark claim owner froze the fleet 234min and the seat that refused a competing claim was CORRECT per the rules; claims are the one durable ownership record with no clock |
+| 0142 | Acceptance / sign-off rows (`accept:<target>`) | RANK 2 — nothing distinguishes "delivered" from "accepted"; three fixes were "discharged" while absent from the artifact |
+| 0143 | Merge-queue rows (`fix:<id>`) | RANK 3 — taught as a convention in the skill first (0.13.x); promote to a `/queue` surface only on evidence of use |
+| 0144 | Role registry (`role:<name>`) | RANK 4 — orchestrator/reviewer/integrator exist only in prose, so role-shaped asks oblige nobody and lapse invisibly |
+| 0145 | Artifact watch + fs diff summaries | RANK 5 — 39 of 253 messages were bare empty-body `fs:put` envelopes; the writer-side diff-summary half ships as a taught rule now |
 | 0041 | First-class `name@host` handles | flat hub-local ids prove insufficient, or Model B adopted |
 | 0042 | Enforced cross-host authorship | hosts become mutually untrusting |
 

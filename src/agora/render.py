@@ -46,6 +46,29 @@ def _asks_field(data: dict[str, Any] | None) -> str:
     return "; ".join(parts)
 
 
+def display_title(title: str, body: str, limit: int = 90) -> str:
+    """The title a reader SEES: the author's, or the body's first line when
+    they left it empty.
+
+    `title` is optional on post_message, and models differ on whether they
+    fill optional arguments — on 2026-08-01 the one claude-harness seat in a
+    live fleet left 11 of 31 posts title-less while every opencode seat filled
+    all of theirs. Bodies were intact throughout, so the information existed;
+    the triage surfaces simply rendered a blank column, and titles are exactly
+    what receivers triage by. Deriving the fallback here (rather than storing
+    a synthesized title) keeps the record honest about what the author wrote
+    while making every surface readable. Marked with a leading '~' so a
+    derived line is never mistaken for an authored one."""
+    clean = (title or "").strip()
+    if clean:
+        return clean
+    first = next((ln.strip() for ln in (body or "").splitlines() if ln.strip()), "")
+    if not first:
+        return ""
+    first = first.lstrip("#*>-— ").strip()
+    return "~ " + (first[:limit] + "…" if len(first) > limit else first)
+
+
 def _neutralize(text: str) -> str:
     """Blunt any attempt to spoof the fence markers in untrusted text."""
     return text.replace("\u27e6", "(").replace("\u27e7", ")").replace(_TOKEN, "A-G-O-R-A")
@@ -118,9 +141,10 @@ def render_messages(messages: list[dict[str, Any]]) -> str:
     for row in messages:
         m = Message(**row)
         fields = {
-            "channel": m.channel, "seq": m.seq, "from": m.sender,
+            "channel": m.channel, "seq": m.seq, "sender": m.sender,
             "status": m.status.value, "urgency": m.urgency.value,
-            "critical": "yes" if m.critical else "", "title": m.title,
+            "critical": "yes" if m.critical else "",
+            "title": display_title(m.title, m.body),
             "reply_to": m.reply_to or "",
             "asks": _asks_field(m.data),
             "answers": ", ".join(str(a) for a in (m.data or {}).get("answers", [])
@@ -155,7 +179,7 @@ def render_envelopes(rows: list[dict[str, Any]]) -> str:
             if texts:
                 asks_field += f" | {texts}"
         fields = {
-            "channel": e.channel, "seq": e.seq, "from": e.sender,
+            "channel": e.channel, "seq": e.seq, "sender": e.sender,
             "status": e.status.value, "urgency": e.effective_urgency.value,
             "flags": _flags(e), "asks": asks_field,
             # The dead-ask guard (ADR-0003): a reader must never answer an old
@@ -165,7 +189,8 @@ def render_envelopes(rows: list[dict[str, Any]]) -> str:
             **({"redelivery": "seen before — pinned because the obligation "
                               "is still open"} if e.redelivery else {}),
             "attachments": _attachments_field(e.attachments, e.channel),
-            "size_bytes": e.body_bytes, "title": e.title,
+            "size_bytes": e.body_bytes,
+            "title": display_title(e.title, e.body or ""),
         }
         if e.redelivery:
             content = (f"(you have read this already — still pinned; "
@@ -245,7 +270,7 @@ def render_channel_digest(digest: dict[str, Any]) -> str:
         lines.append(_fence(nonce, "phase", {}, line))
     for q in digest["open_questions"]:
         asks = "; ".join(f"[{a['id']}] {a['text']}" for a in q["pending_asks"])
-        fields = {"seq": q["seq"], "from": q["from"], "status": q["status"],
+        fields = {"seq": q["seq"], "sender": q["sender"], "status": q["status"],
                   "title": q["title"], "pending_asks": asks}
         lines.append("")
         lines.append(_fence(nonce, f"open-question id={q['id']}", fields, ""))
@@ -253,7 +278,7 @@ def render_channel_digest(digest: dict[str, Any]) -> str:
         how = ("self-resolved" if item.get("self_resolved")
                else "answered by " + ", ".join(item["answered_by"])
                if item.get("answered_by") is not None else "resolved")
-        fields = {"seq": item["seq"], "from": item["from"], "title": item["title"],
+        fields = {"seq": item["seq"], "sender": item["sender"], "title": item["title"],
                   "outcome": how}
         lines.append("")
         lines.append(_fence(nonce, f"decided id={item['id']}", fields, ""))

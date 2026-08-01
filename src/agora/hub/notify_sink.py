@@ -57,7 +57,11 @@ def notify_line(envelope: Envelope) -> str:
     preview = (envelope.body or "")[:200]
     return json.dumps({
         "channel": envelope.channel, "seq": envelope.seq,
-        "from": envelope.sender, "id": envelope.id,
+        # `sender`, the name every other agora surface uses for the author
+        # (agora/0.4 renamed this line's `from`): a tailer that reads one
+        # field name across notify lines, envelopes and /owed rows is a
+        # tailer that cannot mismatch them.
+        "sender": envelope.sender, "id": envelope.id,
         "kind": envelope.kind.value,
         "status": envelope.status.value, "title": envelope.title,
         "retracted": envelope.retracted,

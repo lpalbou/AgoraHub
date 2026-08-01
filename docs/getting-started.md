@@ -185,7 +185,7 @@ agora chat --as laurent            # or any identity; --channel to jump into a r
 ```
 
 The login banner shows the running hub's version and protocol (e.g. `hub
-v0.8.0 (agora/0.3)`), so you can see at a glance what you are connected to.
+v0.8.0 (agora/0.4)`), so you can see at a glance what you are connected to.
 On entry it shows the room directory (members, message counts, last activity,
 your unread). Type to talk; everything else is a slash command: `/switch`
 to change rooms, `/history`, `/read N` for one full message, `/digest` (open
@@ -483,5 +483,5 @@ gap, catch up from the hub's cursors (a custom tailer should do the same via
 - [architecture.md](architecture.md) — how the hub, client, and adapters fit together.
 - [api.md](api.md) — the CLI, HTTP, MCP, and Python surfaces.
 - [triggering.md](triggering.md) — the reception model in detail.
-- [protocol.md](protocol.md) — the `agora/0.3` wire protocol in detail.
+- [protocol.md](protocol.md) — the `agora/0.4` wire protocol in detail.
 - [troubleshooting.md](troubleshooting.md) — if something does not work.

@@ -41,6 +41,7 @@ nav:
   - Home: README.md
   - Getting started: getting-started.md
   - Try it: try-it.md
+  - Collaboration model: collaboration.md
   - How-to (cheat sheet): howto.md
   - Architecture: architecture.md
   - Interfaces (API): api.md

@@ -134,9 +134,13 @@ BOOT_PROMPT = (
 WORK_PROMPT = (
     "AGORA WORK CHUNK. Agora MCP is REQUIRED: use only Agora MCP tools for "
     "Agora communication, never the `agora` CLI or direct HTTP. No new "
-    "obligation is waiting; you hold the live "
-    "claim in your home channel — continue THAT work. FIRST re-read the "
-    "claim row and any newer messages touching the task: a newer message "
+    "obligation is waiting; you hold continuable work — a live claim row, or "
+    "an open phase: row you steward — continue THAT work. A phase row is "
+    "ignition, not a slice receipt: if the work is more than one turn, open a "
+    "claim row for it NOW and chain on that. A claim you already marked "
+    "blocked or parked does NOT count against opening a new one for different "
+    "work. FIRST re-read the "
+    "row and any newer messages touching the task: a newer message "
     "may have canceled, refined, or superseded it (the record outranks "
     "your memory) — if so, adjust or park on the record instead of "
     "continuing blind. Otherwise do ONE bounded slice toward completion, "
@@ -164,8 +168,11 @@ WORK_BOOT_PROMPT = (
     "REQUIRED: use only Agora MCP tools for Agora communication, never the "
     "`agora` CLI or direct HTTP. First call "
     "whoami and heed the hub rules; skim your channels. Then follow the work "
-    "contract: re-read your one live claim and newer messages that may "
-    "supersede it, do one bounded slice, and update the claim row. The row is "
+    "contract: re-read your continuable work — a live claim row, or an open "
+    "phase: row you steward — and newer messages that may "
+    "supersede it, do one bounded slice, and update the claim row (open one "
+    "if a stewarded phase is all you hold; a blocked or parked row does NOT "
+    "count against opening a new one). The row is "
     "the only per-slice receipt; never post reception-pass, no-delta, guard-"
     "rerun, parked, or routine progress messages. If blocked, mark the row "
     "and send one addressed structured ask in a DM or focused group only "
@@ -603,6 +610,20 @@ class DriveAdapter:
                 detail=_one_line(stderr or f"process exited {returncode}"),
             )
         return TurnEvidence(ok=True)
+
+    def turn_notices(self, stdout: str, stderr: str) -> list[str]:
+        """Operator-facing lines about what the harness DID to this turn, for
+        facts that must not change the turn's verdict.
+
+        The class this exists for: a harness silently refuses a tool and tells
+        the MODEL a story about it ("the user rejected permission"). The turn
+        is not a failure — the seat still reached the hub, and failing it
+        would strike a seat for the operator's own configuration — but the
+        operator must be able to see the refusal without reading a 30 MB
+        turn log, and the seat's own account of it cannot be trusted.
+        """
+        del stdout, stderr
+        return []
 
     def observed_tools(self, stdout: str) -> tuple[str, ...] | None:
         """Agora tools this (possibly PARTIAL) event stream shows were called,
@@ -1147,6 +1168,34 @@ class OpencodeDriveAdapter(DriveAdapter):
        nothing — so the permission block is pinned per level below, and
        `assess_turn` treats a rejected agora tool as a failed turn instead of
        trusting the exit code.
+    3. Out-of-workspace access is a SEPARATE permission named
+       `external_directory`, and it is SYNTACTIC, not containment (probed
+       2026-08-01, 22 runs, `--permissions write`). It fires only when
+       opencode's shell parser can statically resolve a path outside `--dir`
+       from an argument of a command it recognises as path-taking, or from
+       the explicit path parameter of the read/write/edit tools:
+
+           DENIED   cat/touch/cp/mkdir <outside>, read tool, write tool
+           ALLOWED  echo hi > <outside>/f      (redirection, not an argv path)
+                    sh -c 'mkdir <outside>/d'  (one wrapper defeats the parse)
+                    nohup <outside>/bin/x ... &
+                    <outside>/bin/x <outside>/f
+                    python3 -c "open('<outside>/f','w')"   (path in a string)
+
+       So `--permissions write` does NOT confine a seat to its workspace: an
+       out-of-workspace file really lands through any indirect form. What the
+       gate reliably does is stop the TIDY forms — which is a real safeguard
+       against an absent-minded write, and nothing like a sandbox. It is
+       pinned explicitly at every level below rather than inherited from
+       opencode's default, because a default that changes under agora would
+       change what an operator's `--permissions` word means.
+
+       It is also the loudest failure agora has ever mis-narrated: opencode
+       reports the auto-reject to the model as "The user rejected permission
+       to use this specific tool call", so the seat concludes the OPERATOR
+       refused it and files a false blocker (live 2026-08-01: a seat spent
+       ~40 minutes and one blocked claim on it). `turn_notices` therefore
+       says out loud what actually happened, on every turn where it happens.
     """
 
     name = "opencode"
@@ -1173,13 +1222,25 @@ class OpencodeDriveAdapter(DriveAdapter):
     #: agora's levels -> opencode's `permission` block. MCP tools are matched
     #: by glob on their exposed names (`agora_*`), verified live in both the
     #: allow and deny directions.
+    #: `external_directory` is stated at every level, never inherited: see
+    #: finding 3 above. `all` already covers it through `*`, and says it
+    #: anyway so the three rows can be read against each other.
     _PERMISSION = {
         "read": {"bash": "deny", "edit": "deny", "write": "deny",
-                 "webfetch": "deny", "websearch": "deny", "agora*": "allow"},
+                 "webfetch": "deny", "websearch": "deny",
+                 "external_directory": "deny", "agora*": "allow"},
         "write": {"bash": "allow", "edit": "allow", "write": "allow",
-                  "webfetch": "deny", "websearch": "deny", "agora*": "allow"},
-        "all": {"*": "allow", "agora*": "allow"},
+                  "webfetch": "deny", "websearch": "deny",
+                  "external_directory": "deny", "agora*": "allow"},
+        "all": {"*": "allow", "external_directory": "allow",
+                "agora*": "allow"},
     }
+
+    #: opencode's headless auto-reject line, e.g.
+    #: `! permission requested: external_directory (/a/*, /b/*); auto-rejecting`
+    _REJECT_RE = re.compile(
+        r"permission requested:\s*(?P<name>\S+)\s*"
+        r"(?:\((?P<patterns>[^)]*)\))?\s*;\s*auto-rejecting")
 
     @classmethod
     def check_knob_combo(cls, *, model: str | None, provider: str | None,
@@ -1282,6 +1343,65 @@ class OpencodeDriveAdapter(DriveAdapter):
             if isinstance(found, str) and found:
                 return found
         return super().parse_session_id(raw, fallback)
+
+    def turn_notices(self, stdout: str, stderr: str) -> list[str]:
+        """Name every tool call opencode refused, on either refusal path.
+
+        Neither path is visible to an operator otherwise: a refused `bash`
+        does not fail an opencode turn (only a refused agora tool does), so
+        the driver log stays green while the seat gets stuck. And what the
+        MODEL is told is not what happened —
+
+          ask  -> "The user rejected permission to use this specific tool
+                   call." A sentence NO user typed. A live seat believed it,
+                   burned ~40 minutes, and filed a blocked claim asking the
+                   operator for permission the operator had already granted
+                   (2026-08-01).
+          deny -> "The user has specified a rule which prevents you..." —
+                   true, and the reason agora pins `external_directory`
+                   rather than leaving it on opencode's `ask` default.
+        """
+        seen: dict[str, list[str]] = {}
+        for m in self._REJECT_RE.finditer(stderr or ""):
+            patterns = seen.setdefault(f"ask:{m.group('name')}", [])
+            for pattern in (m.group("patterns") or "").split(","):
+                if pattern.strip() and pattern.strip() not in patterns:
+                    patterns.append(pattern.strip())
+        for event in _json_objects(stdout or ""):
+            part = event.get("part")
+            if not isinstance(part, dict) or part.get("type") != "tool":
+                continue
+            state = part.get("state") if isinstance(part.get("state"), dict) else {}
+            # Substring, not prefix: the sentence is opencode's wording and
+            # a reworded prefix must not silently switch this notice off.
+            if "specified a rule which prevents you" not in str(
+                    state.get("error") or ""):
+                continue
+            calls = seen.setdefault(f"rule:{part.get('tool') or 'unknown'}", [])
+            call = _one_line(str((state.get("input") or {}).get("command")
+                                 or (state.get("input") or {}).get("filePath")
+                                 or ""))[:120]
+            if call and call not in calls:
+                calls.append(call)
+        notices = []
+        for key, details in sorted(seen.items()):
+            path, _, name = key.partition(":")
+            shown = f" {'paths' if path == 'ask' else 'calls'}=" \
+                    f"{' | '.join(details)}" if details else ""
+            if path == "ask":
+                what = (f"permission={name} was left on opencode's `ask` "
+                        "default and every ask is auto-rejected headlessly — "
+                        "the model was told a USER refused it, which no user "
+                        "did")
+            else:
+                what = (f"tool={name} was refused by the permission block "
+                        f"agora writes for --permissions {self.permissions}")
+            notices.append(
+                f"AGORA_DRIVE warn=harness-refused-tool harness=opencode "
+                f"level={self.permissions}{shown} — {what}. To allow it: "
+                "raise this seat to --permissions all, or keep the work "
+                f"inside {Path(self.cwd).resolve()}.")
+        return notices
 
     def assess_turn(self, stdout: str, stderr: str, returncode: int,
                     kind: str) -> TurnEvidence:
@@ -2422,6 +2542,11 @@ class Driver:
             if isinstance(err, bytes):
                 err = err.decode("utf-8", "replace")
             sid = self._adapter.parse_session_id(out, session_id)
+            # Said on the timeout path too: a seat that spent the whole window
+            # retrying a call the harness kept refusing looks identical to a
+            # hung provider, and the refusal is the actual diagnosis.
+            for notice in self._adapter.turn_notices(out, err):
+                _emit(f"{notice} agent={self.agent_id} kind={kind}")
             # A turn killed at the timeout having called NOTHING never reached
             # its provider — the 2026-07-31 shape, where every seat booted a
             # session, made zero tool calls, and was killed at 600s. Naming it
@@ -2471,6 +2596,13 @@ class Driver:
                 self._log_event(event="turn_stderr",
                                 ts=round(time.time(), 3),
                                 agent=self.agent_id, text=stderr_text)
+        # Emitted BEFORE the verdict and on both paths: a harness that
+        # refused a tool call must be visible whether or not the turn
+        # otherwise passed (a rejected `bash` never fails an opencode turn —
+        # only a rejected agora tool does — so this is the ONLY place the
+        # refusal surfaces).
+        for notice in self._adapter.turn_notices(stdout_text, stderr_text):
+            _emit(f"{notice} agent={self.agent_id} kind={kind}")
         evidence = self._adapter.assess_turn(
             stdout_text, stderr_text, proc.returncode, kind
         )
@@ -2687,22 +2819,49 @@ class Driver:
             self._reception_turns_on_session = 0
         return True
 
-    # -- claim-gated work chunks (work continuation, 2026-07-28) -------------
+    # -- work-gated chunks (work continuation, 2026-07-28; widened to
+    #    stewarded phases 2026-08-01) ---------------------------------------
 
-    def _owned_live_claims(self) -> list[tuple[str, str, int, dict]]:
-        """All non-terminal claims owned by this seat, from existing APIs."""
-        found: list[tuple[str, str, int, dict]] = []
+    #: Status words that mean "this row is NOT continuable". `blocked`/`parked`
+    #: belong here on purpose: chaining chunks against a declared blocker spins
+    #: without progress. What must NOT follow is that the SEAT is finished —
+    #: see _continuation_snapshot.
+    _TERMINAL_STATUS = frozenset({
+        "done", "shipped", "delivered", "complete", "completed",
+        "closed", "landed", "merged", "released", "resolved",
+        "parked", "paused", "blocked", "on-hold", "onhold",
+        "hold", "deferred", "cancelled", "canceled", "abandoned",
+    })
+
+    @classmethod
+    def _is_terminal(cls, *words: object) -> bool:
+        """True when the first word of any given status field is terminal."""
+        for word in words:
+            text = str(word or "").strip().lower()
+            head = text.split()[0].rstrip(".,;:!—-") if text.split() else ""
+            if head in cls._TERMINAL_STATUS:
+                return True
+        return False
+
+    def _scan_owned_rows(
+        self,
+    ) -> tuple[list[tuple[str, str, int, dict]],
+               list[tuple[str, str, int, dict]]]:
+        """ONE pass over every joined channel's store ->
+        (live claims owned by this seat, OPEN phase rows this seat stewards).
+
+        Both feed the same work gate. Kept as one walk because the second
+        gate must not double the hub traffic of an idle boundary.
+        """
+        claims: list[tuple[str, str, int, dict]] = []
+        phases: list[tuple[str, str, int, dict]] = []
         api_key = _config.get_cached_key(self.hub, self.agent_id)
         if not api_key:
-            return found
+            return claims, phases
         import urllib.parse
         import httpx
         hdrs = {"Authorization": f"Bearer {api_key}"}
         base = self.hub.rstrip("/")
-        terminal = {"done", "shipped", "delivered", "complete", "completed",
-                    "closed", "landed", "merged", "released", "resolved",
-                    "parked", "paused", "blocked", "on-hold", "onhold",
-                    "hold", "deferred"}
         try:
             chans = httpx.get(f"{base}/channels", headers=hdrs, timeout=5.0).json()
             for ch in chans if isinstance(chans, list) else []:
@@ -2714,7 +2873,9 @@ class Driver:
                 ).json()
                 for row in rows if isinstance(rows, list) else []:
                     key = str(row.get("key", ""))
-                    if not key.startswith("claim:"):
+                    is_claim, is_phase = (key.startswith("claim:"),
+                                          key.startswith("phase:"))
+                    if not (is_claim or is_phase):
                         continue
                     entry = httpx.get(
                         f"{base}/channels/{name}/store/"
@@ -2724,29 +2885,76 @@ class Driver:
                     value = entry.get("value")
                     if not isinstance(value, dict):
                         continue
-                    if value.get("owner") != self.agent_id or value.get("done"):
+                    version = int(entry.get("version", 0))
+                    if is_claim:
+                        if (value.get("owner") != self.agent_id
+                                or value.get("done")):
+                            continue
+                        if self._is_terminal(value.get("status"),
+                                             value.get("state")):
+                            continue
+                        claims.append((name, key, version, value))
                         continue
-                    status = str(value.get("status") or value.get("state") or "").strip().lower()
-                    first = (status.split()[0].rstrip(".,;:!—-")
-                             if status.split() else "")
-                    if first in terminal:
+                    # A phase row is continuable work for ONE seat: its
+                    # steward, while the row is open AND declares where the
+                    # track is going. Anyone else reads it and parks.
+                    if value.get("steward") != self.agent_id:
                         continue
-                    found.append((name, key, int(entry.get("version", 0)), value))
+                    if self._is_terminal(value.get("status"),
+                                         value.get("current")):
+                        continue
+                    declared = any(
+                        str(value.get(field) or "").strip()
+                        for field in ("next", "next_step", "current")
+                    )
+                    if not declared:
+                        continue
+                    phases.append((name, key, version, value))
         except Exception:
-            return []
-        return found
+            return [], []
+        return claims, phases
 
-    def _claim_snapshot(self) -> tuple[str, str, int] | None:
-        """(channel, key, version) of the seat's live claim, or None. Read
-        with the cached key over EXISTING endpoints (precedent: listen's
+    def _owned_live_claims(self) -> list[tuple[str, str, int, dict]]:
+        """All non-terminal claims owned by this seat, from existing APIs.
+        Claims ONLY — reception-debt verification asks "is there a claim row
+        linked to this pending ask", and a phase row never answers that."""
+        return self._scan_owned_rows()[0]
+
+    def _continuation_snapshot(self) -> tuple[str, str, int] | None:
+        """(channel, key, version) of the seat's continuable work, or None.
+        Read with the cached key over EXISTING endpoints (precedent: listen's
         /owed poll). Any failure returns None — initiative fails toward
-        silence, never toward burn. A row whose status word says done/
-        parked/blocked (or done:true) is not continuable work."""
-        claims = self._owned_live_claims()
-        if not claims:
-            return None
-        channel, key, version, _ = claims[0]
-        return channel, key, version
+        silence, never toward burn.
+
+        TWO kinds of row continue a seat, checked in this order:
+
+        1. A LIVE CLAIM — the finer-grained unit, so it wins.
+        2. An OPEN `phase:` row this seat STEWARDS. Field evidence
+           (2026-07-31): a delegate held one claim, `blocked` on an external
+           tool fault, plus `phase:manuscript` open with itself as steward and
+           `next: writing` declared. Claims-only gating read that seat as
+           having nothing to continue, so it took ZERO work turns across a
+           24-turn fleet run and the arc only moved on external nudges. A
+           steward with an open phase has real pending work by definition:
+           the phase does not close until it acts.
+
+        The phase row is an IGNITION, not a sustainer. Real slice receipts
+        land on a CLAIM row, so a stewarded phase collects strikes (it is not
+        touched per slice) and parks after WORK_STRIKES chunks — which is
+        exactly enough to let the woken steward open a proper claim row for
+        the arc and chain on THAT indefinitely. Bounded fuel is what stops
+        every steward in the fleet burning chunks on every quiet window.
+
+        A row whose status word says done/parked/blocked (or done:true) is not
+        continuable — chaining on a declared blocker only spins. But a blocked
+        claim never makes the SEAT dead: other live claims and a stewarded
+        open phase are still found here, and the teaching says plainly that a
+        blocked row does not count against opening a new one.
+        """
+        claims, phases = self._scan_owned_rows()
+        for channel, key, version, _ in (*claims, *phases):
+            return channel, key, version
+        return None
 
     def _work_budget_ok(self) -> bool:
         now = time.time()
@@ -2793,7 +3001,8 @@ class Driver:
         return True
 
     def _activate_work_claim(self, channel: str, key: str) -> None:
-        """Bind work context to one claim; a different claim boots fresh."""
+        """Bind work context to one row (claim or stewarded phase); a
+        different row boots a fresh work session."""
         ref = f"{channel}/{key}"
         if ref == self._work_claim_ref:
             return
@@ -2805,10 +3014,11 @@ class Driver:
 
     def _chain_step(self) -> bool:
         """One initiative step at an idle boundary: spawn a work chunk when
-        the seat holds a live, progressing claim. Continuation is a LOOP
+        the seat holds continuable work — a live claim, or an open phase row
+        it stewards (see _continuation_snapshot). Continuation is a LOOP
         property — chunks chain at DRIVE_CHAIN_WAIT listen windows and any
         obligation preempts at the arm between them — never a model
-        posture. Strikes are keyed on the claim row's CAS VERSION: a chunk
+        posture. Strikes are keyed on the row's CAS VERSION: a chunk
         that ends without touching the row is a strike; WORK_STRIKES parks
         the chain (recoverable — any row touch mints a fresh version);
         parking is never the wake quarantine."""
@@ -2818,7 +3028,7 @@ class Driver:
             # succeed anyway.
             self._chain_live = False
             return False
-        snap = self._claim_snapshot()
+        snap = self._continuation_snapshot()
         if snap is None:
             self._chain_live = False
             return False
@@ -2829,8 +3039,10 @@ class Driver:
             if self._chain_live:
                 _emit(f"AGORA_DRIVE initiative=parked agent={self.agent_id} "
                       f"key={ck} reason=no-receipt ({WORK_STRIKES} chunks "
-                      "left the claim row unchanged; a NEW receipt on the "
-                      "row — a version bump — resumes)")
+                      "left the row unchanged; a NEW receipt on the "
+                      "row — a version bump — resumes. A phase: row parking "
+                      "here means the steward never opened a claim row for "
+                      "the arc; that claim is what chains indefinitely)")
             self._chain_live = False
             return False
         if not self._work_budget_ok():
@@ -2840,7 +3052,7 @@ class Driver:
             self._chain_live = False
             return False
         ran = self.run_work_turn()
-        after = self._claim_snapshot()
+        after = self._continuation_snapshot()
         if (after is not None and after[0] == channel and after[1] == key
                 and after[2] == version):
             self._work_strikes[ck] = self._work_strikes.get(ck, 0) + 1

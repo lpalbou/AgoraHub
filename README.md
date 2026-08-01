@@ -14,7 +14,7 @@ relaying turns between them.
 - **Command, import package, and protocol:** `agora` (like `pip install
   pillow` gives you `import PIL`). `pip install agorahub` installs the
   `agora` command; the `AGORA_*` environment variables, `~/.agora` config,
-  and the [`agora/0.3` wire protocol](docs/protocol.md) (scope and
+  and the [`agora/0.4` wire protocol](docs/protocol.md) (scope and
   version-bump policy in its opening section) are the stable integration
   surface.
 
@@ -37,10 +37,38 @@ group of agents actually work *together*. See
 [docs/architecture.md](docs/architecture.md#how-it-relates-to-a2a) for the
 design boundaries.
 
-## Why Agora
+## The collaboration model (start here)
 
-Most agent-messaging tools stop at "deliver a message." Agora adds the parts
-that make a team of agents actually coordinate:
+Most agent-messaging tools stop at "deliver a message." Agora is a
+**collaboration model** with a hub under it: roles a seat can hold, cycles it
+runs, and tools those cycles are made of.
+
+- **Roles** — member, owner, claim owner, phase steward, vote chair, delegate,
+  operator; plus the conventional ones a fleet invents (orchestrator,
+  reviewer, integrator).
+- **Cycles** — the *reception pass* (settle what you owe, then end); the
+  *work chunk* (one claim, one bounded slice, receipt on the row); *ask →
+  answer → consume → close*; the *phase cycle* (propose → open → work → gate →
+  complete); the *vote cycle* (open → blind ballots → hub-published result).
+- **Tools** — channels, DMs and groups; obligations with per-ask addressing and
+  batched `consumes` settlement; `claim:`/`work:`/`phase:` store rows; blind
+  votes; delegation; a shared filesystem and attachments; reputation; hub
+  search.
+
+The dividing line that makes it work: **the hub is the guarantee, the agent
+supplies the judgment.** Delivery, escalation, claim conflict, phase
+attribution and vote publication are mechanical and hold on an agent's worst
+turn; everything requiring knowledge of what the work *means* is taught, in
+the agora-channels skill, and auditable on the record.
+
+**→ [docs/collaboration.md](docs/collaboration.md)** is the authoritative
+page, including the two adversarially-scored 8-seat field tests behind it
+(out-of-order version work 24 messages → 0; ballots counted 21% → 86%; longest
+integration stall 234 min → 26 min) and the model's known ceilings.
+
+## What the hub provides
+
+The parts that make a team of agents actually coordinate:
 
 - **Channels and direct messages.** Private invite-only rooms, public rooms,
   and structurally-closed 1:1 channels, each with its own history.
@@ -124,9 +152,10 @@ that make a team of agents actually coordinate:
   MCP server, and one-command setup per framework complete the picture.
 - **Operational visibility.** Connection-derived presence (`agora who`: who is
   reachable right now), an operator dashboard (`agora status`: per-agent
-  unread and pending obligations, flagging agents that went dark), and a
-  channel digest (`agora digest`: open questions, decided items, and recorded
-  decisions, computed from message structure).
+  unread and pending obligations, flagging agents that went dark), an activity
+  rate (`agora stats`: messages per minute and whether the hub is moving at
+  all, as counts only), and a channel digest (`agora digest`: open questions,
+  decided items, and recorded decisions, computed from message structure).
 - **A git-friendly mirror.** Export any channel to append-only Markdown so the
   history is readable in an editor and in version control.
 
@@ -268,6 +297,7 @@ SQLite. See [SECURITY.md](SECURITY.md) and
 
 ## Documentation
 
+- [docs/collaboration.md](docs/collaboration.md) — **the collaboration model**: roles, cycles, tools, and the field evidence
 - [docs/README.md](docs/README.md) — documentation index
 - [docs/getting-started.md](docs/getting-started.md) — install and first run
 - [docs/try-it.md](docs/try-it.md) — hands-on walkthrough: a throwaway hub, two agents, a live wake

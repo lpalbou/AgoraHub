@@ -482,3 +482,96 @@ def test_hub_sweep_counts_every_ballot_shape_the_chair_counts(service, poll):
     assert payload["ballots_seen"] == 5
     assert payload["ballots_counted"] == 4
     assert payload["ballots_rejected"] == 1
+
+
+# -- activity stats: "is this hub moving?" ---------------------------------------
+
+def test_activity_stats_on_a_silent_hub_says_so(service):
+    """A hub that has never carried a message must SAY that, not print an
+    ambiguous row of zeros — the whole point of the surface is a verdict."""
+    alice, _ = service.register_agent("alice", "Alice")
+    stats = service.activity_stats(alice)
+    assert stats["verdict"] == "silent — this hub has never carried a message"
+    assert stats["totals"]["last_10m"] == {"total": 0, "public": 0, "dm": 0}
+    assert stats["last_message_at"] is None
+    assert stats["quiet_for_seconds"] is None
+    # Empty buckets are EMITTED, never omitted: the gap is the signal.
+    assert len(stats["per_minute"]) == 10
+    assert len(stats["per_bucket"]) == 6
+    assert all(r["total"] == 0 for r in stats["per_minute"])
+
+
+def test_activity_stats_counts_public_and_dm_separately(service, agents):
+    """The split the operator asked for. Room-opening system messages count
+    too — they ARE hub traffic, and a surface that quietly drops a class of
+    row makes a busy minute read quieter than it was."""
+    alice, bob = agents
+    service.db.add_member("design", "bob")
+    for i in range(3):
+        service.post_message(alice, "design", PostMessage(body=f"m{i}"))
+    service.post_dm(bob, "alice", PostMessage(body="private"))
+    stats = service.activity_stats(alice)
+    # 3 posts + the "design" opening system row = 4 public;
+    # 1 DM + the dm room's opening system row = 2 dm.
+    assert stats["totals"]["last_10m"] == {"total": 6, "public": 4, "dm": 2}
+    assert stats["totals"]["last_60m"] == {"total": 6, "public": 4, "dm": 2}
+    assert stats["rate_per_minute"]["last_10m"] == 0.6
+    assert stats["active_seats"] == ["alice", "bob", "hub"]
+    assert stats["active_seat_count"] == 3
+    assert stats["verdict"].startswith("active — 6 messages")
+    # The newest per-minute bucket holds them (they were posted just now).
+    assert stats["per_minute"][-1]["total"] == 6
+
+
+def test_activity_stats_is_counts_only(service, agents):
+    """This is the one hub read useful to a seat in no room, so it must stay
+    useless as a way to SEE into rooms: no channel names, no titles, no
+    bodies, no DM pairs anywhere in the payload."""
+    alice, bob = agents
+    service.post_dm(alice, "bob", PostMessage(
+        title="secret title", body="secret body"))
+    blob = json.dumps(service.activity_stats(alice))
+    assert "secret title" not in blob
+    assert "secret body" not in blob
+    assert "design" not in blob
+    assert "dm:" not in blob
+
+
+def test_activity_stats_goes_quiet_when_traffic_stops(service, agents):
+    """An old message must not read as "active": the 10-minute window is what
+    answers "right now", and the verdict must name when it went quiet."""
+    alice, _ = agents
+    service.post_message(alice, "design", PostMessage(body="old"))
+    old = time.time() - 3 * 3600
+    with service.db._lock:
+        service.db._conn.execute("UPDATE messages SET created_at = ?", (old,))
+        service.db._conn.commit()
+    stats = service.activity_stats(alice)
+    assert stats["totals"]["last_10m"]["total"] == 0
+    assert stats["totals"]["last_60m"]["total"] == 0
+    assert stats["active_seats"] == []
+    assert stats["verdict"].startswith("quiet since ")
+    assert stats["quiet_for_seconds"] > 3 * 3600 - 60
+
+
+def test_activity_stats_names_only_seats_you_can_already_see(service, agents):
+    """The rate is everyone's; the ROSTER is not. `/presence` refuses a global
+    who-is-awake oracle to an ordinary seat, and this surface must not hand
+    one out through the side door — while still counting truthfully, because
+    an understated count would misreport exactly what it exists to report."""
+    alice, bob = agents
+    stranger, _ = service.register_agent("stranger", "Stranger")
+    service.create_channel(stranger, "elsewhere", private=True)
+    service.post_message(alice, "design", PostMessage(body="hi"))
+    service.post_message(stranger, "elsewhere", PostMessage(body="hi"))
+
+    mine = service.activity_stats(stranger)
+    assert "alice" not in mine["active_seats"]      # no shared room
+    assert mine["active_seats"] == ["hub", "stranger"]
+    assert mine["active_seat_count"] == 3           # alice, hub, stranger
+    assert mine["totals"]["last_10m"]["total"] == 4
+
+    alice.operator = True
+    everyone = service.activity_stats(alice)
+    assert everyone["active_seats"] == ["alice", "hub", "stranger"]
+    assert everyone["active_seat_count"] == 3

@@ -24,7 +24,7 @@ from typing import Any
 import httpx
 import websockets
 
-from .. import PROTOCOL_VERSION
+from .. import protocol_warning
 from ..models import (
     Envelope,
     Message,
@@ -73,31 +73,34 @@ class AgoraClient:
 
     def _check_protocol(self, hub_protocol: Any) -> None:
         """The version handshake, made real: warn (once per client) when the
-        hub speaks a different `agora/X.Y` than this client was built for.
-        A warning, not a refusal — skew is expected mid-upgrade, and additive
-        changes never bump the string (see docs/protocol.md, Scope)."""
-        self.hub_protocol = hub_protocol or None
-        if self._protocol_warned or not hub_protocol:
+        hub does not speak a version in SUPPORTED_PROTOCOLS. The whole rule
+        lives in `agora.protocol_warning` — this client never diffs
+        capability lists, because a client that diffs capability strings
+        reports a hub as "missing" whatever the last fold renamed."""
+        self.hub_protocol = hub_protocol if isinstance(hub_protocol, str) else None
+        if self._protocol_warned:
             return
-        if hub_protocol != PROTOCOL_VERSION:
+        note = protocol_warning(self.hub_protocol)
+        if note:
             self._protocol_warned = True
-            warnings.warn(
-                f"hub speaks {hub_protocol} but this client speaks "
-                f"{PROTOCOL_VERSION}; field semantics may differ — upgrade "
-                "the older side to the same agorahub release",
-                RuntimeWarning, stacklevel=3)
+            warnings.warn(note, RuntimeWarning, stacklevel=3)
 
     async def board(self) -> dict[str, Any]:
         """The caller's decision board (pending-on-me / queue / proposals /
         in-progress / pending-review / done), derived across its channels."""
         return self._json(await self._http.get("/board"))
 
+    async def activity_stats(self) -> dict[str, Any]:
+        """Hub message RATE on a trailing window (per-minute for 10 minutes,
+        per-10-minutes for an hour, public/dm split, distinct senders, a
+        one-line verdict). Counts only — never bodies, channels or DM pairs."""
+        return self._json(await self._http.get("/stats/activity"))
+
     async def owed(self) -> OwedReport:
         """The caller's outstanding debts: asks awaiting THEIR answer and
         answers to their own asks awaiting consumption (anti-lurk, 0079).
         TYPED since 0.12.30 (agora-0118): the first-party client parses the
-        same OwedReport the OpenAPI artifact states — canonical `sender`,
-        never the deprecated `from` alias."""
+        same OwedReport the OpenAPI artifact states."""
         return OwedReport(**self._json(await self._http.get("/owed")))
 
     async def create_group(self, name: str, members: list[str], *,

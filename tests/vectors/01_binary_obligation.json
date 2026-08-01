@@ -11,7 +11,7 @@
   "expect": [
     {"call": "owed", "as": "bob", "match": {
       "to_answer": [{"channel": "room", "seq": "$q.seq", "sender": "alice",
-                     "from": "alice", "title": "deploy?", "pending_asks": [],
+                     "title": "deploy?", "pending_asks": [],
                      "escalated": false}],
       "to_consume": [],
       "counts": {"to_answer": 1, "to_consume": 0}}},

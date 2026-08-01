@@ -25,7 +25,7 @@ import time
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import AliasChoices, BaseModel, Field, computed_field
+from pydantic import BaseModel, Field
 
 MAX_BODY_BYTES = 64 * 1024
 MAX_DATA_BYTES = 64 * 1024     # structured payload cap (mirrors body; prevents DB-fill DoS)
@@ -358,45 +358,25 @@ class ObligationRow(BaseModel):
     agora-0118): /owed.to_answer today, board/desk/digest surfaces as they
     migrate. Field notes:
 
-    - `sender`, not `from`: the envelope/Message field name, ending the
-      one-surface alias every TS client had to special-case. The wire still
-      emits `from` too (computed, deprecated) until the agora/0.4 bump.
-    - `created_at` (truth) rides beside `age_minutes` (pre-rounded
-      convenience, deprecated at 0.4) so clients can compute their own ages
-      against the report's `computed_at`.
+    - `sender` is the only name for the author — the same field name the
+      envelope and Message use. (The `from` alias this row also emitted
+      through 0.13 is gone at agora/0.4: one name per fact.)
+    - `created_at` is the truth an age is derived from: render
+      `report.computed_at - row.created_at`. The hub no longer serves a
+      pre-rounded `age_minutes` — two numbers for one fact is how the two
+      drift. The JUDGEMENT stays hub-side and pause-adjusted: `escalated`
+      already excludes operator-pause time, which a client cannot compute.
     """
-
-    model_config = {"populate_by_name": True}
 
     channel: str
     id: str
     seq: int
-    sender: str = Field(validation_alias=AliasChoices("sender", "from"))
-    # ^ validation accepts the legacy `from` key too (impl adversary P1-1b):
-    #   a 0.12.30+ client pointed at a pre-0.12.30 hub must still parse the
-    #   owed report — the anti-lurk banner silently vanishing on old hubs is
-    #   exactly the failure the typed client must not introduce.
+    sender: str
     title: str = ""
     pending_asks: list[str] = Field(default_factory=list)
     asks_naming_you: list[str] = Field(default_factory=list)
     created_at: float = 0.0
-    age_minutes: float = Field(default=0.0,
-                               json_schema_extra={"deprecated": True})
-    # ^ DEPRECATED at agora/0.4: derive from created_at vs computed_at. The
-    #   SCHEMA marker matters (design adversary P1-2): generated TS types
-    #   carry @deprecated JSDoc, steering new consumers off before the
-    #   removal. json_schema_extra, NOT Field(deprecated=): the pydantic
-    #   flag warns on every access, spamming the hub's own serve path
-    #   (impl adversary P2-6) — the marker belongs on the wire contract,
-    #   not on runtime reads.
     escalated: bool = False
-
-    @computed_field(alias="from",  # type: ignore[prop-decorator]
-                    json_schema_extra={"deprecated": True})
-    @property
-    def from_(self) -> str:
-        """DEPRECATED wire alias of `sender`; removed at agora/0.4."""
-        return self.sender
 
 
 class ConsumeRow(BaseModel):
@@ -410,10 +390,10 @@ class ConsumeRow(BaseModel):
     answered_by: str
     answer_id: str
     answer_seq: int
-    age_minutes: float = Field(default=0.0,
-                               json_schema_extra={"deprecated": True})
-    # ^ DEPRECATED at agora/0.4 (see ObligationRow: schema-marked so
-    #   generated types warn new consumers off, without runtime warnings).
+    #: When the ANSWER landed (not the question): the debt is "you have not
+    #: read this reply yet", so its age runs from the reply. Ages derive
+    #: from `report.computed_at` (see ObligationRow).
+    answer_created_at: float = 0.0
 
 
 class WaitingRow(BaseModel):
@@ -462,7 +442,9 @@ class CloseRow(BaseModel):
     seq: int
     title: str = ""
     answered_by: str = ""
-    age_minutes: float = 0.0
+    #: When the last answer landed; ages derive from `report.computed_at`
+    #: (uniform across every row in this report since agora/0.4).
+    answered_at: float = 0.0
 
 
 class OwedReport(BaseModel):
@@ -602,13 +584,13 @@ class SearchReport(BaseModel):
 
 
 class WhoamiReport(BaseModel):
-    """The `/whoami` response, typed (parity move 1, agora-0118). The
-    capability ledger `semantics` MUST live in the typed contract — feature
-    detection from generated types is its whole point (adversary P1-4: an
-    untyped whoami makes the ledger invisible to exactly the clients it was
-    built for). Sub-objects that are still evolving governance surfaces
-    (hub_rules, hub_state, delegations) stay loosely typed until their own
-    migration wave."""
+    """The `/whoami` response, typed (parity move 1, agora-0118).
+    `protocol` is the WHOLE capability statement — the `semantics` stamp
+    list that used to ride here was deleted at agora/0.4, because a served
+    list invites clients to diff it, and a client that diffs capability
+    strings reports a hub as "missing" whatever the fold renamed. Sub-objects
+    that are still evolving governance surfaces (hub_rules, hub_state,
+    delegations) stay loosely typed until their own migration wave."""
 
     id: str
     name: str = ""
@@ -617,7 +599,6 @@ class WhoamiReport(BaseModel):
     created_at: float = 0.0
     version: str
     protocol: str
-    semantics: list[str] = Field(default_factory=list)
     hub_rules: dict[str, Any] = Field(default_factory=dict)
     hub_state: dict[str, Any] = Field(default_factory=dict)
     delegations: list[dict[str, Any]] = Field(default_factory=list)

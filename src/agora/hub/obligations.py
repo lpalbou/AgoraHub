@@ -118,22 +118,50 @@ def closed_authoritatively(parent: Message, replies: list[Message],
     return any(_closes(parent, r, operators) for r in replies)
 
 
+def is_operator_broadcast(parent: Message,
+                          operators: frozenset[str]) -> bool:
+    """An operator message that names NOBODY — the shape whose binary
+    discharge had to be tightened (see discharge_state)."""
+    return bool(parent.sender in operators and not parent.to)
+
+
 def discharge_state(parent: Message, replies: list[Message],
-                    operators: frozenset[str] = frozenset()) -> DischargeState:
+                    operators: frozenset[str] = frozenset(),
+                    delegates: frozenset[str] = frozenset()) -> DischargeState:
     """Compute whether `parent`'s obligation is discharged and/or closed.
 
     A reply from the asker itself never DISCHARGES the asker's own obligation
     (you cannot quietly answer your own question to silence it) — but the
     asker's `resolved` reply CLOSES it: closure is a loud, attributed,
     in-thread act, re-openable by anyone posting a new ask. `operators` is
-    the set of operator agent ids (their resolved replies also close).
-    """
+    the set of operator agent ids (their resolved replies also close);
+    `delegates` is the set of reporting delegates (see below).
+
+    THE 75-SECOND DISCHARGE (live, 2026-08-01). An unstructured open is
+    "binary": historically ANY non-sender reply discharged and closed it.
+    That is right for a peer's one-question thread and catastrophic for a
+    human's broadcast: the operator posted at-test#382 carrying FIVE
+    requirements, one seat replied to part of it 75 seconds later, and the
+    thread was closed — no pending asks, nothing escalating, four
+    requirements silently abandoned. An operator broadcast is therefore
+    discharged only by the OPERATOR (any reply of theirs — they are the one
+    who can say "that is what I meant") or by a reporting DELEGATE posting
+    `resolved`, which is the delegate asserting end-to-end completion under
+    the 2026-08-01 ruling. A bystander's partial answer no longer speaks for
+    the human. Structured asks are unaffected: they already discharge
+    per-ask, which is the shape the operator should prefer anyway."""
     non_sender = [r for r in replies if r.sender != parent.sender]
     has_resolved = any(r.status.value == "resolved" for r in replies)
     closed_by_resolve = any(_closes(parent, r, operators) for r in replies)
     asks = asks_of(parent)
     if not asks:
-        discharged = bool(non_sender)
+        if is_operator_broadcast(parent, operators):
+            discharged = any(
+                r.sender in operators
+                or (r.sender in delegates and r.status.value == "resolved")
+                for r in replies)
+        else:
+            discharged = bool(non_sender)
         return DischargeState(mode="binary", discharged=discharged,
                               closed=discharged or closed_by_resolve,
                               has_resolved_reply=has_resolved)

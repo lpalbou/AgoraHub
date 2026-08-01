@@ -63,7 +63,8 @@ verdicts locally (rather than consuming `/owed`, which is the point of the
 parity spine) must read `docs/protocol.md` on epoch bounding.
 
 CI RULE: changing a vector's expectations — or a code change that makes one
-fail — is a WIRE-CONTRACT change. It requires a version bump and a
-`PROTOCOL_SEMANTICS` entry (see `src/agora/__init__.py`); the 0102
-obligation semantics shipping unnamed is the incident this tripwire exists
-to prevent.
+fail — is a WIRE-CONTRACT change. It requires bumping `PROTOCOL_VERSION`
+(see `src/agora/__init__.py`), which is the ONE compatibility statement
+agora makes; the 0102 obligation semantics shipping unnamed is the incident
+this tripwire exists to prevent. Vector 01 lost its `"from"` expectation at
+`agora/0.4` — that diff is what a legitimate break looks like here.

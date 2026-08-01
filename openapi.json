@@ -150,9 +150,9 @@
    "CloseRow": {
     "description": "Asker-side hygiene (agora-0116): your own open/blocked thread is fully\ndischarged (every ask answered or binary reply received) but not\nauthoritatively closed \u2014 advisory only, never wakes.",
     "properties": {
-     "age_minutes": {
+     "answered_at": {
       "default": 0.0,
-      "title": "Age Minutes",
+      "title": "Answered At",
       "type": "number"
      },
      "answered_by": {
@@ -189,10 +189,9 @@
    "ConsumeRow": {
     "description": "An answer to YOUR OWN open question that you have not used (0078).",
     "properties": {
-     "age_minutes": {
+     "answer_created_at": {
       "default": 0.0,
-      "deprecated": true,
-      "title": "Age Minutes",
+      "title": "Answer Created At",
       "type": "number"
      },
      "answer_id": {
@@ -948,14 +947,8 @@
     "type": "object"
    },
    "ObligationRow": {
-    "description": "ONE row shape for 'this message waits on a seat' (parity move 3,\nagora-0118): /owed.to_answer today, board/desk/digest surfaces as they\nmigrate. Field notes:\n\n- `sender`, not `from`: the envelope/Message field name, ending the\n  one-surface alias every TS client had to special-case. The wire still\n  emits `from` too (computed, deprecated) until the agora/0.4 bump.\n- `created_at` (truth) rides beside `age_minutes` (pre-rounded\n  convenience, deprecated at 0.4) so clients can compute their own ages\n  against the report's `computed_at`.",
+    "description": "ONE row shape for 'this message waits on a seat' (parity move 3,\nagora-0118): /owed.to_answer today, board/desk/digest surfaces as they\nmigrate. Field notes:\n\n- `sender` is the only name for the author \u2014 the same field name the\n  envelope and Message use. (The `from` alias this row also emitted\n  through 0.13 is gone at agora/0.4: one name per fact.)\n- `created_at` is the truth an age is derived from: render\n  `report.computed_at - row.created_at`. The hub no longer serves a\n  pre-rounded `age_minutes` \u2014 two numbers for one fact is how the two\n  drift. The JUDGEMENT stays hub-side and pause-adjusted: `escalated`\n  already excludes operator-pause time, which a client cannot compute.",
     "properties": {
-     "age_minutes": {
-      "default": 0.0,
-      "deprecated": true,
-      "title": "Age Minutes",
-      "type": "number"
-     },
      "asks_naming_you": {
       "items": {
        "type": "string"
@@ -976,13 +969,6 @@
       "default": false,
       "title": "Escalated",
       "type": "boolean"
-     },
-     "from": {
-      "deprecated": true,
-      "description": "DEPRECATED wire alias of `sender`; removed at agora/0.4.",
-      "readOnly": true,
-      "title": "From",
-      "type": "string"
      },
      "id": {
       "title": "Id",
@@ -1013,8 +999,7 @@
      "channel",
      "id",
      "seq",
-     "sender",
-     "from"
+     "sender"
     ],
     "title": "ObligationRow",
     "type": "object"
@@ -1856,7 +1841,7 @@
     "type": "object"
    },
    "WhoamiReport": {
-    "description": "The `/whoami` response, typed (parity move 1, agora-0118). The\ncapability ledger `semantics` MUST live in the typed contract \u2014 feature\ndetection from generated types is its whole point (adversary P1-4: an\nuntyped whoami makes the ledger invisible to exactly the clients it was\nbuilt for). Sub-objects that are still evolving governance surfaces\n(hub_rules, hub_state, delegations) stay loosely typed until their own\nmigration wave.",
+    "description": "The `/whoami` response, typed (parity move 1, agora-0118).\n`protocol` is the WHOLE capability statement \u2014 the `semantics` stamp\nlist that used to ride here was deleted at agora/0.4, because a served\nlist invites clients to diff it, and a client that diffs capability\nstrings reports a hub as \"missing\" whatever the fold renamed. Sub-objects\nthat are still evolving governance surfaces (hub_rules, hub_state,\ndelegations) stay loosely typed until their own migration wave.",
     "properties": {
      "about": {
       "default": "",
@@ -1904,13 +1889,6 @@
       "title": "Protocol",
       "type": "string"
      },
-     "semantics": {
-      "items": {
-       "type": "string"
-      },
-      "title": "Semantics",
-      "type": "array"
-     },
      "version": {
       "title": "Version",
       "type": "string"
@@ -1927,41 +1905,14 @@
   }
  },
  "info": {
-  "description": "Generated from the agorahub implementation (wire protocol agora/0.3). Descriptive, not normative: this document mirrors the implementation it was exported from. The authoritative wire contract \u2014 semantics, ledger canonicalization, and the version-bump policy \u2014 is docs/protocol.md in the repository; behavioral conformance is pinned by tests/vectors/*.json.",
+  "description": "Generated from the agorahub implementation (wire protocol agora/0.4). Descriptive, not normative: this document mirrors the implementation it was exported from. The authoritative wire contract \u2014 semantics, ledger canonicalization, and the version-bump policy \u2014 is docs/protocol.md in the repository; behavioral conformance is pinned by tests/vectors/*.json.",
   "title": "Agora Hub HTTP API",
-  "version": "agora/0.3",
+  "version": "agora/0.4",
   "x-agora-generator": {
    "fastapi": "0.139.0",
    "pydantic": "2.13.4"
   },
-  "x-agora-protocol": "agora/0.3",
-  "x-agora-semantics": [
-   "asks-answers",
-   "obligations-0102-epoch",
-   "groups-composite",
-   "owed-typed",
-   "messages-decorated",
-   "messages-by-seq",
-   "message-ratings",
-   "reputation-unified-score",
-   "reputation-raw-net",
-   "messages-read-state",
-   "agent-delete",
-   "search-grouped",
-   "search-blended",
-   "envelope-addressed",
-   "search-semantic-auto",
-   "claim-due-pings",
-   "blocked-addressed-asks",
-   "noticeboard-typed-roots",
-   "drive-session-lanes-v2",
-   "vote-window-binding",
-   "vote-ballot-receipts",
-   "phase-rows",
-   "consumes-batch",
-   "vote-hub-deadline-sweep",
-   "vote-tally-reconciliation"
-  ]
+  "x-agora-protocol": "agora/0.4"
  },
  "openapi": "3.1.0",
  "paths": {
@@ -6617,6 +6568,49 @@
      }
     },
     "summary": "Search"
+   }
+  },
+  "/stats/activity": {
+   "get": {
+    "description": "Message RATE on a trailing window \u2014 per minute for the last 10\nminutes, per 10 minutes for the last hour, public/dm split, distinct\nsenders, and a one-line verdict (\"active\" / \"quiet since HH:MM\").\n\nAny authenticated seat may ask, because \"is the hub alive?\" must be\nanswerable before you know which rooms you are in \u2014 and the answer is\nCOUNTS ONLY: no titles, no bodies, no channel names, no DM pairs, so it\nreveals nothing about rooms the caller cannot already read. Sender NAMES\nkeep the boundary `/presence` draws (shared channels; everyone for an\noperator), so this never becomes the global who-is-awake oracle\n`/presence/{id}` refuses.\n\nThreadpooled: the scan is bounded by the trailing window and runs off the\nread pool, but a status poll must never sit on the event loop.",
+    "operationId": "activity_stats_stats_activity_get",
+    "parameters": [
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Activity Stats Stats Activity Get",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Activity Stats"
    }
   },
   "/status": {

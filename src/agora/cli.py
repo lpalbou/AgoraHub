@@ -26,6 +26,7 @@ import time
 from pathlib import Path
 
 from . import config as _config
+from . import is_agora_protocol
 from .hook import HOOK_EVENTS as _HOOK_EVENTS
 from .setup_harness import SUPPORTED_HARNESSES
 from . import db_locate as _db_locate
@@ -94,6 +95,11 @@ def _default_url(port: int) -> str:
     return f"http://127.0.0.1:{port}"
 
 
+# How many times `agora up --force` will re-resolve a port that changes
+# hands mid-takeover before it gives up and names the pids it killed.
+_FORCE_MAX_ROUNDS = 4
+
+
 def _port_holder(host: str, port: int) -> tuple[int, str] | None:
     """(pid, command-line) of whatever LISTENs on host:port, or None if the
     port is free. Best-effort via lsof (present on macOS/Linux); a missing
@@ -133,6 +139,49 @@ def _port_holder(host: str, port: int) -> tuple[int, str] | None:
     return 0, ""  # taken, but holder unidentifiable — still refuse loudly
 
 
+def _identify_hub(url: str) -> tuple[bool, str]:
+    """(is-an-agora-hub, version) for whatever answers /healthz at `url`.
+    IDENTITY, not compatibility (agora/0.4: one rule, one helper): whether
+    we may take a port over depends on the holder being an agora hub AT
+    ALL, never on which version it speaks."""
+    try:
+        import httpx
+        r = httpx.get(f"{url}/healthz", timeout=3.0)
+        body = r.json()
+        if r.status_code == 200 and is_agora_protocol(body.get("protocol")):
+            return True, body.get("version", "?")
+    except Exception:
+        pass  # not an agora hub (or not answering) — the squatter path
+    return False, "?"
+
+
+def _take_port_from(host: str, port: int, pid: int) -> str:
+    """SIGTERM (then SIGKILL) `pid` and watch the PORT, not just the pid.
+    Returns 'freed' when the port came free, 'changed' when a DIFFERENT
+    process now holds it (the caller must re-verify THAT one before
+    signaling it), or 'survived' when `pid` still holds it after SIGKILL.
+    Exits 3 on EPERM."""
+    import signal
+    for sig, grace in ((signal.SIGTERM, 10.0), (signal.SIGKILL, 5.0)):
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            pass  # already gone — someone else may still hold the port
+        except PermissionError:
+            print(f"REFUSING to start: pid {pid} is not ours to kill "
+                  "(EPERM) — another user owns that hub.", file=sys.stderr)
+            raise SystemExit(3)
+        deadline = time.monotonic() + grace
+        while time.monotonic() < deadline:
+            holder = _port_holder(host, port)
+            if holder is None:
+                return "freed"
+            if holder[0] != pid:
+                return "changed"
+            time.sleep(0.25)
+    return "survived"
+
+
 def _preflight_port(host: str, port: int, url: str,
                     force: bool = False) -> None:
     """Before binding, diagnose a busy port instead of dying on a raw
@@ -143,68 +192,76 @@ def _preflight_port(host: str, port: int, url: str,
     terminal always ends with the newest installed hub serving and its logs
     in THAT terminal. A NON-hub squatter is never killed, force or not
     (killing an unverified process on protocol suspicion is how innocent
-    daemons die): name the pid+command and exit 3."""
-    holder = _port_holder(host, port)
-    if holder is None:
-        return  # free: proceed to bind
-    # Something listens. Is it a real agora hub?
-    is_hub, version = False, "?"
-    try:
-        import httpx
-        r = httpx.get(f"{url}/healthz", timeout=3.0)
-        body = r.json()
-        if r.status_code == 200 and body.get("protocol", "").startswith("agora/"):
-            is_hub, version = True, body.get("version", "?")
-    except Exception:
-        pass  # not an agora hub (or not answering) — a squatter path below
-    pid, cmd = holder
-    if is_hub and not force:
-        print(f"an agora hub is ALREADY running at {url} "
-              f"(version {version}) — nothing to do. "
-              "Stop it first if you meant to restart, or take the port "
-              "over with `agora up --force`.", file=sys.stderr)
-        raise SystemExit(0)
-    if is_hub and force:
+    daemons die): name the pid+command and exit 3.
+
+    The port can be held by a process OTHER than the one we just killed —
+    an inherited listen fd, a lingering predecessor, a supervisor that
+    respawned the hub, or simply a second lsof row picked first. Killing
+    the first pid we saw and then only asking "is the port free?" blamed an
+    innocent pid for surviving and left the REAL hub serving (0.14.0 field
+    test). So the takeover re-resolves the holder every round and keeps
+    going, re-verifying each new holder as a hub before signaling it."""
+    seen: list[int] = []
+    for _round in range(_FORCE_MAX_ROUNDS):
+        holder = _port_holder(host, port)
+        if holder is None:
+            if seen:
+                print(f"--force: port {port} is free; starting fresh.",
+                      file=sys.stderr)
+            return  # free: proceed to bind
+        pid, cmd = holder
+        # Something listens. Is it a real agora hub? Re-asked every round:
+        # the new holder is not necessarily the same software.
+        is_hub, version = _identify_hub(url)
+        if is_hub and not force:
+            print(f"an agora hub is ALREADY running at {url} "
+                  f"(version {version}) — nothing to do. "
+                  "Stop it first if you meant to restart, or take the port "
+                  "over with `agora up --force`.", file=sys.stderr)
+            raise SystemExit(0)
+        if not is_hub:
+            who = f"pid {pid} ({cmd})" if pid else "an unidentified process"
+            print(
+                f"REFUSING to start: port {port} is held by {who} — NOT an "
+                f"agora hub. This is exactly the silent-squatter class that "
+                f"left the room deaf for 16h (a stray static file server on "
+                f"the hub port). Free the port (kill {pid or 'that pid'}) "
+                f"and retry, or start on a different port with --port. "
+                f"(--force never kills an UNVERIFIED process — only a hub "
+                f"that answers /healthz as agora.)", file=sys.stderr)
+            raise SystemExit(3)
         if not pid:
             print(f"REFUSING to start: a hub answers at {url} but its pid "
                   "is unidentifiable (lsof missing or opaque) — nothing "
                   "safe to kill. Stop it by hand and retry.",
                   file=sys.stderr)
             raise SystemExit(3)
-        import signal
+        if pid in seen:                       # already SIGKILLed, still here
+            print(f"REFUSING to start: pid {pid} survived SIGTERM and "
+                  f"SIGKILL and port {port} is still held — inspect it by "
+                  "hand.", file=sys.stderr)
+            raise SystemExit(3)
+        seen.append(pid)
         print(f"--force: taking over port {port} from the running agora "
               f"hub (version {version}, pid {pid}) — SIGTERM, then "
               "SIGKILL if it lingers.", file=sys.stderr)
-        for sig, grace in ((signal.SIGTERM, 10.0), (signal.SIGKILL, 5.0)):
-            try:
-                os.kill(pid, sig)
-            except ProcessLookupError:
-                pass  # already gone
-            except PermissionError:
-                print(f"REFUSING to start: pid {pid} is not ours to kill "
-                      "(EPERM) — another user owns that hub.",
-                      file=sys.stderr)
-                raise SystemExit(3)
-            deadline = time.monotonic() + grace
-            while time.monotonic() < deadline:
-                if _port_holder(host, port) is None:
-                    print(f"--force: port {port} is free; starting fresh.",
-                          file=sys.stderr)
-                    return
-                time.sleep(0.25)
-        print(f"REFUSING to start: pid {pid} survived SIGTERM and SIGKILL "
-              f"and port {port} is still held — inspect it by hand.",
-              file=sys.stderr)
-        raise SystemExit(3)
-    who = f"pid {pid} ({cmd})" if pid else "an unidentified process"
-    print(
-        f"REFUSING to start: port {port} is held by {who} — NOT an agora "
-        f"hub. This is exactly the silent-squatter class that left the room "
-        f"deaf for 16h (a stray static file server on the hub port). Free "
-        f"the port (kill {pid or 'that pid'}) and retry, or start on a "
-        f"different port with --port. (--force never kills an UNVERIFIED "
-        f"process — only a hub that answers /healthz as agora.)",
-        file=sys.stderr)
+        outcome = _take_port_from(host, port, pid)
+        if outcome == "freed":
+            print(f"--force: port {port} is free; starting fresh.",
+                  file=sys.stderr)
+            return
+        if outcome == "survived":
+            print(f"REFUSING to start: pid {pid} survived SIGTERM and "
+                  f"SIGKILL and port {port} is still held — inspect it by "
+                  "hand.", file=sys.stderr)
+            raise SystemExit(3)
+        # 'changed': a different process holds the port now. Round again —
+        # re-verify it as a hub, then take it over too.
+    held = ", ".join(str(p) for p in seen)
+    print(f"REFUSING to start: port {port} kept changing hands after "
+          f"{_FORCE_MAX_ROUNDS} takeover rounds (killed {held}, and it is "
+          "STILL held) — something is respawning hubs. Stop that supervisor "
+          "and retry.", file=sys.stderr)
     raise SystemExit(3)
 
 
@@ -224,8 +281,8 @@ def _preflight_foreign_hub(db_path: str, cfg: dict, url: str) -> None:
     try:
         import httpx
         r = httpx.get(f"{cfg_url.rstrip('/')}/healthz", timeout=3.0)
-        if r.status_code == 200 and r.json().get(
-                "protocol", "").startswith("agora/"):
+        if r.status_code == 200 and is_agora_protocol(
+                r.json().get("protocol")):
             print(f"REFUSING to start: a hub at {cfg_url} is already "
                   f"serving this db ({db_path}). Two hubs on one SQLite "
                   "file double-deliver every message. Stop that hub first, "
@@ -322,11 +379,47 @@ def cmd_up(args: argparse.Namespace) -> None:
     # (`up --db /new` while a hub is serving) rewrote db_path to a file no
     # hub was using (adversarial review F4, 2026-07-27).
     _config.save_config(url=url, admin_key=admin_key, db_path=db_path)
+    # Operator-set hub rules are NEVER auto-upgraded (their prose is theirs).
+    # But this build enforces mechanisms only the rules teach, so a stored
+    # text from before a protocol bump leaves the hub enforcing what no agent
+    # was ever told. Silent until now: the 0.14.0 field test upgraded a hub
+    # that kept serving a v8 snapshot of an OLDER packaged default, and the
+    # whole fleet ran a session without phase rows or consumes batching.
+    _warn_stale_hub_rules(app)
     # Pin WS keepalive explicitly: connection-derived presence relies on dead
     # sockets being detected within a bounded window (audit M4). Defaults can
     # differ per uvicorn/ws backend; make the bound deliberate.
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning",
                 ws_ping_interval=20.0, ws_ping_timeout=20.0)
+
+
+def _warn_stale_hub_rules(app: Any) -> None:
+    """Say so, once at boot, when the SERVED hub rules never mention a
+    mechanism this build enforces. Version 0 (the packaged default) is
+    always current by construction; only a stored operator text can fall
+    behind. Marker-based, so rules rewritten in the operator's own words
+    stay silent — this fires on a MISSING mechanism, not on a diff.
+
+    Everything here is best-effort: a diagnostic must never be the reason
+    a hub fails to boot."""
+    from .governance import rules_missing_markers
+    try:
+        rules = app.state.service.hub_rules()
+        if not rules.get("version"):
+            return                      # packaged default: current by build
+        missing = rules_missing_markers(rules.get("text") or "")
+    except Exception:
+        return                          # never let a warning break a boot
+    if not missing:
+        return
+    print(f"  WARNING: hub rules v{rules['version']} (operator-set) never "
+          f"mention {len(missing)} mechanism(s) this build enforces:")
+    for why in missing:
+        print(f"    - {why}")
+    print("    Agents are served THESE rules at every whoami, so they will "
+          "never be taught the above.\n"
+          "    Merge the packaged default into your text and publish it: "
+          "`agora rules --set FILE`.")
 
 
 def _setup_key(url: str, agent_id: str, about: str,
@@ -1259,6 +1352,57 @@ def cmd_whoami(args):
     _run_agent_cmd(args, go)
 
 
+def _activity_bar(count: int, peak: int, width: int = 20) -> str:
+    """One proportional bar. A rate table read as raw integers hides the
+    SHAPE — a burst and a steady trickle summing the same look identical —
+    and the shape is the whole question ("is the hub active or not")."""
+    if count <= 0:
+        return "·"
+    return "#" * max(1, round(width * count / max(peak, 1)))
+
+
+def cmd_stats(args):
+    """Hub activity RATE: per-minute over the last 10 minutes, per-10-minutes
+    over the last hour, public/dm split, who spoke, and a verdict line.
+
+    Answers the one question no other surface answers: `agora status` says
+    who is LIVE and `agora board` says what is OWED, and both look the same
+    on a hub that has been silent for an hour as on one mid-storm. Counts
+    only — the hub never returns titles, bodies, channel names or DM pairs
+    here, so this stays safe to poll from anywhere."""
+    async def go(c, a):
+        s = await c.activity_stats()
+        print(f"hub: {_hub_url(a)} — {s['verdict']}")
+
+        def table(rows, heading):
+            peak = max((r["total"] for r in rows), default=0)
+            print(f"\n{heading}")
+            for r in rows:
+                print(f"  {r['label']}  {r['total']:>4} "
+                      f"(pub {r['public']:>3} · dm {r['dm']:>3})  "
+                      f"{_activity_bar(r['total'], peak)}")
+
+        table(s["per_minute"], "per minute, last 10 minutes")
+        table(s["per_bucket"], "per 10 minutes, last hour")
+        t10, t60 = s["totals"]["last_10m"], s["totals"]["last_60m"]
+        rate = s["rate_per_minute"]
+        print(f"\n10m: {t10['total']} msgs ({rate['last_10m']}/min · "
+              f"pub {t10['public']} · dm {t10['dm']})   "
+              f"60m: {t60['total']} msgs ({rate['last_60m']}/min · "
+              f"pub {t60['public']} · dm {t60['dm']})")
+        seats = s["active_seats"]
+        print(f"active seats (10m): {', '.join(seats) if seats else 'none'}")
+        if s["quiet_for_seconds"] is not None and not t10["total"]:
+            # Said only on the quiet branch, because this is exactly where an
+            # operator misreads the number: a seat grinding a 40-minute local
+            # job is WORKING and posts nothing, and reads here as silence.
+            print(f"silence: {s['quiet_for_seconds'] / 60:.0f} minutes since "
+                  "the last message anywhere on this hub\n"
+                  "  (this counts CHATTER, not work — a seat mid-job posts "
+                  "nothing; `agora status` says who is live)")
+    _run_agent_cmd(args, go)
+
+
 def cmd_board(args):
     """The --as agent's decision board: what waits on them, what is queued
     for them, what the room is working on, what awaits review, what is done.
@@ -1274,7 +1418,7 @@ def cmd_board(args):
             for r in b["pending_on_me"]:
                 esc = " ESCALATED" if r["escalated"] else ""
                 asks = f" asks:{','.join(r['pending_asks'])}" if r["pending_asks"] else ""
-                print(f"  {r['channel']}#{r['seq']} from {r['from']} "
+                print(f"  {r['channel']}#{r['seq']} from {r['sender']} "
                       f"({r['age_minutes']:.0f}m{esc}{asks}) — {r['q'][:100]}")
         if b["queue"]:
             print("\n## queued for you (curated)")
@@ -1288,7 +1432,7 @@ def cmd_board(args):
         if b["proposals"]:
             print("\n## proposals (unaddressed open questions)")
             for r in b["proposals"][:15]:
-                print(f"  {r['channel']}#{r['seq']} from {r['from']} — {r['q'][:100]}")
+                print(f"  {r['channel']}#{r['seq']} from {r['sender']} — {r['q'][:100]}")
         if b["in_progress"]:
             print("\n## in progress (claims)")
             for r in b["in_progress"]:
@@ -1648,8 +1792,10 @@ def cmd_inbox(args):
                 print(f"- {row.channel} {row.key}: {row.current} OPEN{nxt}{who}")
             print()
         if owed and (owed.counts.to_answer or owed.counts.to_consume):
-            # Typed consumption (agora-0118): canonical `sender`, never the
-            # deprecated `from` alias the 0.4 bump removes.
+            # Typed consumption (agora-0118). Ages derive from the
+            # report's own clock — agora/0.4 dropped the pre-rounded age
+            # fields so one fact cannot be served two ways.
+            at = owed.computed_at
             print("YOU OWE (ack clears none of this):")
             for row in owed.to_answer[:10]:
                 naming = (f" asks naming you: {row.asks_naming_you}"
@@ -1657,19 +1803,22 @@ def cmd_inbox(args):
                 esc = ", ESCALATED" if row.escalated else ""
                 print(f"- ANSWER {row.channel}#{row.seq} from {row.sender}"
                       f" (pending {row.pending_asks},{naming}"
-                      f" {row.age_minutes}m{esc}) — read id={row.id},"
+                      f" {(at - row.created_at) / 60:.0f}m{esc}) — read id={row.id},"
                       " reply with answers=[...], DO or claim assigned work")
             for row in owed.to_consume[:10]:
                 print(f"- CONSUME {row.channel}#{row.answer_seq}:"
                       f" {row.answered_by} answered YOUR ask {row.your_asks}"
-                      f" ({row.age_minutes}m ago) — read id={row.answer_id}"
+                      f" ({(at - row.answer_created_at) / 60:.0f}m ago) —"
+                      f" read id={row.answer_id}"
                       " and use it, or close your thread")
             print()
         if owed and owed.counts.to_close:
             print("ADVISORY — your open threads, fully answered:")
+            at = owed.computed_at
             for row in owed.to_close[:10]:
                 print(f"- CLOSE {row.channel}#{row.seq}: "
-                      f"{row.answered_by} answered ({row.age_minutes}m ago)"
+                      f"{row.answered_by} answered "
+                      f"({(at - row.answered_at) / 60:.0f}m ago)"
                       f" — post status=resolved")
             print()
         envs = await c.check_inbox(wait=a.wait)
@@ -3027,6 +3176,10 @@ def build_parser() -> argparse.ArgumentParser:
     _agent_parser("whoami", "print your identity").set_defaults(func=cmd_whoami)
     _agent_parser("board", "your decision board: pending on you, queued, "
                            "in progress, awaiting review, done").set_defaults(func=cmd_board)
+    _agent_parser("stats", "hub activity rate: messages per minute (last 10m) "
+                           "and per 10 minutes (last hour), public/dm split, "
+                           "active seats, and whether the hub is moving"
+                  ).set_defaults(func=cmd_stats)
     _agent_parser("channels", "list channels").set_defaults(func=cmd_channels)
 
     sm = _agent_parser("summarize", "LLM summary of the hub from your view "

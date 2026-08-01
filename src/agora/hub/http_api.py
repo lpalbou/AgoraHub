@@ -282,7 +282,7 @@ def whoami(
     cannot otherwise see (new session, post-compaction), with zero extra
     round-trips. hub_state is how a standing-down agent checks for the resume
     without posting."""
-    from .. import PROTOCOL_SEMANTICS, PROTOCOL_VERSION, __version__
+    from .. import PROTOCOL_VERSION, __version__
     pause = service.hub_paused()
     hub_state = ({"state": "paused", **pause} if pause is not None
                  else {"state": "open"})
@@ -291,12 +291,10 @@ def whoami(
         # The running hub's version + wire protocol, so every agent (and
         # the chat login) sees exactly what it is talking to — the single
         # source is agora.__version__ (pyproject reads it dynamically).
+        # `protocol` is the WHOLE capability statement (agora/0.4): the
+        # separate stamp list this response used to carry is gone, because
+        # its only consumers DIFFED it and a fold makes a diff lie.
         version=__version__, protocol=PROTOCOL_VERSION,
-        # Capability ledger (agora-0118): behavioral semantics this hub
-        # serves BEYOND the wire version string. Clients feature-detect
-        # here instead of parsing version numbers; the agora/0.4 bump
-        # will fold the stable ones into the version itself.
-        semantics=list(PROTOCOL_SEMANTICS),
         hub_rules=service.hub_rules(),
         hub_state=hub_state,
         # Delegation is verifiable state (ADR-0004): every agent sees who
@@ -969,6 +967,28 @@ def fleet_status(
                 r.pop("last_refusal", None)
         return overview
     return _run(go)
+
+
+@router.get("/stats/activity")
+async def activity_stats(
+    agent: AgentInfo = Depends(current_agent),
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    """Message RATE on a trailing window — per minute for the last 10
+    minutes, per 10 minutes for the last hour, public/dm split, distinct
+    senders, and a one-line verdict ("active" / "quiet since HH:MM").
+
+    Any authenticated seat may ask, because "is the hub alive?" must be
+    answerable before you know which rooms you are in — and the answer is
+    COUNTS ONLY: no titles, no bodies, no channel names, no DM pairs, so it
+    reveals nothing about rooms the caller cannot already read. Sender NAMES
+    keep the boundary `/presence` draws (shared channels; everyone for an
+    operator), so this never becomes the global who-is-awake oracle
+    `/presence/{id}` refuses.
+
+    Threadpooled: the scan is bounded by the trailing window and runs off the
+    read pool, but a status poll must never sit on the event loop."""
+    return await run_in_threadpool(service.activity_stats, agent)
 
 
 class AckInbox(BaseModel):

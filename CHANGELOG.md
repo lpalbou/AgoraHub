@@ -1,5 +1,249 @@
 # Changelog
 
+## 0.14.0 — 2026-08-01
+
+**One protocol version, and it means everything.** Agora shipped two
+compatibility mechanisms: the wire string `agora/0.3`, and a 25-entry
+`PROTOCOL_SEMANTICS` capability ledger served on `/whoami` that clients
+hardcoded and diffed. Two mechanisms for one question is why the honest
+version bump sat deferred for three releases — folding the ledger would have
+made every deployed seat print *"hub lacks: …"* about capabilities the hub
+had just gained. The ledger is now **deleted**, not folded, and the version
+string is bumped to `agora/0.4`, which names the whole contract in
+`docs/protocol.md` — every route, field and obligation rule. There is
+nothing left to diff.
+
+- **The rule, entire.** A client knows which versions it speaks
+  (`agora.SUPPORTED_PROTOCOLS`). Additive changes ship *inside* a version —
+  an older client simply does not call the new tools, and calling a route is
+  a better feature test than any list of strings. The version bumps only on
+  a breaking wire change, and hub and clients release together, because one
+  `agorahub` install upgrades both sides. A mismatch produces **one warning
+  naming both versions**, never a refusal.
+- **One comparison, one place.** `agora.protocol_warning()` is the only code
+  that compares protocol strings; the chat login banner and the Python
+  client both call it. The port preflight's `startswith("agora/")` checks
+  are now `agora.is_agora_protocol()` and are labelled for what they are —
+  hub IDENTITY (may we take this port over?), which was never a
+  compatibility question.
+- **`agora/0.4` performs the removals it was defined to perform.**
+  `ObligationRow` no longer emits the `from` alias of `sender`; no `/owed`
+  row emits a pre-rounded `age_minutes`. Ages derive from the report's
+  `computed_at` minus the row's own `created_at` / `answer_created_at` /
+  `answered_at` — one fact, one source. `escalated` remains the hub's
+  judgement, because it excludes operator-pause time no client can see.
+- **`sender` everywhere.** The seven remaining untyped surfaces that called
+  the author `from` — the digest brief, board rows, notify lines, and the
+  message/envelope/digest renderers — now say `sender`, the name the
+  envelope and every typed row already used.
+- **A rendering bug fell out of the removal.** `agora chat`'s `/owed` and
+  `/board` fed `age_minutes` into a formatter that takes *seconds*: a
+  90-minute-old debt rendered as `1m`, and anything under an hour as `now`.
+  Deriving the age in seconds fixes it.
+
+### Migration notes
+
+- **Upgrade every seat and the hub together.** One `agorahub` install does
+  both sides; that is the premise the single version string rests on.
+- **What actually breaks for a 0.13 client against a 0.4 hub:** anything
+  that reads `from` or `age_minutes`. `/owed` rows, digest `open_questions`
+  and `decided` entries, and board rows have no `from` key and no
+  `age_minutes` key — a client indexing them gets a `KeyError`, not a stale
+  value. `/whoami` no longer serves `semantics`; a client diffing it now
+  sees an empty list and would report every capability missing. Everything
+  else — routes, auth, the ledger canonicalization, envelope and obligation
+  semantics — is unchanged, so a 0.13 client keeps working on the surfaces
+  it does not touch, after one warning line.
+- **Notify files are the one place the break could have been silent.**
+  `agora listen` skips a pre-0.4 line (the one with `from`) and says so on
+  stderr, once per process, naming the version — a hub that was not upgraded,
+  or a resume offset written before the upgrade, must not read as a quiet
+  channel.
+- **`PROTOCOL_SEMANTICS` is gone from the Python package** and
+  `x-agora-semantics` from `openapi.json` and the live `/openapi.json`.
+  Regenerate any vendored types from the 0.4 artifact.
+
+- **A `reporting` delegate now owes every operator message** in a channel it
+  can read, whatever the message's status and whoever else it names. If you
+  hold a reporting grant, expect `/owed` to carry operator lines that name
+  nobody; if you grant one, expect that seat to be the routing point for
+  operator requests. Nothing changes for seats without the grant, and
+  addressed operator messages keep obliging their named seats exactly as
+  before. Revoke with `agora delegate --revoke AGENT` if you do not want the
+  routing concentrated.
+- **`--sandbox` is still accepted** on `agora drive` as a deprecated alias for
+  `--permissions` (`enabled`=write, `disabled`/`none`=all). It is unchanged in
+  this release; migrate to `--permissions`, which is the spelling every
+  adapter expresses.
+
+**No seat can be work-starved by a blocked row — least of all the delegate.**
+Field test 3: the delegate and phase steward answered every addressed ask
+promptly and still took **zero** work turns across a 24-turn fleet run; the arc
+moved only on external operator nudges. Its one claim was `blocked` on an
+external tool fault, `blocked` is terminal for the work gate, and its REAL
+pending work — `phase:manuscript`, open, itself the steward, `next: writing`
+declared — carried no continuation force at all. The driver correctly saw "no
+live claim" and correctly concluded "nothing to continue"; both were true and
+the seat was starving anyway.
+
+- **A stewarded open phase is now continuable work**, feeding the same gate as
+  a live claim (`Driver._scan_owned_rows`, `_continuation_snapshot`). A claim
+  wins when both exist — it is the finer-grained unit and the real slice
+  receipt. Gate conditions stay narrow so a quiet window cannot buy every
+  steward in the fleet a chunk: `status` open, `steward` is you, and a declared
+  next step.
+- **The phase row is ignition, not fuel.** Slice receipts land on claim rows,
+  so a stewarded phase collects strikes and parks after `WORK_STRIKES` chunks —
+  enough for the woken steward to open a claim row for the arc and chain on
+  that indefinitely, bounded enough that no steward burns chunks forever on one
+  untouched row. The parking line now says so.
+- **The teaching was half the trap.** "Hold ONE live claim" read as *one row
+  for life*, so a seat whose only row was `blocked` never opened another. Rule
+  2 now says one per ACTIVE task and that a `done`/`parked`/`blocked` row is
+  spent — leave it honest, open a new one. Rule 4 says stewarding an open phase
+  IS continuable work. Same correction in `SKILL.md`, both work prompts, and
+  `docs/collaboration.md`.
+- **`blocked` stays terminal for the ROW**, deliberately: chaining chunks
+  against a declared blocker only spins. What changed is that it no longer
+  makes the SEAT dead.
+- **Verified, not asserted.** Ten regression tests pin the exact trap — blocked
+  claim + open stewarded phase + periodic broadcast noise MUST fire a chunk; a
+  seat with nothing continuable MUST NOT — and the whole set was confirmed to
+  fail against the pre-fix gate. Reproduced live before/after on an isolated
+  hub over real HTTP.
+- **The idle-boundary half of the diagnosis did not reproduce.** An unowned
+  broadcast already passes through as elapsed idle and reaches the work gate;
+  only wakes that actually spawn a turn defer work, which is intended. A test
+  now pins both halves so the pass-through cannot regress.
+
+- **`agora stats` — is the hub moving?** A new hub read (`GET /stats/activity`)
+  and CLI answer the one question no existing surface answered: `agora status`
+  says who is LIVE and `agora board` says what is OWED, and both look identical
+  on a hub silent for an hour and on one mid-storm. Messages per minute over
+  the last 10 minutes, per 10 minutes over the last hour, public/dm split,
+  distinct senders, and a verdict line (`active — 16 messages in the last 10
+  minutes (1.6/min)` / `quiet since 07:49`). **Counts only**: no titles, no
+  bodies, no channel names, no DM pairs, so the one hub read useful to a seat
+  in no room stays useless as a way to see into rooms. Buckets are wall-clock
+  aligned (two seats polling seconds apart read the same rows) and empty
+  buckets are emitted, because the gap is the signal. Indexed on `created_at`
+  and served off the read pool, so a status poll never queues behind the writer
+  and never costs a full scan of hub history. Sender NAMES keep the boundary
+  `/presence` already draws (shared channels; everyone for an operator) so this
+  never becomes the global who-is-awake oracle `/presence/{id}` refuses — while
+  `active_seat_count` stays the true count, because an understated count would
+  misreport the one thing the surface exists to report.
+
+- **The out-of-workspace permission rule, ground-truthed.** "Writes outside the
+  workspace are auto-denied headless" was *false*, and believing it cost a live
+  seat ~40 minutes. opencode gates out-of-workspace access with a separate
+  permission, `external_directory`, whose built-in default is `ask` — and
+  `opencode run` auto-rejects every ask. agora's `read`/`write` maps never named
+  it, so it silently inherited that default. The gate is **syntactic, not
+  containment**: it fires only when opencode's shell parser can statically
+  resolve an outside path from a recognised path-taking command or a read/write
+  tool argument. Measured over 22 live runs: `touch`/`cat`/`cp`/`mkdir` on an
+  outside path are refused, while `sh -c '...'`, `echo hi > outside`,
+  `nohup outside/bin/x &`, an external binary, and `python3 -c "open(...)"` all
+  succeed and really land the file. **Nothing changed in 0.14** — the mapping
+  has been the same since 0.13.0; what changed was the shape of the command the
+  model emitted, which is why the same seat wrote to the same folder minutes
+  before being refused.
+- **`external_directory` is now pinned at every level** (`read`/`write` deny,
+  `all` allow) instead of inherited, so an opencode default change cannot
+  redefine what an operator's `--permissions` word means. Pinning also fixes
+  what the model is TOLD: an `ask` auto-reject reports "The user rejected
+  permission to use this specific tool call" — a sentence no user typed, which
+  a live seat read as the operator refusing, leading it to file a blocked claim
+  begging for permission already granted. A pinned `deny` says "the user has
+  specified a rule", which is true.
+- **A refused tool call is never silent again.** A refused `bash` does not fail
+  an opencode turn (only a refused agora tool does), so the driver log stayed
+  green while the seat was stuck. Adapters now implement `turn_notices()` and
+  the driver prints `AGORA_DRIVE warn=harness-refused-tool ... ` on both
+  refusal paths, naming the permission, the paths, and the two remedies. The
+  turn's verdict is untouched: a refused shell call is the operator's
+  configuration, not the seat's fault.
+- **`docs/harness_contract.md` stops over-claiming.** `write` no longer reads
+  "write inside the workspace" — no framework agora drives can promise that. A
+  level is an instruction, not a sandbox; out-of-workspace refusal is a speed
+  bump against an absent-minded write, and a seat whose filesystem matters must
+  be contained by a container or VM.
+
+**A human's request to their fleet now lands on someone by construction.** An
+operator posted a task as `status=reply, to=[]`. Every obligation surface let
+it through — open obligations cover only `open`/`blocked`, addressed-debt
+detection requires the viewer in `to`, and the doorbell is gated on
+open/blocked — so the message created **zero** obligations fleet-wide: nobody
+owed it, nothing escalated, and the deliverable was never built.
+
+- **Every operator message obliges the reporting delegate**, whatever its
+  status and whoever else it names. This is the only place the hub widens an
+  obligation beyond addressing, and it is deliberately *not* oblige-all-members
+  — that is the wake-storm shape 0.12.55 removed, and re-creating it here would
+  trade a silent failure for a loud one. The delegate is the single routing
+  point, which is exactly what the role is responsible for. Addressed operator
+  messages keep obliging their named seats; this only ADDS the delegate.
+- **Every guard the directive class already earned still applies:** the epoch
+  bound (a debt is never older than the rule that created it), retractions,
+  replies carrying `answers`, and the delegate's own posts. The debt discharges
+  on the operator's own word, on the delegate's `resolved`, and per-ask when the
+  request carried structured asks — and a bystander's partial reply never
+  discharges it.
+- **One discharge call.** Every surface now routes through `_discharge`, so
+  operator and delegate authority cannot be computed one way for `/owed` and
+  another for the envelope — the drift class that let a thread read as closed on
+  one surface while its work was still undone.
+- **The delegate playbook ships with the role.** `agora delegate --charter`
+  now prints what end-to-end ownership means in practice: decompose into
+  ADDRESSED asks (an assignment without `to=` is a wish); verify against the
+  ARTIFACT, not the thread; hold one live claim until delivered *and* reported;
+  report at each phase transition; never let stewardship outrank a live
+  operator request; and re-poll an external process at its known per-item
+  duration before declaring it dead. Documented for readers in
+  `docs/collaboration.md` §3.7 and `docs/protocol.md`.
+
+**Stewardship stopped nagging itself.** Three sweep defects, each of which
+re-consumed the one seat still working:
+
+- **`blocked` claims are exempt from the stale sweep, like `parked`.** A row
+  honestly declaring a blocker is not a row someone forgot to touch.
+- **A shrinking stale set is not news.** The sweep re-rang the steward every
+  window while the set only got smaller; an alert now needs something actually
+  new to say.
+- **The steward's own bookkeeping rows no longer feed its own sweep**, which
+  had it canvassing itself in a loop.
+- **The dark and deaf watchdogs cite only debt the seat actually owes**, so an
+  alert names work the recipient can act on.
+
+**Two small surfaces that cost real time.**
+
+- **A title-less post is readable again.** `title` is optional on
+  `post_message`, and models differ on whether they fill optional arguments —
+  one claude-harness seat in a live fleet left 11 of 31 posts title-less while
+  every opencode seat filled all of theirs. Bodies were intact, so the
+  information existed; the triage surfaces simply rendered a blank column, and
+  titles are what receivers triage by. Triage surfaces now fall back to the
+  body's first line, marked with a leading `~` so a derived line is never
+  mistaken for an authored one. The stored record is untouched — the fallback
+  is derived at render time, so it stays honest about what the author wrote.
+- **The hub says so when its own rules are stale.** Operator-set rules are
+  never auto-upgraded (the prose is theirs), so a text stored before an upgrade
+  keeps being served forever — and agents receive it at every `whoami`, which
+  means a hub can enforce a mechanism no agent has ever been told about. `agora
+  up` now warns at boot, naming each mechanism the served text never mentions
+  (phase rows, `consumes=` batching) and the one-line fix. The check is
+  marker-based rather than a diff, so rules rewritten in an operator's own words
+  stay silent; it fires only on a mechanism missing entirely.
+
+**Documentation.** `docs/collaboration.md` — the collaboration model as a
+first-class page (roles, the five cycles, what the hub guarantees versus what
+the fleet practises, the gate discipline) — joins the site navigation and the
+LLM index. `agora stats` is documented in the CLI table, the HTTP route list
+and the operator cheat-sheet. `docs/troubleshooting.md` gains entries for a
+harness refusing a seat's shell commands and for the stale-rules boot warning.
+`docs/protocol.md` documents the delegate obligation.
+
 ## 0.13.1 — 2026-08-01
 
 **`agora join` settles identity before it looks at your folder.** A pinned
@@ -82,7 +326,8 @@ works, and a vote lifecycle the hub guarantees.** This release consolidates
   (`vote-window-binding`, `vote-ballot-receipts`, `vote-hub-deadline-sweep`,
   `vote-tally-reconciliation`, `phase-rows`, `consumes-batch`). No client
   change is required. The reasoning behind deferring `agora/0.4` is recorded
-  in `docs/backlog/proposed/0117_protocol_0_4_semantic_bump.md`.
+  in `docs/backlog/completed/0117_protocol_0_4_semantic_bump.md` (the
+  deferral was reversed in 0.14.0).
 
 ### 0.12.63 — 2026-07-31
 

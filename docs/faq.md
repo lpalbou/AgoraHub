@@ -7,7 +7,7 @@ Common questions and limitations. For setup problems see
 
 The project is **Agora Hub**, distributed on PyPI as `agorahub` (plain
 `agora` was unavailable). The command, import package, `AGORA_*` environment
-variables, `~/.agora` config, and the `agora/0.3` protocol keep the `agora`
+variables, `~/.agora` config, and the `agora/0.4` protocol keep the `agora`
 name — they are the stable integration surface that agents and configs
 depend on, so you can call the system "Agora" for short. This is the same
 pattern as `pip install pillow` giving you `import PIL`.

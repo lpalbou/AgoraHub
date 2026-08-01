@@ -256,10 +256,94 @@ def test_docs_templates_match_packaged_constants():
 
 def test_hub_rules_text_stays_one_screenful_class():
     """The rules are read by LLM agents every session: keep them bounded.
-    (~70 lines is the agreed budget; growth beyond it needs a design pass.
+    (The budget is a screenful; growth beyond it needs a design pass.
     2026-07-28: raised 60 -> 70 by the continuation design pass — six
     adversarial reviews added the ADVANCE definition to rule 2 and the
     owner-declared claim-cadence rule 7; the operator's principle "agents
-    finish what they start" earned the six lines.)"""
-    assert len(HUB_RULES_DEFAULT.splitlines()) <= 70
+    finish what they start" earned the six lines.
+    2026-08-01: raised 70 -> 78 by the collaboration-model pass (0140 field
+    tests + docs/collaboration.md). Four teachings the field measured and one
+    correctness fix earned it: operator debts before peer courtesy; batched
+    `consumes`; the empty reception pass ends WITHOUT posting (ceremony was
+    50% of traffic on empty wakes); phase order as rule 4 — the operator's own
+    v3/v4 invariant, previously absent from the rules entirely; and the vote
+    section no longer tells a chair to publish a result the HUB now publishes.
+    Most of the cost was paid back by compression, not by budget: the routing,
+    messages, votes, claim and blocked-you blocks were all tightened in the
+    same pass.
+    2026-08-01: raised 78 -> 81 by the work-starvation pass. Field test 3 cost a
+    delegate EVERY work turn of a 24-turn run: its one claim was `blocked` on an
+    external tool fault, and the rules never said a blocked row is spent — so it
+    never opened another, and its driver (which chains only on continuable work)
+    saw nothing to continue. Two lines of rule 2 say the row is per ACTIVE task,
+    not per life; two of rule 4 say stewarding an open phase IS continuable work.
+    Two of the four were paid back by reflowing the #commons and hub-blocks
+    blocks, which were carrying short lines.)"""
+    assert len(HUB_RULES_DEFAULT.splitlines()) <= 81
     assert len(CHANNEL_CHARTER_TEMPLATE.splitlines()) <= 25
+
+
+# -- stale operator rules (0.14.0 field test) ---------------------------------
+# An operator text is never auto-upgraded, so a hub that bumps protocol keeps
+# serving whatever was stored. The field test found a v8 snapshot of an OLDER
+# packaged default still being served by a 0.14.0 hub: the fleet was never
+# taught phase rows or consumes batching, and NOTHING said so.
+
+def test_packaged_default_teaches_every_enforced_mechanism():
+    """The guard is only honest if the packaged default itself passes it."""
+    from agora.governance import rules_missing_markers
+    assert rules_missing_markers(HUB_RULES_DEFAULT) == []
+
+
+def test_missing_markers_names_what_a_stale_text_never_teaches():
+    from agora.governance import rules_missing_markers
+    stale = "# Hub rules\nOld text: claims, asks, votes. No new mechanisms.\n"
+    missing = rules_missing_markers(stale)
+    assert len(missing) == 2
+    assert any("phase" in m for m in missing)
+    assert any("consumes" in m for m in missing)
+
+
+def test_rewritten_but_current_rules_are_not_nagged():
+    """Marker-based, not a diff: an operator who says it in their OWN words
+    must stay silent — the warning is for a MISSING mechanism only."""
+    from agora.governance import rules_missing_markers
+    mine = ("House rules. Declare phase:<track> before you work. "
+            "Settle answers in one message with consumes=[refs].")
+    assert rules_missing_markers(mine) == []
+
+
+def test_boot_warns_when_stored_rules_predate_the_build(capsys):
+    from agora.cli import _warn_stale_hub_rules
+
+    class _App:
+        class state:
+            class service:
+                @staticmethod
+                def hub_rules():
+                    return {"version": 8,
+                            "text": "# Hub rules\nno new mechanisms\n"}
+
+    _warn_stale_hub_rules(_App())
+    out = capsys.readouterr().out
+    assert "hub rules v8" in out and "agora rules --set" in out
+    assert "phase rows" in out and "consumes batching" in out
+
+
+def test_boot_is_silent_on_the_packaged_default_and_on_current_rules(capsys):
+    from agora.cli import _warn_stale_hub_rules
+
+    def _app(fn):
+        return type("A", (), {"state": type("S", (), {
+            "service": type("Svc", (), {"hub_rules": staticmethod(fn)})})})()
+
+    def _boom():
+        raise RuntimeError("db went away")
+
+    apps = [_app(lambda: {"version": 0, "text": HUB_RULES_DEFAULT}),
+            _app(lambda: {"version": 12, "text": HUB_RULES_DEFAULT}),
+            _app(_boom),          # a warning never breaks boot
+            object()]             # nor does an app with no service at all
+    for a in apps:
+        _warn_stale_hub_rules(a)
+    assert capsys.readouterr().out == ""

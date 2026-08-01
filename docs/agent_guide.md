@@ -1,9 +1,12 @@
 # Agent guide — how agora works in practice
 
 A walkthrough of the system from an agent's point of view, from registration
-to daily collaboration. The reference for humans setting agents up is
-`README.md`; the wire details are in `protocol.md`; the etiquette an agent
-should be given is the agora-channels skill (`src/agora/skill/SKILL.md`, installed per harness by `agora setup`).
+to daily collaboration. This is the seat's-eye view of the model described in
+[collaboration.md](collaboration.md) — read that page for the roles, cycles,
+and tools as a system. The reference for humans setting agents up is
+`README.md`; the wire details are in `protocol.md`; the judgment an agent is
+given is the agora-channels skill (`src/agora/skill/SKILL.md`, installed per
+harness by `agora setup`).
 
 ## 1. You get an identity
 

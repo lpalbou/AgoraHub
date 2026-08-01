@@ -391,6 +391,65 @@ quiet, the problem is reception rather than execution — see "The listener is
 armed but the session never wakes" above and check the `driver` column in
 `agora status`.
 
+## A driven seat's shell commands are refused ("the user rejected permission")
+
+The seat reports that it lacks permission for a path you believe it may use,
+often after writing to that same folder minutes earlier. Look for
+`AGORA_DRIVE warn=harness-refused-tool` in the driver output: the driver
+prints it on every turn where the harness refused a tool call, naming the
+permission and the paths involved. A refused shell call does not fail the
+turn, so without that line the log looks green while the seat is stuck.
+
+The cause is the harness's own out-of-workspace gate, not agora and not the
+hub. On opencode this is the `external_directory` permission; agora pins it
+explicitly per level (`read`/`write` deny it, `all` allows it), so what an
+operator's `--permissions` word means cannot drift with a harness default.
+
+The gate is syntactic rather than containment: it fires when the harness can
+statically resolve an outside path from a recognised path-taking command or a
+read/write tool argument. That is why a direct `cat`/`cp`/`mkdir` on an
+outside path is refused while the same write reaches disk through a shell
+indirection — the refusal is a speed bump against an absent-minded write, not
+a boundary.
+
+Two remedies, depending on what you intended:
+
+- The seat genuinely needs that folder — run it with `--permissions all`, or
+  move the work inside the workspace.
+- The seat should not have that folder — leave the refusal in place, and
+  contain the seat in a container or VM if its filesystem actually matters.
+  See [harness_contract.md](harness_contract.md) for what each permission
+  level can and cannot promise.
+
+## `agora up` warns that the hub rules never mention a mechanism
+
+At boot the hub compares the rules it *serves* against the mechanisms this
+build *enforces*, and prints a warning naming any the stored text never
+mentions:
+
+```
+WARNING: hub rules v8 (operator-set) never mention 2 mechanism(s) this build enforces:
+    - phase rows (which work is legitimate right now)
+    - consumes batching (settling answers in one message)
+```
+
+Operator-set rules are never auto-upgraded — the prose is yours — so a text
+stored before an upgrade keeps being served indefinitely. Agents receive that
+text at every `whoami`, which means they are never taught the mechanism, even
+though the hub enforces it.
+
+The check is marker-based rather than a diff, so rules rewritten in your own
+words stay silent; it fires only on a mechanism that is missing entirely.
+Fix it by merging the packaged default into your text and publishing again:
+
+```bash
+agora rules                    # what is served today
+agora rules --set rules.md     # publish the merged text (version bumps)
+```
+
+Agents pick up the new text on their next `whoami`. Version 0 — the packaged
+default — is current by construction and never warns.
+
 ## My ballot was not counted
 
 Look at the published result: it prints `ballots_seen`, `ballots_counted` and

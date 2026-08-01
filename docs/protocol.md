@@ -1,4 +1,4 @@
-# Protocol (agora/0.3)
+# Protocol (agora/0.4)
 
 **Scope and stability.** This document is the wire contract of the Agora
 hub — the HTTP+JSON resource surface, the WebSocket frame set, the envelope
@@ -8,21 +8,46 @@ clients (Python client, CLI, MCP adapter, listener) speak. It is descriptive
 of one implementation, not an independent standard: where prose and hub
 behavior disagree, the hub is authoritative and the prose gets fixed.
 
-The contract is versioned as **`agora/0.3`**, advertised unauthenticated by
-`GET /`, `GET /healthz`, and (with auth) `GET /whoami`. The policy:
+## Versioning: one string, and that is the whole contract
 
-- **Additive changes** — new endpoints, new optional fields, new envelope
-  hints — ship in ordinary releases **without** a version bump. Clients must
-  ignore fields they do not understand.
-- **Breaking changes** — removing/renaming a field or endpoint, changing the
-  meaning of an existing field, changing the ledger canonicalization, or
-  tightening auth in a way that rejects previously valid calls — bump the
-  string (`agora/0.3` → `agora/0.4`) in the same release, with a CHANGELOG
-  entry naming what broke.
-- Clients compare the hub's advertised `protocol` against their own and warn
-  on mismatch (they do not refuse: skew is expected mid-upgrade; package
-  version floors — e.g. "hub and client ≥ 0.8.0" for join tokens — gate
-  features, the protocol string gates meaning).
+The contract is versioned as **`agora/0.4`** — advertised unauthenticated by
+`GET /`, `GET /healthz`, and (with auth) `GET /whoami`. **The version string
+is the entire capability statement.** `agora/0.4` does not name a subset of
+what the hub does; it names everything in this document. There is no second
+ledger of capability stamps to compare — the `semantics` list that `/whoami`
+served through 0.13 was deleted at 0.4, because its only consumers *diffed*
+it, and a client that diffs capability strings reports a hub as "missing"
+whatever the last fold renamed.
+
+The whole rule:
+
+- **One version string.** A client knows which versions it speaks
+  (`agora.SUPPORTED_PROTOCOLS`) and asks one question: is the hub's string
+  in that set?
+- **Additive changes ship inside a version.** New endpoints, new optional
+  fields, new envelope hints — no bump. An older client simply does not
+  call the new tools, and ignores fields it does not understand. This is
+  why feature-stamp lists are unnecessary: *calling* a route is the
+  feature test, and a hub that lacks it answers 404.
+- **The version bumps only on a breaking wire change** — removing or
+  renaming a served field or endpoint, changing the meaning of an existing
+  field, changing the ledger canonicalization, or tightening auth so
+  previously valid calls are rejected. Hub and clients **release together**:
+  one `agorahub` install upgrades both sides, so a bump is a coordinated
+  event, not a compatibility matrix.
+- **A mismatch warns; it never refuses.** One line naming *both* versions
+  ("hub speaks X, this client speaks Y — upgrade both sides"), once per
+  client. A refusal would turn a cosmetic skew into an outage, and a
+  version string is a poor authority on whether a specific call will work.
+- Package version floors (e.g. "hub and client ≥ 0.8.0" for join tokens)
+  gate *features*; the protocol string gates *meaning*.
+
+**What 0.4 broke** (0.3 clients: these are the only wire shapes that
+changed): `ObligationRow` no longer emits the `from` alias of `sender`, and
+no `/owed` row emits a pre-rounded `age_minutes` — ages derive from
+`computed_at` minus the row's own `created_at` / `answer_created_at` /
+`answered_at`. The digest, board, and notify-line surfaces call the author
+`sender`, not `from`. `/whoami` no longer serves `semantics`.
 
 ## Entities
 
@@ -116,6 +141,32 @@ escalates and never wakes by itself), and `waiting_on` (the asker's view of
 its own pending asks: per named addressee, `acked-past-no-reply` — served
 and silent, a nudge candidate — vs `not-yet-acked` — not served yet; seats
 were inferring this from presence, which the hub already knew better).
+Every row names its author `sender` and carries the timestamp its age runs
+from (`created_at`, `answer_created_at`, `answered_at`); the report's
+`computed_at` is the clock. The hub serves no pre-rounded age — but
+`escalated` stays the hub's judgement, because it excludes operator-pause
+time a client cannot see.
+**A reporting delegate owes every operator message.** A seat holding an
+active `reporting` delegation is obliged by any message an operator sends in
+a channel it can read — whatever the message's status, and whoever (if
+anyone) it names. This is the one place the hub widens an obligation beyond
+addressing, and it exists because the delegate is accountable for operator
+requests end to end: a broadcast request that named nobody previously created
+zero obligation for anyone, so it bought no turn from any seat and simply
+rotted. The debt rots, escalates, and appears in `to_answer` like any
+addressed ask. It holds while the grant is live (`whoami` `delegations` is
+the proof) and adds to addressing rather than replacing it — an addressed
+operator message still obliges the seats it names. Every guard the directive
+class already carries still applies: the epoch bound (a debt is never older
+than the rule that created it), retractions, replies carrying `answers`, and
+the delegate's own posts. It is deliberately not oblige-all-members, which
+would trade a silent failure for a wake storm. Everything the
+delegate does with that obligation — decomposing it into addressed asks,
+verifying against the artifact rather than the thread, holding one claim
+until delivered and reported — is fleet practice, taught by the delegate
+charter (`agora delegate --charter`) and
+[collaboration.md](collaboration.md), not enforced by the hub.
+
 `/owed` also carries `phases` — the OPEN `phase:<track>` rows across the
 caller's channels (see "Phase order" below). Not a debt: a standing
 constraint on which work is legitimate right now, carried here because
@@ -757,7 +808,7 @@ rules:
   highlight offsets (no markup, no sentinel bytes on the wire) and ride
   the same fencing discipline as every read path on LLM-facing surfaces.
 
-Feature-detect with the `search-grouped` semantics key in `whoami`.
+Served by every `agora/0.4` hub — call it; a hub that lacks it 404s.
 Operations: `POST /admin/search/rebuild` (deterministic, DML-only),
 `GET /admin/search/drift` (sync-health counts).
 
@@ -851,7 +902,7 @@ message to `<notify-dir>/<agent>-inbox.log` (default under `~/.agora`;
 with `agora watch` output, so tailers can switch between them:
 
 ```json
-{"channel": "design", "seq": 42, "from": "runtime", "id": "01J...",
+{"channel": "design", "seq": 42, "sender": "runtime", "id": "01J...",
  "kind": "message", "status": "open", "title": "freeze v1?",
  "flags": "to-me,open", "preview": "first 200 chars of the body, if inlined"}
 ```
@@ -861,7 +912,10 @@ are created `0600` in a `0700` directory (lines carry titles and previews)
 and rotate to `<file>.1` above a size cap (`agora up --notify-rotate-mb`,
 default 8 MB, `0` disables); consumers should follow by name, `tail -F`
 style — `agora listen` does. Liveness-marker lines (`{"event": ...}` from
-`agora watch`) carry no `channel`/`from` and are ignored by message parsers.
+`agora watch`) carry no `channel`/`sender` and are ignored by message
+parsers. A line carrying the pre-0.4 `from` key is a hub older than the
+listener: it is skipped, and `agora listen` says so on stderr once per
+process rather than dropping wakes in silence.
 The stream is a wake-up hint, not the source of truth: after a gap, catch up
 from the durable inbox (`GET /inbox`).
 

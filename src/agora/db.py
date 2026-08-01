@@ -24,7 +24,7 @@ from typing import Any
 
 from . import search_index as _si
 from .ids import new_ulid
-from .models import AgentInfo, Channel, Member, Message, StoreEntry
+from .models import DM_PREFIX, AgentInfo, Channel, Member, Message, StoreEntry
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS agents (
@@ -108,6 +108,10 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS idx_messages_channel_seq ON messages (channel, seq);
 CREATE INDEX IF NOT EXISTS idx_messages_reply_to ON messages (reply_to);
+-- `agora stats` asks "is the hub moving RIGHT NOW?" on a short trailing
+-- window. Without this the answer costs a full table scan of all history,
+-- so the cheap question would get more expensive every day the hub lives.
+CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages (created_at);
 CREATE TABLE IF NOT EXISTS message_dedupe (
     channel     TEXT NOT NULL,
     sender      TEXT NOT NULL,
@@ -1407,6 +1411,38 @@ class Database:
                 (since,)).fetchall()
         return [self._row_to_message(r) for r in rows]
 
+    def activity_counts(self, since: float,
+                        bucket_seconds: float) -> dict[str, Any]:
+        """COUNTS ONLY for messages newer than `since`, bucketed by
+        `bucket_seconds` — the raw material of `agora stats`.
+
+        Deliberately returns no titles, no bodies and no channel names: the
+        question is "is this hub moving?", and answering it must never become
+        a way to read rooms you are not in, or to learn WHO is DMing whom.
+        The public/dm split is a count of two buckets, not a pair list.
+        Retracted messages still count — they were real traffic at the time,
+        and hiding them would make a busy minute look quiet.
+        Off the read pool: a status poll must never queue behind the writer.
+        """
+        buckets: dict[int, dict[str, int]] = {}
+        senders: set[str] = set()
+        with self.read_transaction() as conn:
+            for row in conn.execute(
+                    "SELECT channel, sender, created_at FROM messages "
+                    "WHERE created_at >= ?", (since,)):
+                idx = int(row["created_at"] // bucket_seconds)
+                slot = buckets.setdefault(idx, {"total": 0, "public": 0, "dm": 0})
+                slot["total"] += 1
+                slot["dm" if row["channel"].startswith(DM_PREFIX)
+                     else "public"] += 1
+                senders.add(row["sender"])
+            # Hub-wide, NOT window-bounded: "quiet since HH:MM" has to name a
+            # time outside the window, which is the only case it is asked in.
+            last_any = conn.execute(
+                "SELECT MAX(created_at) AS t FROM messages").fetchone()["t"]
+        return {"buckets": buckets, "senders": sorted(senders),
+                "last_message_at": last_any}
+
     def unread_criticals(self, agent_id: str, channels: list[str]) -> list[Message]:
         """Critical messages stay pinned until the agent actually reads the body."""
         if not channels:
@@ -1562,6 +1598,36 @@ class Database:
                 ORDER BY m.created_at
                 """,
                 (*channels,),
+            ).fetchall()
+        return [self._row_to_message(r) for r in rows]
+
+    def unaddressed_directives(self, channels: list[str],
+                               senders: list[str]) -> list[Message]:
+        """Reply/fyi messages from `senders` that name NOBODY (to_agents
+        empty) — the mirror of addressed_directives, and the feed the
+        reporting delegate's operator debt is built from (operator ruling,
+        2026-08-01: the delegate owns operator requests end to end, so an
+        operator line that names no one is still THEIR obligation).
+
+        Restricted to `senders` on purpose: this must never become "every
+        unaddressed reply obliges someone", which is the ping-pong the
+        addressed rule exists to avoid. Callers pass the operator seats."""
+        if not channels or not senders:
+            return []
+        ch_marks = ",".join("?" for _ in channels)
+        sender_marks = ",".join("?" for _ in senders)
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT m.* FROM messages m
+                WHERE m.status IN ('reply', 'fyi') AND m.to_agents = '[]'
+                  AND m.kind = 'message'
+                  AND m.channel IN ({ch_marks})
+                  AND m.sender IN ({sender_marks})
+                  AND m.retracted_at IS NULL
+                ORDER BY m.created_at
+                """,
+                (*channels, *senders),
             ).fetchall()
         return [self._row_to_message(r) for r in rows]
 

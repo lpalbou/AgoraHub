@@ -327,3 +327,75 @@ def test_channel_authorship_required_flag_reserved_and_typed(service, team):
     with pytest.raises(HubError) as e:
         service.store_set(alice, "design", CHANNEL_META_KEY, {"authorship_required": "yes"})
     assert e.value.status_code == 400
+
+
+# -- operator broadcasts: the 75-second discharge (live, 2026-08-01) ----------
+
+
+def _op_msg(sender="laurent", to=None, data=None, status="open"):
+    return Message(id="x", channel="c", seq=1, sender=sender, status=status,
+                   data=data, to=to or [])
+
+
+OPS = frozenset({"laurent"})
+
+
+def test_operator_broadcast_survives_a_bystanders_partial_reply():
+    """THE FIVE-REQUIREMENT CLOSE. at-test#382 was an operator broadcast
+    carrying five requirements; a seat answered part of it 75 seconds later
+    and binary discharge closed the whole thread — nothing pending, nothing
+    escalating, four requirements silently abandoned. A bystander does not
+    get to say what the human meant."""
+    parent = _op_msg()
+    bystander = _msg("editor", status="reply")
+    assert discharge_state(parent, [bystander], OPS).discharged is False
+    assert discharge_state(parent, [bystander], OPS).closed is False
+    # Two bystanders are no better than one.
+    assert discharge_state(parent, [bystander, _msg("reader", status="reply")],
+                           OPS).discharged is False
+
+
+def test_operator_broadcast_discharges_on_the_operators_own_word():
+    """The human can always settle their own request."""
+    parent = _op_msg()
+    assert discharge_state(parent, [_msg("laurent", status="reply")],
+                           OPS).discharged is True
+    assert discharge_state(parent, [_msg("laurent", status="resolved")],
+                           OPS).closed is True
+
+
+def test_operator_broadcast_discharges_on_the_delegates_resolved():
+    """The reporting delegate owns operator requests end to end (ruling
+    2026-08-01), so their `resolved` is an accountable completion claim —
+    but a mere reply from them is progress, not delivery."""
+    parent = _op_msg()
+    dels = frozenset({"reader"})
+    assert discharge_state(parent, [_msg("reader", status="reply")],
+                           OPS, dels).discharged is False
+    assert discharge_state(parent, [_msg("reader", status="resolved")],
+                           OPS, dels).discharged is True
+    # A non-delegate's `resolved` still carries no authority here.
+    assert discharge_state(parent, [_msg("editor", status="resolved")],
+                           OPS, frozenset()).discharged is False
+
+
+def test_addressed_operator_ask_and_peer_broadcasts_are_unchanged():
+    """The tightening is scoped to operator messages that name NOBODY."""
+    # Operator naming a seat: that seat's reply discharges, as before.
+    named = _op_msg(to=["editor"])
+    assert discharge_state(named, [_msg("editor", status="reply")],
+                           OPS).discharged is True
+    # A peer's unaddressed open keeps plain binary discharge.
+    peer = _msg("reader")
+    assert discharge_state(peer, [_msg("editor", status="reply")],
+                           OPS).discharged is True
+
+
+def test_operator_broadcast_with_structured_asks_still_discharges_per_ask():
+    """Structured asks are the shape that already worked; do not change it."""
+    parent = _op_msg(data={"asks": [{"id": "1"}, {"id": "2"}]})
+    one = _msg("editor", data={"answers": ["1"]}, status="reply")
+    st = discharge_state(parent, [one], OPS)
+    assert st.mode == "asks" and st.pending == ["2"] and st.discharged is False
+    both = _msg("at1", data={"answers": ["2"]}, status="reply")
+    assert discharge_state(parent, [one, both], OPS).discharged is True

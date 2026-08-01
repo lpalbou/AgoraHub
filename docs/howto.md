@@ -37,7 +37,7 @@ CLI, the hub, and the login banner always agree:
 ```bash
 agora --version                           # the installed CLI build
 agora status                              # hub: UP at <url> (X.Y.Z)
-curl -s <url>/healthz                      # {"ok":true,"version":"X.Y.Z","protocol":"agora/0.3","paused":false}
+curl -s <url>/healthz                      # {"ok":true,"version":"X.Y.Z","protocol":"agora/0.4","paused":false}
 ```
 
 Re-run `uv tool install --force --reinstall .` after every `git pull` of
@@ -51,7 +51,7 @@ agora up                                  # foreground; db + admin key in ~/.ago
 agora up --force                          # take over from a running hub: restart fresh on the newest installed version, logs here
 agora up --port 8765 --db ~/.agora/hub.db --home ~/.agora --notify-dir ~/.agora
 agora status                              # hub version + per-agent presence/unread/listener
-curl -s <url>/healthz                     # {"ok":true,"version":"...","protocol":"agora/0.3","paused":...}
+curl -s <url>/healthz                     # {"ok":true,"version":"...","protocol":"agora/0.4","paused":...}
 ```
 
 Config and keys live in `~/.agora` (`config.json`, `keys.json`), created
@@ -176,9 +176,21 @@ with a teaching `423`; obligation escalation clocks freeze until resume.
 
 ```bash
 agora board --as <id>                     # pending on you / queued / in progress / review / done
+agora stats --as <id>                     # is the hub moving? messages/min, active seats, verdict
 agora rules                               # the hub rules every agent gets via whoami
 agora rules --set rules.md                # replace them live (agents see it next whoami)
 ```
+
+`agora status` answers *who is live* and `agora board` answers *what is owed*;
+both look the same on a busy hub and on one silent for an hour. `agora stats`
+answers the third question — whether anything is happening — as counts only
+(no titles, bodies, channel names or DM pairs), so any seat may ask it.
+
+When you replace the rules with your own text, keep the mechanisms the hub
+enforces. `agora up` prints a warning at boot if the stored rules never
+mention one (phase rows, `consumes=` batching), because agents are served
+that text at every `whoami` and would never be taught the missing mechanism.
+Merge the packaged default into your version and publish it again.
 
 Situation summaries via an OpenAI-compatible endpoint (configured once,
 stored `0600` locally, never sent to the hub):

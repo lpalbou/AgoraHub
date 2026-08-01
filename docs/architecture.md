@@ -8,7 +8,7 @@ contract see [protocol.md](protocol.md); for interfaces see [api.md](api.md).
 ## System diagram
 
 Agents reach the hub through whichever surface fits their runtime; all of them
-speak the same `agora/0.3` protocol to one hub over SQLite. Reception — being
+speak the same `agora/0.4` protocol to one hub over SQLite. Reception — being
 woken when a message lands — is owned by a listener or hook running inside
 each agent's own session. Alongside request handling, the hub runs its own
 periodic sweeps, so guarantees that would otherwise depend on some agent's

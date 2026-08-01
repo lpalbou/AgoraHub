@@ -1277,6 +1277,71 @@ def test_opencode_rejected_agora_tool_fails_the_turn_despite_rc0(home):
     assert ok.ok is True and ok.tools == ("agora_whoami",)
 
 
+def test_opencode_pins_external_directory_at_every_level(home):
+    """Out-of-workspace access is a SEPARATE opencode permission. Left
+    unstated it falls to opencode's own default, so the meaning of an
+    operator's `--permissions` word would change under agora whenever
+    opencode changed that default."""
+    from agora.drive import OpencodeDriveAdapter
+
+    levels = {}
+    for level in ("read", "write", "all"):
+        a = OpencodeDriveAdapter(model="m", permissions=level, cwd=home,
+                                 mcp=_binding(home))
+        block = json.loads(a.environment()["OPENCODE_CONFIG_CONTENT"])["permission"]
+        levels[level] = block["external_directory"]
+    assert levels == {"read": "deny", "write": "deny", "all": "allow"}
+
+
+def test_opencode_refused_tool_is_named_on_both_refusal_paths(home):
+    """A refused `bash` never fails an opencode turn, so without this the
+    driver log is green while the seat is stuck — and what the model is told
+    ("The user rejected permission...") is a sentence no user typed. A live
+    seat believed it, burned ~40 minutes and filed a blocked claim asking the
+    operator for permission the operator had already granted (2026-08-01)."""
+    from agora.drive import OpencodeDriveAdapter
+
+    a = OpencodeDriveAdapter(model="m", permissions="write", cwd=home,
+                             mcp=_binding(home))
+    # path 1 — a permission left on opencode's `ask` default (stderr).
+    stderr = ("\x1b[93m\x1b[1m! \x1b[0mpermission requested: "
+              "external_directory (/Users/x/Desktop/*, /Users/x/gen/*); "
+              "auto-rejecting\n"
+              "\x1b[93m\x1b[1m! \x1b[0mpermission requested: "
+              "external_directory (/Users/x/Desktop/*); auto-rejecting\n")
+    asked = a.turn_notices("", stderr)
+    assert len(asked) == 1                        # one line per permission
+    assert "permission=external_directory" in asked[0]
+    assert "/Users/x/Desktop/*" in asked[0] and "/Users/x/gen/*" in asked[0]
+    assert "which no user did" in asked[0]
+
+    # path 2 — agora's own pinned `deny` (stdout tool error, no stderr line).
+    stdout = json.dumps({"type": "tool_use", "part": {
+        "type": "tool", "tool": "bash", "state": {
+            "status": "error",
+            "input": {"command": 'touch "/Users/x/Desktop/a.txt"'},
+            "error": "The user has specified a rule which prevents you from "
+                     "using this specific tool call. Here are some of the "
+                     "relevant rules [...]"}}}) + "\n"
+    ruled = a.turn_notices(stdout, "")
+    assert len(ruled) == 1
+    assert "tool=bash" in ruled[0] and "--permissions write" in ruled[0]
+    assert '/Users/x/Desktop/a.txt' in ruled[0]
+    for line in asked + ruled:
+        assert "--permissions all" in line and str(home.resolve()) in line
+    # A clean turn says nothing: this must not become per-turn noise.
+    assert a.turn_notices("", "") == []
+
+
+def test_turn_notices_default_to_silence(home):
+    """Every other harness inherits the hook and stays quiet."""
+    from agora.drive import ClaudeDriveAdapter, CodexDriveAdapter
+
+    for cls in (ClaudeDriveAdapter, CodexDriveAdapter):
+        a = cls(model="m", permissions="write", cwd=home, mcp=_binding(home))
+        assert a.turn_notices("some stdout", "some stderr") == []
+
+
 def test_pi_command_carries_the_bridge_and_owns_the_session_namespace(home):
     """pi ships no MCP client, so agora's bridge extension rides `-e`; the
     session id is CALLER-chosen (`--session-id` creates if missing), so agora

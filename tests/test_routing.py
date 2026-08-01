@@ -51,7 +51,7 @@ def make_public_channel(client: TestClient, owner: dict, name: str,
 # -- the narrowed listener rule (pure function) ------------------------------
 
 def _event(status: str = "open", flags: str = "", sender: str = "peer") -> dict:
-    return {"from": sender, "status": status, "flags": flags}
+    return {"sender": sender, "status": status, "flags": flags}
 
 
 def test_addressed_open_wakes_only_the_named_seats():
@@ -342,8 +342,18 @@ def test_broadcast_open_in_big_room_doorbells_the_sender(tmp_path):
     notices = [l for l in _notify_lines(tmp_path, "sender")
                if str(l.get("id", "")).startswith("notice:")]
     assert len(notices) == 1
-    assert "obliges ALL 5" in notices[0]["preview"]
+    # The notice states the LEDGER's arithmetic, not the old false claim
+    # that a broadcast "obliges ALL 5" (corrected 2026-08-01): an
+    # unaddressed open creates no obligation for anyone, which is exactly
+    # why an idle seat spends no turn on it.
+    assert "creates NO obligation for any of the 5 other members" \
+        in notices[0]["preview"]
+    assert "obliges ALL" not in notices[0]["preview"]
     assert not qualifies(notices[0], "sender", important_only=True)
+    # And the claim is TRUE: every other seat's ledger really is empty.
+    for i in range(5):
+        owed = client.get("/owed", headers=others[i]).json()
+        assert owed["counts"]["to_answer"] == 0
     # Nothing stored: the room's history carries only the real message
     # (join/create system rows aside).
     hist = client.get("/channels/board/messages", headers=sender).json()
@@ -394,23 +404,74 @@ def test_dark_addressee_advisory_doorbells_the_sender(tmp_path):
     assert len(advisories) == 1                        # suppressed: no new one
 
 
-def test_addressed_or_small_room_opens_get_no_doorbell(tmp_path):
+def test_addressed_opens_get_no_doorbell(tmp_path):
+    """An ADDRESSED open needs no correction: naming a seat is exactly the
+    form that creates a tracked, escalatable obligation."""
     client = make_client(tmp_path)
     sender = register(client, "sender")
     peer = register(client, "peer")
     others = [register(client, f"seat{i}") for i in range(5)]
     make_public_channel(client, sender, "board", peer, *others)
-    make_public_channel(client, sender, "duo", peer)
-    # Addressed in the big room: the named seat carries it, no notice.
     client.post("/channels/board/messages",
                 json={"body": "q", "status": "open", "to": ["peer"]},
                 headers=sender)
-    # Broadcast in a tiny room: below the teaching threshold.
-    client.post("/channels/duo/messages",
-                json={"body": "q", "status": "open"}, headers=sender)
     notices = [l for l in _notify_lines(tmp_path, "sender")
                if str(l.get("id", "")).startswith("notice:")]
     assert notices == []
+    # The named seat really does carry the debt.
+    assert client.get("/owed", headers=peer).json()["counts"]["to_answer"] == 1
+    # A seat alone in a room broadcasts to nobody: no notice either.
+    make_public_channel(client, sender, "solo")
+    client.post("/channels/solo/messages",
+                json={"body": "q", "status": "open"}, headers=sender)
+    assert [l for l in _notify_lines(tmp_path, "sender")
+            if str(l.get("id", "")).startswith("notice:")] == []
+
+
+def test_broadcast_notice_reaches_small_and_private_working_groups(tmp_path):
+    """THE FAN-OUT THAT VANISHED (live, 2026-08-01). A steward relayed the
+    operator's task into freshly-created PRIVATE working groups as
+    unaddressed room-wide opens. Those obliged nobody, so every writer that
+    owed nothing no-op'd the wake and the deliverable never got built — and
+    the old notice was doubly unable to warn: it skipped private channels
+    entirely and required 6 members, while the brief was posted when the
+    steward was still the room's only member. Obligation arithmetic is not a
+    routing opinion; it must reach the rooms where fan-out actually lives."""
+    client = make_client(tmp_path)
+    steward = register(client, "steward")
+    writer = register(client, "writer")
+
+    # A PRIVATE purpose-built group, the shape the steward actually used.
+    r = client.post("/channels", json={"name": "brief", "private": True},
+                    headers=steward)
+    assert r.status_code == 200
+    client.post("/channels/brief/join", json={}, headers=steward)
+    tok = client.post("/channels/brief/invites", json={"agent_id": "writer"},
+                      headers=steward).json()["invite_token"]
+    client.post("/channels/brief/join", json={"invite_token": tok},
+                headers=writer)
+    client.post("/channels/brief/messages",
+                json={"body": "collaborate on the preface", "status": "open",
+                      "title": "preface"}, headers=steward)
+    notices = [l for l in _notify_lines(tmp_path, "steward")
+               if str(l.get("id", "")).startswith("notice:")]
+    assert len(notices) == 1, "private working group got no broadcast notice"
+    assert "creates NO obligation" in notices[0]["preview"]
+    # The warning is accurate: the writer owes nothing and would no-op.
+    assert client.get("/owed", headers=writer).json()["counts"]["to_answer"] == 0
+    # It stays a doorbell: ephemeral, non-waking, nothing stored in the room.
+    assert not qualifies(notices[0], "steward", important_only=True)
+    hist = client.get("/channels/brief/messages", headers=steward).json()
+    assert [m["title"] for m in hist if m["kind"] == "message"] == ["preface"]
+
+    # Naming the seat is the fix the notice teaches — and it silences it.
+    client.post("/channels/brief/messages",
+                json={"body": "write the preface", "status": "open",
+                      "to": ["writer"], "title": "assigned"}, headers=steward)
+    after = [l for l in _notify_lines(tmp_path, "steward")
+             if str(l.get("id", "")).startswith("notice:")]
+    assert len(after) == 1, "an addressed open must not re-notice"
+    assert client.get("/owed", headers=writer).json()["counts"]["to_answer"] == 1
 
 
 # -- fork nudge (0135) --------------------------------------------------------

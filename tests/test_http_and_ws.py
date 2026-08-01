@@ -339,7 +339,7 @@ def test_hub_writes_notify_files_without_any_watcher(tmp_path):
     posted = [l for l in bob_lines if l.get("title") == "hi"]
     assert len(posted) == 1                      # exactly once, no duplicates
     assert posted[0]["channel"] == "design"
-    assert posted[0]["from"] == "alice"
+    assert posted[0]["sender"] == "alice"   # agora/0.4: one name for the author
     assert posted[0]["kind"] == "message"        # tailers filter fs/system noise
     assert "to-me" in posted[0]["flags"]          # viewer-specific envelope
     assert posted[0]["preview"] == "hello file"
@@ -567,3 +567,27 @@ def test_create_group_reports_partial_invite_failure(client):
         "name": "room-y", "members": ["gw", "ghost"], "purpose": "p"}).json()
     assert out["invited"] == ["gw"]
     assert len(out["failed"]) == 1 and out["failed"][0]["agent"] == "ghost"
+
+
+def test_activity_stats_endpoint(client):
+    """`agora stats` over HTTP: any authenticated seat, counts only."""
+    alice = register(client, "alice")
+    assert client.post("/channels", json={"name": "design"},
+                       headers=alice).status_code == 200
+    client.post("/channels/design/messages", json={"body": "hello"},
+                headers=alice)
+    body = client.get("/stats/activity", headers=alice).json()
+    assert len(body["per_minute"]) == 10 and len(body["per_bucket"]) == 6
+    assert body["totals"]["last_10m"]["total"] == 2   # post + room-opening row
+    assert body["active_seats"] == ["alice", "hub"]
+    assert body["verdict"].startswith("active — 2 messages")
+    # No room ever leaks through this surface.
+    assert "design" not in str(body)
+
+
+def test_activity_stats_requires_a_seat(client):
+    """Unauthenticated liveness has a home already (/healthz). This surface
+    reads the message table, so it stays behind a bearer token."""
+    assert client.get("/stats/activity").status_code == 401
+    assert client.get("/stats/activity",
+                      headers={"Authorization": "Bearer nope"}).status_code == 401

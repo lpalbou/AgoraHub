@@ -44,7 +44,7 @@ ADMIN = "listen-test-admin"
 
 def _event(channel="design", seq=1, sender="alice", title="", status="fyi",
            flags="", **extra) -> dict:
-    return {"channel": channel, "seq": seq, "from": sender, "kind": "message",
+    return {"channel": channel, "seq": seq, "sender": sender, "kind": "message",
             "status": status, "title": title, "flags": flags, **extra}
 
 
@@ -62,16 +62,33 @@ def _envelope(channel="design", seq=1, sender="alice", title="hi", body="hello",
 def test_parse_line_accepts_notify_lines_and_skips_markers_and_junk():
     real = notify_line(_envelope(seq=7))
     parsed = parse_line(real)
-    assert parsed is not None and parsed["seq"] == 7 and parsed["from"] == "alice"
+    assert parsed is not None and parsed["seq"] == 7 and parsed["sender"] == "alice"
     assert parse_line('{"event": "watch_started", "as": "bob"}') is None
     assert parse_line('{"event": "watch_ended"}') is None
     assert parse_line("tail: cannot open file") is None       # non-JSON junk
     assert parse_line("[1, 2]") is None                        # JSON, wrong shape
     assert parse_line("") is None
-    assert parse_line('{"channel": "c", "seq": 1}') is None    # missing "from"
-    assert parse_line('{"channel": "c", "seq": "x", "from": "a"}') is None
-    lenient = parse_line('{"channel": "c", "seq": "12", "from": "a"}')
+    assert parse_line('{"channel": "c", "seq": 1}') is None    # missing "sender"
+    assert parse_line('{"channel": "c", "seq": "x", "sender": "a"}') is None
+    lenient = parse_line('{"channel": "c", "seq": "12", "sender": "a"}')
     assert lenient is not None and lenient["seq"] == 12        # legacy string seq
+
+
+def test_pre_0_4_notify_line_is_refused_out_loud_not_in_silence(capsys):
+    """agora/0.4 renamed the notify line's `from` to `sender`. A line in the
+    old shape means the HUB is older than this listener (or 0086 resumed us
+    from an offset written before the upgrade). Such a line cannot be
+    delivered — but a dropped wake that says nothing is the deaf-agent
+    failure this file exists to prevent, so the version is named on stderr."""
+    import agora.listen as L
+
+    L._pre_0_4_line_warned = False
+    assert parse_line('{"channel": "c", "seq": 1, "from": "a"}') is None
+    err = capsys.readouterr().err
+    assert "pre-0.4" in err and "agora/0.4" in err and "Upgrade the hub" in err
+    # Once per process: a stale file must not print a line per line.
+    assert parse_line('{"channel": "c", "seq": 2, "from": "a"}') is None
+    assert capsys.readouterr().err == ""
 
 
 def test_retraction_tombstones_never_wake_listeners():
@@ -86,9 +103,9 @@ def test_qualifies_skips_own_messages_defensively():
 
 
 def test_minimal_legacy_event_flows_through_pipeline():
-    """A bare pre-0.7 line (channel/seq/from only) must parse, qualify sanely
-    and render — general-purpose handling, not schema-of-the-day handling."""
-    parsed = parse_line('{"channel": "old", "seq": 2, "from": "alice"}')
+    """A bare line (channel/seq/sender only) must parse, qualify sanely and
+    render — general-purpose handling, not schema-of-the-day handling."""
+    parsed = parse_line('{"channel": "old", "seq": 2, "sender": "alice"}')
     assert parsed is not None
     assert qualifies(parsed, "bob") is True
     assert qualifies(parsed, "bob", important_only=True) is False  # nothing important
@@ -302,12 +319,18 @@ def test_sharpest_debt_surfaces_on_wake_and_digest():
                               _sharpest_debt_digest_clause,
                               _sharpest_debt_wake_token)
 
+    # Ages DERIVE from the report clock (agora/0.4 dropped `age_minutes`):
+    # computed_at minus the row's own timestamp, so one fact has one source.
+    now = 1_000_000.0
     owed = {
+        "computed_at": now,
         "to_answer": [
             {"channel": "commons", "seq": 3310, "sender": "laurent",
-             "age_minutes": 474.0, "asks_naming_you": ["1"], "escalated": True},
+             "created_at": now - 474.0 * 60, "asks_naming_you": ["1"],
+             "escalated": True},
             {"channel": "dm:agora--laurent", "seq": 12, "sender": "laurent",
-             "age_minutes": 30.0, "asks_naming_you": [], "escalated": False},
+             "created_at": now - 30.0 * 60, "asks_naming_you": [],
+             "escalated": False},
         ],
         "to_consume": [],
         "counts": {"to_answer": 2, "to_consume": 0},
@@ -327,13 +350,15 @@ def test_sharpest_debt_surfaces_on_wake_and_digest():
 def test_sharpest_debt_prefers_escalated_then_oldest_consume():
     from agora.listen import _sharpest_debt_wake_token
 
+    now = 1_000_000.0
     owed = {
+        "computed_at": now,
         "to_answer": [],
         "to_consume": [
             {"channel": "commons", "answer_seq": 45, "answered_by": "runtime",
-             "age_minutes": 125.0},
+             "answer_created_at": now - 125.0 * 60},
             {"channel": "commons", "answer_seq": 12, "answered_by": "memory",
-             "age_minutes": 10.0},
+             "answer_created_at": now - 10.0 * 60},
         ],
     }
     assert _sharpest_debt_wake_token(owed) == "commons#45,2.1h,consume-runtime"
@@ -777,8 +802,8 @@ def test_follow_lines_buffers_partial_writes_until_newline(tmp_path):
         w.write('{"channel": "c", ')                  # partial, no newline
     assert next(gen) is None                           # nothing to yield yet
     with open(path, "a") as w:
-        w.write('"seq": 1, "from": "a"}\n')
-    assert _drive(gen, until_lines=1) == ['{"channel": "c", "seq": 1, "from": "a"}']
+        w.write('"seq": 1, "sender": "a"}\n')
+    assert _drive(gen, until_lines=1) == ['{"channel": "c", "seq": 1, "sender": "a"}']
     gen.close()
 
 
@@ -1453,7 +1478,7 @@ def test_ws_once_subscribes_wakes_and_writes_notify_file(tmp_path, spawn, hub_fa
     [line] = notify_copy.read_text().splitlines()
     event = json.loads(line)
     assert event["channel"] == "design" and event["seq"] == posted["seq"]
-    assert event["from"] == "alice" and "to-me" in event["flags"]
+    assert event["sender"] == "alice" and "to-me" in event["flags"]
 
 
 def test_ws_reconnects_after_hub_restart_and_catches_up(tmp_path, spawn, hub_factory):

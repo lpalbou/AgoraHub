@@ -2,7 +2,7 @@
 """Standalone Agora ledger verifier — stdlib only, no agora imports.
 
 Written from the canonicalization rules in docs/protocol.md ("Verbatim
-ledger", agora/0.3) and nothing else, as proof that the document alone
+ledger", agora/0.4) and nothing else, as proof that the document alone
 suffices to verify a transcript:
 
     python3 verify_ledger.py ledger.json

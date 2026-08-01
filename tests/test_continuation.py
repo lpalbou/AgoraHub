@@ -193,7 +193,7 @@ def test_claim_continuation_is_on_by_default(home, monkeypatch):
     calls = []
     d = _driver(home, lambda p, s: (calls.append(p) or "s", True))
     versions = iter(range(1, 20))
-    monkeypatch.setattr(d, "_claim_snapshot",
+    monkeypatch.setattr(d, "_continuation_snapshot",
                         lambda: ("commons", "claim:x", next(versions)))
     _run_loop(d, [0], monkeypatch)
     assert calls == [WORK_BOOT_PROMPT]
@@ -205,7 +205,7 @@ def test_chain_spawns_work_turns_while_claim_progresses(home, monkeypatch):
     calls = []
     d = _driver(home, lambda p, s: (calls.append(p) or "s", True))
     versions = iter([1, 1, 2, 2, 3, 3, 4, 4])
-    monkeypatch.setattr(d, "_claim_snapshot",
+    monkeypatch.setattr(d, "_continuation_snapshot",
                         lambda: ("commons", "claim:x", next(versions, 99)))
     _run_loop(d, [0, 0, 0], monkeypatch)
     assert len(calls) == 3
@@ -220,12 +220,12 @@ def test_receiptless_chunks_park_the_chain(home, monkeypatch):
     version bump (any row touch) resumes — strikes key on the version."""
     calls = []
     d = _driver(home, lambda p, s: (calls.append(p) or "s", True))
-    monkeypatch.setattr(d, "_claim_snapshot",
+    monkeypatch.setattr(d, "_continuation_snapshot",
                         lambda: ("commons", "claim:x", 7))   # frozen version
     _run_loop(d, [0] * (WORK_STRIKES + 3), monkeypatch)
     assert len(calls) == WORK_STRIKES         # parked after the strikes
     calls.clear()
-    monkeypatch.setattr(d, "_claim_snapshot",
+    monkeypatch.setattr(d, "_continuation_snapshot",
                         lambda: ("commons", "claim:x", 8))   # row touched
     _run_loop(d, [0], monkeypatch)
     assert len(calls) == 1                    # chain resumed
@@ -237,7 +237,7 @@ def test_obligation_preempts_chain(home, monkeypatch):
     calls = []
     d = _driver(home, lambda p, s: (calls.append(p) or "s", True))
     versions = iter(range(1, 50))
-    monkeypatch.setattr(d, "_claim_snapshot",
+    monkeypatch.setattr(d, "_continuation_snapshot",
                         lambda: ("commons", "claim:x", next(versions)))
     _run_loop(d, [0, 2, 0], monkeypatch)
     assert calls[0] == WORK_BOOT_PROMPT       # work chunk (fresh session)
@@ -252,7 +252,7 @@ def test_work_budget_is_a_separate_pool(home, monkeypatch):
     d = _driver(home, lambda p, s: (calls.append(p) or "s", True),
                 work_budget=1)
     versions = iter(range(1, 50))
-    monkeypatch.setattr(d, "_claim_snapshot",
+    monkeypatch.setattr(d, "_continuation_snapshot",
                         lambda: ("commons", "claim:x", next(versions)))
     _run_loop(d, [0, 0, 2], monkeypatch)
     # chunk 1 spends the whole work pool; idle 2 parks; the wake still runs.
@@ -291,7 +291,7 @@ def test_held_wake_blocks_new_work_chunks(home, monkeypatch):
     d = _driver(home, lambda p, s: (calls.append(p) or "s", True),
                 turn_budget=1)
     versions = iter(range(1, 50))
-    monkeypatch.setattr(d, "_claim_snapshot",
+    monkeypatch.setattr(d, "_continuation_snapshot",
                         lambda: ("commons", "claim:x", next(versions)))
     assert d.run_turn() is True               # exhaust the reception budget
     _run_loop(d, [2, 0, 0], monkeypatch)      # wake held; two idle boundaries
@@ -541,3 +541,189 @@ def test_claimless_seat_surfaces_unchanged(hub):
     the sweep posts nothing anywhere."""
     assert hub._claim_due_sweep() == []
     assert hub.db.open_obligations(["room"]) == []
+
+
+# -- work starvation: the reader trap (2026-07-31 field test 3) ---------------
+#
+# A delegate + phase steward answered every ADDRESSED ask promptly, yet took
+# ZERO work turns across a 24-turn fleet run; the arc only advanced on external
+# operator nudges. Cause: its only claim row was `blocked` on an EXTERNAL tool
+# fault (a broken image generator), and `blocked` is terminal for the work
+# gate. Its real pending work — an OPEN `phase:manuscript` row with itself as
+# steward and `next: writing` declared — carried zero continuation force, so
+# the driver saw "nothing to continue" and the seat starved with work in hand.
+
+
+def _fake_store_hub(monkeypatch, rows: dict[str, dict[str, tuple[dict, int]]],
+                    *, channels: list[str] | None = None):
+    """Serve _scan_owned_rows from an in-memory {channel: {key: (value, ver)}}
+    over the three GETs it really makes."""
+    import urllib.parse
+
+    import httpx
+
+    monkeypatch.setattr(drive_mod._config, "get_cached_key",
+                        lambda *a, **k: "key")
+
+    class _R:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    def get(url, **kw):
+        path = url.split("://", 1)[-1].split("/", 1)[-1]
+        if path == "channels":
+            return _R([{"name": n, "member": True}
+                       for n in (channels if channels is not None else rows)])
+        parts = path.split("/")                      # channels/<name>/store...
+        channel = parts[1]
+        if len(parts) == 3:
+            return _R([{"key": k} for k in rows.get(channel, {})])
+        key = urllib.parse.unquote(parts[3])
+        value, version = rows.get(channel, {}).get(key, ({}, 0))
+        return _R({"value": value, "version": version})
+
+    monkeypatch.setattr(httpx, "get", get)
+
+
+#: reader's exact hub state at the moment it starved.
+_READER_TRAP = {
+    "at-test": {
+        "claim:msg-331": ({"owner": "reader", "status": "blocked",
+                           "next_step": "blocked: mlx-gen ModuleNotFoundError"},
+                          3),
+        "phase:manuscript": ({"current": "planning", "status": "open",
+                              "next": "writing", "steward": "reader",
+                              "paths": ["manuscript.md"]}, 10),
+    }
+}
+
+
+def _reader(home, spawn, **kw):
+    return Driver("reader", "http://127.0.0.1:1", spawn=spawn, **kw)
+
+
+def test_blocked_claim_alone_is_not_continuable(home, monkeypatch):
+    """Unchanged and deliberate: chaining chunks against a declared blocker
+    only spins. The bug was never that `blocked` is terminal for the ROW."""
+    d = _reader(home, lambda p, s: ("s", True))
+    _fake_store_hub(monkeypatch, {"at-test": {
+        "claim:msg-331": ({"owner": "reader", "status": "blocked"}, 3)}})
+    assert d._scan_owned_rows()[0] == []
+    assert d._continuation_snapshot() is None
+
+
+def test_stewarded_open_phase_is_continuable_work(home, monkeypatch):
+    """THE FIX: a blocked claim plus an open phase row this seat stewards is
+    continuable — the phase row, not the blocked claim, is what chains."""
+    d = _reader(home, lambda p, s: ("s", True))
+    _fake_store_hub(monkeypatch, _READER_TRAP)
+    claims, phases = d._scan_owned_rows()
+    assert claims == []                              # blocked: still terminal
+    assert [(c, k) for c, k, _, _ in phases] == [("at-test", "phase:manuscript")]
+    assert d._continuation_snapshot() == ("at-test", "phase:manuscript", 10)
+
+
+def test_a_live_claim_outranks_a_stewarded_phase(home, monkeypatch):
+    """The claim is the finer-grained unit and the real slice receipt, so it
+    wins whenever both exist."""
+    d = _reader(home, lambda p, s: ("s", True))
+    rows = {"at-test": dict(_READER_TRAP["at-test"])}
+    rows["at-test"]["claim:msg-333"] = ({"owner": "reader",
+                                         "status": "in progress"}, 2)
+    _fake_store_hub(monkeypatch, rows)
+    assert d._continuation_snapshot() == ("at-test", "claim:msg-333", 2)
+
+
+def test_the_reader_trap_fires_a_work_chunk_through_broadcast_noise(
+        home, monkeypatch):
+    """END TO END, the exact trap: blocked claim + open stewarded phase +
+    periodic unowned-broadcast noise (hub-alerts woke reader every ~10 min).
+    A work chunk MUST fire. Before the fix this loop spawned NOTHING."""
+    from agora.listen import _DRIVER_UNOWNED_WAKE
+    calls = []
+    d = _reader(home, lambda p, s: (calls.append(p) or "s", True))
+    _fake_store_hub(monkeypatch, _READER_TRAP)
+    _run_loop(d, [_DRIVER_UNOWNED_WAKE, _DRIVER_UNOWNED_WAKE], monkeypatch)
+    assert calls and calls[0] == WORK_BOOT_PROMPT
+
+
+def test_a_seat_with_nothing_continuable_still_fires_nothing(home, monkeypatch):
+    """The over-correction guard. Quiet windows must NOT buy every seat in
+    the fleet a work chunk: no live claim and no phase it stewards means no
+    chunk, however long the seat idles."""
+    d = _reader(home, lambda p, s: ("s", True))
+    _fake_store_hub(monkeypatch, {"at-test": {
+        # someone ELSE's open phase, and this seat's own finished claim
+        "phase:manuscript": ({"current": "writing", "status": "open",
+                              "next": "gate", "steward": "at5"}, 4),
+        "claim:msg-113": ({"owner": "reader", "status": "done"}, 3),
+    }})
+    assert d._scan_owned_rows() == ([], [])
+    assert d._continuation_snapshot() is None
+    calls = []
+    d = _reader(home, lambda p, s: (calls.append(p) or "s", True))
+    _run_loop(d, [0, 0, 0], monkeypatch)
+    assert calls == []
+
+
+def test_a_complete_phase_is_not_continuable(home, monkeypatch):
+    """A steward whose phase is closed is finished, not starving."""
+    d = _reader(home, lambda p, s: ("s", True))
+    for status, current in (("complete", "complete"), ("resolved", "v6-closed")):
+        _fake_store_hub(monkeypatch, {"at-test": {"phase:manuscript": (
+            {"current": current, "status": status, "next": "",
+             "steward": "reader"}, 10)}})
+        assert d._continuation_snapshot() is None
+
+
+def test_a_phase_declaring_no_next_step_is_not_continuable(home, monkeypatch):
+    """REAL pending work only: a row that says nothing about where the track
+    is going is not an instruction to burn a chunk."""
+    d = _reader(home, lambda p, s: ("s", True))
+    _fake_store_hub(monkeypatch, {"at-test": {"phase:manuscript": (
+        {"status": "open", "steward": "reader", "next": "", "current": ""},
+        10)}})
+    assert d._continuation_snapshot() is None
+
+
+def test_a_stewarded_phase_parks_after_strikes(home, monkeypatch):
+    """Ignition, not fuel. Slice receipts land on CLAIM rows, so a stewarded
+    phase collects strikes and parks after WORK_STRIKES chunks — enough to
+    let the woken steward open a claim row, bounded enough that no steward
+    burns chunks forever on one untouched row."""
+    calls = []
+    d = _reader(home, lambda p, s: (calls.append(p) or "s", True))
+    _fake_store_hub(monkeypatch, _READER_TRAP)         # frozen version 10
+    _run_loop(d, [0] * (WORK_STRIKES + 3), monkeypatch)
+    assert len(calls) == WORK_STRIKES
+
+
+def test_reception_debt_verification_ignores_phase_rows(home, monkeypatch):
+    """_owned_live_claims answers 'is there a CLAIM linked to this pending
+    ask'. A stewarded phase must never launder an unanswered structured ask
+    into a satisfied one."""
+    d = _reader(home, lambda p, s: ("s", True))
+    _fake_store_hub(monkeypatch, _READER_TRAP)
+    assert d._owned_live_claims() == []
+
+
+def test_an_unowned_broadcast_does_not_reset_the_idle_countdown(
+        home, monkeypatch):
+    """The second half of the trap, pinned so it cannot regress: mail that
+    obliges the seat nothing must pass through as ELAPSED idle and reach the
+    work gate, not restart the listen window. An ADDRESSED wake legitimately
+    defers work — that stays true."""
+    from agora.listen import _DRIVER_UNOWNED_WAKE
+    calls = []
+    d = _reader(home, lambda p, s: (calls.append(p) or "s", True))
+    versions = iter(range(1, 50))
+    monkeypatch.setattr(d, "_continuation_snapshot",
+                        lambda: ("at-test", "claim:x", next(versions)))
+    _run_loop(d, [_DRIVER_UNOWNED_WAKE] * 3, monkeypatch)
+    assert calls == [WORK_BOOT_PROMPT, WORK_PROMPT, WORK_PROMPT]
+    calls.clear()
+    _run_loop(d, [2, 2], monkeypatch)                # addressed: work defers
+    assert all(not p.startswith("AGORA WORK CHUNK") for p in calls)

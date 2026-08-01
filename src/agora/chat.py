@@ -635,7 +635,7 @@ class ChatApp:
             f"{c['decisions']} recorded decision(s)"))
         for q in d["open_questions"]:
             seq = s.dim(f"#{q['seq']}")
-            self._print(f"  {s.yellow('OPEN')} {seq} {s.sender(safe(q['from']))} "
+            self._print(f"  {s.yellow('OPEN')} {seq} {s.sender(safe(q['sender']))} "
                         f"{s.bold(safe(q['title']))}")
             for a in q["pending_asks"]:
                 self._print(s.dim(safe(f"        [{a['id']}] {a['text'][:90]}")))
@@ -1268,9 +1268,12 @@ class ChatApp:
         except Exception as exc:
             self._print(s.red(f"owed failed (hub too old?): {exc}"))
             return
-        # Typed consumption (agora-0118): the reference client renders the
-        # canonical `sender` field — never the deprecated `from` alias whose
-        # removal the 0.4 bump carries.
+        # Typed consumption (agora-0118). Ages are DERIVED from the report's
+        # own clock (agora/0.4 dropped the pre-rounded age fields): one
+        # subtraction, in seconds, which is what fmt_age actually takes —
+        # the old code fed it minutes and rendered every hour-old debt as
+        # "1m". `escalated` stays the hub's pause-adjusted judgement.
+        at = owed.computed_at
         ta, tc, wo, tc_close = (owed.to_answer, owed.to_consume,
                                 owed.waiting_on, owed.to_close)
         if not (ta or tc or wo or tc_close):
@@ -1284,14 +1287,14 @@ class ChatApp:
                           if r.asks_naming_you else "")
                 self._print(f"  {safe(r.channel)}#{r.seq} from "
                             f"{s.sender(safe(r.sender))} — pending "
-                            f"{r.pending_asks}{naming} · {fmt_age(r.age_minutes)}"
+                            f"{r.pending_asks}{naming} · {fmt_age(at - r.created_at)}"
                             f"{esc} · /read {r.seq}@{safe(r.channel)}")
         if tc:
             self._print(s.bold("TO CONSUME (answers to YOUR asks — read and use):"))
             for r in tc:
                 self._print(f"  {safe(r.channel)}#{r.answer_seq} "
                             f"{s.sender(safe(r.answered_by))} answered your ask "
-                            f"{r.your_asks} · {fmt_age(r.age_minutes)} · "
+                            f"{r.your_asks} · {fmt_age(at - r.answer_created_at)} · "
                             f"/read {r.answer_seq}@{safe(r.channel)}")
         if wo:
             self._print(s.bold("WAITING ON (your open asks, per seat):"))
@@ -1306,7 +1309,7 @@ class ChatApp:
             for r in tc_close:
                 self._print(f"  {safe(r.channel)}#{r.seq} "
                             f"{s.sender(safe(r.answered_by))} answered · "
-                            f"{fmt_age(r.age_minutes)} · post resolved + "
+                            f"{fmt_age(at - r.answered_at)} · post resolved + "
                             f"decision:<slug>")
 
     async def cmd_board(self) -> None:
@@ -1327,14 +1330,14 @@ class ChatApp:
                 if len(items) > 12:
                     self._print(s.dim(f"  … {len(items) - 12} more"))
         rows("PENDING ON YOU:", b.get("pending_on_me", []),
-             lambda r: (f"{safe(r['channel'])}#{r['seq']} {s.sender(safe(r['from']))}: "
-                        f"{safe(r['q'])[:70]} · {fmt_age(r['age_minutes'])}"
+             lambda r: (f"{safe(r['channel'])}#{r['seq']} {s.sender(safe(r['sender']))}: "
+                        f"{safe(r['q'])[:70]} · {fmt_age(r['age_minutes'] * 60)}"
                         + (s.red(" ESCALATED") if r.get("escalated") else "")))
         rows("QUEUE (operator-curated):", b.get("queue", []),
              lambda r: f"{safe(r.get('channel',''))} {safe(str(r.get('q') or r.get('key',''))[:70])}")
         rows("PROPOSALS (unowned open questions):", b.get("proposals", []),
-             lambda r: (f"{safe(r['channel'])}#{r['seq']} {s.sender(safe(r['from']))}: "
-                        f"{safe(r['q'])[:70]} · {fmt_age(r['age_minutes'])}"))
+             lambda r: (f"{safe(r['channel'])}#{r['seq']} {s.sender(safe(r['sender']))}: "
+                        f"{safe(r['q'])[:70]} · {fmt_age(r['age_minutes'] * 60)}"))
         rows("IN PROGRESS (claims):", b.get("in_progress", []),
              lambda r: f"{safe(r.get('channel',''))} {safe(str(r.get('key',''))[:70])}")
         rows("PENDING REVIEW:", b.get("pending_review", []),
@@ -1503,28 +1506,24 @@ class ChatApp:
         # Show the running hub's version + wire protocol at login, so it is
         # obvious what you are connected to (single source: agora.__version__).
         # A protocol mismatch is flagged inline instead of hidden in a warning.
-        from . import PROTOCOL_VERSION
+        # ONE compatibility question, asked once (agora/0.4): does this hub
+        # speak a version we speak? No capability list is compared — the
+        # protocol string names the whole contract, and the stamp-diff this
+        # banner used to print reported a hub as "lacking" every capability
+        # a fold had renamed.
+        from . import PROTOCOL_VERSION, protocol_warning
         ver = me.get("version")
         proto = me.get("protocol", "")
-        if proto and proto != PROTOCOL_VERSION:
+        note = protocol_warning(proto)
+        if note:
             # Mismatch renders even if a future hub omits `version` — the
             # protocol flag must never disappear behind a missing field.
-            proto_s = s.yellow(f"{proto} ≠ client {PROTOCOL_VERSION} — upgrade one side")
+            proto_s = s.yellow(f"{proto} ≠ client {PROTOCOL_VERSION} — "
+                               "upgrade both sides")
             hub_label = f"  hub v{ver} (" if ver else "  hub ("
             ver_s = s.dim(hub_label) + proto_s + s.dim(")")
         else:
             ver_s = s.dim(f"  hub v{ver} ({proto})") if ver else ""
-        # Capability ledger (agora-0118): the first-party client FEATURE-
-        # DETECTS from whoami.semantics rather than parsing version numbers —
-        # the consumer that keeps the ledger honest. A hub serving NO ledger
-        # lacks everything this client depends on, which is exactly when the
-        # warning matters most (impl adversary P2-1: gating on `served`
-        # silenced the one hub that needed the line).
-        from . import PROTOCOL_SEMANTICS
-        served = me.get("semantics") or []
-        missing = [x for x in PROTOCOL_SEMANTICS if x not in served]
-        if missing:
-            ver_s += s.yellow(f"  hub lacks: {', '.join(missing[:4])}")
         self._print(f" {s.bold('agora chat')} — {s.sender(self.me)}{role}{ver_s}")
         self._print(s.cyan("═" * width))
         self._print(_render_channel_table(
