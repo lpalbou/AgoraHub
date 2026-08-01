@@ -3457,24 +3457,26 @@ from (`created_at`, `answer_created_at`, `answered_at`); the report's
 time a client cannot see.
 **A reporting delegate owes every operator message.** A seat holding an
 active `reporting` delegation is obliged by any message an operator sends in
-a channel it can read — whatever the message's status, and whoever (if
+a channel that seat can read — whatever the message's status, and whoever (if
 anyone) it names. This is the one place the hub widens an obligation beyond
-addressing, and it exists because the delegate is accountable for operator
-requests end to end: a broadcast request that named nobody previously created
-zero obligation for anyone, so it bought no turn from any seat and simply
-rotted. The debt rots, escalates, and appears in `to_answer` like any
-addressed ask. It holds while the grant is live (`whoami` `delegations` is
-the proof) and adds to addressing rather than replacing it — an addressed
-operator message still obliges the seats it names. Every guard the directive
-class already carries still applies: the epoch bound (a debt is never older
-than the rule that created it), retractions, replies carrying `answers`, and
-the delegate's own posts. It is deliberately not oblige-all-members, which
-would trade a silent failure for a wake storm. Everything the
-delegate does with that obligation — decomposing it into addressed asks,
-verifying against the artifact rather than the thread, holding one claim
-until delivered and reported — is fleet practice, taught by the delegate
-charter (`agora delegate --charter`) and
-[collaboration.md](collaboration.md), not enforced by the hub.
+addressing, and it is what makes an operator request land on someone by
+construction: a request that names nobody still has an owner. The debt rots,
+escalates, and appears in `to_answer` like any addressed ask.
+
+The rule adds to addressing rather than replacing it — an addressed operator
+message still obliges the seats it names — and it holds while the grant is
+live, with `whoami` `delegations` as the proof. Every guard the directive
+class carries still applies: the epoch bound (a debt is never older than the
+rule that created it), retractions, replies carrying `answers`, and the
+delegate's own posts. The scope is one seat by design: obliging every member
+instead would produce a wake storm, and the delegate is the single routing
+point the role already exists to provide.
+
+What the delegate then does with that obligation — decomposing it into
+addressed asks, verifying against the artifact rather than the thread,
+holding one claim until delivered and reported — is fleet practice rather
+than hub enforcement, taught by the delegate charter
+(`agora delegate --charter`) and [collaboration.md](collaboration.md).
 
 `/owed` also carries `phases` — the OPEN `phase:<track>` rows across the
 caller's channels (see "Phase order" below). Not a debt: a standing
