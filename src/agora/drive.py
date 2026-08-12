@@ -34,6 +34,26 @@ by other agents; an unsandboxed all-tools turn driven by a hostile peer
 message is arbitrary code execution on the operator's machine. Nonce fencing
 is advisory to the model, not a boundary — the sandbox is the boundary.
 
+THE LOOP HAS FIVE STATES, and says which one it is in on every pass
+(`AGORA_DRIVE state=<name> ... next=<seconds>s`), so a stall is readable from
+stdout alone:
+
+    armed    — listening. `next` is the listen window: the chain cadence when
+               this seat holds a work chunk it may run, else the idle ceiling.
+    turn     — a reception turn is running (the seat is deaf until it returns).
+    chunk    — a work chunk is running (same, for longer).
+    backoff  — the last turn never reached the hub. Retries are spaced
+               exponentially; the wake is HELD, never dropped.
+    parked   — an hourly budget is spent. The wake is HELD; `next` is its
+               exact release.
+
+There is exactly ONE failure mechanism (backoff). The poison ledger and its
+wake quarantine were deleted 2026-08-03: in the whole live record they never
+once fired (every `drive-*.attempts` file held `{}` or a single strike, and no
+driver log ever printed a quarantine line), while their failure mode — DROP a
+specific obligation and go deaf to it — is the exact outcome the driver exists
+to prevent. Backoff dominates it: same retry spacing, no dropped wake.
+
 KNOWN LIMITATION — the loop is SINGLE-THREADED. While a turn's subprocess
 runs, the driver cannot arm its listener, so the seat is deaf to every
 obligation for the whole span. Reception is bounded at RECEPTION_TURN_TIMEOUT
@@ -46,8 +66,10 @@ thread and is not attempted here.
 
 from __future__ import annotations
 
+from .models import elide
+
 import contextlib
-import hashlib
+import dataclasses
 import json
 import os
 import re
@@ -81,8 +103,24 @@ WAKE_PROMPT = (
     "AGORA WAKE. Agora MCP is REQUIRED: use only Agora MCP tools for Agora "
     "communication, never the `agora` CLI or direct HTTP. Run ONE reception "
     "pass: check_inbox; settle what you OWE. For a question, answer it. For "
-    "assigned work, START DOING THE WORK NOW in this workspace; do not send "
-    "an acknowledgement, intention, or promise. Finish and answer with "
+    "assigned work, BEGIN IT THIS TURN. Thinking, designing and agreeing a "
+    "plan with the room IS work — on anything the room shares it is the "
+    "FIRST work, and going straight to building is how two seats build the "
+    "same thing twice. What is banned is a BARE promise: an acknowledgement "
+    "with nothing attached. Say what you are taking AND do something with it "
+    "in the same turn. When you start on something others depend on, SAY SO "
+    "in the room, and say so again when a piece is ready for them — a "
+    "colleague who discovers your lane by collision was failed by you. "
+    "If the human posted an open/blocked task in a shared room, treat it as "
+    "a contribution call: evaluate it against what you own; if you can help, "
+    "reply once with the slice you own and how you will contribute; if not, "
+    "say nothing. "
+    "If the work now clearly needs 3+ seats speaking over multiple turns, "
+    "create the focused room immediately with create_group and move the "
+    "working thread there; if it only needs one peer, use a DM. In that "
+    "focused room, planning comes BEFORE implementation: agree the plan, the "
+    "phases if any, and the ownership split before building. "
+    "Finish and answer with "
     "evidence when feasible. If the job needs another turn, create or update "
     "a real `claim:msg-<source seq>` row with store_set in the request's "
     "channel; its value MUST include owner, status, source_message_id, and "
@@ -107,7 +145,13 @@ BOOT_PROMPT = (
     "You are a DRIVEN agora seat. Agora MCP is REQUIRED. Use only the Agora "
     "MCP tools for Agora communication; never invoke the `agora` CLI or an "
     "HTTP substitute. First: call whoami and heed the hub "
-    "rules; skim your channels. Then run one reception pass (check_inbox, "
+    "rules; call read_charter() ONCE now (the standing answer to who is who "
+    "and what each seat owes). A receipt is per-SEAT and this context is "
+    "NEW: the delegate that soloed a commission on 2026-08-04 held a "
+    "day-old receipt, was told its charter was current, and so never read "
+    "the sentence telling it to decompose into addressed asks. If you hold "
+    "any delegation, read the part that names what YOU owe. Skim your "
+    "channels. Then run one reception pass (check_inbox, "
     "settle what you owe). Questions require answers. Assigned work requires "
     "actual workspace work now, not an acknowledgement or promise; finish it "
     "when feasible, otherwise create a real linked `claim:msg-<source seq>` "
@@ -143,7 +187,11 @@ WORK_PROMPT = (
     "row and any newer messages touching the task: a newer message "
     "may have canceled, refined, or superseded it (the record outranks "
     "your memory) — if so, adjust or park on the record instead of "
-    "continuing blind. Otherwise do ONE bounded slice toward completion, "
+    "continuing blind. If the task has outgrown #commons or another open "
+    "floor and 3+ seats now need to coordinate, create the focused room "
+    "before continuing the multi-seat work. If the room still lacks a shared "
+    "plan or phase order, do that planning work first. Otherwise do ONE bounded slice "
+    "toward completion, "
     "stop at a safe checkpoint (workspace consistent: commit or stash), "
     "overwrite your claim row with a one-line progress receipt naming "
     "what is done and what is next. That row is the ONLY per-slice receipt: "
@@ -167,7 +215,9 @@ WORK_BOOT_PROMPT = (
     "AGORA WORK CHUNK BOOT. You are a DRIVEN agora seat. Agora MCP is "
     "REQUIRED: use only Agora MCP tools for Agora communication, never the "
     "`agora` CLI or direct HTTP. First call "
-    "whoami and heed the hub rules; skim your channels. Then follow the work "
+    "whoami and heed the hub rules; call read_charter() once now (a receipt "
+    "is per-seat, and this context is new — if you hold a delegation, read "
+    "what YOU owe); skim your channels. Then follow the work "
     "contract: re-read your continuable work — a live claim row, or an open "
     "phase: row you steward — and newer messages that may "
     "supersede it, do one bounded slice, and update the claim row (open one "
@@ -180,35 +230,80 @@ WORK_BOOT_PROMPT = (
     "Then END. Do not wait, listen, or start watchers."
 )
 
+#: Prepended to a DELEGATE's work chunk. Its job is the room, not the code.
+SUPERVISE_PROMPT = (
+    "You are a user's delegate. Your job is to make their work simpler.\n"
+    "They may be reading along right now, or not — either way, they should "
+    "not have to follow every seat to know where things stand. That is what "
+    "you are for. With a handful of agents it is a convenience; with twenty "
+    "it is the difference between a project they can follow and a firehose "
+    "they cannot. So keep the whole picture and give it back to them "
+    "condensed: what progressed, what is stuck and why, what was decided and "
+    "on what grounds, what needs them specifically.\n"
+    "What you may DO with that picture depends entirely on the powers they "
+    "granted you — check whoami.delegations. Some delegates only watch and "
+    "report. Some may run the machinery. Some may decide in the user's name. "
+    "Read what you hold before you act, and never promise a move your grant "
+    "does not cover.\n"
+    "When a task on #commons or another open floor already has a real owner "
+    "and the contributor set is known, your default move is to put the work "
+    "in its focused room immediately: two speaking seats = DM; three+ or "
+    "clearly multi-turn coordination = create_group. Keep the open floor for "
+    "the pointer, cross-room decisions, milestones and final delivery.\n"
+    "For a fresh operator task in a shared room, first look for contributor "
+    "replies already on the operator thread. If contributors already stated "
+    "their slices there, that set is known: do NOT ask the same question "
+    "again. Reply in-thread to the operator naming that you own the "
+    "commission and where the work is moving, then create the focused room "
+    "immediately and make the first job there the shared plan. Only run a "
+    "formation round when the contributor set is not yet known: let each "
+    "seat decide silently whether it can contribute; contributors state what "
+    "they own and how they help; once that set is known, create the room. "
+    "Use phases when the plan needs ordering, and do not let implementation "
+    "jump ahead of an unsettled plan. A new root pointer does not settle the "
+    "operator thread; your operator-facing progress updates belong in-thread "
+    "on the original commission at phase changes and completion.\n"
+    "supervise(channel) is your radar: who is live and holding nothing, what "
+    "each seat is for, whether they can hear you, which rows are stuck and on "
+    "whom, and — given your powers — which of those you can end yourself. "
+    "Read it each chunk, then act within your grant: hand an idle seat the "
+    "slice its expertise fits, ask the room what it thinks, call a vote when "
+    "the decision belongs to them, ask for a shared plan they can argue over, "
+    "chase whoever is blocking someone, wake a seat that went quiet mid-task. "
+    "The work itself belongs to the seats; you are not the one building.\n"
+    "Decide only after hearing from the people who know, and only what your "
+    "powers allow. If the user is reachable and the call is theirs, ask them. "
+    "If it is yours to make, make it — and tell them what you decided and "
+    "why, so they can disagree.\n\n"
+)
+
 DEFAULT_MODEL: str | None = None
 DEFAULT_MAX_WAIT = 1200.0           # idle ceiling; a wake returns instantly
 DEFAULT_TURN_BUDGET = 250           # light abuse ceiling; ordinary debt rarely parks
 DEFAULT_BROADCAST_TURN_BUDGET = 100 # roomy fuse for noisy unowned wakes
 TURN_BUDGET_WINDOW = 3600.0
 DEFAULT_SESSION_ROTATE = 25         # turns on one session before a fresh one
-POISON_STRIKES = 3                  # a wake that crashes N turns is quarantined
-QUARANTINE_TTL = 3600.0             # and stays quarantined only THIS long. The
-#                                     wake key is the owed SIGNATURE, and an
-#                                     obligation a seat cannot yet settle has a
-#                                     signature that BY CONSTRUCTION never
-#                                     changes — so a permanent quarantine made
-#                                     three transient harness failures deafen
-#                                     the seat forever to the exact debt it most
-#                                     needed to answer. Expiry bounds the damage
-#                                     to one window; a genuinely poisonous wake
-#                                     simply re-earns its strikes.
-INFRA_BACKOFF_BASE = 60.0           # first wait after a PROVIDER-level failure
-INFRA_BACKOFF_MAX = 900.0           # ceiling for the exponential backoff: a
+BACKOFF_BASE = 60.0                 # first wait after a turn that never reached
+#                                     the hub (provider 429/5xx, harness crash,
+#                                     a stream that ended without its terminal
+#                                     event). ONE mechanism for every such
+#                                     failure — see Driver._hold.
+BACKOFF_MAX = 900.0                 # ceiling for the exponential backoff: a
 #                                     rate-limited fleet must stop hammering,
 #                                     but must still recover on its own
-MUTE_NOTICE_INTERVAL = 300.0        # how often a seat that is NOT processing
-#                                     obligations must say so on stdout: a
-#                                     driver may be quiet, never silently mute
 LONG_TURN_NOTICE = 600.0            # cadence of the "still running" line for a
 #                                     turn that blocks the single-threaded loop
 FAILURE_LEDGER_MAX_BYTES = 1_000_000
 TURN_TIMEOUT = 3600.0               # one WORK chunk; full jobs span many chunks
-RECEPTION_TURN_TIMEOUT = 600.0      # one RECEPTION turn. Deliberately much
+RECEPTION_TURN_TIMEOUT = 3600.0     # one RECEPTION turn. Deliberately much
+#: 60 MINUTES BY DEFAULT (operator ruling, 2026-08-08). It was 600s, which
+#: made the hub silently unusable with local inference: a 122B model needs
+#: minutes per round-trip, a boot pass is a dozen round-trips, and every
+#: turn died at `no-tool-calls` having done real work. A ceiling that kills
+#: a working turn and reports it as "the model did nothing" is the worst
+#: shape available. Cloud harnesses finish in seconds and never approach
+#: this; only the slow case is affected, and the slow case is exactly the
+#: one that was broken. `--reception-timeout` still raises or lowers it.
 #                                     smaller: the driver loop is BLOCKED for
 #                                     this whole window and cannot re-arm, so
 #                                     the value is literally "how long one
@@ -229,11 +324,29 @@ WORK_STRIKES = 3                    # receipt-less chunks per claim VERSION
 #                                     before the chain parks (a NEW receipt =
 #                                     a version bump = the reset; identical
 #                                     rewrites are heartbeats, not progress)
+WORK_STRIKE_TTL = 3600.0            # struck-out rows re-enter selection after
+#                                     this. Strikes used to last the process
+#                                     lifetime, and the only seat that would
+#                                     ever bump a struck stewarded phase is
+#                                     the steward the strikes had retired:
+#                                     the novel fleet idled 17.5h behind
+#                                     exactly that deadlock (2026-08-04)
 _LISTENER_FRESH_S = 600.0           # a listen pidfile younger than this marks
 #                                     a live interactive surface (tab loops
 #                                     rewrite it every <=245s)
 _DRIVER_STALE_S = 7200.0            # a drive pidfile older than this never
 #                                     blocks anyone (reboot pid-reuse guard)
+#: Failure stages that mean the turn NEVER REACHED THE HUB — the transport
+#: broke (a raw spawn failure, a crashed/timed-out harness, a provider 429/5xx,
+#: an MCP server that would not start). Everything NOT listed here is a
+#: SEMANTIC verdict about a turn that did run: `mcp-use`/`mcp-call`/`tool`
+#: (it worked but touched no Agora tool, or one call was refused) and
+#: `reception` (it looked at the inbox and left debt). Only transport failures
+#: may hold a WORK chunk's reception, because only they are certain to repeat.
+#: Verdicts meaning "the turn reached the hub and we judged what it did".
+#: A diagnosis, never a retry: the next identical turn has identical inputs.
+_SEMANTIC_STAGES = frozenset({"reception", "mcp-use", "mcp-call", "tool"})
+_TRANSPORT_STAGES = frozenset({None, "harness", "infrastructure", "mcp-init"})
 
 
 @dataclass(frozen=True)
@@ -247,15 +360,38 @@ class TurnEvidence:
 
 @dataclass(frozen=True)
 class ReceptionDebt:
-    """Debt identities that a reception turn must engage or consume."""
+    """Debt identities that a reception turn must ENGAGE.
+
+    `to_consume` is deliberately absent. The hub's own contract for that
+    ledger is "never escalates, never wakes by itself" — it is advisory
+    hygiene ("someone answered you; use it or close it"). Scoring it as
+    unsettled debt failed the turn of the one seat that had just done the
+    orchestration right: live 2026-08-03, the delegate's reception turns were
+    marked failed at 00:27:49, 00:32:53 and 02:38:58 with
+    `to_consume=<answer id>` — i.e. because the seats it had dispatched work
+    to had ANSWERED. A driver must not penalise a seat for the fan-in it
+    organised, and must never fail a turn on a debt the hub itself refuses to
+    wake anyone for.
+    """
 
     to_answer: frozenset[str]
-    to_consume: frozenset[str]
     structured: tuple[tuple[str, int, str, frozenset[str]], ...] = ()
+    #: message id -> "channel#seq" for every to_answer row. Claim rows cite
+    #: their source in either form — models overwhelmingly write the
+    #: human-readable ref every doc uses — so the linked-claim excusal must
+    #: match both (fund4: 8 of 11 delegate turns failed `debt-remains` while
+    #: a live claim named `commons#6`).
+    refs: tuple[tuple[str, str], ...] = ()
 
     @property
     def empty(self) -> bool:
-        return not self.to_answer and not self.to_consume
+        return not self.to_answer
+
+    def ref_of(self, message_id: str) -> str:
+        for mid, ref in self.refs:
+            if mid == message_id:
+                return ref
+        return ""
 
 
 # Issued bearer values have a long random suffix. Requiring 32+ characters
@@ -270,7 +406,9 @@ def _redact(text: str) -> str:
 
 
 def _one_line(text: str, *, limit: int = 500) -> str:
-    return _redact(" ".join(text.split()))[:limit]
+    """One log line, shortened VISIBLY — a driver diagnostic that stops
+    mid-sentence with no marker reads as "the harness said exactly this"."""
+    return elide(_redact(" ".join(text.split())), limit)
 
 
 def _emit(line: str) -> None:
@@ -647,6 +785,12 @@ class CursorDriveAdapter(DriveAdapter):
     binary = "cursor-agent"
     # Single-vendor, and reasoning rides the model name — no knob to forward.
     SUPPORTS = frozenset({"model", "permissions", "session"})
+    # `--output-format json` returns a result envelope with no tool record, so
+    # this adapter is scored on its exit code. DECLARED, not silent: an
+    # undeclared evidence gap is what let the claude seat run blind for two
+    # releases (see ClaudeDriveAdapter.EVIDENCE). Drop `UNMET` the moment a
+    # tool-carrying stream is parsed here.
+    UNMET = ("evidence",)
     PERMISSION_VOCAB = ("write", "all")
     PERMISSION_ARGV = {"write": ("--sandbox", "enabled"),
                        "all": ("--force",)}
@@ -927,9 +1071,27 @@ class ClaudeDriveAdapter(DriveAdapter):
     # Claude's thinking rides the model choice; there is no effort flag to map.
     SUPPORTS = frozenset({"model", "permissions", "session"})
     PERMISSION_VOCAB = ("write", "all")
+    # THE MUTE SEAT (2026-08-04). This adapter shipped with no EVIDENCE and no
+    # `assess_turn`, so it inherited the rc-only base and `EVIDENCE = None` —
+    # the codebase's own marker for "this harness reports nothing". Measured
+    # across the whole fleet history: 106 of 106 successful claude turns
+    # recorded ZERO observability, and 12 of them made no tool call at all yet
+    # scored ok. One was a reception wake whose own text read
+    # "AGORA_MCP_UNAVAILABLE ... Reception pass cannot complete without agora
+    # tools" — marked healthy, wake consumed, no backoff. Every `mcp-use`,
+    # `mcp-call`, `mcp-init` and missing-terminal verdict was unreachable, and
+    # for a WORK chunk the complete set of verdicts was `rc == 0`.
+    # `stream-json` (which REQUIRES --verbose) carries the same tool_use /
+    # tool_result / result events the other adapters key on.
+    EVIDENCE = "ndjson: tool_use / result"
 
     def build_command(self, prompt: str, session_id: str | None) -> list[str]:
-        cmd = ["claude", "-p", "--output-format", "json"]
+        # `--output-format json` returns ONE result envelope with no tool
+        # record; `stream-json --verbose` emits the per-message events that
+        # make a turn assessable. `--verbose` is mandatory with stream-json
+        # (the CLI exits 1 without it) and `_find_session_id` still resolves
+        # continuity, since every event carries `session_id`.
+        cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose"]
         if self.model:
             cmd += ["--model", self.model]
         # Bind the seat's MCP server on the COMMAND LINE, exactly as the Codex
@@ -957,6 +1119,120 @@ class ClaudeDriveAdapter(DriveAdapter):
             cmd += ["--resume", session_id]
         cmd.append(prompt)
         return cmd
+
+    def assess_turn(self, stdout: str, stderr: str, returncode: int,
+                    kind: str) -> TurnEvidence:
+        """Score a claude turn from its stream-json events (see EVIDENCE).
+
+        Shape, probed live against claude 2.1.209:
+          {"type":"system","subtype":"init","mcp_servers":[{"name","status"}]}
+          {"type":"assistant","message":{"content":[{"type":"tool_use",
+             "id","name":"mcp__agora__agora_post_message"}]}}
+          {"type":"user","message":{"content":[{"type":"tool_result",
+             "tool_use_id","is_error","content":[{"type":"text","text"}]}]}}
+          {"type":"result","subtype":"success","is_error":false,...}
+        """
+        successful: list[str] = []
+        failed: dict[str, str] = {}
+        pending: dict[str, str] = {}    # tool_use id -> bare agora tool name
+        mcp_down = ""
+        terminal: dict[str, Any] | None = None
+        for event in _json_objects(stdout):
+            etype = event.get("type")
+            if etype == "system" and event.get("subtype") == "init":
+                for server in event.get("mcp_servers") or []:
+                    if (isinstance(server, dict)
+                            and server.get("name") == "agora"
+                            and str(server.get("status") or "") != "connected"):
+                        mcp_down = str(server.get("status") or "unavailable")
+                continue
+            if etype == "result":
+                terminal = event
+                continue
+            message = event.get("message")
+            content = (message.get("content")
+                       if isinstance(message, dict) else None)
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "tool_use":
+                    name = str(block.get("name") or "")
+                    # MCP tools arrive as `mcp__<server>__<tool>`; only this
+                    # seat's agora server counts as agora evidence.
+                    if name.startswith("mcp__agora__"):
+                        pending[str(block.get("id"))] = name.split("__", 2)[-1]
+                elif block.get("type") == "tool_result":
+                    tool = pending.pop(str(block.get("tool_use_id")), "")
+                    if not tool:
+                        continue
+                    if block.get("is_error"):
+                        failed[tool] = _one_line(str(block.get("content")))
+                        continue
+                    # A transport-successful call can still carry agora's
+                    # {"ok": false} refusal (same class codex/opencode guard).
+                    payload = block.get("content")
+                    if isinstance(payload, list):
+                        payload = next((p.get("text") for p in payload
+                                        if isinstance(p, dict)
+                                        and p.get("type") == "text"), None)
+                    app_error = _mcp_result_error(payload)
+                    if app_error is None:
+                        try:
+                            app_error = _mcp_result_error(json.loads(str(payload)))
+                        except (TypeError, ValueError):
+                            app_error = None
+                    if app_error:
+                        failed[tool] = app_error
+                    elif tool not in successful:
+                        successful.append(tool)
+
+        if mcp_down:
+            # rc=0 lies here: claude exits 0 with a dead MCP server, which is
+            # how a seat spent a whole wake announcing it had no agora tools
+            # and was scored healthy (live, 2026-08-01 editor).
+            return TurnEvidence(
+                ok=False, stage="mcp-init", reason="required-server-unavailable",
+                detail=f"agora MCP server status={mcp_down}",
+                tools=tuple(successful))
+        if returncode or (terminal is not None
+                          and (terminal.get("is_error")
+                               or terminal.get("subtype") != "success")):
+            detail = _one_line(str(
+                (terminal or {}).get("result")
+                or stderr or f"process exited {returncode}"))
+            return TurnEvidence(
+                ok=False, stage="harness",
+                reason="nonzero-exit" if returncode else "turn-failed",
+                detail=detail, tools=tuple(successful))
+        if terminal is None:
+            # The stream stopped before its terminal event: the turn was cut
+            # off, not completed (codex guards the same class).
+            return TurnEvidence(
+                ok=False, stage="harness", reason="missing-terminal-event",
+                detail="stream ended without a result event",
+                tools=tuple(successful))
+        unresolved = {t: d for t, d in failed.items() if t not in successful}
+        if unresolved:
+            tool, detail = next(iter(unresolved.items()))
+            return TurnEvidence(
+                ok=False, stage="mcp-call", reason=f"{tool}-failed",
+                detail=f"{tool}: {detail}", tools=tuple(successful))
+        if not successful:
+            return TurnEvidence(
+                ok=False, stage="mcp-use", reason="no-agora-tool-call",
+                detail="no successful Agora MCP tool call in this turn",
+                tools=())
+        if kind in {"boot", "wake"} and "check_inbox" not in successful:
+            # Only check_inbox is REQUIRED — the call that proves the seat
+            # looked. Same relaxation and reasoning as codex/abstractcode:
+            # demanding the full ceremony scores a correct no-op pass failed.
+            return TurnEvidence(
+                ok=False, stage="mcp-use", reason="incomplete-reception-pass",
+                detail="missing successful Agora MCP call(s): check_inbox",
+                tools=tuple(successful))
+        return TurnEvidence(ok=True, tools=tuple(successful))
 
 
 class AbstractCodeDriveAdapter(DriveAdapter):
@@ -1196,6 +1472,12 @@ class OpencodeDriveAdapter(DriveAdapter):
        refused it and files a false blocker (live 2026-08-01: a seat spent
        ~40 minutes and one blocked claim on it). `turn_notices` therefore
        says out loud what actually happened, on every turn where it happens.
+    4. opencode persists session/project state in a USER-GLOBAL SQLite store
+       under XDG data. Four seats booting together on one machine can crash
+       before the first tool call with `database is locked`, which means the
+       failure never even reaches the hub. The driven seat must pin opencode's
+       data/cache/state roots to a stable PER-WORKSPACE tree so turns keep
+       continuity without contending with other seats.
     """
 
     name = "opencode"
@@ -1313,11 +1595,32 @@ class OpencodeDriveAdapter(DriveAdapter):
                 "options": {"reasoningEffort": self.reasoning_effort}}}}}
         return cfg
 
+    def _state_roots(self) -> tuple[Path, Path, Path]:
+        """Per-workspace XDG roots for opencode's own mutable local state.
+
+        Keep the workspace stable across turns so the seat can resume its own
+        opencode sessions, while preventing several seats from fighting over
+        the operator's one global opencode.db.
+        """
+        root = Path(self.cwd).resolve() / ".agora" / "opencode"
+        data = root / "data"
+        cache = root / "cache"
+        state = root / "state"
+        for path in (data, cache, state):
+            path.mkdir(parents=True, exist_ok=True)
+        return data, cache, state
+
     def environment(self) -> dict[str, str]:
         # opencode has no argv equivalent of codex's `-c`; its per-run layer
         # is this env var. Riding it here also puts the binding in the surface
         # `agora harness-check` inspects (C4/C5/C8).
-        return {"OPENCODE_CONFIG_CONTENT": json.dumps(self._run_config())}
+        data, cache, state = self._state_roots()
+        return {
+            "OPENCODE_CONFIG_CONTENT": json.dumps(self._run_config()),
+            "XDG_DATA_HOME": str(data),
+            "XDG_CACHE_HOME": str(cache),
+            "XDG_STATE_HOME": str(state),
+        }
 
     def build_command(self, prompt: str, session_id: str | None) -> list[str]:
         cmd = ["opencode", "run",
@@ -1325,6 +1628,12 @@ class OpencodeDriveAdapter(DriveAdapter):
                # parent shell had, silently losing the workspace, the project
                # config and AGENTS.md.
                "--dir", str(Path(self.cwd).resolve()),
+               # opencode otherwise spends a whole extra model round-trip just
+               # to mint a session title before the real turn. On free/shared
+               # tiers that extra request is often the difference between a
+               # seat that starts and one that hits provider 429 before its
+               # first tool call.
+               "--title", f"agora:{self.mcp.agent_id}:{'resume' if session_id else 'turn'}",
                "--format", "json"]
         model = self.model
         if model and self.provider and "/" not in model:
@@ -1448,15 +1757,8 @@ class OpencodeDriveAdapter(DriveAdapter):
 
         if returncode or harness_error:
             lowered = f"{stderr}\n{stdout}".lower()
-            provider = _provider_failure(harness_error, stderr)
-            if provider:
-                # The provider refused or fell over. Nothing about this seat's
-                # wake caused it and no retry count can fix it — it heals on
-                # its own clock, so it is backed off, never struck.
-                return TurnEvidence(
-                    ok=False, stage="infrastructure", reason="provider-failure",
-                    detail=_one_line(harness_error or stderr or provider),
-                    tools=tuple(successful))
+            # A provider failure carried in `harness_error` is re-staged
+            # centrally (Driver._classify_provider_failure) for every harness.
             if "mcp" in lowered and ("failed" in lowered
                                      or "connect" in lowered):
                 stage, reason = "mcp-init", "required-server-unavailable"
@@ -1719,7 +2021,8 @@ class AbstractCodeTuiDriveAdapter(DriveAdapter):
         cmd = [self.binary, "exec", prompt,
                "--workspace", str(self.cwd), "--workspace-mode",
                "workspace_only", *self.permission_argv(),
-               "--timeout", str(int(RECEPTION_TURN_TIMEOUT))]
+               "--timeout", str(int(getattr(self, "_reception_timeout",
+                                            None) or RECEPTION_TURN_TIMEOUT))]
         if self.model:
             cmd += ["--model", self.model]
         if self.provider:
@@ -1875,8 +2178,9 @@ def _make_adapter(harness: str, *, model: str | None,
 
 class Driver:
     """One seat's reception loop. Stateful across wakes: the harness session
-    id (for resume/state), the per-hour turn budget, the poison ledger keyed
-    by the wake's channel head, and the session-rotation counter."""
+    id (for resume/state), the per-hour turn budget, the consecutive-failure
+    backoff (the ONE failure mechanism — see _hold), and the session-rotation
+    counter."""
 
     def __init__(self, agent_id: str, hub: str, *, harness: str = "cursor",
                  model: str | None = DEFAULT_MODEL,
@@ -1889,6 +2193,7 @@ class Driver:
                  broadcast_turn_budget: int = DEFAULT_BROADCAST_TURN_BUDGET,
                  session_rotate: int = DEFAULT_SESSION_ROTATE,
                  work_timeout: float = TURN_TIMEOUT,
+                 reception_timeout: float = RECEPTION_TURN_TIMEOUT,
                  work_budget: int = DEFAULT_WORK_BUDGET,
                  force: bool = False,
                  turn_log: str | None = None,
@@ -1909,6 +2214,7 @@ class Driver:
         # Cap: a chunk longer than half the driver-staleness bound would
         # let a second driver "take over" mid-chunk (review F8).
         self.work_timeout = min(work_timeout, _DRIVER_STALE_S / 2)
+        self.reception_timeout = max(60.0, float(reception_timeout))
         self.work_budget = work_budget
         self.force = force
         self.cwd = Path(cwd) if cwd else Path.cwd()
@@ -1927,9 +2233,18 @@ class Driver:
                                       harness_args=harness_args,
                                       cwd=self.cwd, mcp=self._mcp_binding,
                                       reasoning_effort=reasoning_effort)
+        # The adapter spawns the turn, so it needs the ceiling the operator
+        # set — a local model can need far longer than cloud latency.
+        self._adapter._reception_timeout = self.reception_timeout
         # `spawn` is injectable so the loop is unit-testable without a real
         # harness process: spawn(prompt, session_id) -> (new_session_id|None, ok).
         self._spawn = spawn or self._spawn_turn
+        # Debt verification asks the HUB what is still owed after a turn, so
+        # it is only meaningful when the turn really talked to one. Explicit
+        # rather than inferred from the spawn identity, so an end-to-end
+        # harness can drive a scripted seat against a real hub and still get
+        # the real verdict path.
+        self.verify_reception_debt = spawn is None
         home = _config.home()
         # Protocol-v2 sessions deliberately ignore the old shared
         # drive-<id>.session file. Reception and initiative have different
@@ -1941,14 +2256,12 @@ class Driver:
             self._reception_session_path = home / f"drive-{agent_id}.reception-v2.session"
             self._work_session_path = home / f"drive-{agent_id}.work-v2.session"
             self._work_claim_path = home / f"drive-{agent_id}.work-v2.claim"
-            self._attempts_path = home / f"drive-{agent_id}.attempts"
         else:
             self._reception_session_path = (
                 home / f"drive-{agent_id}.{harness}.reception-v2.session")
             self._work_session_path = (
                 home / f"drive-{agent_id}.{harness}.work-v2.session")
             self._work_claim_path = home / f"drive-{agent_id}.{harness}.work-v2.claim"
-            self._attempts_path = home / f"drive-{agent_id}.{harness}.attempts"
         # THE driver-ownership signal (2026-07-28 unification): while this
         # file holds a LIVE pid, `agora listen` refuses to arm a second
         # reception surface for the seat, the stop hook stays quiet, and
@@ -1964,24 +2277,30 @@ class Driver:
         self._work_claim_ref = self._read_session(self._work_claim_path)
         self._turn_times: list[float] = []       # spawn timestamps in the last hour
         self._broadcast_turn_times: list[float] = []  # unowned room-wide wakes
-        # wake key -> when its quarantine LAPSES. Never permanent: see
-        # QUARANTINE_TTL.
-        self._quarantine_until: dict[str, float] = {}
-        self._infra_failures = 0                  # consecutive provider failures
-        self._infra_retry_at = 0.0                # ...and when to try again
-        self._last_mute_notice = 0.0              # cadence of the "still mute" line
-        self._turn_timeout = RECEPTION_TURN_TIMEOUT  # work turns raise it
+        # THE ONE failure mechanism: consecutive turns that never reached the
+        # hub, and when the next one may run. No second ledger, nothing on
+        # disk, nothing that can outlive the process that observed it.
+        self._fail_streak = 0
+        self._retry_at = 0.0
+        self._fail_reason = ""                    # one word for the state line
+        # The OPERATOR's ceiling, not the constant: --reception-timeout must
+        # reach every harness, not only the one adapter that reads it as an
+        # argv flag. Shipping it half-wired made the knob a lie — accepted,
+        # documented, and silently ignored (2026-08-08).
+        self._turn_timeout = self.reception_timeout  # work turns raise it
         self._work_times: list[float] = []        # work-chunk spawns, rolling hour
         self._work_strikes: dict[str, int] = {}   # claim-version -> receipt-less chunks
-        self._chain_live = False                  # a work chain is running
-        self._pending_wake = False                # a budget-parked wake is HELD
+        self._work_strike_at: dict[str, float] = {}  # claim-version -> last strike ts
+        self._has_work = False                    # last KNOWN continuation answer
+        self._scan_ok = False                     # ...and whether it was READ
+        self._pending_wake = False                # a wake we could not run YET
         self._pending_wake_has_debt = False       # addressed/owed beats broadcast fuse
         self._reception_debt_before: ReceptionDebt | None = None
         self._reception_debt_verification_required = False
         self._last_turn_ok: bool | None = None
-        # Stage of the most recent failed turn ("harness" = the process itself
-        # failed; "mcp-use"/"reception" = the turn ran but its outcome was
-        # judged incomplete). Only "harness" may cost a poison strike.
+        # Stage of the most recent failed turn. "reception" alone means the
+        # turn REACHED the hub and left debt (a diagnosis); every other stage
+        # means it did not get there, and only those back off.
         self._last_turn_stage: str | None = None
         self._last_turn_detail: str = ""
         # The flight recorder (--turn-log, 2026-07-28): the FULL event
@@ -2122,107 +2441,83 @@ class Driver:
         except OSError:
             pass
 
-    def _attempts(self) -> dict[str, int]:
-        try:
-            return json.loads(self._attempts_path.read_text())
-        except (OSError, ValueError):
-            return {}
+    # -- the ONE failure mechanism: backoff ----------------------------------
 
-    def _bump_attempt(self, key: str) -> int:
-        data = self._attempts()
-        data[key] = data.get(key, 0) + 1
-        try:
-            self._attempts_path.write_text(json.dumps(data))
-        except OSError:
-            pass
-        return data[key]
+    def _note_failure(self, reason: str, detail: str) -> float:
+        """A turn did not reach the hub. Space the next attempt, keep the wake.
 
-    def _clear_attempt(self, key: str) -> None:
-        data = self._attempts()
-        if data.pop(key, None) is not None:
-            try:
-                self._attempts_path.write_text(json.dumps(data))
-            except OSError:
-                pass
+        Every such failure — a 429, a 5xx, a harness crash, a stream that
+        ended without its terminal event — is about the PATH to the hub, not
+        about the obligation waiting at the other end. So there is one
+        response: wait longer, say so, and try the same wake again. Nothing is
+        ever dropped, and one healthy turn clears the whole streak.
 
-    # -- quarantine (bounded) ------------------------------------------------
-
-    @property
-    def _quarantined(self) -> set[str]:
-        """Wake keys quarantined RIGHT NOW (expired ones are not)."""
-        now = time.time()
-        return {k for k, until in self._quarantine_until.items() if now < until}
-
-    def _quarantine_expired(self, key: str) -> bool:
-        """True once `key`'s quarantine has lapsed; clears it and its strikes.
-
-        The strikes go with it: a wake that returns after the window deserves
-        a full fresh try, not instant re-quarantine off the on-disk ledger.
+        Callers set `_pending_wake` BEFORE calling, because the line says
+        whether a wake is being held and a work chunk holds none.
         """
-        until = self._quarantine_until.get(key)
-        if until is None or time.time() < until:
-            return False
-        del self._quarantine_until[key]
-        self._clear_attempt(key)
-        _emit(f"AGORA_DRIVE quarantine-lapsed agent={self.agent_id} key={key} "
-              f"after={QUARANTINE_TTL:.0f}s — retrying this obligation")
-        return True
-
-    # -- provider failures (retry, never strike) -----------------------------
-
-    def _note_infra_failure(self, detail: str) -> float:
-        """Record a provider-level failure and return the backoff in seconds."""
-        self._infra_failures += 1
-        wait = min(INFRA_BACKOFF_BASE * (2 ** (self._infra_failures - 1)),
-                   INFRA_BACKOFF_MAX)
-        self._infra_retry_at = time.time() + wait
-        _emit(f"AGORA_DRIVE parked agent={self.agent_id} "
-              f"reason=provider-failing consecutive={self._infra_failures} "
-              f"retry_in={wait:.0f}s wake=held — the harness's PROVIDER is "
-              f"failing, not this seat; obligations wait and still escalate "
-              f"hub-side. detail={_one_line(detail, limit=200) or 'none'}")
+        self._fail_streak += 1
+        self._fail_reason = reason
+        wait = min(BACKOFF_BASE * (2 ** (self._fail_streak - 1)), BACKOFF_MAX)
+        self._retry_at = time.time() + wait
+        kept = ("wake=held — the turn never reached the hub; the obligation "
+                "is kept and still escalates hub-side."
+                if self._pending_wake else
+                "wake=none — a work chunk never reached the hub; no "
+                "obligation was pending, and the next chunk is spaced too.")
+        _emit(f"AGORA_DRIVE state=backoff agent={self.agent_id} "
+              f"reason={reason} consecutive={self._fail_streak} "
+              f"next={wait:.0f}s {kept} "
+              f"detail={_one_line(detail, limit=200) or 'none'}")
         return wait
 
-    def _clear_infra_failure(self) -> None:
-        if self._infra_failures:
+    def _clear_backoff(self) -> None:
+        if self._fail_streak:
             _emit(f"AGORA_DRIVE recovered agent={self.agent_id} "
-                  f"after={self._infra_failures} provider-failure(s)")
-        self._infra_failures = 0
-        self._infra_retry_at = 0.0
+                  f"after={self._fail_streak} failed turn(s) "
+                  f"reason={self._fail_reason or 'unknown'}")
+        self._fail_streak = 0
+        self._retry_at = 0.0
+        self._fail_reason = ""
 
-    def _infra_retry_after(self) -> float:
-        return max(0.0, self._infra_retry_at - time.time())
+    def _backoff_retry_after(self) -> float:
+        return max(0.0, self._retry_at - time.time())
 
-    # -- never silently mute -------------------------------------------------
+    def _hold(self, *, has_debt: bool) -> tuple[str, str, float] | None:
+        """Why a reception turn cannot run RIGHT NOW: (state, reason, next).
 
-    def _mute_notice(self) -> None:
-        """Say, at intervals, that this seat is NOT processing obligations.
-
-        A driver whose wakes are all held, parked or quarantined still
-        heartbeats — presence advances, the listener re-arms — and so reads as
-        an idle HEALTHY seat. That is precisely how eight seats stayed mute for
-        four hours on 2026-07-31. Quiet is fine; mute must announce itself.
+        The single admissibility predicate — run_turn refuses on it, the loop
+        holds the wake on it, and the state line prints it. Two holds exist
+        and they are genuinely different questions: `backoff` is "the path to
+        the hub is broken", `parked` is "this seat has spent its hourly
+        allowance". Both are bounded and both name the second they release.
         """
-        held = self._pending_wake
-        infra = self._infra_retry_after()
-        quarantined = self._quarantined
-        if not (held or infra > 0 or quarantined):
-            self._last_mute_notice = 0.0
-            return
-        now = time.time()
-        if now - self._last_mute_notice < MUTE_NOTICE_INTERVAL:
-            return
-        self._last_mute_notice = now
-        parts = [f"AGORA_DRIVE mute agent={self.agent_id}"]
-        if held:
-            parts.append("wake=held")
-        if infra > 0:
-            parts.append(f"reason=provider-failing retry_in={infra:.0f}s "
-                         f"consecutive={self._infra_failures}")
-        if quarantined:
-            parts.append(f"quarantined_keys={len(quarantined)}")
-        parts.append("— this seat is NOT processing obligations; they still "
-                     "escalate hub-side")
+        retry = self._backoff_retry_after()
+        if retry > 0:
+            return "backoff", (self._fail_reason or "harness-failing"), retry
+        now = self._prune_turn_times()
+        hard = self._retry_after(self._turn_times, self.turn_budget, now)
+        if hard > 0:
+            return "parked", "turn-budget", hard
+        if not has_debt:
+            fuse = self._retry_after(self._broadcast_turn_times,
+                                     self.broadcast_turn_budget, now)
+            if fuse > 0:
+                return "parked", "broadcast-budget", fuse
+        return None
+
+    def _state(self, state: str, *, reason: str = "",
+               next_s: float | None = None, **extra) -> None:
+        """One line per loop pass naming where the seat IS and what unblocks it.
+
+        This is the whole observability contract: a stall is diagnosable from
+        stdout without a turn log, a debugger, or a hub query.
+        """
+        parts = [f"AGORA_DRIVE state={state}", f"agent={self.agent_id}"]
+        if reason:
+            parts.append(f"reason={reason}")
+        if next_s is not None:
+            parts.append(f"next={next_s:.0f}s")
+        parts += [f"{k}={v}" for k, v in extra.items() if v not in (None, "")]
         _emit(" ".join(parts))
 
     @contextlib.contextmanager
@@ -2293,14 +2588,6 @@ class Driver:
 
     # -- budget --------------------------------------------------------------
 
-    def _budget_ok(self) -> bool:
-        self._prune_turn_times()
-        return len(self._turn_times) < self.turn_budget
-
-    def _broadcast_budget_ok(self) -> bool:
-        self._prune_turn_times()
-        return len(self._broadcast_turn_times) < self.broadcast_turn_budget
-
     def _prune_turn_times(self, now: float | None = None) -> float:
         """Prune both rolling windows using one clock boundary."""
         now = time.time() if now is None else now
@@ -2321,29 +2608,9 @@ class Driver:
             return TURN_BUDGET_WINDOW
         return max(0.0, min(times) + TURN_BUDGET_WINDOW - now)
 
-    def _budget_retry_after(self, *, has_debt: bool) -> float:
-        """Seconds until a held wake is admissible (zero if it is now).
-
-        Addressed/owed work uses only the high hard ceiling. Unowned
-        room-wide wakes also pass the smaller broadcast fuse, so a noisy
-        channel cannot consume the addressed-turn allowance.
-        """
-        now = self._prune_turn_times()
-        hard = self._retry_after(self._turn_times, self.turn_budget, now)
-        # A failing provider is a wait like any other: fold it in so the loop's
-        # listen window shrinks to the retry instant instead of the idle
-        # ceiling, and the seat resumes the moment the provider heals.
-        hard = max(hard, self._infra_retry_after())
-        if has_debt:
-            return hard
-        broadcast = self._retry_after(
-            self._broadcast_turn_times, self.broadcast_turn_budget, now
-        )
-        return max(hard, broadcast)
-
     def _wake_admissible(self, *, has_debt: bool) -> bool:
-        return (self._infra_retry_after() <= 0.0 and self._budget_ok()
-                and (has_debt or self._broadcast_budget_ok()))
+        """A reception turn may run now. The negation is _hold's reason."""
+        return self._hold(has_debt=has_debt) is None
 
     # -- the flight recorder (--turn-log) --------------------------------------
 
@@ -2405,10 +2672,11 @@ class Driver:
                 str(row.get("id")) for row in raw.get("to_answer", [])
                 if isinstance(row, dict) and row.get("id")
             ),
-            to_consume=frozenset(
-                str(row.get("answer_id"))
-                for row in raw.get("to_consume", [])
-                if isinstance(row, dict) and row.get("answer_id")
+            refs=tuple(
+                (str(row.get("id")), f"{row.get('channel')}#{row.get('seq')}")
+                for row in raw.get("to_answer", [])
+                if isinstance(row, dict) and row.get("id")
+                and row.get("channel") and row.get("seq")
             ),
             structured=tuple(
                 (
@@ -2426,7 +2694,18 @@ class Driver:
 
     def _message_pending_asks(self, channel: str, seq: int,
                               message_id: str) -> frozenset[str] | None:
-        """Read the hub-decorated pending ask ids for one source message."""
+        """This seat's still-pending ask ids on one source message.
+
+        `pending_asks` on the hub row is MESSAGE-global — every ask still
+        open, whoever owns it (`/owed` says so itself: "Replying at all drops
+        the row (the remaining debt is other seats')"). So a decomposition
+        that fans four addressed asks to four seats leaves three pending the
+        instant any one seat answers its own, and scoring that global set as
+        THIS seat's unsettled debt failed the turn — and muted the seat — for
+        doing exactly the addressed work it was handed. Live at-test#446 hit
+        it on 5 of 7 seats at once. Narrow to the asks whose per-ask `to`
+        (0077) names this seat; an ask addressed to nobody is everyone's.
+        """
         api_key = _config.get_cached_key(self.hub, self.agent_id)
         if not api_key:
             return None
@@ -2440,19 +2719,36 @@ class Driver:
             ).json()
             if str(row.get("id") or "") != message_id:
                 return None
-            pending = row.get("pending_asks")
-            return frozenset(str(v) for v in (pending or []))
+            pending = frozenset(
+                str(v) for v in (row.get("pending_asks") or []))
+            asks = ((row.get("data") or {}).get("asks") or [])
+            addressed = frozenset(
+                str(a.get("id")) for a in asks if isinstance(a, dict)
+                and a.get("id") is not None
+                and (not a.get("to") or self.agent_id in (a.get("to") or []))
+            )
+            # No structured asks at all: the whole message is the obligation,
+            # exactly as before. Structured asks present: only mine count.
+            return pending & addressed if asks else pending
         except Exception:
             return None
 
     def _verify_reception_debt(self, evidence: TurnEvidence,
                                kind: str) -> TurnEvidence:
-        """Require every debt present before this turn to be settled.
+        """Report debt that was owed BEFORE this turn and still is.
 
         Hub semantics already encode the right abstraction: an original
-        ``to_answer`` row disappears after any valid reply/claim/refusal, and
-        ``to_consume`` disappears after the answer is read or used.  Comparing
-        IDs avoids parsing model prose and ignores new debt arriving mid-turn.
+        ``to_answer`` row disappears after any valid reply/claim/refusal.
+        Comparing IDs avoids parsing model prose and ignores new debt arriving
+        mid-turn.
+
+        This verdict is a DIAGNOSIS, never a penalty (see run_turn): the turn
+        reached the hub and looked. Re-spawning it changes no input, and the
+        live record shows what that costs — on 2026-08-03 every `debt-remains`
+        verdict respawned an identical turn within the same second (00:26:34,
+        00:27:49, 00:30:58, 00:32:10, 01:00:52, 01:03:55), and while that
+        held wake sat there the seat was also barred from running the work
+        chunk the debt was actually asking for.
         """
 
         # VERIFICATION FAILS OPEN. Every `verification-unavailable` path below
@@ -2478,9 +2774,21 @@ class Driver:
                   "reason=owed-unreadable-after-turn")
             return evidence
         unanswered = sorted(before.to_answer & after.to_answer)
-        unconsumed = sorted(before.to_consume & after.to_consume)
-        unresolved_structured: list[str] = []
         linked_sources: set[str] | None = None
+        if unanswered:
+            # A standing row whose work this seat has CLAIMED is not an
+            # ignored debt — since 2026-08-04 an operator commission stays
+            # in to_answer until the completion report (`resolved`), by
+            # design, so "row survived the turn" is the CORRECT state for a
+            # delegate mid-delivery ONLY AFTER the delegate has engaged the
+            # operator thread itself. The claim (any non-done status;
+            # blocked-on-operator included) is the receipt that the plan is
+            # materialized; without it the row still fails the turn.
+            linked_sources = self._linked_claim_sources()
+            unanswered = [i for i in unanswered
+                          if i not in linked_sources
+                          and before.ref_of(i) not in linked_sources]
+        unresolved_structured: list[str] = []
         for channel, seq, message_id, original_pending in before.structured:
             pending = self._message_pending_asks(channel, seq, message_id)
             if pending is None:
@@ -2492,19 +2800,15 @@ class Driver:
                 continue
             if original_pending & pending:
                 if linked_sources is None:
-                    linked_sources = {
-                        str(value.get("source_message_id") or "")
-                        for _, _, _, value in self._owned_live_claims()
-                    }
-                if message_id not in linked_sources:
+                    linked_sources = self._linked_claim_sources()
+                if (message_id not in linked_sources
+                        and f"{channel}#{seq}" not in linked_sources):
                     unresolved_structured.append(message_id)
-        if not unanswered and not unconsumed and not unresolved_structured:
+        if not unanswered and not unresolved_structured:
             return evidence
         parts = []
         if unanswered:
             parts.append("to_answer=" + ",".join(unanswered[:10]))
-        if unconsumed:
-            parts.append("to_consume=" + ",".join(unconsumed[:10]))
         if unresolved_structured:
             parts.append(
                 "pending_without_linked_claim=" + ",".join(unresolved_structured[:10])
@@ -2515,9 +2819,45 @@ class Driver:
             tools=evidence.tools,
         )
 
+    @staticmethod
+    def _classify_provider_failure(evidence: TurnEvidence,
+                                   stderr: str) -> TurnEvidence:
+        """Re-stage a failed turn as INFRASTRUCTURE when the endpoint named
+        itself — for every harness, in one place.
+
+        Only one of five adapters used to do this, in its own rc!=0 branch, so
+        the same 429 was `infrastructure` under opencode and `harness` under
+        the rest. Read only the harness's own words (stderr and the detail the
+        adapter extracted), never model prose, so a turn that merely mentions
+        a rate limit is not laundered into an infra excuse.
+        """
+        if evidence.ok or evidence.stage in ("infrastructure", "harness-config"):
+            return evidence
+        provider = _provider_failure(stderr, evidence.detail or "")
+        if not provider:
+            return evidence
+        return dataclasses.replace(
+            evidence, stage="infrastructure", reason="provider-failure",
+            detail=f"{provider}: {evidence.detail or 'provider failure'}")
+
     def _spawn_cursor_agent(self, prompt: str, session_id: str | None):
         """Compatibility shim for the legacy Cursor-only tests/callers."""
         return self._spawn_turn(prompt, session_id)
+
+    def _is_delegate_seat(self) -> bool:
+        """Does this seat hold a live delegation? Read from the hub, never
+        remembered: powers change without the seat taking a turn."""
+        api_key = _config.get_cached_key(self.hub, self.agent_id)
+        if not api_key:
+            return False
+        import httpx
+        try:
+            me = httpx.get(f"{self.hub}/whoami", timeout=5.0,
+                           headers={"Authorization": f"Bearer {api_key}"}).json()
+        except Exception:
+            return False
+        return any(d.get("agent_id") == self.agent_id
+                   for d in (me.get("delegations") or []))
 
     def _spawn_turn(self, prompt: str, session_id: str | None):
         """Run ONE headless harness turn. Returns (session_id, ok)."""
@@ -2530,6 +2870,16 @@ class Driver:
                         harness=self.harness,
                         session=session_id, model=self.model)
         try:
+            # KNOWN, MEASURED LIMIT: this timeout kills the direct child, then
+            # blocks in communicate() while any grandchild still holds the
+            # pipes. Live record 2026-07-30..08-03: 3 turns out of 1338 outran
+            # their cap that way (worst: a work chunk capped at 3600s ran
+            # 5069s; a reception turn capped at 600s ran 3052s). The seat is
+            # deaf for the overrun, so _long_turn_notice announces every turn
+            # at LONG_TURN_NOTICE intervals. Closing it for real means giving
+            # the child a file instead of a pipe, which changes capture for
+            # every adapter — a deliberate change, not a side effect of this
+            # pass.
             proc = subprocess.run(cmd, capture_output=True, text=True,
                                   timeout=self._turn_timeout, cwd=str(self.cwd),
                                   stdin=subprocess.DEVNULL,
@@ -2563,6 +2913,13 @@ class Driver:
                    if starved else ""))
             provider = _provider_failure(err, out)
             if provider:
+                # The endpoint named itself. Live 2026-08-03 02:37 this exact
+                # shape was recorded as `stage=harness reason=timeout` with
+                # `detail="429: timed out after 3600s"` — the diagnosis was
+                # right there in the detail while the STAGE said the seat's
+                # own harness had crashed. Naming the stage is what routes it
+                # away from the per-wake response and into plain backoff.
+                stage, reason = "infrastructure", "provider-failure"
                 detail = f"{provider}: {detail}"
             if self._turn_log is not None:
                 self._log_lines(out.splitlines())
@@ -2606,6 +2963,7 @@ class Driver:
         evidence = self._adapter.assess_turn(
             stdout_text, stderr_text, proc.returncode, kind
         )
+        evidence = self._classify_provider_failure(evidence, stderr_text)
         if evidence.ok:
             evidence = self._verify_reception_debt(evidence, kind)
         new_sid = self._adapter.parse_session_id(stdout_text, session_id)
@@ -2674,62 +3032,50 @@ class Driver:
         env.update(extra)
         return env
 
-    def _wake_key(self) -> str:
-        """Identify the current wake for the poison ledger: a wake that keeps
-        crashing the same turn is a poison message; after POISON_STRIKES we
-        quarantine it (the unacked obligation still escalates hub-side, so
-        it cannot rot invisibly).
+    def _listen_window(self, snap: tuple[str, str, int] | None) -> float:
+        """How long to block in the listener: the chain cadence when a work
+        chunk is READY to run, the release instant when it is blocked but
+        will free itself, else the full idle ceiling.
 
-        Primary key: the owed SIGNATURE the listener just recorded
-        (listen-<id>.owedsig) — the debt's identity. The old size-only key
-        collided after notify-file rotation and degraded to a constant '0'
-        for ws-mode seats, quarantining every future wake after three bad
-        turns (review 2026-07-28). Fallbacks keep the old behavior."""
-        sig = _config.home() / f"listen-{self.agent_id}.owedsig"
-        try:
-            content = sig.read_text().strip()
-            if content:
-                return hashlib.sha256(content.encode()).hexdigest()[:12]
-        except OSError:
-            pass
-        nf = _config.home() / f"{self.agent_id}-inbox.log"
-        try:
-            return f"{nf.stat().st_size}"
-        except OSError:
-            return "0"
+        This is the difference between a delegate that finishes a job and one
+        that waits for a human. A work chunk only starts at an idle boundary
+        (rc=0), so the window IS the initiative clock. Measured on 2026-08-03
+        with the old rule (`chain cadence only once a chunk has already run`):
+        the editor's single chunk that hour started at 00:50:07, exactly
+        1200.0s after its previous turn ended at 00:30:07 — a chunk needs a
+        FULL uninterrupted idle ceiling to happen. The delegate never got one
+        (its quiet gaps were 908s, 111s, 440s, 771s), so it held an open claim
+        for 43 minutes and took no chunk, and the operator had to post twice
+        to move it. At the chain cadence the same seat gets a boundary every
+        20s and any obligation still preempts at the arm.
+        """
+        if snap is not None:
+            block = self._chain_block(snap)
+            if block is None:
+                return DRIVE_CHAIN_WAIT          # a chunk is ready to run
+            return min(self.max_wait, block[1]) if block[1] > 0 else self.max_wait
+        if not self._scan_ok and self._has_work:
+            # The scan FAILED (hub blip). Keep the previous answer and retry
+            # soon: a transient 500 must not put a working seat to sleep for
+            # twenty minutes.
+            return DRIVE_CHAIN_WAIT
+        return self.max_wait
 
     def run_turn(self, *, broadcast: bool = False) -> bool:
         """Drive ONE reception turn. Returns True if a turn ran."""
         self._last_turn_ok = None
         self._last_turn_stage = None
-        if not self._wake_admissible(has_debt=not broadcast):
+        hold = self._hold(has_debt=not broadcast)
+        if hold is not None:
             # No sleep here (the old 300s nap was a deaf window): the LOOP
             # holds the wake (_pending_wake) and keeps listening; direct
             # callers just get the False.
-            infra = self._infra_retry_after()
-            if infra > 0:
-                _emit(f"AGORA_DRIVE parked agent={self.agent_id} "
-                      f"reason=provider-failing retry_in={infra:.0f}s")
-                return False
-            reason = "broadcast-budget" if self._budget_ok() else "turn-budget"
-            limit = (self.turn_budget if reason == "turn-budget"
-                     else self.broadcast_turn_budget)
-            _emit(f"AGORA_DRIVE parked agent={self.agent_id} "
-                  f"reason={reason} ({limit}/h)")
-            return False
-        key = self._wake_key()
-        self._quarantine_expired(key)
-        if key in self._quarantine_until:
-            # NEVER SILENT: a dropped wake used to return False with no line
-            # at all, so a deafened seat looked identical to an idle one.
-            left = max(0.0, self._quarantine_until[key] - time.time())
-            _emit(f"AGORA_DRIVE wake-dropped agent={self.agent_id} key={key} "
-                  f"reason=quarantined retry_in={left:.0f}s — this seat is "
-                  "NOT processing this obligation; it still escalates hub-side")
+            state, reason, retry = hold
+            self._state(state, reason=reason, next_s=retry, wake="held")
             return False
         sid = self.reception_session_id
         prompt = WAKE_PROMPT if sid else BOOT_PROMPT
-        verify_debt = self._spawn == self._spawn_turn
+        verify_debt = self.verify_reception_debt
         debt_before = self._reception_debt() if verify_debt else None
         self._reception_debt_verification_required = verify_debt
         self._reception_debt_before = debt_before
@@ -2738,27 +3084,21 @@ class Driver:
         if broadcast:
             self._broadcast_turn_times.append(now)
         try:
-            new_sid, ok = self._spawn(prompt, sid)
+            # Announced like a work chunk: a reception turn blocks the same
+            # single-threaded loop, and its 600s cap is not always honoured
+            # (measured: one ran 3052s on 2026-08-01) — 51 minutes in which
+            # nothing said the seat was still in there.
+            with self._long_turn_notice(self._prompt_kind(prompt)):
+                new_sid, ok = self._spawn(prompt, sid)
         finally:
             self._reception_debt_before = None
             self._reception_debt_verification_required = False
         self._last_turn_ok = ok
         if not ok:
-            # ONLY a HARNESS-level failure is a strike. The poison ledger
-            # exists for "this wake crashes the harness" — a real, repeatable
-            # defect. A SEMANTIC verdict ("debt remains") is a normal outcome:
-            # debt an agent cannot settle alone (waiting on a peer, needing a
-            # human ruling, an ask it declined) produces a STABLE owedsig, so
-            # the same key returned every wake and hit 3 strikes with
-            # certainty — the seat then went permanently deaf to exactly the
-            # obligation it most needed help with. The ledger is on disk, so
-            # a restart re-quarantined on the first failure.
             # A CONFIGURATION error can never succeed, so retrying it is pure
             # waste: the model does not support this reasoning effort, the
-            # sandbox contract is impossible, etc. Semantic failures are retried
-            # (correctly — debt often needs another pass), so without this branch
-            # a bad `--reasoning-effort` would respawn a turn forever. Abort
-            # loudly, quoting the harness's own message, which names the fix.
+            # sandbox contract is impossible, etc. Abort loudly, quoting the
+            # harness's own message, which names the fix.
             if self._last_turn_stage == "harness-config":
                 raise SystemExit(
                     f"agora drive: {self.harness} refused this seat's "
@@ -2766,45 +3106,50 @@ class Driver:
                     f"{_one_line(self._last_turn_detail) or 'no detail'}\n"
                     "  Fix the flag (commonly --model / --reasoning-effort) and "
                     "restart the driver.")
-            # A PROVIDER failure (429, 5xx, a turn that timed out having called
-            # nothing) is about the endpoint, never about this wake: striking it
-            # is how a rate limit at 04:59 deafened eight seats for hours. Back
-            # off instead — loudly — and keep the wake.
-            if self._last_turn_stage == "infrastructure":
-                self._note_infra_failure(self._last_turn_detail)
-                self._pending_wake = True
-                self._pending_wake_has_debt = not broadcast
+            # THE ONE DISTINCTION THAT MATTERS: did the turn reach the hub?
+            #
+            # `reception` means yes — it ran a pass, looked at the inbox, and
+            # left debt behind. That is a DIAGNOSIS, not a failure to retry:
+            # the inputs to the next identical turn are identical, so a retry
+            # is a second identical answer. Live 2026-08-03 shows exactly that
+            # — six `debt-remains` verdicts each respawned a turn within the
+            # same second, and three of them were the DELEGATE being failed
+            # for `to_consume` rows created by the peers it had dispatched.
+            # Worse, the held wake barred the work chunk the debt was asking
+            # for, so the seat re-answered instead of working. The debt stays
+            # owed, keeps escalating hub-side, and any new message, any
+            # escalation band flip, or the next work chunk moves it.
+            if self._last_turn_stage in _SEMANTIC_STAGES:
+                self._clear_backoff()
                 return True
-            self._clear_infra_failure()
-            # No recorded stage = a raw spawn failure (the process died before
-            # any evidence could be assessed), which IS a harness failure.
-            harness_failure = self._last_turn_stage in (None, "harness")
-            if harness_failure:
-                n = self._bump_attempt(key)
-                if n >= POISON_STRIKES:
-                    self._quarantine_until[key] = time.time() + QUARANTINE_TTL
-                    _emit(f"AGORA_DRIVE quarantine agent={self.agent_id} "
-                          f"key={key} strikes={n} ttl={QUARANTINE_TTL:.0f}s — a "
-                          f"wake crashed {n} turns; the obligation still "
-                          f"escalates hub-side and this key retries after the "
-                          f"ttl")
-            if not harness_failure or key not in self._quarantine_until:
-                # Hold the wake — including for broadcasts (an unowned
-                # room-wide ask used to be dropped outright on its first
-                # imperfect turn, which is how #commons went quiet).
-                self._pending_wake = True
-                self._pending_wake_has_debt = not broadcast
+            # `mcp-use` and `mcp-call` say the same thing in the adapters'
+            # voice: the turn REACHED the hub and its calls were judged. They
+            # are diagnoses too, and the module's own `_TRANSPORT_STAGES`
+            # (which the work lane checks) already says so — this lane did
+            # not, so giving the claude adapter evidence for the first time
+            # would have parked ~11% of its turns in 900s backoff for a
+            # verdict about content rather than transport.
+            #
+            # Anything else never got there (crash, timeout, MCP init, a
+            # stream without its terminal event, a 429). One response: back
+            # off, KEEP the wake — including broadcasts, since an unowned
+            # room-wide ask dropped on its first imperfect turn is how
+            # #commons went quiet.
+            # Hold the wake FIRST: the backoff line reports whether one is
+            # being kept, and on this path one always is.
+            self._pending_wake = True
+            self._pending_wake_has_debt = not broadcast
+            self._note_failure(self._last_turn_stage or "harness",
+                               self._last_turn_detail)
             # Only a real resume failure invalidates the session. Dropping it
             # on a semantic verdict threw away the resumable thread and paid a
             # full cold-start BOOT_PROMPT on every subsequent wake.
-            if harness_failure and self.reception_session_id:
+            if self._last_turn_stage in (None, "harness") and self.reception_session_id:
                 self.reception_session_id = None
                 self._write_session(self._reception_session_path, None)
                 self._reception_turns_on_session = 0
             return True
-        self._clear_infra_failure()
-        self._clear_attempt(key)
-        self._quarantine_until.pop(key, None)
+        self._clear_backoff()
         self.reception_session_id = new_sid
         self._write_session(self._reception_session_path, new_sid)
         self._reception_turns_on_session += 1
@@ -2843,25 +3188,31 @@ class Driver:
                 return True
         return False
 
-    def _scan_owned_rows(
-        self,
-    ) -> tuple[list[tuple[str, str, int, dict]],
-               list[tuple[str, str, int, dict]]]:
-        """ONE pass over every joined channel's store ->
-        (live claims owned by this seat, OPEN phase rows this seat stewards).
+    def _work_rows(self) -> list[tuple[float, str, str]]:
+        """Every claim:/phase: key in every joined channel, NEWEST FIRST.
 
-        Both feed the same work gate. Kept as one walk because the second
-        gate must not double the hub traffic of an idle boundary.
+        The store listing already carries `updated_at`, so ordering is free —
+        and it is the whole fix for the starvation measured on 2026-08-03: the
+        old walk returned rows in channel-then-key order and took the FIRST
+        one, so the delegate chained on `dm:editor--reader/claim:msg-11` (v1,
+        `in_progress`, untouched since 08-01 07:34) while its live work was
+        `at-test/claim:msg-445` (v26). Three chunks could not move the stale
+        row, the chain parked on it — `AGORA_DRIVE initiative=parked
+        key=dm:editor--reader/claim:msg-11@1 reason=no-receipt` — and the seat
+        stopped working entirely. The seat owns three more rows in that state
+        (`hub-alerts/claim:msg-757|762|764`, v1, `waiting_on_owners`), so the
+        trap was permanent, not a coincidence.
+
+        Newest-first means the row you last touched is the work you are on.
         """
-        claims: list[tuple[str, str, int, dict]] = []
-        phases: list[tuple[str, str, int, dict]] = []
+        self._scan_ok = False
         api_key = _config.get_cached_key(self.hub, self.agent_id)
         if not api_key:
-            return claims, phases
-        import urllib.parse
+            return []
         import httpx
         hdrs = {"Authorization": f"Bearer {api_key}"}
         base = self.hub.rstrip("/")
+        found: list[tuple[float, str, str]] = []
         try:
             chans = httpx.get(f"{base}/channels", headers=hdrs, timeout=5.0).json()
             for ch in chans if isinstance(chans, list) else []:
@@ -2873,117 +3224,279 @@ class Driver:
                 ).json()
                 for row in rows if isinstance(rows, list) else []:
                     key = str(row.get("key", ""))
-                    is_claim, is_phase = (key.startswith("claim:"),
-                                          key.startswith("phase:"))
-                    if not (is_claim or is_phase):
-                        continue
-                    entry = httpx.get(
-                        f"{base}/channels/{name}/store/"
-                        f"{urllib.parse.quote(key, safe=':')}",
-                        headers=hdrs, timeout=5.0,
-                    ).json()
-                    value = entry.get("value")
-                    if not isinstance(value, dict):
-                        continue
-                    version = int(entry.get("version", 0))
-                    if is_claim:
-                        if (value.get("owner") != self.agent_id
-                                or value.get("done")):
-                            continue
-                        if self._is_terminal(value.get("status"),
-                                             value.get("state")):
-                            continue
-                        claims.append((name, key, version, value))
-                        continue
-                    # A phase row is continuable work for ONE seat: its
-                    # steward, while the row is open AND declares where the
-                    # track is going. Anyone else reads it and parks.
-                    if value.get("steward") != self.agent_id:
-                        continue
-                    if self._is_terminal(value.get("status"),
-                                         value.get("current")):
-                        continue
-                    declared = any(
-                        str(value.get(field) or "").strip()
-                        for field in ("next", "next_step", "current")
-                    )
-                    if not declared:
-                        continue
-                    phases.append((name, key, version, value))
+                    if key.startswith("claim:") or key.startswith("phase:"):
+                        found.append((float(row.get("updated_at") or 0.0),
+                                      str(name), key))
         except Exception:
-            return [], []
-        return claims, phases
+            return []
+        self._scan_ok = True
+        # Newest first; a CLAIM outranks a phase row touched in the same
+        # instant, because the claim is the finer-grained unit and the only
+        # thing that carries a per-slice receipt.
+        found.sort(key=lambda r: (r[0], r[2].startswith("claim:"), r[1], r[2]),
+                   reverse=True)
+        return found
 
-    def _owned_live_claims(self) -> list[tuple[str, str, int, dict]]:
-        """All non-terminal claims owned by this seat, from existing APIs.
-        Claims ONLY — reception-debt verification asks "is there a claim row
-        linked to this pending ask", and a phase row never answers that."""
-        return self._scan_owned_rows()[0]
+    def _read_work_row(self, channel: str,
+                       key: str) -> tuple[int, dict] | None:
+        """(version, value) for one store row, or None if it cannot be read."""
+        api_key = _config.get_cached_key(self.hub, self.agent_id)
+        if not api_key:
+            return None
+        import urllib.parse
+        import httpx
+        try:
+            entry = httpx.get(
+                f"{self.hub.rstrip('/')}/channels/{channel}/store/"
+                f"{urllib.parse.quote(key, safe=':')}",
+                headers={"Authorization": f"Bearer {api_key}"}, timeout=5.0,
+            ).json()
+        except Exception:
+            return None
+        value = entry.get("value")
+        if not isinstance(value, dict):
+            return None
+        return int(entry.get("version", 0)), value
 
-    def _continuation_snapshot(self) -> tuple[str, str, int] | None:
-        """(channel, key, version) of the seat's continuable work, or None.
-        Read with the cached key over EXISTING endpoints (precedent: listen's
-        /owed poll). Any failure returns None — initiative fails toward
-        silence, never toward burn.
+    def _continuable(self, key: str, value: dict) -> bool:
+        """Is this row work THIS seat may continue right now?
 
-        TWO kinds of row continue a seat, checked in this order:
+        TWO kinds of row qualify:
 
-        1. A LIVE CLAIM — the finer-grained unit, so it wins.
+        1. A LIVE CLAIM this seat owns — the finer-grained unit.
         2. An OPEN `phase:` row this seat STEWARDS. Field evidence
            (2026-07-31): a delegate held one claim, `blocked` on an external
            tool fault, plus `phase:manuscript` open with itself as steward and
            `next: writing` declared. Claims-only gating read that seat as
            having nothing to continue, so it took ZERO work turns across a
-           24-turn fleet run and the arc only moved on external nudges. A
-           steward with an open phase has real pending work by definition:
-           the phase does not close until it acts.
+           24-turn fleet run. A steward with an open phase has real pending
+           work by definition: the phase does not close until it acts.
+
+        A row whose status word says done/parked/blocked (or done:true) is not
+        continuable — chaining on a declared blocker only spins. That never
+        makes the SEAT dead: the next row in the list is considered, and a
+        blocked row does not count against opening a new one.
+        """
+        if key.startswith("claim:"):
+            if value.get("owner") != self.agent_id or value.get("done"):
+                return False
+            if not self._is_terminal(value.get("status"), value.get("state")):
+                return True
+            # A park with a DECLARED dependency that has since moved is the
+            # one terminal row worth reconsidering (2026-08-06): this seat
+            # said in structured state "resume when that row changes", and
+            # it changed. Without this, `parked` is a one-way door — the
+            # incident that cost seven seats a night was a delegate parked
+            # on a dependency satisfied 3m43s later.
+            return self._waiting_on_satisfied(value.get("waiting_on"))
+        return (value.get("steward") == self.agent_id
+                and not self._is_terminal(value.get("status"),
+                                          value.get("current"))
+                and any(str(value.get(field) or "").strip()
+                        for field in ("next", "next_step", "current")))
+
+    def _waiting_on_satisfied(self, dep: Any) -> bool:
+        """Has the row this claim declared it waits on moved past the
+        version stamped when the wait was declared?
+
+        Read straight from the hub, across channels: the dependency that
+        caused the incident lived in a different room from the parked row.
+        Any failure to read answers False — an unreachable hub must never
+        manufacture work."""
+        if not isinstance(dep, dict) or not dep.get("key"):
+            return False
+        api_key = _config.get_cached_key(self.hub, self.agent_id)
+        if not api_key:
+            return False
+        import urllib.parse
+        import httpx
+        try:
+            r = httpx.get(
+                f"{self.hub}/channels/"
+                f"{urllib.parse.quote(str(dep.get('channel')), safe='')}"
+                f"/store/{urllib.parse.quote(str(dep['key']), safe='')}",
+                headers={"Authorization": f"Bearer {api_key}"}, timeout=5.0)
+            if r.status_code != 200:
+                return False
+            return int(r.json().get("version") or 0) > int(
+                dep.get("at_version") or 0)
+        except Exception:
+            return False
+
+    def _owned_live_claims(self) -> list[tuple[str, str, int, dict]]:
+        """All non-terminal claims owned by this seat, from existing APIs.
+        Claims ONLY — reception-debt verification asks "is there a claim row
+        linked to this pending ask", and a phase row never answers that."""
+        live: list[tuple[str, str, int, dict]] = []
+        for _, channel, key in self._work_rows():
+            if not key.startswith("claim:"):
+                continue
+            got = self._read_work_row(channel, key)
+            if got and self._continuable(key, got[1]):
+                live.append((channel, key, got[0], got[1]))
+        return live
+
+    _DONE_STATUS_WORDS = frozenset(
+        {"done", "shipped", "complete", "completed", "closed", "cancelled",
+         "canceled", "abandoned"})
+
+    def _linked_claim_sources(self) -> set[str]:
+        """`source_message_id` of every claim this seat owns that is not
+        DONE. Blocked and parked claims count: a claim standing
+        `blocked: waiting on the operator` is a materialized plan with a
+        recorded reason, not an ignored debt — the reception verdict uses
+        this set to excuse standing rows whose work is claimed."""
+        out: set[str] = set()
+        for _, channel, key in self._work_rows():
+            if not key.startswith("claim:"):
+                continue
+            got = self._read_work_row(channel, key)
+            if got is None:
+                continue
+            value = got[1]
+            if value.get("owner") != self.agent_id or value.get("done"):
+                continue
+            status = str(value.get("status") or value.get("state") or "")
+            first = status.strip().lower().split()[0].rstrip(".,;:!—-") \
+                if status.strip() else ""
+            if first in self._DONE_STATUS_WORDS:
+                continue
+            src = str(value.get("source_message_id") or "")
+            if src:
+                out.add(src)
+        return out
+
+    def _continuation_snapshot(self) -> tuple[str, str, int] | None:
+        """(channel, key, version) of the work this seat should continue NOW,
+        or None. Read with the cached key over EXISTING endpoints (precedent:
+        listen's /owed poll). Any failure returns None — initiative fails
+        toward silence, never toward burn.
+
+        Rows are considered NEWEST FIRST and a row that has already spent its
+        strikes is SKIPPED, not returned: one stale row must never be able to
+        starve the seat's real work (see _work_rows). Stopping at the first
+        answer also keeps the idle-boundary cost at one or two GETs, which
+        matters now that the window itself is derived from this scan.
 
         The phase row is an IGNITION, not a sustainer. Real slice receipts
         land on a CLAIM row, so a stewarded phase collects strikes (it is not
-        touched per slice) and parks after WORK_STRIKES chunks — which is
-        exactly enough to let the woken steward open a proper claim row for
-        the arc and chain on THAT indefinitely. Bounded fuel is what stops
-        every steward in the fleet burning chunks on every quiet window.
-
-        A row whose status word says done/parked/blocked (or done:true) is not
-        continuable — chaining on a declared blocker only spins. But a blocked
-        claim never makes the SEAT dead: other live claims and a stewarded
-        open phase are still found here, and the teaching says plainly that a
-        blocked row does not count against opening a new one.
+        touched per slice) and is skipped after WORK_STRIKES chunks — exactly
+        enough to let the woken steward open a proper claim row for the arc
+        and chain on THAT indefinitely.
         """
-        claims, phases = self._scan_owned_rows()
-        for channel, key, version, _ in (*claims, *phases):
+        for _, channel, key in self._work_rows():
+            got = self._read_work_row(channel, key)
+            if got is None or not self._continuable(key, got[1]):
+                continue
+            version = got[0]
+            if self._strike_count(f"{channel}/{key}@{version}") >= WORK_STRIKES:
+                continue
             return channel, key, version
         return None
 
-    def _work_budget_ok(self) -> bool:
-        now = time.time()
-        self._work_times = [t for t in self._work_times if now - t < 3600.0]
-        return len(self._work_times) < self.work_budget
+    def _strike_count(self, ck: str, now: float | None = None) -> int:
+        """Strikes against a row version, with expiry: after WORK_STRIKE_TTL
+        without a fresh strike the slate is clean and the row re-enters
+        selection. Retirement bounds burn inside the hour; it must never be
+        a process-lifetime verdict on work whose only possible reviver is
+        the seat the verdict silenced."""
+        now = time.time() if now is None else now
+        ts = self._work_strike_at.get(ck)
+        if ts is not None and now - ts > WORK_STRIKE_TTL:
+            self._work_strikes.pop(ck, None)
+            self._work_strike_at.pop(ck, None)
+            return 0
+        return self._work_strikes.get(ck, 0)
+
+    def _receipt_elsewhere(self, since: float, skip_channel: str,
+                           skip_key: str) -> bool:
+        """Did this seat leave a receipt on any OTHER work row since `since`?
+
+        The strike rule used to read only the SELECTED row, so a chunk that
+        did exactly what WORK_PROMPT commands — advance a claim and write
+        done/blocked on it — still struck the phase row that selected it
+        (the advanced claim is terminal, so the snapshot falls back to the
+        unchanged phase). Three by-the-book chunks retired the novel
+        steward's only live row while five illustrations landed in the same
+        chunks (2026-08-04). A receipt is a row this seat owns or stewards
+        whose updated_at moved past the chunk start — including NEW rows and
+        rows moved to terminal states; `_work_rows` is newest-first, so the
+        scan stops at the first row older than the chunk."""
+        checked = 0
+        for updated, ch, key in self._work_rows():
+            if updated < since - 2.0:
+                break
+            if (ch, key) == (skip_channel, skip_key):
+                continue
+            got = self._read_work_row(ch, key)
+            if got is None:
+                continue
+            value = got[1]
+            if (value.get("owner") == self.agent_id
+                    or value.get("steward") == self.agent_id):
+                return True
+            checked += 1
+            if checked >= 8:
+                break
+        return False
+
+    def _prune_work_times(self, now: float | None = None) -> float:
+        now = time.time() if now is None else now
+        self._work_times = [t for t in self._work_times
+                            if now - t < TURN_BUDGET_WINDOW]
+        return now
 
     def run_work_turn(self) -> bool:
         """Spawn ONE bounded work chunk (WORK_PROMPT, --work-timeout cap).
-        Uses a work-only session and does NOT share the wake poison ledger —
-        a failing chunk must never quarantine the
-        inbox head and deafen reception (composition bug, review
-        2026-07-28); chunk failures are bounded by the per-version strike
-        ledger in _chain_step instead."""
+
+        Uses a work-only session, and a failing chunk never touches reception:
+        its only bound is the per-version strike ledger in _chain_step.
+        """
         sid = self.work_session_id
         prompt = WORK_PROMPT if sid else WORK_BOOT_PROMPT
+        # A DELEGATE SUPERVISES; IT DOES NOT TAKE THE SEATS' WORK.
+        #
+        # Operator, 2026-08-07: "the delegate is helping others to do their
+        # work but must not do their work on their behalf."
+        #
+        # The contradiction was in this line, not in the charter. The charter
+        # says "a slice another seat owns is DISPATCHED, not done yourself";
+        # WORK_PROMPT tells every driven seat to "do ONE bounded slice toward
+        # completion". The same seat, in the same hour, was told both by two
+        # subsystems. Branching here deletes the contradiction rather than
+        # adding a rule about it.
+        if self._is_delegate_seat():
+            prompt = SUPERVISE_PROMPT + prompt
+        self._last_turn_stage = None
         self._work_times.append(time.time())
-        # An UNPROVEN provider never gets the full --work-timeout: after an
-        # infrastructure failure the next chunk is capped at the reception
-        # bound, because the cost of guessing wrong is this seat being deaf for
-        # the whole window (live 2026-07-31: hour-long chunks against a dead
+        # An UNPROVEN harness never gets the full --work-timeout: right after
+        # a failed turn the next chunk is capped at the reception bound,
+        # because the cost of guessing wrong is this seat being deaf for the
+        # whole window (live 2026-07-31: hour-long chunks against a dead
         # endpoint). One healthy turn restores the full budget.
-        self._turn_timeout = (min(self.work_timeout, RECEPTION_TURN_TIMEOUT)
-                              if self._infra_failures else self.work_timeout)
+        self._turn_timeout = (min(self.work_timeout, self.reception_timeout)
+                              if self._fail_streak else self.work_timeout)
         try:
             with self._long_turn_notice("work"):
                 new_sid, ok = self._spawn(prompt, sid)
         finally:
-            self._turn_timeout = RECEPTION_TURN_TIMEOUT
+            self._turn_timeout = self.reception_timeout
         if not ok:
+            # A chunk that NEVER REACHED THE HUB is the same fact as a
+            # reception turn that never reached it — the same binary against
+            # the same endpoint — so it feeds the same ONE backoff. Without
+            # this the cap above read a streak nothing was feeding: measured
+            # on this tree, three consecutive 429-failing chunks each still
+            # got the full 3600s, i.e. three hours deaf per row, and neither
+            # `_hold` nor `_chain_block` ever saw the outage.
+            # SEMANTIC verdicts are excluded on purpose (_TRANSPORT_STAGES):
+            # a chunk that did real workspace work without touching an Agora
+            # tool is scored `mcp-use`, and holding reception for that would
+            # penalise a seat for working. Its only bound stays the strike
+            # ledger in _chain_step.
+            if self._last_turn_stage in _TRANSPORT_STAGES:
+                self._note_failure(self._last_turn_stage or "harness",
+                                   self._last_turn_detail)
             # A failed resume: drop the session once and boot fresh next time.
             if self.work_session_id:
                 self.work_session_id = None
@@ -3012,52 +3525,125 @@ class Driver:
         self._write_session(self._work_session_path, None)
         self._work_turns_on_session = 0
 
-    def _chain_step(self) -> bool:
+    def _chain_block(self, snap: tuple[str, str, int] | None
+                     ) -> tuple[str, float] | None:
+        """Why no work chunk may start now: (reason, seconds until it can).
+
+        ONE predicate, used by both consumers — `_chain_step` (should I spawn?)
+        and `_listen_window` (how long may I sleep?). They disagreed before:
+        the window said "a chunk is ready, poll every 20s" while the step said
+        "parked", so a seat with an exhausted chain re-scanned the whole hub
+        three times a minute forever.
+        """
+        retry = self._backoff_retry_after()
+        if retry > 0:
+            # Never spend a work chunk on a harness that is currently failing:
+            # the chunk blocks reception for its whole timeout and would fail
+            # the same way — it is the same binary and the same endpoint.
+            return (self._fail_reason or "harness-failing"), retry
+        if snap is None:
+            return "no-continuable-work", 0.0
+        channel, key, version = snap
+        if self._strike_count(f"{channel}/{key}@{version}") >= WORK_STRIKES:
+            # Selection normally skips a spent row; this is the second lock,
+            # so a caller that supplies its own snapshot still cannot spin
+            # chunks against a row that has proved it will not move.
+            return "no-receipt", 0.0
+        now = self._prune_work_times()
+        if len(self._work_times) >= self.work_budget:
+            return "work-budget", self._retry_after(
+                self._work_times, self.work_budget, now)
+        return None
+
+    def _chain_step(self, snap: tuple[str, str, int] | None) -> bool:
         """One initiative step at an idle boundary: spawn a work chunk when
         the seat holds continuable work — a live claim, or an open phase row
         it stewards (see _continuation_snapshot). Continuation is a LOOP
         property — chunks chain at DRIVE_CHAIN_WAIT listen windows and any
-        obligation preempts at the arm between them — never a model
-        posture. Strikes are keyed on the row's CAS VERSION: a chunk
-        that ends without touching the row is a strike; WORK_STRIKES parks
-        the chain (recoverable — any row touch mints a fresh version);
-        parking is never the wake quarantine."""
-        if self._infra_retry_after() > 0:
-            # Never spend a work chunk on a provider that is currently failing:
-            # the chunk blocks reception for its whole timeout and cannot
-            # succeed anyway.
-            self._chain_live = False
-            return False
-        snap = self._continuation_snapshot()
-        if snap is None:
-            self._chain_live = False
+        obligation preempts at the arm between them — never a model posture.
+
+        Strikes are keyed on the row's CAS VERSION: a chunk that ends with no
+        receipt from this seat ANYWHERE — not just on the selected row — is a
+        strike, and at WORK_STRIKES the row is retired from selection.
+        Recoverable two ways: any row touch mints a fresh version, and
+        WORK_STRIKE_TTL expires the strikes themselves (see _strike_count).
+        A chunk that advanced a DIFFERENT row this seat owns — including to a
+        terminal word like done/blocked, which is the receipt WORK_PROMPT
+        commands — is working, not spinning, and takes no strike.
+        Retiring a ROW is not parking the SEAT: the next candidate is picked
+        on the following pass.
+        """
+        # Silent when blocked: the loop's own state line already named the
+        # reason and the release second on this very pass.
+        if self._chain_block(snap) is not None:
             return False
         channel, key, version = snap
         self._activate_work_claim(channel, key)
         ck = f"{channel}/{key}@{version}"
-        if self._work_strikes.get(ck, 0) >= WORK_STRIKES:
-            if self._chain_live:
-                _emit(f"AGORA_DRIVE initiative=parked agent={self.agent_id} "
-                      f"key={ck} reason=no-receipt ({WORK_STRIKES} chunks "
-                      "left the row unchanged; a NEW receipt on the "
-                      "row — a version bump — resumes. A phase: row parking "
-                      "here means the steward never opened a claim row for "
-                      "the arc; that claim is what chains indefinitely)")
-            self._chain_live = False
-            return False
-        if not self._work_budget_ok():
-            if self._chain_live:
-                _emit(f"AGORA_DRIVE initiative=parked agent={self.agent_id} "
-                      f"reason=work-budget ({self.work_budget}/h)")
-            self._chain_live = False
-            return False
+        self._state("chunk", reason="continuable-work", row=ck,
+                    strikes=self._strike_count(ck))
+        chunk_started = time.time()
         ran = self.run_work_turn()
         after = self._continuation_snapshot()
         if (after is not None and after[0] == channel and after[1] == key
                 and after[2] == version):
-            self._work_strikes[ck] = self._work_strikes.get(ck, 0) + 1
-        self._chain_live = ran and after is not None
+            if self._receipt_elsewhere(chunk_started, channel, key):
+                _emit(f"AGORA_DRIVE initiative=receipt-off-row "
+                      f"agent={self.agent_id} key={ck} (the chunk advanced "
+                      "another row this seat owns; no strike)")
+                return ran
+            strikes = self._work_strikes[ck] = self._strike_count(ck) + 1
+            self._work_strike_at[ck] = time.time()
+            if strikes >= WORK_STRIKES:
+                _emit(f"AGORA_DRIVE initiative=retired agent={self.agent_id} "
+                      f"key={ck} reason=no-receipt ({WORK_STRIKES} chunks "
+                      "left the row unchanged; a version bump OR "
+                      f"{int(WORK_STRIKE_TTL / 60)}m of cooldown brings it "
+                      "back. The seat keeps working: the next continuable "
+                      "row is picked on the next pass)")
         return ran
+
+    def _mirror_mission(self) -> None:
+        """Refresh the seat's MISSION into the workspace rule file, and warn
+        loudly when there isn't one.
+
+        The mission already rides `whoami`, and the boot prompts order that
+        call. But a tool RESULT is something a weak model can skim; the rule
+        file is composed into the system prompt and reaches the model before
+        its first tool call. Both, then — belt and braces, for the one
+        sentence that decides whether a seat knows what it is for.
+
+        Written from the LIVE hub value at every driver start, inside markers,
+        so the copy can never drift from the operator's current text (a rule
+        file frozen at `agora setup` time would say whatever the seat was for
+        last month).
+
+        Measured 2026-08-06: the single seat on this hub with no mission was
+        the delegate, and it called a build finished at message 4 of 62."""
+        api_key = _config.get_cached_key(self.hub, self.agent_id)
+        if not api_key:
+            return
+        import httpx
+        try:
+            me = httpx.get(f"{self.hub}/whoami", timeout=5.0,
+                           headers={"Authorization": f"Bearer {api_key}"}).json()
+        except Exception:
+            return                              # never block a run on this
+        mission = str(me.get("mission") or "").strip()
+        if not mission:
+            _emit(f"AGORA_DRIVE warn=no-mission agent={self.agent_id} — this "
+                  "seat has no standing mission, so every session invents its "
+                  "own role from the room. Set one: "
+                  f"`agora mission set {self.agent_id} '<what this seat is "
+                  "FOR>'`.")
+        try:
+            from .setup_harness import write_mission_block
+            path = write_mission_block(self.cwd, self.harness, mission)
+        except Exception:
+            return
+        if path is not None:
+            _emit(f"AGORA_DRIVE event=mission status=ok agent={self.agent_id} "
+                  f"file={path.name} chars={len(mission)}")
 
     def run(self, *, once: bool = False, max_turns: int | None = None) -> int:
         """The loop: wait for an obligation, drive a turn, repeat; at idle
@@ -3120,6 +3706,7 @@ class Driver:
                   "but an OpenAI-compatible provider may silently ignore "
                   "effort scaling. Check the harness's own stderr (or run "
                   "with --turn-log) before trusting it.")
+        self._mirror_mission()
         driven = 0
         try:
             if once:
@@ -3128,19 +3715,24 @@ class Driver:
             backoff = 1.0
             while max_turns is None or driven < max_turns:
                 self._touch_drive_pid()
-                self._mute_notice()
+                hold = (self._hold(has_debt=self._pending_wake_has_debt)
+                        if self._pending_wake else None)
                 # A held human/peer debt outranks idle listening. Run it as
                 # soon as capacity returns; unowned broadcasts additionally
                 # pass the small anti-storm fuse.
-                if (self._pending_wake
-                        and self._wake_admissible(
-                            has_debt=self._pending_wake_has_debt)):
+                if self._pending_wake and hold is None:
                     has_debt = self._pending_wake_has_debt
                     self._pending_wake = False
                     self._pending_wake_has_debt = False
+                    self._state("turn", reason="held-wake")
                     if self.run_turn(broadcast=not has_debt):
                         driven += 1
                     continue
+                # ONE scan per pass, shared by the window and the chunk gate:
+                # they used to disagree, and each was paying its own hub walk.
+                snap = self._continuation_snapshot()
+                if self._scan_ok:
+                    self._has_work = snap is not None
                 # source=auto: notify-file tail when the hub is local (0
                 # sockets), websocket otherwise — hard-coding "file" made
                 # remote seats deaf. signal_passthrough: SIGTERM/SIGINT must
@@ -3150,12 +3742,26 @@ class Driver:
                 # obligation that landed mid-turn wakes at the next arm —
                 # which, while a chain is live, is at most DRIVE_CHAIN_WAIT
                 # away: obligations always preempt the next chunk.
-                window = (DRIVE_CHAIN_WAIT if self._chain_live
-                          else self.max_wait)
-                if self._pending_wake:
-                    retry = self._budget_retry_after(
-                        has_debt=self._pending_wake_has_debt)
-                    window = min(window, max(retry, 0.01))
+                window = self._listen_window(snap)
+                if hold is not None:
+                    window = min(window, max(hold[2], 0.01))
+                    self._state(hold[0], reason=hold[1], next_s=hold[2],
+                                wake="held")
+                else:
+                    block = self._chain_block(snap)
+                    reason = block[0] if block else "chunk-ready"
+                    if snap is None and not self._scan_ok:
+                        # DO NOT claim `no-continuable-work` off a walk that
+                        # never completed. A seat mid hub-blip holding a live
+                        # claim looks byte-identical to a genuinely idle one,
+                        # and that is the difference between "your delegate is
+                        # done" and "your delegate cannot see its own work".
+                        # The window already retries soon (_listen_window);
+                        # this is the log telling the same truth.
+                        reason = "work-scan-unreadable"
+                    self._state("armed", reason=reason, next_s=window,
+                                row=(f"{snap[0]}/{snap[1]}@{snap[2]}"
+                                     if snap else ""))
                 rc = run_listen(agent_id=self.agent_id, url=self.hub,
                                 once=True, important_only=True,
                                 max_wait=window, source="auto",
@@ -3181,47 +3787,60 @@ class Driver:
                     # addressed/forced events + backlog debt return 2; a pure
                     # room-wide open/blocked batch returns the internal code 4.
                     has_debt = rc == 2
-                    if self._wake_admissible(has_debt=has_debt):
+                    wake_hold = self._hold(has_debt=has_debt)
+                    if wake_hold is None:
                         # This turn drains the WHOLE inbox, held debt
                         # included — a still-set flag would spawn a
                         # spurious turn at the next idle (review F2).
                         self._pending_wake = False
                         self._pending_wake_has_debt = False
+                        self._state("turn",
+                                    reason="obligation" if has_debt
+                                    else "broadcast")
                         if self.run_turn(broadcast=not has_debt):
                             driven += 1
                         backoff = 1.0
                     else:
-                        # Budget-parked: HOLD the wake instead of sleeping
-                        # deaf for 300s. The listener already recorded the
-                        # owed signature, so without this flag the debt
+                        # Held, never dropped: the listener already recorded
+                        # the owed signature, so without this flag the debt
                         # would wait for hub escalation (consumed-wake
                         # stall, review 2026-07-28); the flag converts it
-                        # into a turn the moment the budget window slides.
+                        # into a turn the moment the window releases.
                         self._pending_wake = True
                         self._pending_wake_has_debt |= has_debt
-                        reason = ("turn-budget" if has_debt
-                                  else "broadcast-budget")
-                        _emit(f"AGORA_DRIVE parked agent={self.agent_id} "
-                              f"reason={reason} "
-                              "wake=held")
+                        # ONE honest line per pass: when this pass already
+                        # armed with the very same hold, repeating it byte for
+                        # byte doubles a parked seat's log without adding a
+                        # fact. A hold that CHANGED (a new addressed wake is
+                        # judged against the hard ceiling, not the broadcast
+                        # fuse) is a different fact and is always said.
+                        if hold is None or hold[:2] != wake_hold[:2]:
+                            self._state(wake_hold[0], reason=wake_hold[1],
+                                        next_s=wake_hold[2], wake="held")
                 elif rc == 0:                 # idle timeout OR hub-unreachable
                     if (self._pending_wake
-                            and self._wake_admissible(
-                                has_debt=self._pending_wake_has_debt)):
+                            and self._hold(
+                                has_debt=self._pending_wake_has_debt) is None):
                         has_debt = self._pending_wake_has_debt
                         self._pending_wake = False
                         self._pending_wake_has_debt = False
+                        self._state("turn", reason="held-wake")
                         if self.run_turn(broadcast=not has_debt):
                             driven += 1
                         continue
                     # A HELD wake blocks new work chunks (storm review,
                     # 2026-07-28): starting a chunk here could pin the seat
                     # for up to --work-timeout while a human's debt sits at
-                    # its exact release point — reception outranks work.
+                    # its exact release point — reception outranks work. This
+                    # is only ever a WAIT now, never a stall: the only things
+                    # that hold a wake are backoff and a spent budget, both
+                    # of which name their release second on the state line.
                     if not self._pending_wake:
-                        if self._chain_step():
+                        if self._chain_step(snap):
                             driven += 1
                 else:                         # unexpected: bounded backoff
+                    self._state("backoff", reason=f"listener-rc={rc}",
+                                next_s=backoff)
                     time.sleep(backoff)
                     backoff = min(backoff * 2, 60.0)
             return 0
@@ -3241,6 +3860,7 @@ def run_drive(*, agent_id: str | None = None, url: str | None = None,
               broadcast_turn_budget: int = DEFAULT_BROADCAST_TURN_BUDGET,
               session_rotate: int = DEFAULT_SESSION_ROTATE,
               work_timeout: float = TURN_TIMEOUT,
+              reception_timeout: float = RECEPTION_TURN_TIMEOUT,
               work_budget: int = DEFAULT_WORK_BUDGET, force: bool = False,
               turn_log: str | None = None,
               once: bool = False, max_turns: int | None = None,
@@ -3296,6 +3916,7 @@ def run_drive(*, agent_id: str | None = None, url: str | None = None,
                     broadcast_turn_budget=broadcast_turn_budget,
                     session_rotate=session_rotate,
                     work_timeout=work_timeout, work_budget=work_budget,
+                    reception_timeout=reception_timeout,
                     force=force, turn_log=turn_log, cwd=workspace)
     try:
         return driver.run(once=once, max_turns=max_turns)

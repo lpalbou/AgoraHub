@@ -9,12 +9,14 @@ from agora.models import Envelope, Kind, Status, Urgency
 
 
 def _env(status=Status.fyi, to_me=False, reply_to_me=False, critical=False,
-         escalated=False, sender="alice", seq=1) -> Envelope:
+         escalated=False, sender="alice", seq=1, addressed=False,
+         from_operator=False) -> Envelope:
     return Envelope(id=f"m{seq}", channel="c", seq=seq, sender=sender,
                     kind=Kind.message, status=status,
                     urgency=Urgency.inbox, effective_urgency=Urgency.inbox,
                     critical=critical, escalated=escalated, to_me=to_me,
-                    reply_to_me=reply_to_me, body="x", body_bytes=1)
+                    reply_to_me=reply_to_me, addressed=addressed,
+                    from_operator=from_operator, body="x", body_bytes=1)
 
 
 def test_turn_budget_caps_invocations():
@@ -46,8 +48,10 @@ def test_default_should_invoke_respects_attention_model():
     r = _runner()
     d = r._default_should_invoke
     assert d(_env(status=Status.fyi)) is False        # plain broadcast: skip
-    assert d(_env(status=Status.open)) is True         # obligation: act
-    assert d(_env(status=Status.blocked)) is True
+    assert d(_env(status=Status.open)) is False        # peer broadcast: visible only
+    assert d(_env(status=Status.blocked)) is False
+    assert d(_env(status=Status.open, from_operator=True)) is True
+    assert d(_env(status=Status.open, addressed=True, from_operator=True)) is True
     assert d(_env(to_me=True)) is True                 # addressed: act
     assert d(_env(reply_to_me=True)) is True           # reply to me: act
     assert d(_env(critical=True)) is True              # forced: act

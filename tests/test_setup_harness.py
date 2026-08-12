@@ -269,19 +269,25 @@ def test_codex_project_config_approves_agora_tools(tmp_path):
     assert toml.index("default_tools_approval_mode") < toml.index("[mcp_servers.agora.env]")
 
 
-def test_codex_rule_is_mode_free_and_headless_is_a_noop(tmp_path):
-    """Dedicated reception is selected by the running driver, not setup."""
+def test_codex_dedicated_rule_restores_standing_loop(tmp_path):
+    """Codex keeps two live-session shapes: shared terminal vs dedicated live
+    session. The dedicated rule is explicit about the standing
+    `wait_for_messages(45)` loop and must differ from the shared-terminal
+    honesty note."""
     setup_codex(tmp_path, "cx", "http://hub:1", "", "agora-mcp",
                 dedicated=True)
     rule = (tmp_path / "AGENTS.md").read_text()
-    assert "NEVER wait or poll in the FOREGROUND" in rule
-    assert "wait_for_messages(45)" not in rule
+    assert "DEDICATED live Codex seat" in rule
+    assert "wait_for_messages(45)" in rule
+    assert "do not end the turn because nothing arrived" in rule
 
     other = tmp_path / "shared2"
     other.mkdir()
-    setup_codex(other, "cx", "http://hub:1", "", "agora-mcp")
+    setup_codex(other, "cx", "http://hub:1", "", "agora-mcp", with_hook=True,
+                dedicated=False)
     shared_rule = (other / "AGENTS.md").read_text()
-    assert rule == shared_rule
+    assert rule != shared_rule
+    assert "NO idle wake" in shared_rule
 
 
 def test_rule_text_wake_is_informational_in_all_variants(tmp_path):
@@ -310,7 +316,8 @@ def test_rule_text_per_harness_wake_notes(tmp_path):
     assert "ARMING RITUAL" not in claude         # hooks arm it, not the agent
     assert "notify_on_output" not in claude      # Cursor-only tool surface
 
-    setup_codex(tmp_path, "janus", "http://h:1", "", "m", with_hook=True)
+    setup_codex(tmp_path, "janus", "http://h:1", "", "m", with_hook=True,
+                dedicated=False)
     codex = (tmp_path / "AGENTS.md").read_text()
     assert "NO idle wake" in codex               # the gap, stated honestly
     assert "expected, not a fault" in codex
@@ -321,6 +328,16 @@ def test_rule_text_per_harness_wake_notes(tmp_path):
     assert "ARMING RITUAL" not in codex
     assert "notify_on_output" not in codex
     assert "attach" not in codex.lower()
+
+    dedicated = tmp_path / "dedicated-codex"
+    dedicated.mkdir()
+    setup_codex(dedicated, "janus", "http://h:1", "", "m",
+                with_hook=True, dedicated=True)
+    codex_dedicated = (dedicated / "AGENTS.md").read_text()
+    assert "DEDICATED live Codex seat" in codex_dedicated
+    assert "wait_for_messages(45)" in codex_dedicated
+    assert "resume agora protocol" in codex_dedicated
+    assert "`agora drive`" in codex_dedicated
 
 
 def test_rule_text_no_hook_variants_are_truthful(tmp_path):
@@ -338,7 +355,8 @@ def test_rule_text_no_hook_variants_are_truthful(tmp_path):
 
     third = tmp_path / "codex-manual"
     third.mkdir()
-    setup_codex(third, "j1", "http://h:1", "", "m", with_hook=False)
+    setup_codex(third, "j1", "http://h:1", "", "m", with_hook=False,
+                dedicated=False)
     codex = (third / "AGENTS.md").read_text()
     assert "stop hook drains bursts" not in codex
     assert "messages wait for your next turn" in codex
@@ -544,7 +562,8 @@ def test_setup_codex_writes_project_config_and_agents_md(tmp_path):
     assert 'AGORA_AGENT_ID = "janus"' in toml_text
     agents_md = (tmp_path / "AGENTS.md").read_text()
     assert "agora agent: janus" in agents_md
-    assert "no idle wake" in agents_md    # the codex gap, stated honestly
+    assert "DEDICATED live Codex seat" in agents_md
+    assert "wait_for_messages(45)" in agents_md
 
     # Re-run: the workspace converges to the new request instead of leaving a
     # stale Agora-owned table behind, and AGENTS.md is not duplicated.
@@ -738,6 +757,31 @@ def test_upsert_marked_section_replaces_only_the_marked_block(tmp_path):
     upsert_marked_section(path, "v2 content")
     text = path.read_text()
     assert "intro" in text and "v2 content" in text and "v1 content" not in text
+
+
+def test_upsert_marked_section_moves_buried_block_to_top(tmp_path):
+    path = tmp_path / "AGENTS.md"
+    path.write_text(
+        "user intro\n\n"
+        "<!-- agora:begin -->\nold managed block\n<!-- agora:end -->\n\n"
+        "user tail\n"
+    )
+    upsert_marked_section(path, "new managed block")
+    text = path.read_text()
+    assert text.startswith(
+        "<!-- agora:begin -->\nnew managed block\n<!-- agora:end -->\n"
+    )
+    assert "old managed block" not in text
+    assert "user intro" in text and "user tail" in text
+
+
+def test_setup_codex_prepends_agora_block_above_existing_agents_content(tmp_path):
+    agents_md = tmp_path / "AGENTS.md"
+    agents_md.write_text("# Existing guide\n\nKeep this.\n")
+    setup_codex(tmp_path, "janus", "http://hub:8765", "", "agora-mcp")
+    text = agents_md.read_text()
+    assert text.startswith("<!-- agora:begin -->\n# agora agent: janus\n")
+    assert "# Existing guide" in text and "Keep this." in text
 
 
 # ---------------------------------------------------------------------------

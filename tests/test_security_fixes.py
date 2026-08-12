@@ -222,7 +222,10 @@ def test_agent_id_validation_blocks_dm_collision_and_reserved(service):
 
 def test_presence_not_globally_enumerable(service):
     a, _ = service.register_agent("a", "A")
-    b, _ = service.register_agent("b", "B")  # shares no channel with a
+    b, _ = service.register_agent("b", "B")
+    # Registration auto-joins #commons; b must actually leave it to share
+    # nothing with a.
+    service.leave_channel(b, "commons")
     with pytest.raises(HubError) as e:
         service.get_presence(a, "b")
     assert e.value.status_code == 404

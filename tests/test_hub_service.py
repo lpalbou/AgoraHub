@@ -40,6 +40,21 @@ def test_register_and_authenticate(service):
     assert e.value.status_code == 401
 
 
+def test_registration_auto_joins_commons(service):
+    info, _ = service.register_agent("alice", "Alice")
+    assert service.db.is_member("commons", "alice")
+    history = service.get_messages(info, "commons")
+    assert history[-1].kind == "system"
+    assert history[-1].body == "alice joined"
+
+
+def test_database_writer_enables_busy_timeout(tmp_path):
+    """Concurrent fleet boots should wait briefly for the writer lock rather
+    than surfacing immediate `database is locked` errors."""
+    db = Database(str(tmp_path / "hub.db"))
+    assert db._conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
+
+
 def test_duplicate_agent_rejected(service):
     service.register_agent("alice", "")
     with pytest.raises(HubError) as e:
@@ -150,7 +165,10 @@ async def test_wait_inbox_wakes_on_post(service, agents):
 
 async def test_wait_inbox_times_out_empty(service, agents):
     alice, _ = agents
-    service.ack_inbox(alice, {"design": service.db.last_seq("design")})
+    service.ack_inbox(alice, {
+        "commons": service.db.last_seq("commons"),
+        "design": service.db.last_seq("design"),
+    })
     messages = await service.wait_inbox(alice, timeout=0.1)
     assert messages == []
 
@@ -487,18 +505,19 @@ def test_hub_sweep_counts_every_ballot_shape_the_chair_counts(service, poll):
 # -- activity stats: "is this hub moving?" ---------------------------------------
 
 def test_activity_stats_on_a_silent_hub_says_so(service):
-    """A hub that has never carried a message must SAY that, not print an
-    ambiguous row of zeros — the whole point of the surface is a verdict."""
+    """A freshly registered seat now produces one commons join row, so the
+    hub is no longer silent even before any manual post."""
     alice, _ = service.register_agent("alice", "Alice")
     stats = service.activity_stats(alice)
-    assert stats["verdict"] == "silent — this hub has never carried a message"
-    assert stats["totals"]["last_10m"] == {"total": 0, "public": 0, "dm": 0}
-    assert stats["last_message_at"] is None
-    assert stats["quiet_for_seconds"] is None
+    assert stats["verdict"] == "active — 1 messages in the last 10 minutes (0.1/min)"
+    assert stats["totals"]["last_10m"] == {"total": 1, "public": 1, "dm": 0}
+    assert stats["last_message_at"] is not None
+    assert stats["quiet_for_seconds"] is not None
     # Empty buckets are EMITTED, never omitted: the gap is the signal.
     assert len(stats["per_minute"]) == 10
     assert len(stats["per_bucket"]) == 6
-    assert all(r["total"] == 0 for r in stats["per_minute"])
+    assert stats["per_minute"][-1]["total"] == 1
+    assert all(r["total"] == 0 for r in stats["per_minute"][:-1])
 
 
 def test_activity_stats_counts_public_and_dm_separately(service, agents):
@@ -511,16 +530,15 @@ def test_activity_stats_counts_public_and_dm_separately(service, agents):
         service.post_message(alice, "design", PostMessage(body=f"m{i}"))
     service.post_dm(bob, "alice", PostMessage(body="private"))
     stats = service.activity_stats(alice)
-    # 3 posts + the "design" opening system row = 4 public;
-    # 1 DM + the dm room's opening system row = 2 dm.
-    assert stats["totals"]["last_10m"] == {"total": 6, "public": 4, "dm": 2}
-    assert stats["totals"]["last_60m"] == {"total": 6, "public": 4, "dm": 2}
-    assert stats["rate_per_minute"]["last_10m"] == 0.6
+    # Add the two commons auto-join system rows to the previous public count.
+    assert stats["totals"]["last_10m"] == {"total": 9, "public": 7, "dm": 2}
+    assert stats["totals"]["last_60m"] == {"total": 9, "public": 7, "dm": 2}
+    assert stats["rate_per_minute"]["last_10m"] == 0.9
     assert stats["active_seats"] == ["alice", "bob", "hub"]
     assert stats["active_seat_count"] == 3
-    assert stats["verdict"].startswith("active — 6 messages")
+    assert stats["verdict"].startswith("active — 9 messages")
     # The newest per-minute bucket holds them (they were posted just now).
-    assert stats["per_minute"][-1]["total"] == 6
+    assert stats["per_minute"][-1]["total"] == 9
 
 
 def test_activity_stats_is_counts_only(service, agents):
@@ -566,10 +584,11 @@ def test_activity_stats_names_only_seats_you_can_already_see(service, agents):
     service.post_message(stranger, "elsewhere", PostMessage(body="hi"))
 
     mine = service.activity_stats(stranger)
-    assert "alice" not in mine["active_seats"]      # no shared room
-    assert mine["active_seats"] == ["hub", "stranger"]
+    assert mine["active_seats"] == ["alice", "hub", "stranger"]
     assert mine["active_seat_count"] == 3           # alice, hub, stranger
-    assert mine["totals"]["last_10m"]["total"] == 4
+    # 2 posts + 2 room-opening rows + 2 seeded-charter audit rows (0146)
+    # + 3 commons auto-join rows.
+    assert mine["totals"]["last_10m"]["total"] == 9
 
     alice.operator = True
     everyone = service.activity_stats(alice)

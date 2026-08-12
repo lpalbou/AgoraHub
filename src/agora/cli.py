@@ -21,6 +21,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -31,6 +32,7 @@ from .hook import HOOK_EVENTS as _HOOK_EVENTS
 from .setup_harness import SUPPORTED_HARNESSES
 from . import db_locate as _db_locate
 from .agent_id import validate_agent_id
+from .governance import CHARTER_PATH as _CHARTER_PATH
 from .models import NOTICE_KINDS
 
 
@@ -386,6 +388,7 @@ def cmd_up(args: argparse.Namespace) -> None:
     # that kept serving a v8 snapshot of an OLDER packaged default, and the
     # whole fleet ran a session without phase rows or consumes batching.
     _warn_stale_hub_rules(app)
+    _warn_stale_hub_charter(app)
     # Pin WS keepalive explicitly: connection-derived presence relies on dead
     # sockets being detected within a bounded window (audit M4). Defaults can
     # differ per uvicorn/ws backend; make the bound deliberate.
@@ -420,6 +423,54 @@ def _warn_stale_hub_rules(app: Any) -> None:
           "never be taught the above.\n"
           "    Merge the packaged default into your text and publish it: "
           "`agora rules --set FILE`.")
+
+
+def _stale_charter_lines(version: int, text: str) -> list[str]:
+    """The hub-charter twin of the rules-drift warning (0146). Same doctrine:
+    operator prose is NEVER auto-upgraded, so a charter published before a
+    kind of seat existed keeps being served with that kind missing — and the
+    role model is exactly the document a new seat consults to learn what it
+    may do. Marker-based (a rewrite in the operator's own words stays
+    silent), and version 0 is the packaged default: current by construction.
+
+    Returns printable lines so the SAME text can be shown at boot and by
+    `agora status` — the 0.14.0 incident was not that no warning existed,
+    it was that the only place it printed was a boot an operator had run
+    hours earlier."""
+    from .governance import charter_missing_roles, charter_scoping_advice
+    if not version:
+        return []
+    out: list[str] = []
+    missing = charter_missing_roles(text or "")
+    if missing:
+        out.append(f"  WARNING: hub charter v{version} (operator-set) never "
+                   f"describes {len(missing)} kind(s) of seat this hub "
+                   f"implements:")
+        out += [f"    - {why}" for why in missing]
+        out.append("    Seats read THIS text to learn what they may do, so those "
+                   "powers are undocumented on this hub.\n"
+                   "    Merge the packaged default and publish it: "
+                   "`agora charter set FILE` (see `agora charter show --version 0`).")
+    # 0147: a text that describes every seat kind may still be unsliceable —
+    # every seat then pays for every role's rules on every read. Advice, not a
+    # warning: nothing is wrong, and nothing is hidden.
+    advice = charter_scoping_advice(text or "")
+    if advice:
+        out.append(f"  hub charter v{version}: served WHOLE to every seat.")
+        out += advice
+    return out
+
+
+def _warn_stale_hub_charter(app: Any) -> None:
+    """Boot-time half of the charter-drift warning. Best-effort like its
+    rules twin: a diagnostic must never be the reason a hub fails to boot."""
+    try:
+        doc = app.state.service.hub_charter()
+        lines = _stale_charter_lines(doc.get("version") or 0, doc.get("text") or "")
+    except Exception:
+        return
+    for line in lines:
+        print(line)
 
 
 def _setup_key(url: str, agent_id: str, about: str,
@@ -640,14 +691,16 @@ def _setup_result(harness: str, workspace: Path, agent_id: str, url: str,
             api_key=api_key,
         )
         lines.append(
-            "  reception: `agora drive abstractcode` owns unattended wakes; "
-            "AbstractCode exposes no native hook registration surface, so the "
-            "generic --with-hook default requires no extra hook file."
+            "  reception: `agora drive` owns unattended wakes; AbstractCode "
+            "exposes no native hook registration surface, so the generic "
+            "--with-hook default requires no extra hook file."
         )
         lines.append(
             "  launch: run `abstractcode --state-file "
             ".abstractcode/agora.state.json --skill agora-channels` for an "
-            "interactive session, or `agora drive abstractcode` unattended."
+            "interactive session, or `agora drive` unattended "
+            "(use `agora drive --harness abstractcode` only in a multi-"
+            "harness workspace)."
         )
         return _HarnessSetupResult(
             "abstractcode", "AbstractCode", written, lines,
@@ -710,7 +763,7 @@ def _setup_result(harness: str, workspace: Path, agent_id: str, url: str,
 
     written = _sh.setup_codex(workspace, agent_id, url, about,
                               mcp_command, with_hook=with_hook,
-                              api_key=api_key, dedicated=headless)
+                              api_key=api_key, dedicated=True)
     lines.append("  hook: installed the Stop hook backstop; approve it once "
                  "via /hooks (and re-approve if the file changes)."
                  if with_hook else
@@ -732,14 +785,14 @@ def _setup_result(harness: str, workspace: Path, agent_id: str, url: str,
         lines.append("  launch: run `codex` in this folder and trust the "
                      "project when prompted so this workspace's "
                      "`.codex/config.toml` takes effect.")
-    if headless:
-        lines.append("  --headless is a deprecated no-op (wiring is "
-                     "mode-free). Dedicated quickstart: "
-                     f"cd {workspace} && agora drive")
-    lines.append("  note: interactive Codex has no idle-wake surface; with "
-                 "the Stop hook it drains bursts at turn ends, otherwise "
-                 "messages wait for the next turn. Use `agora drive` for an "
-                 "unattended seat.")
+    lines.append("  mode: dedicated LIVE Codex session. Nobody shares this "
+                 "terminal; after `start agora protocol` the Stop hook keeps "
+                 "the live turn alive around the standing "
+                 "`wait_for_messages(45)` loop.")
+    lines.append("  alternative: if you want an unattended external watcher "
+                 "instead, run "
+                 f"`cd {workspace} && agora drive` and do NOT use the "
+                 "standing loop in a shared session.")
     return _HarnessSetupResult("codex", "Codex CLI", written, lines,
                                issues=issues)
 
@@ -789,10 +842,6 @@ def cmd_setup(args: argparse.Namespace) -> None:
     harnesses = _resolve_harnesses("setup", workspace, selection)
     with_hook = _effective_hook_choice("setup", args)
     headless = bool(getattr(args, "headless", False))
-    if headless and (len(harnesses) != 1
-                     or harnesses[0] not in ("cursor", "codex", "abstractcode")):
-        sys.exit("agora setup: --headless requires exactly one harness "
-                 "(`--harness cursor|codex|abstractcode`)")
     vendor_bootstrap = bool(getattr(args, "vendor_bootstrap", False))
     if vendor_bootstrap and (len(harnesses) != 1 or harnesses[0] not in ("claude", "codex")):
         sys.exit("agora setup: --vendor-bootstrap requires exactly one harness "
@@ -1164,6 +1213,499 @@ def cmd_rules(args: argparse.Namespace) -> None:
     print(payload["text"])
 
 
+def _charter_diff(old: str, new: str, *, old_label: str,
+                  new_label: str) -> str:
+    """Unified diff between two charter texts, or "" when identical.
+
+    A charter is prose an operator EDITS, so "what am I about to change?" is
+    the question every publish has to answer before it lands — a full reprint
+    of two screenfuls does not answer it."""
+    import difflib
+
+    lines = list(difflib.unified_diff(
+        old.splitlines(keepends=True), new.splitlines(keepends=True),
+        fromfile=old_label, tofile=new_label, n=2))
+    return "".join(lines)
+
+
+#: Diff lines shown before the tail is folded. A wholesale replacement of a
+#: 75-line charter would otherwise scroll the confirmation prompt off screen —
+#: which is the one thing the preview exists to prevent.
+_CHARTER_DIFF_LINES = 60
+
+
+def _print_charter_diff(old: str, new: str, *, old_label: str,
+                        new_label: str, header: str = "proposed change") -> bool:
+    """Show the pending change; False when there is nothing to publish."""
+    diff = _charter_diff(old, new, old_label=old_label, new_label=new_label)
+    if not diff:
+        return False
+    lines = diff.rstrip("\n").splitlines()
+    added = sum(1 for line in lines
+                if line.startswith("+") and not line.startswith("+++"))
+    removed = sum(1 for line in lines
+                  if line.startswith("-") and not line.startswith("---"))
+    print(f"# {header}: +{added} -{removed} lines")
+    print("\n".join(lines[:_CHARTER_DIFF_LINES]))
+    if len(lines) > _CHARTER_DIFF_LINES:
+        print(f"  … +{len(lines) - _CHARTER_DIFF_LINES} more diff lines "
+              f"(the full texts: `agora charter show`)")
+    return True
+
+
+def _charter_confirm(args: argparse.Namespace, what: str) -> None:
+    """Ask before publishing, but ONLY at a keyboard.
+
+    `--yes` skips it; a pipe, a heredoc or CI skips it too (an interactive
+    prompt no one can answer is a hang, not a safeguard). The diff has
+    already been printed either way, so a scripted publish still leaves the
+    change on the record."""
+    if getattr(args, "yes", False) or not sys.stdin.isatty():
+        return
+    answer = input(f"publish this as {what}? [y/N] ").strip().lower()
+    if answer not in ("y", "yes"):
+        sys.exit("aborted — nothing was published")
+
+
+def _charter_editor_text(current: str, *, what: str) -> str:
+    """$EDITOR on the CURRENT text; the saved buffer is the new charter.
+
+    Aborts (never publishes) when the buffer comes back empty or unchanged —
+    quitting the editor is how an operator says "never mind", and an editor
+    that exits nonzero (`:cq`) means the same thing. `$AGORA_EDITOR` wins
+    over `$VISUAL`/`$EDITOR` so a harness can drive this deterministically."""
+    import subprocess
+    import tempfile
+
+    editor = (os.environ.get("AGORA_EDITOR") or os.environ.get("VISUAL")
+              or os.environ.get("EDITOR"))
+    if not editor:
+        sys.exit("no editor: set $EDITOR (or $VISUAL/$AGORA_EDITOR), or pass "
+                 "a FILE / `-` to read the text from stdin")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "charter.md"
+        path.write_text(current)
+        try:
+            rc = subprocess.call([*shlex.split(editor), str(path)])
+        except OSError as exc:
+            sys.exit(f"could not run $EDITOR ({editor!r}): {exc}")
+        if rc != 0:
+            sys.exit(f"editor exited {rc} — nothing was published")
+        text = path.read_text()
+    if not text.strip():
+        sys.exit("the buffer came back empty — nothing was published "
+                 f"({what} is unchanged)")
+    if text == current:
+        sys.exit(f"no changes — {what} is unchanged, nothing was published")
+    return text
+
+
+def _charter_new_text(args: argparse.Namespace, current: str, *,
+                      what: str, default_text: str) -> str:
+    """The text a `set` will publish, from exactly ONE declared source:
+    a FILE, `-` (stdin/heredoc), `--edit` ($EDITOR on the current text), or
+    `--from-default` (the packaged text). Naming two is a mistake worth
+    refusing — silently preferring one would publish the wrong document."""
+    sources = [name for name, on in (
+        ("FILE", bool(args.file) and args.file != "-"),
+        ("-", args.file == "-"),
+        ("--edit", bool(getattr(args, "edit", False))),
+        ("--from-default", bool(getattr(args, "from_default", False))),
+    ) if on]
+    if len(sources) > 1:
+        sys.exit(f"pick ONE source for the new text, not {', '.join(sources)}")
+    if not sources:
+        sys.exit("usage: agora charter set FILE | - | --edit | --from-default "
+                 "[--channel X --as SEAT] [--yes]")
+    if sources[0] == "--from-default":
+        return default_text
+    if sources[0] == "--edit":
+        return _charter_editor_text(current, what=what)
+    if sources[0] == "-":
+        text = sys.stdin.read()
+        if not text.strip():
+            sys.exit("stdin was empty — nothing was published")
+        return text
+    path = Path(args.file)
+    try:
+        return path.read_text()
+    except OSError as exc:
+        sys.exit(f"cannot read {path}: {exc}")
+
+
+def cmd_charter(args: argparse.Namespace) -> None:
+    """Charter management, one verb for both scopes (0146).
+
+        agora charter show                      the hub charter (who is who)
+        agora charter show --diff               what the last publish changed
+        agora charter show --channel design     that room's charter
+        agora charter set FILE                  publish a new hub charter
+        agora charter set -                     ... from stdin / a heredoc
+        agora charter set --edit                ... in $EDITOR, save to publish
+        agora charter set --from-default        ... back to the packaged text
+        agora charter set FILE --channel design --as owner
+        agora charter history [--channel X]     published versions
+        agora charter history --diff N          what version N changed
+        agora charter receipts [--channel X]    who has read the current one
+
+    Hub scope is the operator's (admin key); channel scope is the owner's
+    (`--as` an agent who owns the room, or an operator). Every subcommand
+    takes `--channel` and means the same thing in both scopes. `show` at hub
+    scope reads through the ARCHIVE, so an operator inspecting the text never
+    silently stamps a seat as briefed; `show --channel X --as seat` is that
+    seat genuinely reading the room's charter, and records its receipt.
+
+    Every `set` prints a unified diff against the version in force and (at a
+    keyboard, unless `--yes`) asks before it lands."""
+    import httpx
+
+    from .governance import CHANNEL_CHARTER_SEED, ROLE_CHARTER
+
+    url = _hub_url(args)
+    channel = getattr(args, "channel", None)
+    action = args.charter_action or "show"
+    # `--diff` with no value means "the version in force" — normalize the
+    # sentinel once so every branch below reads one pair of fields.
+    args.diff_flag = args.diff == -1
+    if args.diff_flag:
+        args.diff = None
+    if args.diff is not None and args.diff < 1:
+        # v0/v1 is the birth text (the packaged charter, the room's seed):
+        # there is no version before it to diff against.
+        sys.exit(f"--diff takes a version of 1 or more (got {args.diff}); "
+                 "the first version is the packaged/seed text — read it with "
+                 "`agora charter show --version 0`")
+    if channel and not args.as_agent:
+        # Channel authority is ownership, and ownership belongs to a SEAT.
+        # Fail here with the fix rather than inside key resolution.
+        sys.exit(f"channel charters are owner-authored: add `--as <seat>` "
+                 f"(a seat that owns '{channel}', or an operator seat)")
+
+    def _admin_headers() -> dict[str, str]:
+        return {"Authorization": f"Bearer {_admin_key_or_exit(args, url)}"}
+
+    if channel:
+        # Channel scope rides the agent client: authority here is channel
+        # ownership, which an admin key does not confer (there is no
+        # hub-wide impersonation path, by design).
+        async def go(c, a):
+            if action == "set":
+                info = await c.channel_info(channel)
+                cur = (info.get("charter") or {}).get("version")
+                try:
+                    head = await c.fs_read(channel, _CHARTER_PATH)
+                    current = head["content"]
+                except Exception:      # room predates 0146: no charter yet
+                    current, cur = "", None
+                room = info.get("channel") or {}
+                meta = info.get("meta") or {}
+                seed = CHANNEL_CHARTER_SEED.format(
+                    channel=channel, owner=room.get("created_by") or a.as_agent,
+                    purpose=(meta.get("purpose")
+                             or "Not declared yet — the owner sets it here and "
+                                "in channel:meta.purpose."))
+                text = _charter_new_text(a, current,
+                                         what=f"'{channel}' charter",
+                                         default_text=seed)
+                if not _print_charter_diff(current, text,
+                                           old_label=f"'{channel}' charter v{cur or 0}",
+                                           new_label="proposed"):
+                    sys.exit(f"identical to '{channel}' charter v{cur or 0} — "
+                             "nothing was published")
+                _charter_confirm(a, f"'{channel}' charter v{(cur or 0) + 1}")
+                try:
+                    row = await c.fs_write(channel, _CHARTER_PATH, text,
+                                           expect_version=cur,
+                                           description="channel charter: purpose "
+                                                       "and room rules")
+                except Exception as exc:
+                    sys.exit(_charter_write_hint(exc, channel, a.as_agent))
+                print(f"'{channel}' charter updated to v{row['version']} — "
+                      f"members are told once (advisory) and their receipts "
+                      f"for older versions no longer count as current")
+                return
+            if action == "history":
+                rows = await c.fs_history(channel, _CHARTER_PATH)
+                if not rows:
+                    print(f"no charter history for '{channel}'")
+                    return
+                if a.diff is not None or a.diff_flag:
+                    # Bare `--diff` = the version in force; `--diff N` pins it.
+                    head = a.diff or max(
+                        int((m.get("data") or {}).get("version") or 0)
+                        for m in rows)
+                    await _print_channel_version_diff(c, channel, head)
+                    return
+                for m in rows:
+                    data = m.get("data") or {}
+                    when = time.strftime("%Y-%m-%d %H:%M",
+                                         time.localtime(m.get("created_at", 0)))
+                    print(f"v{str(data.get('version', '?')):<4} {when}  "
+                          f"{data.get('op', '?'):<7} {m.get('sender', '?')}"
+                          "   (read it: agora charter show --channel "
+                          f"{channel} --version {data.get('version', '?')})")
+                return
+            if action == "receipts":
+                r = await c.charter_receipts(channel)
+                print(f"# '{channel}' charter v{r['version']}"
+                      + ("  (norms_required: posting is GATED on this read)"
+                         if r["gated"] else ""))
+                for m in r["members"]:
+                    mark = "read" if m["current"] else "STALE"
+                    seen = f"v{m['version']}" if m["version"] is not None else "never"
+                    print(f"  {m['agent_id']:<16} {m['role']:<6} {mark:<6} {seen}")
+                return
+            row = await c.fs_read(channel, _CHARTER_PATH,
+                                  version=a.diff or getattr(a, "version", None))
+            if a.diff is not None or a.diff_flag:
+                await _print_channel_version_diff(c, channel, row["version"])
+                return
+            print(f"# '{channel}' charter v{row['version']} "
+                  f"(by {row['updated_by']})")
+            print(row["content"])
+        try:
+            _run_agent_cmd(args, go)
+        except SystemExit:
+            raise
+        except Exception as exc:                       # 404 = room predates 0146
+            sys.exit(f"charter {action} failed for '{channel}': {exc}")
+        return
+
+    if action == "set":
+        headers = _admin_headers()
+        cur = httpx.get(f"{url}/admin/charter", headers=headers, timeout=10.0)
+        if cur.status_code != 200:
+            sys.exit(f"reading the hub charter failed: {cur.status_code} "
+                     f"{cur.text}\n(a wrong or missing admin key looks exactly "
+                     "like this — check --admin-key / $AGORA_ADMIN_KEY)")
+        current_doc = cur.json()
+        current = current_doc.get("text", "")
+        text = _charter_new_text(args, current, what="the hub charter",
+                                 default_text=ROLE_CHARTER)
+        if not _print_charter_diff(
+                current, text,
+                old_label=f"hub charter v{current_doc.get('version', 0)}",
+                new_label="proposed"):
+            sys.exit(f"identical to hub charter v{current_doc.get('version', 0)}"
+                     " — nothing was published")
+        _charter_confirm(args,
+                         f"hub charter v{(current_doc.get('version') or 0) + 1}")
+        r = httpx.put(f"{url}/admin/charter", headers=headers,
+                      json={"text": text}, timeout=10.0)
+        if r.status_code != 200:
+            sys.exit(f"setting the hub charter failed: {r.status_code} {r.text}")
+        body = r.json()
+        print(f"hub charter updated to v{body['version']} "
+              f"({len(text.splitlines())} lines) — announced in hub-alerts; "
+              "every seat sees the new version in its next whoami")
+        for why in body.get("missing_roles") or []:
+            print(f"  WARNING: your text never mentions {why}")
+        return
+    if action == "receipts":
+        r = httpx.get(f"{url}/admin/charter/receipts", headers=_admin_headers(),
+                      timeout=10.0)
+        if r.status_code != 200:
+            sys.exit(f"reading hub charter receipts failed: {r.status_code} {r.text}")
+        body = r.json()
+        print(f"# hub charter v{body['version']} — who has read it")
+        if not body["readers"]:
+            print("  (nobody yet — a seat records its receipt by calling "
+                  "read_charter())")
+        for row in body["readers"]:
+            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(row["read_at"]))
+            print(f"  {row['agent_id']:<16} v{row['version']:<4} "
+                  f"{'current' if row['current'] else 'STALE':<8} {when}")
+        return
+    def _hub_diff(version: int | None) -> None:
+        """`--diff` at hub scope. With `--as` the whole thing rides the seat's
+        key (the only credential the version ARCHIVE accepts); without it,
+        the admin key covers v0 (packaged, local) and the version in force —
+        which is exactly `show --diff`, the common operator gesture."""
+        if args.as_agent:
+            async def go_diff(c, a):
+                head = version
+                if head is None:
+                    head = (await c.whoami()).get("hub_charter", {}).get("version", 0)
+                if head <= 0:
+                    sys.exit("hub charter v0 is the packaged default — there "
+                             "is nothing before it to diff against")
+                old = (await c.hub_charter_version(head - 1)).get("text", "")
+                new = (await c.hub_charter_version(head)).get("text", "")
+                if not _print_charter_diff(
+                        old, new, old_label=f"hub charter v{head - 1}",
+                        new_label=f"hub charter v{head}",
+                        header=f"hub charter v{head} changed"):
+                    print(f"hub charter v{head} is byte-identical to v{head - 1}")
+            _run_agent_cmd(args, go_diff)
+            return
+        head = version
+        if head is None:
+            r = httpx.get(f"{url}/admin/charter", headers=_admin_headers(),
+                          timeout=10.0)
+            if r.status_code != 200:
+                sys.exit(f"reading the hub charter failed: {r.status_code} "
+                         f"{r.text}")
+            head = r.json().get("version") or 0
+        _print_hub_version_diff(url, _admin_headers(), head)
+
+    if action == "history":
+        # `--as` reads it as a seat; without it, as the operator. Both hit
+        # archive metadata only, so neither records anything.
+        if args.diff is not None or args.diff_flag:
+            _hub_diff(args.diff)
+            return
+        if args.as_agent:
+            async def go_hist(c, a):
+                _print_hub_charter_history(await c.hub_charter_history())
+            _run_agent_cmd(args, go_hist)
+            return
+        _print_hub_charter_history(_hub_charter_history_via_admin(url, _admin_headers()))
+        return
+
+    if args.diff is not None or args.diff_flag:
+        # `show --diff` = what the version in force changed; `--diff N` pins it.
+        _hub_diff(args.diff)
+        return
+    if args.as_agent:
+        async def go_show(c, a):
+            # The ARCHIVE read, never the receipt-recording head read: showing
+            # the text on a terminal is not the seat being briefed by it.
+            doc = await c.hub_charter_version(a.version)
+            _print_hub_charter(doc)
+        _run_agent_cmd(args, go_show)
+        return
+    if args.version is not None:
+        r = httpx.get(f"{url}/charter/versions/{args.version}",
+                      headers=_admin_headers(), timeout=10.0)
+        if r.status_code != 200:
+            # The archive route is an agent surface; an operator reading an
+            # OLD version needs a seat. Say exactly that instead of a 401 dump.
+            sys.exit(f"reading hub charter v{args.version} failed: "
+                     f"{r.status_code} — archived versions read as a seat "
+                     f"(`agora charter show --version {args.version} --as <id>`)")
+        _print_hub_charter(r.json())
+        return
+    r = httpx.get(f"{url}/admin/charter", headers=_admin_headers(), timeout=10.0)
+    if r.status_code != 200:
+        sys.exit(f"reading the hub charter failed: {r.status_code} {r.text}")
+    _print_hub_charter(r.json())
+
+
+def _charter_write_hint(exc: Exception, channel: str, seat: str | None) -> str:
+    """Turn an fs_write refusal into the fix. `channel/` is owner+operator
+    only and the charter is CAS-guarded, so the two failures an operator
+    actually hits are "wrong seat" and "someone published while you edited" —
+    both invisible in a raw status dump."""
+    text = str(exc)
+    if "403" in text or "reserved" in text or "owner" in text:
+        return (f"{seat or 'that seat'} may not write '{channel}' charter: "
+                f"`channel/` is the OWNER's (or an operator seat's). Run "
+                f"`agora charter receipts --channel {channel} --as <owner>` to "
+                f"see who owns the room, or re-run with that seat.\n({text})")
+    if "409" in text or "conflict" in text:
+        return (f"'{channel}' charter changed while you were editing — re-read "
+                f"it (`agora charter show --channel {channel} --as {seat}`), "
+                f"merge, and publish again.\n({text})")
+    return f"publishing '{channel}' charter failed: {text}"
+
+
+async def _print_channel_version_diff(client, channel: str, version: int) -> None:
+    """What version N of a room's charter changed (v0/v1 = the birth text)."""
+    new = await client.fs_read(channel, _CHARTER_PATH, version=version)
+    old_text = ""
+    if version > 1:
+        old_text = (await client.fs_read(channel, _CHARTER_PATH,
+                                         version=version - 1))["content"]
+    label = f"'{channel}' charter v{version - 1}" if version > 1 else "(new file)"
+    if not _print_charter_diff(old_text, new["content"], old_label=label,
+                               new_label=f"'{channel}' charter v{version}",
+                               header=f"'{channel}' charter v{version} changed"):
+        print(f"'{channel}' charter v{version} is byte-identical to v{version - 1}")
+
+
+def _print_hub_version_diff(url: str, headers: dict, version: int,
+                            as_agent: str | None = None) -> None:
+    """What version N of the hub charter changed. v0 is the packaged default,
+    so `--diff 1` shows what the operator's first publish did to it.
+
+    Three sources, cheapest first: v0 never travels (this build SHIPS it),
+    the version in force reads with the admin key, and any older archived
+    version is an agent-surface route — so it needs `--as <seat>`, which the
+    refusal says instead of dumping a 401."""
+    import httpx
+
+    from .governance import ROLE_CHARTER
+
+    head_doc: dict = {}
+
+    def _head() -> dict:
+        nonlocal head_doc
+        if not head_doc:
+            r = httpx.get(f"{url}/admin/charter", headers=headers, timeout=10.0)
+            if r.status_code != 200:
+                sys.exit(f"reading the hub charter failed: {r.status_code} "
+                         f"{r.text}")
+            head_doc = r.json()
+        return head_doc
+
+    def _text(v: int) -> str:
+        if v == 0:
+            return ROLE_CHARTER
+        if v == (_head().get("version") or 0):
+            return _head().get("text", "")
+        r = httpx.get(f"{url}/charter/versions/{v}", headers=headers, timeout=10.0)
+        if r.status_code == 200:
+            return r.json().get("text", "")
+        sys.exit(f"reading hub charter v{v} failed: {r.status_code} — archived "
+                 f"versions read as a seat, not with the admin key. Retry as "
+                 f"one: `agora charter history --diff {version} --as <id>`")
+
+    if version <= 0:
+        sys.exit("hub charter v0 is the packaged default — there is nothing "
+                 "before it to diff against (`agora charter show --version 0`)")
+    if not _print_charter_diff(_text(version - 1), _text(version),
+                               old_label=f"hub charter v{version - 1}",
+                               new_label=f"hub charter v{version}",
+                               header=f"hub charter v{version} changed"):
+        print(f"hub charter v{version} is byte-identical to v{version - 1}")
+
+
+def _print_hub_charter(doc: dict) -> None:
+    packaged = (" (packaged default; `agora charter set FILE` to replace)"
+                if doc.get("version") == 0 else "")
+    by = doc.get("updated_by") or "operator"
+    print(f"# hub charter v{doc.get('version')}{packaged}"
+          + (f" — published by {by}" if doc.get("version") else ""))
+    print(doc.get("text", ""))
+
+
+def _print_hub_charter_history(rows: list) -> None:
+    if not rows:
+        print("hub charter: still the packaged default (v0) — nothing "
+              "published yet (`agora charter show` prints it)")
+        return
+    for row in rows:
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(row["updated_at"]))
+        print(f"v{row['version']:<4} {when}  {row['size']:>6}B  "
+              f"{row['updated_by'] or 'operator'}")
+
+
+def _hub_charter_history_via_admin(url: str, headers: dict) -> list:
+    """History is an agent-surface route; an operator with only the admin key
+    still deserves the list, so derive it from the served head when the agent
+    route refuses. Metadata only — no text, no receipts either way."""
+    import httpx
+
+    r = httpx.get(f"{url}/charter/history", headers=headers, timeout=10.0)
+    if r.status_code == 200:
+        return r.json()
+    doc = httpx.get(f"{url}/admin/charter", headers=headers, timeout=10.0).json()
+    if not doc.get("version"):
+        return []
+    return [{"version": doc["version"], "updated_at": doc.get("updated_at", 0.0),
+             "size": len(doc.get("text", "")), "updated_by": doc.get("updated_by", "")}]
+
+
 def cmd_pause(args: argparse.Namespace) -> None:
     """Operator verb: pause the hub (agents stand down; reads/acks stay open;
     obligation clocks freeze) or resume it. No TTL — resume is explicit."""
@@ -1194,8 +1736,12 @@ def cmd_delegate(args: argparse.Namespace) -> None:
     verifiable hub state (whoami lists it; prose claims count for nothing).
     Powers: ruling (sign-offs), operational (restarts etc.), reporting
     (board curation / queue rows), moderation (kick/ban to protect the
-    collaboration — cannot target operators or other delegates). Grants
-    expire (default 7d, cap 30d)."""
+    collaboration — cannot target operators or other delegates), and proxy
+    (ACT ON THE OWNER'S BEHALF — clears a room's gated acts without asking;
+    requires --scope and expires in a day by default). `--mission` lets the
+    operator write the seat's charge in the same act, so appointing a blank
+    seat does not dead-end. Grants expire (default 7d, cap 30d; proxy
+    1d/7d)."""
     import httpx
 
     from .join import parse_ttl
@@ -1220,7 +1766,9 @@ def cmd_delegate(args: argparse.Namespace) -> None:
         for d in rows:
             until = time.strftime("%Y-%m-%d %H:%M", time.localtime(d["expires_at"]))
             note = f"  — {d['note']}" if d.get("note") else ""
-            print(f"{d['agent_id']:<16} {'+'.join(d['powers']):<32} until {until}{note}")
+            scope = f" [{d['scope']}]" if d.get("scope") else ""
+            print(f"{d['agent_id']:<16} {'+'.join(d['powers']):<28}{scope} "
+                  f"until {until}{note}")
         return
     if args.revoke:
         r = httpx.delete(f"{url}/admin/delegation/{args.revoke}",
@@ -1232,21 +1780,62 @@ def cmd_delegate(args: argparse.Namespace) -> None:
         return
     if not args.agent or not args.powers:
         sys.exit("usage: agora delegate AGENT --powers ruling,reporting "
-                 "[--ttl 7d] [--note TEXT]   (or --list / --revoke AGENT)")
+                 "[--ttl 7d] [--note TEXT] [--scope CHANNEL|'*'] "
+                 "[--mission TEXT]   "
+                 "(or --list / --revoke AGENT)")
     try:
         ttl = parse_ttl(args.ttl) if args.ttl else None
     except ValueError as e:
         sys.exit(str(e))
+    mission = getattr(args, "mission", None)
+    if mission == "-":
+        mission = sys.stdin.read()
     r = httpx.put(f"{url}/admin/delegation", headers=headers, timeout=10.0,
                   json={"agent_id": args.agent,
                         "powers": [p.strip() for p in args.powers.split(",") if p.strip()],
-                        "ttl_seconds": ttl, "note": args.note or ""})
+                        "ttl_seconds": ttl, "note": args.note or "",
+                        "scope": args.scope or "",
+                        "mission": mission})
     if r.status_code != 200:
         sys.exit(f"delegation failed: {r.status_code} {r.text}")
     g = r.json()
     until = time.strftime("%Y-%m-%d %H:%M", time.localtime(g["expires_at"]))
-    print(f"delegated {'+'.join(g['powers'])} to {g['agent_id']} until {until} "
-          "(announced in hub-alerts; visible in every whoami)")
+    where = (f" scoped to {'the whole hub' if g.get('scope') == '*' else '#' + g['scope']}"
+             if g.get("scope") else "")
+    print(f"delegated {'+'.join(g['powers'])} to {g['agent_id']}{where} until "
+          f"{until} (announced in hub-alerts; visible in every whoami)")
+
+
+def cmd_mission(args: argparse.Namespace) -> None:
+    """Operator verb: write what a seat is FOR.
+
+    A seat's `about` is its own self-description; a MISSION is the charge
+    the operator gives it, and the seat cannot soften it. It rides every
+    `whoami` — the one thing a fresh harness session reads before it acts.
+    A delegation is refused to a seat that has none."""
+    import httpx
+
+    url = _hub_url(args)
+    admin = _admin_key_or_exit(args, url)
+    headers = {"Authorization": f"Bearer {admin}"}
+    if args.verb == "show":
+        r = httpx.get(f"{url}/admin/missions", headers=headers, timeout=10.0)
+        if r.status_code != 200:
+            sys.exit(f"reading missions failed: {r.status_code} {r.text}")
+        for a in r.json():
+            if args.agent and a["agent_id"] != args.agent:
+                continue
+            print(f"{a['agent_id']:<18} {a['mission'] or '(no mission)'}")
+        return
+    if not args.agent or args.text is None:
+        sys.exit("usage: agora mission set AGENT 'what this seat is for'"
+                 "   (or: agora mission show [AGENT])")
+    text = sys.stdin.read() if args.text == "-" else args.text
+    r = httpx.put(f"{url}/admin/agents/{args.agent}/mission", headers=headers,
+                  timeout=10.0, json={"mission": text})
+    if r.status_code != 200:
+        sys.exit(f"setting mission failed: {r.status_code} {r.text}")
+    print(f"mission set for {args.agent} — it rides every whoami from now on")
 
 
 def cmd_register(args: argparse.Namespace) -> None:
@@ -1261,7 +1850,8 @@ def cmd_register(args: argparse.Namespace) -> None:
     admin = _admin_key_or_exit(args, url)
     r = httpx.post(f"{url}/agents",
                    headers={"Authorization": f"Bearer {admin}"},
-                   json={"id": args.agent, "about": args.about or ""},
+                   json={"id": args.agent, "about": args.about or "",
+                         "mission": getattr(args, "mission", "") or ""},
                    timeout=10.0)
     if r.status_code == 409:
         sys.exit(f"agent '{args.agent}' is already registered; keys are "
@@ -1781,6 +2371,20 @@ def cmd_inbox(args):
             owed = await c.owed()
         except Exception:
             owed = None  # pre-0.10 hub: no /owed yet
+        if owed and owed.charters:
+            # Above everything (0146/2): the rules you work under precede
+            # both the work that is legitimate and the debts you owe on it.
+            # Self-clearing — reading records the receipt, so this line is
+            # gone next pass and no seat is nagged twice.
+            print("CHARTER — the rules you work under CHANGED. Read it this "
+                  "turn (one call; nothing is blocked, and reading is not "
+                  "posting — an empty pass stays empty):")
+            from .render import charter_debt_line
+            for row in owed.charters[:4]:
+                print("- " + charter_debt_line(row.model_dump()))
+            if len(owed.charters) > 4:
+                print(f"  … +{len(owed.charters) - 4} more")
+            print()
         if owed and owed.phases:
             # The phase order precedes the debts (0140/2): what work is
             # legitimate right now is prior to which debts you owe on it.
@@ -1804,7 +2408,8 @@ def cmd_inbox(args):
                 print(f"- ANSWER {row.channel}#{row.seq} from {row.sender}"
                       f" (pending {row.pending_asks},{naming}"
                       f" {(at - row.created_at) / 60:.0f}m{esc}) — read id={row.id},"
-                      " reply with answers=[...], DO or claim assigned work")
+                      " reply in-thread (answers=[...] only if it asked numbered"
+                      " questions), DO or claim assigned work")
             for row in owed.to_consume[:10]:
                 print(f"- CONSUME {row.channel}#{row.answer_seq}:"
                       f" {row.answered_by} answered YOUR ask {row.your_asks}"
@@ -1848,7 +2453,8 @@ def cmd_post(args):
     from .models import Status, Urgency
 
     async def go(c, a):
-        to = [x.strip() for x in a.to.split(",")] if a.to else []
+        raw_to = a.to if isinstance(a.to, list) else ([a.to] if a.to else [])
+        to = [x.strip() for part in raw_to for x in part.split(",") if x.strip()]
         data = json.loads(a.data) if a.data else None
         if bool(a.notice_kind) != bool(a.notice_key):
             sys.exit("post: --notice-kind and --notice-key are required together")
@@ -1907,9 +2513,18 @@ def cmd_dm(args):
             for spec in a.ask:
                 aid, _, text = spec.partition(":")
                 asks.append({"id": aid.strip(), "text": text.strip()})
+        # --reply-to/--answer parity too (2026-08-04): a DM carrying a
+        # structured ask is exactly the thread its recipient must ANSWER —
+        # and the answering side of the CLI could not thread or discharge
+        # from `agora dm` at all. The live cost: the operator's ruling that
+        # unblocked the novel fleet had to be posted through the raw
+        # dm:<a>--<b> channel form to carry answers=[1].
+        answers = ([x.strip() for x in a.answer.split(",")]
+                   if getattr(a, "answer", None) else None)
         m = await c.dm(a.to, a.body, title=a.title or "", status=Status(a.status),
                        urgency=Urgency(a.urgency), attachments=attachments,
-                       asks=asks)
+                       asks=asks, reply_to=getattr(a, "reply_to", None),
+                       answers=answers)
         print(f"DM to {a.to} sent: seq {m.seq}")
     _run_agent_cmd(args, go)
 
@@ -2471,7 +3086,7 @@ def cmd_drive(args: argparse.Namespace) -> None:
     ONE bounded harness turn that acts and yields by returning. Reception
     becomes structural (yield = process exit; the check->ack->re-arm trap is
     impossible). Owner-run, session-bound, never hub machinery. See drive.py."""
-    from .drive import run_drive
+    from .drive import RECEPTION_TURN_TIMEOUT, run_drive
 
     harness = getattr(args, "harness", "auto")
     harness_pos = getattr(args, "harness_pos", None)
@@ -2492,6 +3107,9 @@ def cmd_drive(args: argparse.Namespace) -> None:
         broadcast_turn_budget=args.broadcast_turn_budget,
         session_rotate=args.session_rotate,
         work_timeout=args.work_timeout,
+        reception_timeout=(args.reception_timeout
+                           if getattr(args, 'reception_timeout', None)
+                           else RECEPTION_TURN_TIMEOUT),
         work_budget=args.work_budget, force=args.force,
         turn_log=args.turn_log,
         once=args.once, max_turns=args.max_turns))
@@ -2628,6 +3246,39 @@ def _print_reception_posture(workspace: Path) -> None:
                   "need a one-time approval via `/hooks`.")
 
 
+def _print_governance_drift(url: str, admin_key: str) -> None:
+    """Print the rules- and charter-drift warnings, if any. Best-effort and
+    silent when everything is current or unreachable — `agora status` must
+    never fail because a diagnostic could not run."""
+    import httpx
+
+    from .governance import rules_missing_markers
+    headers = {"Authorization": f"Bearer {admin_key}"}
+    try:
+        rules = httpx.get(f"{url}/admin/rules", headers=headers, timeout=5).json()
+    except Exception:
+        rules = None
+    if isinstance(rules, dict) and rules.get("version"):
+        missing = rules_missing_markers(rules.get("text") or "")
+        if missing:
+            print(f"\n  WARNING: hub rules v{rules['version']} (operator-set) "
+                  f"never mention {len(missing)} mechanism(s) this build "
+                  "enforces:")
+            for why in missing:
+                print(f"    - {why}")
+            print("    Merge the packaged default and publish it: "
+                  "`agora rules --set FILE`.")
+    try:
+        r = httpx.get(f"{url}/admin/charter", headers=headers, timeout=5)
+        doc = r.json() if r.status_code == 200 else None
+    except Exception:
+        return                      # pre-0146 hub, or unreachable
+    if not isinstance(doc, dict):
+        return
+    for line in _stale_charter_lines(doc.get("version") or 0, doc.get("text") or ""):
+        print(line)
+
+
 def cmd_status(args: argparse.Namespace) -> None:
     import httpx
 
@@ -2649,6 +3300,12 @@ def cmd_status(args: argparse.Namespace) -> None:
     admin_key = cfg.get("admin_key")
     if not admin_key:
         return
+    # Governance drift, on the surface an operator actually looks at (0146).
+    # The rules/charter warnings used to print ONLY at `agora up`; the 0.14.0
+    # field test lost its first hour to a hub that had been serving a stale
+    # rules text since a boot nobody was watching. Same words, a place you
+    # can reach any time.
+    _print_governance_drift(url, admin_key)
     try:
         data = httpx.get(f"{url}/admin/status", timeout=5,
                          headers={"Authorization": f"Bearer {admin_key}"}).json()
@@ -2666,28 +3323,15 @@ def cmd_status(args: argparse.Namespace) -> None:
         dark = " DARK EPISODE" if fleet.get("dark_episode") else ""
         print(f"\nfleet: {fleet.get('live', '?')}/{fleet.get('eligible', '?')} live "
               f"({100 * fleet.get('live_fraction', 0):.0f}%){dark}")
-    digest = (data.get("report_digest") if isinstance(data, dict) else {}) or {}
-    for row in digest.get("delegates") or []:
-        age = row.get("period_age_minutes")
-        age_s = f"{age:.0f}m" if age is not None else "-"
-        if digest.get("paused"):
-            flag = "paused (fleet dark)"
-        elif row.get("replied"):
-            flag = "replied"
-        elif row.get("missed_alerted"):
-            flag = "MISSED"
-        elif row.get("overdue"):
-            flag = "overdue"
-        else:
-            flag = "pending"
-        print(f"digest: {row.get('delegate', '?')} period={age_s} {flag}")
     print(f"\n{'agent':<16} {'state':<8} {'listener':<9} {'driver':<8} "
           f"{'unread':>6} {'pending':>7}  oldest-pending")
     # The hub can only see what CONTACTS it: an open-but-idle IDE tab makes no
     # calls, so it honestly reads offline even though it will respond at its
     # next prompt. Spell that out or every operator misreads the table.
     legend = ("  states: idle/working = live push connection | active = made an "
-              "authenticated call <10m ago |\n  offline = no contact (an open but "
+              "authenticated call <10m ago,\n  or its reception loop armed "
+              "<15m ago (a seat mid work chunk arms less often than it calls) |"
+              "\n  offline = no contact (an open but "
               "idle IDE tab reads offline; it acts at its next prompt/turn)\n"
               "  listener: armed = live `agora listen` pidfile | STALE = pidfile "
               "but dead/old | - = none\n"
@@ -2725,6 +3369,153 @@ def cmd_status(args: argparse.Namespace) -> None:
               f"{driver:<8} {row['unread']:>6} "
               f"{row['pending_obligations']:>7}  {oldest_s}{flag}")
     print(f"\n{legend}")
+
+
+def _dur(seconds: float | None, *, dash: str = "-") -> str:
+    """Compact age: 45s / 12m / 3.1h / 2.4d. None -> dash."""
+    if seconds is None:
+        return dash
+    s = float(seconds)
+    if s < 90:
+        return f"{s:.0f}s"
+    if s < 5400:
+        return f"{s / 60:.0f}m"
+    if s < 172800:
+        return f"{s / 3600:.1f}h"
+    return f"{s / 86400:.1f}d"
+
+
+def _local_driver_facts(home: Path, agent_id: str) -> dict[str, str]:
+    """What the HUB cannot know, read from this machine's ~/.agora: the
+    listener/driver pidfiles, the adaptive backoff ceiling, and the last line
+    of the driver's turn log / failure ledger. Labelled `local` everywhere it
+    is printed — on another machine these are simply absent, and saying so is
+    the point."""
+    import json as _json
+
+    out: dict[str, str] = {
+        "listener": _listener_state(home, agent_id),
+        "driver": _driver_state(home, agent_id),
+        "turn": "-",
+    }
+    turns = Path(home) / f"drive-{agent_id}.turns.jsonl"
+    fails = Path(home) / f"drive-{agent_id}.failures.jsonl"
+    with contextlib.suppress(OSError, ValueError, IndexError):
+        last = _json.loads(turns.read_text().strip().split("\n")[-1])
+        if last.get("event") == "turn_end":
+            verdict = "ok" if last.get("ok") else f"FAILED rc={last.get('rc')}"
+            out["turn"] = (f"{last.get('kind', '?')} {verdict} "
+                           f"{_dur(time.time() - float(last.get('ts', 0)))} ago")
+    with contextlib.suppress(OSError, ValueError, IndexError):
+        last = _json.loads(fails.read_text().strip().split("\n")[-1])
+        age = time.time() - float(last.get("ts", 0))
+        if age < 6 * 3600:
+            out["turn"] += (f" | last failure {last.get('stage')}/"
+                            f"{last.get('reason')} {_dur(age)} ago")
+    return out
+
+
+def cmd_doctor(args: argparse.Namespace) -> None:
+    """One screen, one truth: why is this seat quiet?
+
+    Assembled from the hub's own state (`GET /admin/doctor`) plus the local
+    driver artifacts the hub structurally cannot see. Everything printed is
+    sourced — `hub:` facts come from the hub, `local:` facts from ~/.agora —
+    and the blind-spot list at the bottom is printed every time, because a
+    diagnostic that quietly omits what it does not know is how three
+    investigations in a row ended up reconstructing state by hand."""
+    import json as _json
+
+    import httpx
+
+    cfg = _config.load_config()
+    url = cfg.get("url", _default_url(DEFAULT_PORT))
+    admin_key = cfg.get("admin_key")
+    if not admin_key:
+        print("agora doctor: needs the admin key (run it on the hub's machine, "
+              f"where {_config.home() / 'config.json'} holds it)")
+        return
+    try:
+        r = httpx.get(f"{url}/admin/doctor", timeout=20,
+                      params={"agent": args.as_agent} if args.as_agent else None,
+                      headers={"Authorization": f"Bearer {admin_key}"})
+    except Exception as exc:
+        print(f"hub: not reachable at {url} ({exc}) — run `agora up`")
+        return
+    if r.status_code != 200:
+        print(f"agora doctor: hub refused ({r.status_code}) {r.text[:200]}")
+        return
+    data = r.json()
+    if args.json:
+        print(_json.dumps(data, indent=2))
+        return
+    home = _config.home()
+    hub = data["hub"]
+    pause = hub.get("paused")
+    print(f"hub: {url}  paused: "
+          + (f"YES since {time.strftime('%H:%M', time.localtime(pause['since']))}"
+             if pause else "no"))
+    sw = hub["sweeps"]
+    print("sweeps: " + " | ".join(
+        f"{name} {_dur(s['last_run_seconds'], dash='never (since boot)')} ago"
+        f" ({s['actions']} action(s))" if s["last_run_seconds"] is not None
+        else f"{name} not run since boot"
+        for name, s in sw.items()))
+    fleet = hub["fleet"]
+    print(f"health: {fleet['live']}/{fleet['eligible']} seats live"
+          f" | votes past deadline {hub['votes_past_deadline']}"
+          f" | open hub alerts {hub['open_hub_alerts']}"
+          f" (unclosed silence {hub['unclosed_silence_alerts']})"
+          f" | claims {hub['live_claims']} live, {hub['stale_claims']} stale")
+    print()
+    print(f"{'seat':<14}{'presence':<9}{'reception':<11}{'last work':<10}"
+          f"{'owes':<9}{'local driver':<22}working on / held up by")
+    for s in data["seats"]:
+        local = _local_driver_facts(home, s["agent_id"])
+        owes = s["owes"]
+        rec = s["reachable"]
+        claim = (s["working_on"][0] if s["working_on"] else None)
+        what = (f"{claim['key']} [{claim['status']}] idle "
+                f"{_dur(claim['idle_seconds'])}" if claim else "-")
+        if len(s["working_on"]) > 1:
+            what += f" (+{len(s['working_on']) - 1})"
+        for h in s["held_up_by"]:
+            what += f"  <- {h['kind']}"
+            if h.get("seconds_left"):
+                what += f" {_dur(h['seconds_left'])} left"
+        print(f"{s['agent_id']:<14}{rec['presence']:<9}"
+              f"{rec['reception'] + ' ' + _dur(rec['reception_age_seconds']):<11}"
+              f"{_dur(s['did_work']['last_work_seconds'], dash='>24h'):<10}"
+              f"{str(owes['to_answer']) + '(' + str(owes['escalated']) + 'esc)':<9}"
+              f"{local['listener'] + '/' + local['driver']:<22}{what}")
+    print()
+    print("REQUESTS IN FLIGHT (operator asks not closed)"
+          if data["requests"] else "REQUESTS IN FLIGHT: none open")
+    for req in data["requests"]:
+        print(f"  {req['channel']}#{req['seq']} from {req['from']} "
+              f"{_dur(req['age_seconds'])} old"
+              + (f" — {req['title'][:60]}" if req.get("title") else "")
+              + f"\n    owner: {', '.join(req['owned_by']) or '(no claim row)'}"
+              f" | owes: {', '.join(req['owed_by']) or 'NOBODY'}"
+              f" | owner last work {_dur(req['owner_last_work_seconds'], dash='>24h')} ago"
+              + (f" | asks {req['ask_progress']}" if req["ask_progress"] else ""))
+        for c in req["claims"]:
+            print(f"    next step ({c['owner']}, idle {_dur(c['idle_seconds'])}):"
+                  f" {c['next_step'] or '(none declared)'}")
+        for a in req["outstanding_asks"][:6]:
+            print(f"    outstanding: {a['asker']} -> {a['waiting_on']} "
+                  f"({a['where']} ask {a['ask']}) {a['state']}, "
+                  f"{_dur(a['age_seconds'])}")
+        if len(req["outstanding_asks"]) > 6:
+            print(f"    (+{len(req['outstanding_asks']) - 6} more outstanding asks)")
+    print()
+    for s in data["seats"]:
+        local = _local_driver_facts(home, s["agent_id"])
+        if local["turn"] != "-":
+            print(f"local: {s['agent_id']} last turn — {local['turn']}")
+    print("\nthe hub CANNOT see (do not infer these from the table above):")
+    for line in data["hub_cannot_see"]:
+        print(f"  - {line}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2810,10 +3601,13 @@ def build_parser() -> argparse.ArgumentParser:
                    "the mode (`cd <workspace> && agora drive`). The flag "
                    "only prints the driver quickstart"),
         "claude": None,   # hooks already arm reception; no dedicated variant
-        "codex": ("DEPRECATED no-op: Codex setup is mode-free; run "
-                  "`cd <workspace> && agora drive` for a dedicated seat"),
+        "codex": ("Compatibility alias: plain `agora setup <id> --harness "
+                  "codex` already writes the dedicated live-session rule. "
+                  "Use `agora drive` for an unattended external watcher"),
         "abstractcode": ("DEPRECATED no-op: AbstractCode setup is mode-free; "
-                         "run `cd <workspace> && agora drive abstractcode`"),
+                         "run `cd <workspace> && agora drive` (or `agora "
+                         "drive --harness abstractcode` in a multi-harness "
+                         "workspace)"),
     }
 
     st = sub.add_parser("setup",
@@ -2847,8 +3641,10 @@ def build_parser() -> argparse.ArgumentParser:
                          "that boots member-of-nothing must ask instead "
                          "of picking a room itself)")
     st.add_argument("--headless", action="store_true",
-                    help="deprecated compatibility hint; requires exactly one "
-                         "harness (`cursor`, `codex`, or `abstractcode`)")
+                    help="deprecated compatibility alias; plain `agora setup "
+                         "<id> --harness <name>` already writes the normal "
+                         "workspace contract, and `agora drive` is the "
+                         "separate unattended mode")
     st.add_argument("--vendor-bootstrap", action="store_true",
                     help="also run the harness's own registration convenience "
                          "when supported (`claude mcp add --scope local` or "
@@ -2869,6 +3665,8 @@ def build_parser() -> argparse.ArgumentParser:
                              "with seed-key or setup-* --key)")
     rg.add_argument("agent", help="agent id, e.g. castor")
     rg.add_argument("--about", default="", help="self-description for this agent")
+    rg.add_argument("--mission", default="",
+                    help="operator-authored charge that rides every whoami")
     rg.add_argument("--url", default=None)
     rg.add_argument("--admin-key", dest="admin_key", default=None,
                     help="admin key (default: $AGORA_ADMIN_KEY, then config.json)")
@@ -2880,15 +3678,35 @@ def build_parser() -> argparse.ArgumentParser:
                          "seed-key paste)")
     rg.set_defaults(func=cmd_register)
 
+    mi = sub.add_parser("mission", help="operator: set what a seat is FOR "
+                                        "(rides every whoami; required "
+                                        "before delegating)")
+    mi.add_argument("verb", nargs="?", default="show", choices=["set", "show"])
+    mi.add_argument("agent", nargs="?", default=None)
+    mi.add_argument("text", nargs="?", default=None,
+                    help="the mission text, or - to read stdin")
+    mi.add_argument("--url", default=None)
+    mi.add_argument("--admin-key", dest="admin_key", default=None)
+    mi.set_defaults(func=cmd_mission)
+
     dg = sub.add_parser("delegate", help="grant/list/revoke delegation "
                                          "(verifiable hub state; powers: "
-                                         "ruling,operational,reporting,moderation)")
+                                         "ruling,operational,reporting,"
+                                         "moderation,proxy)")
     dg.add_argument("agent", nargs="?", default=None)
     dg.add_argument("--powers", default=None,
-                    help="comma-separated subset of "
-                         "ruling,operational,reporting,moderation")
+                    help="comma-separated subset of ruling,operational,"
+                         "reporting,moderation,proxy ('proxy' = act on the "
+                         "owner's behalf: clears a room's gated acts)")
+    dg.add_argument("--scope", default=None, metavar="CHANNEL",
+                    help="the channel this grant reaches, or '*' for the "
+                         "whole hub. REQUIRED for --powers proxy: acting as "
+                         "the owner everywhere must be typed, not defaulted")
     dg.add_argument("--ttl", default=None, help="e.g. 7d, 48h (default 7d, cap 30d)")
     dg.add_argument("--note", default="", help="shown in the grant announcement")
+    dg.add_argument("--mission", default=None,
+                    help="operator-authored charge to set first if the seat is "
+                         "blank; use - to read stdin")
     dg.add_argument("--list", action="store_true", help="list active delegations")
     dg.add_argument("--charter", action="store_true",
                     help="print the delegate role brief to hand the agent "
@@ -2957,6 +3775,44 @@ def build_parser() -> argparse.ArgumentParser:
                     help="admin key (default: $AGORA_ADMIN_KEY, then config.json)")
     ru.set_defaults(func=cmd_rules)
 
+    ch = sub.add_parser("charter",
+                        help="show/set/history/receipts for the HUB charter "
+                             "(who is who: member, owner, delegate, operator) "
+                             "or a channel's (--channel)")
+    ch.add_argument("charter_action", nargs="?", default="show",
+                    choices=["show", "set", "history", "receipts"])
+    ch.add_argument("file", nargs="?", default=None,
+                    help="for `set`: the markdown file to publish, or `-` to "
+                         "read the text from stdin (heredoc)")
+    ch.add_argument("--channel", default=None,
+                    help="operate on this room's charter instead of the hub's "
+                         "(needs --as an owner or operator seat); works with "
+                         "every subcommand")
+    ch.add_argument("--version", type=int, default=None,
+                    help="for `show`: read one archived version verbatim")
+    ch.add_argument("--edit", action="store_true",
+                    help="for `set`: open $EDITOR on the charter in force; "
+                         "saving publishes, an empty or unchanged buffer aborts")
+    ch.add_argument("--from-default", dest="from_default", action="store_true",
+                    help="for `set`: publish the PACKAGED text (hub: the role "
+                         "charter; --channel: that room's seed charter)")
+    ch.add_argument("-y", "--yes", action="store_true",
+                    help="for `set`: skip the confirmation (the diff still "
+                         "prints); implied when stdin is not a terminal")
+    # `--diff` is both a flag (`show --diff` = what the version in force
+    # changed) and a value (`history --diff 3`). One option, because an
+    # operator asking "what changed?" should not have to know which.
+    ch.add_argument("--diff", nargs="?", type=int, const=-1, default=None,
+                    metavar="N",
+                    help="show a unified diff instead of the text: bare = the "
+                         "version in force, `--diff N` = what version N changed")
+    ch.add_argument("--as", dest="as_agent", default=None,
+                    help="agent identity (required with --channel)")
+    ch.add_argument("--url", default=None)
+    ch.add_argument("--admin-key", dest="admin_key", default=None,
+                    help="admin key (default: $AGORA_ADMIN_KEY, then config.json)")
+    ch.set_defaults(func=cmd_charter)
+
     lm = sub.add_parser("llm",
                         help="configure (or show) the OpenAI-compatible endpoint "
                              "`agora summarize` / chat `/summary` use (local, 0600)")
@@ -2979,6 +3835,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     st = sub.add_parser("status", help="check hub + config")
     st.set_defaults(func=cmd_status)
+
+    dr = sub.add_parser("doctor",
+                        help="one-screen diagnosis: per seat — reachable? "
+                             "owes what? working on what? blocked by what? — "
+                             "plus operator requests in flight and hub health")
+    dr.add_argument("--as", dest="as_agent", default=None, metavar="AGENT_ID",
+                    help="diagnose ONE seat (and the requests it owns/owes)")
+    dr.add_argument("--json", action="store_true",
+                    help="print the raw diagnostic instead of the table")
+    dr.set_defaults(func=cmd_doctor)
 
     hc = sub.add_parser("harness-check",
                         help="check a framework against the agora harness "
@@ -3135,6 +4001,12 @@ def build_parser() -> argparse.ArgumentParser:
                     default=25,
                     help="turns on one harness session before rotating to a "
                          "fresh one (context-bloat + residue flush; default 25)")
+    dr.add_argument("--reception-timeout", type=float, default=None,
+                    help="seconds a RECEPTION turn may take (default 600). "
+                         "Raise it for slow local inference: a 122B model "
+                         "cannot finish whoami+charter+discovery in 600s, and "
+                         "every boot turn dies at no-tool-calls having done "
+                         "real work")
     dr.add_argument("--work-timeout", dest="work_timeout", type=float,
                     default=TURN_TIMEOUT,
                     help="hard cap for one spawned work chunk in seconds "
@@ -3252,7 +4124,12 @@ def build_parser() -> argparse.ArgumentParser:
     po.add_argument("--channel", required=True)
     po.add_argument("--status", default="fyi", choices=["open", "reply", "fyi", "blocked", "resolved"])
     po.add_argument("--urgency", default="inbox", choices=["inbox", "next_turn", "interrupt"])
-    po.add_argument("--title", default=""); po.add_argument("--to", default="")
+    po.add_argument("--title", default="")
+    # append, not store: `--to a --to b` must address BOTH. The plain store
+    # action silently kept only the last flag — a four-seat commission went
+    # out addressed to one seat and nobody could tell (fund1, commons#6).
+    po.add_argument("--to", action="append", default=None,
+                    help="recipient seat id (repeatable, or comma-separated)")
     po.add_argument("--reply-to", dest="reply_to", default=None)
     po.add_argument("--critical", action="store_true"); po.add_argument("--data", default=None)
     po.add_argument("--notice-kind", choices=NOTICE_KINDS)
@@ -3283,6 +4160,12 @@ def build_parser() -> argparse.ArgumentParser:
     dm.add_argument("--ask", action="append", metavar="ID:TEXT",
                     help="a numbered ask (repeatable; required for "
                          "--status blocked), e.g. --ask '1:which schema?'")
+    dm.add_argument("--reply-to", dest="reply_to", default=None,
+                    help="message id this DM answers (thread it: an "
+                         "unthreaded answer discharges nothing)")
+    dm.add_argument("--answer", default="",
+                    help="ask ids this reply discharges, e.g. --answer 1,3 "
+                         "(requires --reply-to)")
     dm.add_argument("body")
     dm.set_defaults(func=cmd_dm)
 

@@ -18,6 +18,7 @@ from starlette.concurrency import run_in_threadpool
 
 from ..db import StoreConflict
 from ..models import (
+    TextTooLong,
     AgentInfo,
     Envelope,
     LeaderboardReport,
@@ -92,6 +93,11 @@ def _run(fn, *args, **kwargs):
         return fn(*args, **kwargs)
     except StoreConflict as e:
         raise HTTPException(409, f"store version conflict: current version is {e.current_version}")
+    except TextTooLong as e:
+        # A cap REFUSES; it never trims. The 400 names the field, the length
+        # and the cap, so the author can shorten their own text rather than
+        # discover later that the hub kept an arbitrary prefix of it.
+        raise HTTPException(400, str(e))
     except HubError as e:
         raise HTTPException(e.status_code, e.detail)
 
@@ -102,6 +108,9 @@ class RegisterAgent(BaseModel):
     id: str
     name: str = ""
     about: str = ""         # self-description: scope, ownership, what to ask this agent
+    mission: str = ""       # the OPERATOR's standing charge: what this seat is FOR.
+                            # Legal here because registration is already an admin
+                            # act; the seat can never write it afterwards.
     operator: bool = False  # may post critical broadcasts; admin-granted only
 
 
@@ -115,7 +124,7 @@ def register_agent(
     if not hmac.compare_digest(token, admin_key):
         raise HTTPException(403, "agent registration requires the admin key")
     info, api_key = _run(service.register_agent, payload.id, payload.name,
-                         payload.operator, payload.about)
+                         payload.operator, payload.about, payload.mission)
     # The plaintext key is returned exactly once; only its hash is stored.
     return {"agent": info.model_dump(), "api_key": api_key}
 
@@ -288,6 +297,11 @@ def whoami(
                  else {"state": "open"})
     return WhoamiReport(
         **agent.model_dump(),
+        # The seat's standing charge. Separate from `about` on purpose: a
+        # critic that can rewrite its own mandate is not adversarial by
+        # construction, and one did exactly that within an hour of the two
+        # sharing a column (2026-08-06).
+        mission=service.db.get_mission(agent.id),
         # The running hub's version + wire protocol, so every agent (and
         # the chat login) sees exactly what it is talking to — the single
         # source is agora.__version__ (pyproject reads it dynamically).
@@ -296,6 +310,12 @@ def whoami(
         # its only consumers DIFFED it and a fold makes a diff lie.
         version=__version__, protocol=PROTOCOL_VERSION,
         hub_rules=service.hub_rules(),
+        # The hub charter (0146) rides as a POINTER, never as text: the role
+        # model is stable and long, and re-pushing an authority-labelled
+        # document on every session-start call is exactly the periodic
+        # injection ADR-0002 rules out. Version + your receipt is enough for
+        # a seat to know it must call read_charter() once.
+        hub_charter=service.hub_charter_pointer(agent.id, agent.operator),
         hub_state=hub_state,
         # Delegation is verifiable state (ADR-0004): every agent sees who
         # holds which delegated powers — prose claims count for nothing.
@@ -362,11 +382,154 @@ def set_hub_rules(
     return {"version": result["version"]}
 
 
+# -- charters (0146): one uniform surface, two scopes ---------------------------
+#
+# Hub scope reads at /charter (any authenticated seat; the read records the
+# receipt). Channel scope reads at /channels/{c}/charter, which is the same
+# file fs_read already serves — the dedicated route exists so a seat never
+# has to know the magic path, and so `GET .../charter` means the same thing
+# at both scopes. Writes stay where authority already lives: the admin key
+# for the hub, the reserved `channel/` prefix (owner + operator) for a room.
+
+class SetHubCharter(BaseModel):
+    text: str
+
+
+@router.get("/charter")
+def read_hub_charter(
+    full: bool = Query(default=False),
+    agent: AgentInfo = Depends(current_agent),
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    """The hub charter — who is who (member / owner / delegate / operator).
+    Reading it records YOUR receipt for the current version, exactly like
+    reading a channel charter's head. Version 0 is the packaged default.
+
+    Served as YOUR VIEW (0147): the common sections plus the ones addressed
+    to the kinds of seat you are, with the delegate section scoped to the
+    powers you hold. `?full=true` serves the whole document to anyone who
+    asks, and every scoped response names what it left out — the view is a
+    token economy, never an access control."""
+    return _run(service.read_hub_charter, agent, full)
+
+
+@router.get("/charter/history")
+def hub_charter_history(
+    limit: int = Query(default=50),
+    agent: AgentInfo = Depends(current_agent),
+    service: HubService = Depends(get_service),
+) -> list[dict[str, Any]]:
+    """Published hub charter versions, newest first (metadata only)."""
+    return _run(service.hub_charter_history, limit)
+
+
+@router.get("/charter/versions/{version}")
+def hub_charter_version(
+    version: int,
+    agent: AgentInfo = Depends(current_agent),
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    """One archived hub charter version verbatim (0 = the packaged default).
+    History browsing: deliberately records no receipt."""
+    return _run(service.hub_charter_version, version)
+
+
+@router.get("/admin/charter")
+def get_hub_charter(
+    token: str = Depends(bearer_token),
+    service: HubService = Depends(get_service),
+    admin_key: str = Depends(get_admin_key),
+) -> dict[str, Any]:
+    """The served hub charter, for the operator's own tooling (mirrors
+    GET /admin/rules). Records no receipt: an operator inspecting the text
+    is not a seat being briefed by it."""
+    if not hmac.compare_digest(token, admin_key):
+        raise HTTPException(403, "reading the hub charter via admin requires "
+                                 "the admin key")
+    return service.hub_charter()
+
+
+@router.put("/admin/charter")
+def set_hub_charter(
+    payload: SetHubCharter,
+    token: str = Depends(bearer_token),
+    service: HubService = Depends(get_service),
+    admin_key: str = Depends(get_admin_key),
+) -> dict[str, Any]:
+    """Replace the hub charter (operator surface, admin key — same authority
+    as the hub rules). Announced in hub-alerts; every seat's whoami pointer
+    goes stale until it reads the new version. Nothing is blocked."""
+    if not hmac.compare_digest(token, admin_key):
+        raise HTTPException(403, "setting the hub charter requires the admin key")
+    result = _run(service.set_hub_charter, payload.text)
+    return {"version": result["version"],
+            "missing_roles": result["missing_roles"],
+            "sliceable": result["sliceable"],
+            "unsectioned_roles": result["unsectioned_roles"]}
+
+
+@router.get("/admin/charter/receipts")
+def hub_charter_receipts(
+    token: str = Depends(bearer_token),
+    service: HubService = Depends(get_service),
+    admin_key: str = Depends(get_admin_key),
+) -> dict[str, Any]:
+    """Who has read which version of the hub charter. Operator surface: a
+    fleet-wide roster of every registered seat is not something an ordinary
+    member should be able to enumerate from one call."""
+    if not hmac.compare_digest(token, admin_key):
+        raise HTTPException(403, "hub charter receipts require the admin key")
+    from ..governance import HUB_CHARTER_SCOPE
+    doc = service.hub_charter()
+    return {"scope": HUB_CHARTER_SCOPE, "version": doc["version"],
+            "readers": _run(service.charter_readers, HUB_CHARTER_SCOPE)}
+
+
+@router.get("/channels/{channel}/charter")
+def read_channel_charter(
+    channel: str,
+    version: int | None = None,
+    full: bool = Query(default=False),
+    agent: AgentInfo = Depends(current_agent),
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    """This room's charter (`channel/charter.md`) AND what it inherits.
+
+    Reading the head records your receipt; `?version=N` reads the archive and
+    records nothing. 404 means the room has no charter (only possible for DMs
+    and rooms created before 0146).
+
+    The room's own text is served whole and verbatim in `content` — never
+    role-sliced, and unchanged from the fs_read shape, so read-modify-write
+    still round-trips. `hub` carries the inherited hub charter in YOUR view,
+    included only when you are actually behind on it (`?full=true` always
+    includes it, unscoped); when it is included, reading it records your hub
+    receipt too."""
+    return _run(service.read_channel_charter, agent, channel, version, full)
+
+
+@router.get("/channels/{channel}/charter/receipts")
+def channel_charter_receipts(
+    channel: str,
+    agent: AgentInfo = Depends(current_agent),
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    """Per-member charter receipts for this room: who has read the current
+    version and who has not. Member-visible — it is their room."""
+    return _run(service.channel_charter_receipts, agent, channel)
+
+
 class SetDelegation(BaseModel):
     agent_id: str
     powers: list[str]
     ttl_seconds: float | None = None
     note: str = ""
+    #: Channel this grant reaches, or "*" for the whole hub. Only `proxy`
+    #: consults it, and `proxy` REQUIRES it (2026-08-04).
+    scope: str = ""
+    #: Optional operator-authored seat charge to write before the grant.
+    #: Use this to appoint a delegate in one act when the seat is blank.
+    mission: str | None = None
 
 
 @router.get("/delegations")
@@ -391,6 +554,37 @@ def admin_list_delegations(
     return service.active_delegations()
 
 
+class SetMission(BaseModel):
+    mission: str
+
+
+@router.put("/admin/agents/{agent_id}/mission")
+def set_mission(
+    agent_id: str,
+    payload: SetMission,
+    agent: AgentInfo = Depends(operator_or_admin),
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    """Write a seat's standing mission — an OPERATOR act. `set_about` stays
+    the seat's own self-description; this is the charge it cannot soften."""
+    if not agent.operator:
+        raise HTTPException(403, "setting a mission is an operator act")
+    return _run(service.set_mission, agent_id, payload.mission)
+
+
+@router.get("/admin/missions")
+def list_missions(
+    agent: AgentInfo = Depends(operator_or_admin),
+    service: HubService = Depends(get_service),
+) -> list[dict[str, Any]]:
+    """Which seats have a charge and which are running blank. The blanks are
+    the finding: a seat with no mission reads its own name off the roster and
+    invents the rest."""
+    if not agent.operator:
+        raise HTTPException(403, "reading missions is an operator view")
+    return service.list_missions()
+
+
 @router.put("/admin/delegation")
 def set_delegation(
     payload: SetDelegation,
@@ -405,7 +599,8 @@ def set_delegation(
     if not agent.operator:
         raise HTTPException(403, "granting delegation is an operator act")
     return _run(service.set_delegation, payload.agent_id, payload.powers,
-                payload.ttl_seconds, payload.note)
+                payload.ttl_seconds, payload.note, payload.scope,
+                payload.mission)
 
 
 @router.delete("/admin/delegation/{agent_id}")
@@ -483,6 +678,27 @@ def list_blocks(
     return service.list_blocks(scope)
 
 
+@router.get("/supervise")
+def supervise_all(
+    agent: AgentInfo = Depends(current_agent),
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    """Every room you steward, in one read."""
+    return _run(service.supervise, agent, None)
+
+
+@router.get("/channels/{channel}/supervise")
+def supervise(
+    channel: str,
+    agent: AgentInfo = Depends(current_agent),
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    """The delegate's situation report: who is live, who holds nothing, what
+    is blocked and on whom — and for each, whether YOUR granted powers let
+    you end it. Delegation required; the answer is meaningless without one."""
+    return _run(service.supervise, agent, channel)
+
+
 @router.get("/board")
 def board(
     agent: AgentInfo = Depends(current_agent),
@@ -507,6 +723,26 @@ def admin_status(
     if not hmac.compare_digest(token, admin_key):
         raise HTTPException(403, "status overview requires the admin key")
     return service.status_overview()
+
+
+@router.get("/admin/doctor")
+def admin_doctor(
+    token: str = Depends(bearer_token),
+    service: HubService = Depends(get_service),
+    admin_key: str = Depends(get_admin_key),
+    agent: str = "",
+) -> dict[str, Any]:
+    """One-screen diagnosis: per seat — reachable? owes what? working on
+    what? held up by what? — plus operator requests in flight with their
+    owner, next step and outstanding asks, plus the hub's own health, plus
+    an explicit list of what the hub CANNOT see. `agent=<id>` narrows it.
+
+    Admin-gated (not merely operator) because it names channels and seats
+    across the whole hub in one payload; it carries counts, timestamps,
+    titles and declared next-steps — never message bodies."""
+    if not hmac.compare_digest(token, admin_key):
+        raise HTTPException(403, "doctor requires the admin key")
+    return _run(service.doctor, agent or None)
 
 
 @router.post("/admin/search/rebuild")
@@ -839,17 +1075,6 @@ def channel_digest(
 
 class RulingAcks(BaseModel):
     keys: list[str]
-
-
-@router.post("/channels/{channel}/ruling-acks")
-def ack_rulings(
-    channel: str,
-    body: RulingAcks,
-    agent: AgentInfo = Depends(current_agent),
-    service: HubService = Depends(get_service),
-) -> dict[str, Any]:
-    """0113: record that this seat has read the current version of rulings."""
-    return _run(service.ack_rulings, agent, channel, body.keys)
 
 
 # -- inbox (the trigger surface: long-poll for unread across all my channels) --------
@@ -1245,6 +1470,17 @@ def get_notes(
 
 
 # -- work-id activity index (0093): the hub half of the Option-A stitch -------------
+
+@router.post("/channels/{channel}/ruling-acks")
+def ack_rulings(
+    channel: str,
+    body: RulingAcks,
+    agent: AgentInfo = Depends(current_agent),
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    """0113: record that this seat has read the current version of rulings."""
+    return _run(service.ack_rulings, agent, channel, body.keys)
+
 
 @router.get("/desk")
 def desk(

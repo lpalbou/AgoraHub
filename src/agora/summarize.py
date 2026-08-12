@@ -23,7 +23,7 @@ import secrets
 from typing import Any, Callable
 
 from .client import AgoraClient
-from .models import dm_channel_name
+from .models import elide, dm_channel_name
 from .render import _neutralize
 
 # Bounds so one summary cannot balloon into a huge (and costly) prompt: a
@@ -45,7 +45,7 @@ class SummarizerError(RuntimeError):
 
 def _trim(text: str) -> str:
     text = (text or "").strip()
-    return text if len(text) <= MAX_BODY_CHARS else text[:MAX_BODY_CHARS] + " …"
+    return elide(text, MAX_BODY_CHARS)
 
 
 async def _recent(client: AgoraClient, channel: str) -> list[dict[str, Any]]:
@@ -109,7 +109,13 @@ async def gather_context(client: AgoraClient, *, scope: str = "hub",
         except Exception:
             mine = []
         shared: list[dict[str, Any]] = []
-        for name in mine[:MAX_CHANNELS]:
+        # A digest built from a SUBSET of the rooms is a different digest.
+        # The bound stays (a summary of 200 rooms is not a summary), but the
+        # omission is stated in the context the model reads, never dropped
+        # in silence.
+        if len(mine) > MAX_CHANNELS:
+            ctx["channels_omitted"] = sorted(mine[MAX_CHANNELS:])
+        for name in sorted(mine)[:MAX_CHANNELS]:
             recent = [m for m in await _recent(client, name) if m["sender"] == agent]
             if recent:
                 shared.append({"channel": name, "recent": recent})
@@ -126,7 +132,10 @@ async def gather_context(client: AgoraClient, *, scope: str = "hub",
         names = [c["name"] for c in await client.list_channels() if c.get("member")]
     except Exception:
         names = []
-    ctx["channels"] = [await _channel_block(client, n) for n in names[:MAX_CHANNELS]]
+    if len(names) > MAX_CHANNELS:
+        ctx["channels_omitted"] = sorted(names[MAX_CHANNELS:])
+    ctx["channels"] = [await _channel_block(client, n)
+                       for n in sorted(names)[:MAX_CHANNELS]]
     return ctx
 
 

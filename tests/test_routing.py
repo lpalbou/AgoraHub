@@ -48,6 +48,12 @@ def make_public_channel(client: TestClient, owner: dict, name: str,
         client.post(f"/channels/{name}/join", json={}, headers=member)
 
 
+def set_noticeboard(client: TestClient, owner: dict, name: str) -> None:
+    assert client.put(f"/channels/{name}/store/{CHANNEL_META_KEY}",
+                      json={"value": {"traffic_policy": "noticeboard"}},
+                      headers=owner).status_code == 200
+
+
 # -- the narrowed listener rule (pure function) ------------------------------
 
 def _event(status: str = "open", flags: str = "", sender: str = "peer") -> dict:
@@ -485,9 +491,54 @@ def _room_of_ten(client: TestClient, tmp_path) -> tuple[dict, dict, dict]:
     return a, b, c
 
 
+def test_commons_task_with_named_contributors_draws_immediate_room_nudge(tmp_path):
+    client = make_client(tmp_path)
+    a = register(client, "alice")
+    b = register(client, "bob")
+    c = register(client, "carol")
+    for headers in (a, b, c):
+        client.post("/channels/commons/join", json={}, headers=headers)
+    root = client.post(
+        "/channels/commons/messages",
+        json={"body": "take the agora-wui migration together",
+              "title": "agora wui migration",
+              "status": "open",
+              "to": ["bob", "carol"]},
+        headers=a,
+    ).json()
+    hist = client.get("/channels/commons/messages", headers=a).json()
+    nudges = [m for m in hist if m["kind"] == "system"
+              and "Open a focused room NOW" in (m["body"] or "")]
+    assert len(nudges) == 1
+    body = nudges[0]["body"]
+    assert "agora group agora-wui-migration" in body
+    assert "@alice" in body and "@bob" in body and "@carol" in body
+    assert nudges[0]["reply_to"] == root["id"]
+
+
+def test_two_speaking_seats_do_not_draw_the_room_nudge(tmp_path):
+    client = make_client(tmp_path)
+    a = register(client, "alice")
+    b = register(client, "bob")
+    for headers in (a, b):
+        client.post("/channels/commons/join", json={}, headers=headers)
+    client.post(
+        "/channels/commons/messages",
+        json={"body": "bob, can you check the seam?",
+              "title": "seam check",
+              "status": "open",
+              "to": ["bob"]},
+        headers=a,
+    )
+    hist = client.get("/channels/commons/messages", headers=a).json()
+    assert not any("Open a focused room NOW" in (m["body"] or "")
+                   for m in hist if m["kind"] == "system")
+
+
 def test_third_seat_sixth_message_draws_one_fork_nudge(tmp_path):
     client = make_client(tmp_path)
     a, b, c = _room_of_ten(client, tmp_path)
+    set_noticeboard(client, a, "board")
     root = client.post("/channels/board/messages",
                        json={"body": "let's design the queue tiers",
                              "title": "queue tiers design",
@@ -532,6 +583,7 @@ def test_orchestrated_fan_out_never_draws_the_fork_nudge(tmp_path):
     seats = [register(client, f"seat{i}") for i in range(7)]
     crowd = [register(client, f"lurker{i}") for i in range(3)]
     make_public_channel(client, a, "board", *seats, *crowd)
+    set_noticeboard(client, a, "board")
     names = [f"seat{i}" for i in range(7)]
     root = client.post("/channels/board/messages",
                        json={"body": "v7 review: each of you take your lane",
@@ -555,6 +607,7 @@ def test_unaddressed_sprawl_still_draws_the_fork_nudge(tmp_path):
     seats = [register(client, f"seat{i}") for i in range(7)]
     crowd = [register(client, f"lurker{i}") for i in range(3)]
     make_public_channel(client, a, "board", *seats, *crowd)
+    set_noticeboard(client, a, "board")
     root = client.post("/channels/board/messages",
                        json={"body": "thoughts on the queue tiers?",
                              "title": "queue tiers", "status": "open"},
@@ -576,6 +629,7 @@ def test_one_addressed_ask_does_not_exempt_a_room_wide_pile_on(tmp_path):
     seats = [register(client, f"seat{i}") for i in range(7)]
     crowd = [register(client, f"lurker{i}") for i in range(3)]
     make_public_channel(client, a, "board", *seats, *crowd)
+    set_noticeboard(client, a, "board")
     root = client.post("/channels/board/messages",
                        json={"body": "seat0, can you take this?",
                              "title": "the queue", "status": "open",
@@ -611,6 +665,22 @@ def test_private_groups_and_small_rooms_never_get_nudged(tmp_path):
                     json={"body": f"t{i}", "status": "reply",
                           "reply_to": root["id"]}, headers=who)
     hist = client.get("/channels/deep-work/messages", headers=a).json()
+    assert not any("outgrown the noticeboard" in (m["body"] or "")
+                   for m in hist if m["kind"] == "system")
+
+
+def test_collaboration_room_never_gets_noticeboard_fork_nudge(tmp_path):
+    client = make_client(tmp_path)
+    a, b, c = _room_of_ten(client, tmp_path)
+    root = client.post("/channels/board/messages",
+                       json={"body": "let's design the queue tiers",
+                             "title": "queue tiers design",
+                             "status": "open"}, headers=a).json()
+    for i, who in enumerate([b, c, a, b, c]):
+        client.post("/channels/board/messages",
+                    json={"body": f"turn {i}", "status": "reply",
+                          "reply_to": root["id"]}, headers=who)
+    hist = client.get("/channels/board/messages", headers=a).json()
     assert not any("outgrown the noticeboard" in (m["body"] or "")
                    for m in hist if m["kind"] == "system")
 

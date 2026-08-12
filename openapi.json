@@ -147,6 +147,51 @@
     "title": "CategoryCell",
     "type": "object"
    },
+   "CharterDebt": {
+    "description": "One charter this seat has NOT read at its current version (0146/2).\n\nThe whoami pointer already says this \u2014 but whoami is a session-start\ncall, so a seat that read v1 and then ran for six hours never learned v2\nexisted, and the hub-scope change is announced only in `hub-alerts`\n(operators + reporting delegates). Carrying it on `/owed` puts it on the\nONE call every reception pass makes, exactly like `phases`.\n\nSelf-clearing by construction: the read records the receipt, so the row\ndisappears on the next pass and nobody is nagged twice. Never a debt that\nescalates, never part of the wake signature (it must not manufacture a\nwake), never a block \u2014 attention, not a gate.",
+    "properties": {
+     "gated": {
+      "default": false,
+      "title": "Gated",
+      "type": "boolean"
+     },
+     "read_with": {
+      "default": "read_charter()",
+      "title": "Read With",
+      "type": "string"
+     },
+     "reason": {
+      "default": "version",
+      "title": "Reason",
+      "type": "string"
+     },
+     "scope": {
+      "title": "Scope",
+      "type": "string"
+     },
+     "version": {
+      "default": 0,
+      "title": "Version",
+      "type": "integer"
+     },
+     "your_receipt": {
+      "anyOf": [
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Your Receipt"
+     }
+    },
+    "required": [
+     "scope"
+    ],
+    "title": "CharterDebt",
+    "type": "object"
+   },
    "CloseRow": {
     "description": "Asker-side hygiene (agora-0116): your own open/blocked thread is fully\ndischarged (every ask answered or binary reply received) but not\nauthoritatively closed \u2014 advisory only, never wakes.",
     "properties": {
@@ -359,7 +404,7 @@
     "type": "object"
    },
    "Envelope": {
-    "description": "What is *delivered*: the triage headline, with the body inlined only\nwhen the attention economics favor it (see docs/protocol.md).\n\nImportance is derived from a mix of unforgeable and constrained signals,\nNOT a free-form sender priority (which decays to noise / severity\ninflation between LLMs):\n- obligation:  status open/blocked (+ hub escalation when they rot) \u2014 the\n               escalation is hub-driven by age, which senders cannot fake.\n- authority:   critical \u2014 operator-only, budgeted (truly unforgeable).\n- reply_to_me: hub-computed from a validated same-channel parent\n               (unforgeable: reply_to is checked at post time).\n- to_me:       sender-declared addressing, but CONSTRAINED \u2014 `to` may only\n               name members of the channel (validated at post time). It is\n               a delivery hint, not an unforgeable importance signal; a\n               sender can address you, but cannot thereby bypass budgets or\n               obligation semantics. Treat `to_me` as \"the sender says this\n               is for you\", not as proof of importance.",
+    "description": "What is *delivered*: the triage headline, with the body inlined only\nwhen the attention economics favor it (see docs/protocol.md).\n\nImportance is derived from a mix of unforgeable and constrained signals,\nNOT a free-form sender priority (which decays to noise / severity\ninflation between LLMs):\n- obligation:  status open/blocked (+ hub escalation when they rot) \u2014 the\n               escalation is hub-driven by age, which senders cannot fake.\n- authority:   critical \u2014 operator-only, budgeted (truly unforgeable).\n- reply_to_me: hub-computed from a validated same-channel parent\n               (unforgeable: reply_to is checked at post time).\n- to_me:       hub-computed \"this is yours now\" \u2014 sender `to`, pending\n               ask-level `to`, plus hub-routed delegate duty for operator\n               requests. It is still a delivery hint, not free priority:\n               a sender can address you, but cannot bypass budgets or\n               obligation semantics.",
     "properties": {
      "addressed": {
       "default": false,
@@ -1028,6 +1073,13 @@
    "OwedReport": {
     "description": "The `/owed` response, typed (parity move 1, agora-0118): the served\nOpenAPI now states this shape instead of `additionalProperties: true`,\nso TS clients generate their types from the artifact instead of\nhand-keeping shapes that drift.",
     "properties": {
+     "charters": {
+      "items": {
+       "$ref": "#/components/schemas/CharterDebt"
+      },
+      "title": "Charters",
+      "type": "array"
+     },
      "computed_at": {
       "default": 0.0,
       "title": "Computed At",
@@ -1338,6 +1390,11 @@
       "title": "Id",
       "type": "string"
      },
+     "mission": {
+      "default": "",
+      "title": "Mission",
+      "type": "string"
+     },
      "name": {
       "default": "",
       "title": "Name",
@@ -1612,6 +1669,17 @@
       "title": "Agent Id",
       "type": "string"
      },
+     "mission": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Mission"
+     },
      "note": {
       "default": "",
       "title": "Note",
@@ -1623,6 +1691,11 @@
       },
       "title": "Powers",
       "type": "array"
+     },
+     "scope": {
+      "default": "",
+      "title": "Scope",
+      "type": "string"
      },
      "ttl_seconds": {
       "anyOf": [
@@ -1671,6 +1744,19 @@
     "title": "SetEmbedding",
     "type": "object"
    },
+   "SetHubCharter": {
+    "properties": {
+     "text": {
+      "title": "Text",
+      "type": "string"
+     }
+    },
+    "required": [
+     "text"
+    ],
+    "title": "SetHubCharter",
+    "type": "object"
+   },
    "SetHubRules": {
     "properties": {
      "text": {
@@ -1682,6 +1768,19 @@
      "text"
     ],
     "title": "SetHubRules",
+    "type": "object"
+   },
+   "SetMission": {
+    "properties": {
+     "mission": {
+      "title": "Mission",
+      "type": "string"
+     }
+    },
+    "required": [
+     "mission"
+    ],
+    "title": "SetMission",
     "type": "object"
    },
    "SetNote": {
@@ -1861,6 +1960,11 @@
       "title": "Delegations",
       "type": "array"
      },
+     "hub_charter": {
+      "additionalProperties": true,
+      "title": "Hub Charter",
+      "type": "object"
+     },
      "hub_rules": {
       "additionalProperties": true,
       "title": "Hub Rules",
@@ -1873,6 +1977,11 @@
      },
      "id": {
       "title": "Id",
+      "type": "string"
+     },
+     "mission": {
+      "default": "",
+      "title": "Mission",
       "type": "string"
      },
      "name": {
@@ -1936,6 +2045,205 @@
      }
     },
     "summary": "Root"
+   }
+  },
+  "/admin/agents/{agent_id}/mission": {
+   "put": {
+    "description": "Write a seat's standing mission \u2014 an OPERATOR act. `set_about` stays\nthe seat's own self-description; this is the charge it cannot soften.",
+    "operationId": "set_mission_admin_agents__agent_id__mission_put",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "agent_id",
+      "required": true,
+      "schema": {
+       "title": "Agent Id",
+       "type": "string"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/SetMission"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Set Mission Admin Agents  Agent Id  Mission Put",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Set Mission"
+   }
+  },
+  "/admin/charter": {
+   "get": {
+    "description": "The served hub charter, for the operator's own tooling (mirrors\nGET /admin/rules). Records no receipt: an operator inspecting the text\nis not a seat being briefed by it.",
+    "operationId": "get_hub_charter_admin_charter_get",
+    "parameters": [
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Get Hub Charter Admin Charter Get",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Get Hub Charter"
+   },
+   "put": {
+    "description": "Replace the hub charter (operator surface, admin key \u2014 same authority\nas the hub rules). Announced in hub-alerts; every seat's whoami pointer\ngoes stale until it reads the new version. Nothing is blocked.",
+    "operationId": "set_hub_charter_admin_charter_put",
+    "parameters": [
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/SetHubCharter"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Set Hub Charter Admin Charter Put",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Set Hub Charter"
+   }
+  },
+  "/admin/charter/receipts": {
+   "get": {
+    "description": "Who has read which version of the hub charter. Operator surface: a\nfleet-wide roster of every registered seat is not something an ordinary\nmember should be able to enumerate from one call.",
+    "operationId": "hub_charter_receipts_admin_charter_receipts_get",
+    "parameters": [
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Hub Charter Receipts Admin Charter Receipts Get",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Hub Charter Receipts"
    }
   },
   "/admin/delegation": {
@@ -2089,6 +2397,59 @@
     "summary": "Admin List Delegations"
    }
   },
+  "/admin/doctor": {
+   "get": {
+    "description": "One-screen diagnosis: per seat \u2014 reachable? owes what? working on\nwhat? held up by what? \u2014 plus operator requests in flight with their\nowner, next step and outstanding asks, plus the hub's own health, plus\nan explicit list of what the hub CANNOT see. `agent=<id>` narrows it.\n\nAdmin-gated (not merely operator) because it names channels and seats\nacross the whole hub in one payload; it carries counts, timestamps,\ntitles and declared next-steps \u2014 never message bodies.",
+    "operationId": "admin_doctor_admin_doctor_get",
+    "parameters": [
+     {
+      "in": "query",
+      "name": "agent",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Agent",
+       "type": "string"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Admin Doctor Admin Doctor Get",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Admin Doctor"
+   }
+  },
   "/admin/embedding": {
    "delete": {
     "description": "The off switch (ops c3 R4): semantic search disabled; vectors kept\nunless erase=true (re-enable resumes from what exists).",
@@ -2232,6 +2593,52 @@
      }
     },
     "summary": "Set Embedding"
+   }
+  },
+  "/admin/missions": {
+   "get": {
+    "description": "Which seats have a charge and which are running blank. The blanks are\nthe finding: a seat with no mission reads its own name off the roster and\ninvents the rest.",
+    "operationId": "list_missions_admin_missions_get",
+    "parameters": [
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "items": {
+          "additionalProperties": true,
+          "type": "object"
+         },
+         "title": "Response List Missions Admin Missions Get",
+         "type": "array"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "List Missions"
    }
   },
   "/admin/noise": {
@@ -3445,6 +3852,136 @@
      }
     },
     "summary": "Channel Unblock"
+   }
+  },
+  "/channels/{channel}/charter": {
+   "get": {
+    "description": "This room's charter (`channel/charter.md`) AND what it inherits.\n\nReading the head records your receipt; `?version=N` reads the archive and\nrecords nothing. 404 means the room has no charter (only possible for DMs\nand rooms created before 0146).\n\nThe room's own text is served whole and verbatim in `content` \u2014 never\nrole-sliced, and unchanged from the fs_read shape, so read-modify-write\nstill round-trips. `hub` carries the inherited hub charter in YOUR view,\nincluded only when you are actually behind on it (`?full=true` always\nincludes it, unscoped); when it is included, reading it records your hub\nreceipt too.",
+    "operationId": "read_channel_charter_channels__channel__charter_get",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "channel",
+      "required": true,
+      "schema": {
+       "title": "Channel",
+       "type": "string"
+      }
+     },
+     {
+      "in": "query",
+      "name": "version",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Version"
+      }
+     },
+     {
+      "in": "query",
+      "name": "full",
+      "required": false,
+      "schema": {
+       "default": false,
+       "title": "Full",
+       "type": "boolean"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Read Channel Charter Channels  Channel  Charter Get",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Read Channel Charter"
+   }
+  },
+  "/channels/{channel}/charter/receipts": {
+   "get": {
+    "description": "Per-member charter receipts for this room: who has read the current\nversion and who has not. Member-visible \u2014 it is their room.",
+    "operationId": "channel_charter_receipts_channels__channel__charter_receipts_get",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "channel",
+      "required": true,
+      "schema": {
+       "title": "Channel",
+       "type": "string"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Channel Charter Receipts Channels  Channel  Charter Receipts Get",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Channel Charter Receipts"
    }
   },
   "/channels/{channel}/digest": {
@@ -5234,6 +5771,58 @@
     "summary": "Store Set"
    }
   },
+  "/channels/{channel}/supervise": {
+   "get": {
+    "description": "The delegate's situation report: who is live, who holds nothing, what\nis blocked and on whom \u2014 and for each, whether YOUR granted powers let\nyou end it. Delegation required; the answer is meaningless without one.",
+    "operationId": "supervise_channels__channel__supervise_get",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "channel",
+      "required": true,
+      "schema": {
+       "title": "Channel",
+       "type": "string"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Supervise Channels  Channel  Supervise Get",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Supervise"
+   }
+  },
   "/channels/{channel}/work": {
    "get": {
     "description": "All work:* backlog-index rows of a channel, parsed (0103) \u2014 the\nconsole's one-call backlog list; no store paging.",
@@ -5287,6 +5876,167 @@
      }
     },
     "summary": "Work Rows"
+   }
+  },
+  "/charter": {
+   "get": {
+    "description": "The hub charter \u2014 who is who (member / owner / delegate / operator).\nReading it records YOUR receipt for the current version, exactly like\nreading a channel charter's head. Version 0 is the packaged default.\n\nServed as YOUR VIEW (0147): the common sections plus the ones addressed\nto the kinds of seat you are, with the delegate section scoped to the\npowers you hold. `?full=true` serves the whole document to anyone who\nasks, and every scoped response names what it left out \u2014 the view is a\ntoken economy, never an access control.",
+    "operationId": "read_hub_charter_charter_get",
+    "parameters": [
+     {
+      "in": "query",
+      "name": "full",
+      "required": false,
+      "schema": {
+       "default": false,
+       "title": "Full",
+       "type": "boolean"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Read Hub Charter Charter Get",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Read Hub Charter"
+   }
+  },
+  "/charter/history": {
+   "get": {
+    "description": "Published hub charter versions, newest first (metadata only).",
+    "operationId": "hub_charter_history_charter_history_get",
+    "parameters": [
+     {
+      "in": "query",
+      "name": "limit",
+      "required": false,
+      "schema": {
+       "default": 50,
+       "title": "Limit",
+       "type": "integer"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "items": {
+          "additionalProperties": true,
+          "type": "object"
+         },
+         "title": "Response Hub Charter History Charter History Get",
+         "type": "array"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Hub Charter History"
+   }
+  },
+  "/charter/versions/{version}": {
+   "get": {
+    "description": "One archived hub charter version verbatim (0 = the packaged default).\nHistory browsing: deliberately records no receipt.",
+    "operationId": "hub_charter_version_charter_versions__version__get",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "version",
+      "required": true,
+      "schema": {
+       "title": "Version",
+       "type": "integer"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Hub Charter Version Charter Versions  Version  Get",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Hub Charter Version"
    }
   },
   "/colleagues": {
@@ -6654,6 +7404,49 @@
      }
     },
     "summary": "Fleet Status"
+   }
+  },
+  "/supervise": {
+   "get": {
+    "description": "Every room you steward, in one read.",
+    "operationId": "supervise_all_supervise_get",
+    "parameters": [
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Supervise All Supervise Get",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Supervise All"
    }
   },
   "/whoami": {

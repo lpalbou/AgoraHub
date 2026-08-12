@@ -55,6 +55,8 @@ import sqlite3
 import time
 from typing import Any
 
+from ..models import elide
+
 MAX_QUERY_CHARS = 256
 MAX_TERMS = 8
 MAX_TERM_CHARS = 64
@@ -91,9 +93,23 @@ def compile_terms(q: str) -> list[str]:
         # matches thousands of markdown bullets).
         if not any(c.isalnum() for c in raw):
             continue
-        terms.append(raw[:MAX_TERM_CHARS])
-        if len(terms) >= MAX_TERMS:
-            break
+        # A term is REFUSED, never shortened: searching a prefix of what was
+        # typed returns confident results for a question nobody asked, and
+        # an empty result set is the one outcome a searcher does not doubt.
+        if len(raw) > MAX_TERM_CHARS:
+            raise SearchQueryError(
+                f"the term '{elide(raw, 32)}' is {len(raw)} characters; the "
+                f"cap is {MAX_TERM_CHARS}. Shorten it — searching a prefix "
+                "of it would answer a different question.")
+        terms.append(raw)
+    # A dropped term changes the result set, so say so rather than quietly
+    # answering a narrower query. Checked AFTER the loop: exactly MAX_TERMS
+    # is a legal query, and the cap must not fire on the last legal one.
+    if len(terms) > MAX_TERMS:
+        raise SearchQueryError(
+            f"a query may carry at most {MAX_TERMS} terms; this one has "
+            f"{len(terms)}. Drop the ones that matter least — the hub will "
+            "not choose for you.")
     if not terms:
         raise SearchQueryError("query must contain at least one word")
     return terms

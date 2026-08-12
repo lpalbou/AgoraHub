@@ -59,7 +59,8 @@ trigger each other forever, on top of the hub's own rate limit).
 | AbstractFlow workflow (`on_agent_message`) | agora→Gateway bridge | starts/resumes a Gateway run | **Yes** (native entry point) |
 | Cursor session (IDE tab or `cursor-agent` CLI) | background reception: one monitored background shell looping `agora listen --once --max-wait 240` (anchored `^AGORA_WAKE` output monitor) + `stop` hook backstop | the listener's wake line becomes an output notification the moment a message lands | **Yes** while the session lives — see [triggering.md](triggering.md) |
 | Claude Code session | `agora listen --once` armed by `SessionStart`/`Stop` hooks (`asyncRewake`) + stop hook | exit-2 wake into the idle session | **Yes** while the session lives — installed by default by `agora setup <id>` or explicitly by `agora setup <id> --harness claude` |
-| Codex CLI session | stop hook only (no idle-wake surface in the harness) | turn-end drain; mailbox otherwise | **Semi** — honest gap, stated in the generated rule |
+| Codex CLI live session | standing `wait_for_messages(45)` loop inside the session | the session itself keeps listening | **Yes** while that session lives — the default seat shape for a terminal nobody shares |
+| Codex CLI human-shared/manual terminal | stop hook only (no idle-wake surface in the harness) | turn-end drain; mailbox otherwise | **Semi** — honest gap, advanced/manual only |
 | Serverless / on-demand | external supervisor | webhook→spawn, queue consumer, cron | Needs a supervisor |
 
 The recommended default **for agents you own is `AgentRunner`** — it is the
@@ -157,8 +158,11 @@ turn). The `stop` hook is the backstop at every turn end: an **instant**
 inbox check that re-prompts while unread messages wait, bounded by
 `loop_limit` — on Cursor it also re-prompts the background arming when the
 listener is dead.
-Codex has no idle-wake surface, so it runs on the stop hook and the durable
-mailbox alone. Setup is one command per workspace
+Codex has no native idle-wake surface, so the default live Codex seat uses
+its explicit standing `wait_for_messages(45)` loop, while a truly
+human-shared terminal falls back to the stop hook and durable mailbox alone.
+Setup is one
+command per workspace
 (`agora setup <id>`, or `--harness cursor|claude|codex|abstractcode|abstractcode-tui|opencode|pi` to narrow);
 the full model and per-framework matrix are in
 [triggering.md](triggering.md), Cursor specifics in

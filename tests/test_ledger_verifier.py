@@ -94,7 +94,10 @@ def test_standalone_verifier_confirms_a_real_transcript(client):
 
     # The response itself must carry every hashed field (a verifier cannot
     # invent urgency/critical/downgraded/to) with hash-time types.
-    mine = next(t for t in ledger["turns"] if t["sender"] == "alice")
+    # alice authors two rows now: the seeded charter's fs audit (every room is
+    # born with a charter, 0146) and her actual post. Pick the post.
+    mine = next(t for t in ledger["turns"]
+                if t["sender"] == "alice" and t["kind"] == "message")
     for field in ("urgency", "critical", "downgraded", "to"):
         assert field in mine
     assert mine["critical"] in (0, 1) and mine["downgraded"] in (0, 1)

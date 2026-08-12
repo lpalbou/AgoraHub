@@ -544,3 +544,141 @@ def test_preflight_squatter_refuses_loudly(capsys):  # noqa: F811
     finally:
         httpd.shutdown()
         t.join(timeout=5)
+
+
+# ---------------------------------------------------------------------------
+# `agora charter` — one verb, two scopes (0146)
+# ---------------------------------------------------------------------------
+
+
+def _seed_seat(live_hub, agent_id: str) -> str:
+    """Register a seat AND cache its key in the isolated home, so `--as` works
+    exactly as it does on an operator's machine."""
+    key = _register(live_hub.url, agent_id)
+    _config.cache_key(live_hub.url, agent_id, key)
+    return key
+
+
+def test_charter_verb_manages_the_hub_scope_end_to_end(live_hub, isolated_home,
+                                                       tmp_path, capsys):
+    """set -> consult -> change -> re-ack, through the CLI an operator types."""
+    _config.save_config(url=live_hub.url, admin_key=live_hub.admin, db_path="")
+    key = _seed_seat(live_hub, "seat-a")
+
+    _run_cli(["charter", "show", "--url", live_hub.url])
+    out = capsys.readouterr().out
+    assert "hub charter v0 (packaged default" in out
+    assert "## Delegate" in out and "## Operator" in out
+
+    # Nobody has read it; the seat's own read is what changes that.
+    _run_cli(["charter", "receipts", "--url", live_hub.url])
+    assert "nobody yet" in capsys.readouterr().out
+    httpx.get(f"{live_hub.url}/charter", headers=_bearer(key), timeout=5)
+    _run_cli(["charter", "receipts", "--url", live_hub.url])
+    assert "seat-a" in capsys.readouterr().out
+
+    # Publish v1 -> the seat is stale until it reads again.
+    doc = tmp_path / "roles.md"
+    doc.write_text("# roles\nmember, owner, delegate, operator.\n")
+    _run_cli(["charter", "set", str(doc), "--url", live_hub.url])
+    assert "updated to v1" in capsys.readouterr().out
+    _run_cli(["charter", "receipts", "--url", live_hub.url])
+    assert "STALE" in capsys.readouterr().out
+    httpx.get(f"{live_hub.url}/charter", headers=_bearer(key), timeout=5)
+    _run_cli(["charter", "receipts", "--url", live_hub.url])
+    assert "current" in capsys.readouterr().out
+
+    _run_cli(["charter", "history", "--url", live_hub.url])
+    assert "v1" in capsys.readouterr().out
+    # v0 stays readable forever — the packaged default is never lost.
+    _run_cli(["charter", "show", "--version", "0", "--as", "seat-a",
+              "--url", live_hub.url])
+    assert "hub charter v0" in capsys.readouterr().out
+
+
+def test_charter_set_warns_when_the_operator_text_drops_a_seat_kind(
+        live_hub, isolated_home, tmp_path, capsys):
+    _config.save_config(url=live_hub.url, admin_key=live_hub.admin, db_path="")
+    doc = tmp_path / "thin.md"
+    doc.write_text("# house\nEveryone is a member; owners own their rooms.\n")
+    _run_cli(["charter", "set", str(doc), "--url", live_hub.url])
+    out = capsys.readouterr().out
+    assert "never mentions delegate" in out and "never mentions operator" in out
+    # And `agora status` says it again, on the surface an operator revisits.
+    from agora.cli import _print_governance_drift
+    _print_governance_drift(live_hub.url, live_hub.admin)
+    assert "hub charter v1 (operator-set)" in capsys.readouterr().out
+
+
+def test_charter_verb_manages_a_channel_scope_end_to_end(live_hub, isolated_home,
+                                                         tmp_path, capsys):
+    _config.save_config(url=live_hub.url, admin_key=live_hub.admin, db_path="")
+    owner_key = _seed_seat(live_hub, "owner-a")
+    member_key = _seed_seat(live_hub, "member-b")
+    httpx.post(f"{live_hub.url}/channels", json={"name": "design"},
+               headers=_bearer(owner_key), timeout=5)
+    token = httpx.post(f"{live_hub.url}/channels/design/invites",
+                       json={"agent_id": "member-b"},
+                       headers=_bearer(owner_key), timeout=5).json()["invite_token"]
+    httpx.post(f"{live_hub.url}/channels/design/join", json={"invite_token": token},
+               headers=_bearer(member_key), timeout=5)
+
+    # Born with a charter: nothing to create, only to read.
+    _run_cli(["charter", "show", "--channel", "design", "--as", "owner-a",
+              "--url", live_hub.url])
+    out = capsys.readouterr().out
+    assert "'design' charter v1" in out and "Owner: owner-a" in out
+
+    # The member has not read it yet.
+    _run_cli(["charter", "receipts", "--channel", "design", "--as", "owner-a",
+              "--url", live_hub.url])
+    assert "member-b" in capsys.readouterr().out
+
+    doc = tmp_path / "design.md"
+    doc.write_text("# design — charter\nReviews name files and lines.\n")
+    _run_cli(["charter", "set", str(doc), "--channel", "design", "--as", "owner-a",
+              "--url", live_hub.url])
+    assert "updated to v2" in capsys.readouterr().out
+    _run_cli(["charter", "receipts", "--channel", "design", "--as", "owner-a",
+              "--url", live_hub.url])
+    out = capsys.readouterr().out
+    assert "member-b         member STALE" in out
+    assert "owner-a          owner  read" in out
+
+    httpx.get(f"{live_hub.url}/channels/design/charter",
+              headers=_bearer(member_key), timeout=5)
+    _run_cli(["charter", "receipts", "--channel", "design", "--as", "owner-a",
+              "--url", live_hub.url])
+    assert "STALE" not in capsys.readouterr().out
+
+    _run_cli(["charter", "history", "--channel", "design", "--as", "owner-a",
+              "--url", live_hub.url])
+    hist = capsys.readouterr().out
+    assert "v1" in hist and "v2" in hist
+
+
+def test_charter_verb_refuses_ambiguous_invocations(live_hub, isolated_home):
+    """Both refusals name the fix rather than failing inside key resolution."""
+    _config.save_config(url=live_hub.url, admin_key=live_hub.admin, db_path="")
+    with pytest.raises(SystemExit) as e:
+        _run_cli(["charter", "set", "--url", live_hub.url])
+    assert "usage: agora charter set FILE" in str(e.value)
+    with pytest.raises(SystemExit) as e:
+        _run_cli(["charter", "show", "--channel", "design", "--url", live_hub.url])
+    assert "--as <seat>" in str(e.value)
+
+
+def test_post_to_flag_is_repeatable_and_comma_splittable():
+    """fund1 (2026-08-11): `--to a --to b --to c` silently kept only `c` —
+    argparse's plain store action last-wins — so a four-seat commission went
+    out addressed to one seat. The flag now appends; both the repeated and
+    the comma form must survive parsing intact."""
+    args = build_parser().parse_args(
+        ["post", "--as", "op", "--channel", "commons",
+         "--to", "lead", "--to", "systems", "--to", "gameplay,frontend",
+         "body"])
+    assert args.to == ["lead", "systems", "gameplay,frontend"]
+    # And the no---to shape stays falsy (an unaddressed post).
+    args = build_parser().parse_args(
+        ["post", "--as", "op", "--channel", "commons", "body"])
+    assert not args.to

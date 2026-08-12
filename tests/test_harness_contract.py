@@ -37,6 +37,28 @@ def test_every_declared_harness_answers_the_contract():
             assert cls.REASONING_VOCAB, f"{name} claims reasoning, declares none"
 
 
+def test_an_adapter_without_evidence_must_declare_the_gap():
+    """THE HONESTY INVARIANT (2026-08-04). `EVIDENCE is None` is the marker
+    for "this harness reports no tool stream", and every per-turn verdict
+    that reads tools — mcp-use, mcp-call, mcp-init, missing-terminal — dies
+    silently when it holds. The claude adapter shipped with neither an
+    EVIDENCE string nor an `UNMET` entry, so nothing anywhere said the seat
+    was unobservable: 106 of 106 successful claude turns recorded zero tool
+    evidence, 12 of them made no tool call at all and scored ok, and for a
+    WORK chunk the complete set of verdicts was `rc == 0`.
+
+    An adapter may lack evidence. It may not lack evidence QUIETLY."""
+    for name, cls in _DRIVE_ADAPTERS.items():
+        if cls.EVIDENCE is None:
+            assert "evidence" in cls.UNMET, (
+                f"{name} parses no turn evidence but does not declare it in "
+                "UNMET — every tool-reading verdict fails open and no surface "
+                "says so")
+        else:
+            assert "evidence" not in cls.UNMET, (
+                f"{name} declares EVIDENCE and also claims it is unmet")
+
+
 def test_an_unmet_hard_capability_is_refused_without_naming_a_vendor(home):
     """The refusal must be as useful to the fifth framework as to the first.
 
@@ -191,3 +213,32 @@ def test_every_declared_knob_survives_the_knob_probe(home, monkeypatch):
         if probe.status != PASS:
             failures[name] = probe.detail
     assert failures == {}, failures
+
+
+def test_a_seat_can_cite_evidence_through_the_mcp_surface():
+    """A driven seat may use ONLY the Agora MCP tools. The evidence rule made
+    a delegate's `resolved` the one way to close an operator request — and
+    `post_message` exposed no way to send `data.evidence`, so through the
+    only permitted surface a commission could NEVER discharge (audit,
+    2026-08-04: 127 of 132 revived obligations were unreachable this way)."""
+    import inspect
+
+    from agora.mcp import server
+
+    src = inspect.getsource(server.build_server)
+    start = src.index("def post_message(")
+    sig = src[start:src.index(") -> dict:", start)]
+    assert "evidence" in sig, "MCP post_message cannot carry data.evidence"
+    assert "settled_by" in sig, "MCP post_message cannot close another's thread"
+
+
+def test_semantic_verdicts_are_diagnoses_not_transport_failures():
+    """A verdict about what a turn DID (mcp-use, mcp-call) must not back the
+    seat off like a turn that never reached the hub. Giving the claude
+    adapter evidence made it emit `mcp-use` for the first time; without this
+    ~11% of its turns would have parked in 900s backoff."""
+    from agora.drive import _SEMANTIC_STAGES, _TRANSPORT_STAGES
+
+    assert {"reception", "mcp-use", "mcp-call"} <= _SEMANTIC_STAGES
+    assert not (_SEMANTIC_STAGES & _TRANSPORT_STAGES), (
+        "a stage cannot be both a diagnosis and a transport failure")

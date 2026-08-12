@@ -24,7 +24,7 @@ from __future__ import annotations
 import pytest
 
 from agora.db import Database
-from agora.hub.service import HubService
+from agora.hub.service import HubError, HubService
 from agora.models import PostMessage
 
 
@@ -36,10 +36,10 @@ def service() -> HubService:
 @pytest.fixture()
 def fleet(service):
     """An operator, a reporting delegate, and two ordinary seats in a room."""
-    op, _ = service.register_agent("laurent", "Laurent", operator=True)
-    reader, _ = service.register_agent("reader", "Reader")
-    editor, _ = service.register_agent("editor", "Editor")
-    at1, _ = service.register_agent("at1", "At1")
+    op, _ = service.register_agent("laurent", "Laurent", operator=True, mission="seat laurent")
+    reader, _ = service.register_agent("reader", "Reader", mission="seat reader")
+    editor, _ = service.register_agent("editor", "Editor", mission="seat editor")
+    at1, _ = service.register_agent("at1", "At1", mission="seat at1")
     service.create_channel(op, "at-test", private=True)
     for seat in (reader, editor, at1):
         service.join_channel(
@@ -216,9 +216,175 @@ def test_bystander_reply_no_longer_closes_the_operators_broadcast(
         body="picked author names", status="reply", reply_to=task.id))
     assert task.id in _owed_ids(service, reader), \
         "a bystander's partial reply closed the operator's broadcast"
-    # The delegate's own `resolved` is what settles it — an accountable
-    # end-to-end completion claim, per the ruling.
+    # The delegate's own `resolved` settles it — but only as an accountable
+    # claim, which since 2026-08-04 means one that POINTS at the delivery.
+    # A bare `resolved` is the shape a delegate used to close a commission
+    # it had not delivered, and nothing could tell it from a real one.
+    # Since 2026-08-11 (fund1) the hub REFUSES it at post time with the
+    # recipe: silently achieving nothing taught the delegate nothing — a
+    # live seat posted three uncited "delivery complete" resolveds in a row,
+    # each spawned by the very debt the previous one failed to clear.
+    with pytest.raises(HubError) as exc:
+        service.post_message(reader, "at-test", PostMessage(
+            body="delivered: pdf rebuilt and reported", status="resolved",
+            reply_to=task.id))
+    assert exc.value.status_code == 400
+    assert "data.evidence" in exc.value.detail
+    assert task.id in _owed_ids(service, reader), \
+        "an uncited completion report closed the operator's request"
+    service.fs_write(reader, "at-test", "report.md", "# done\n",
+                     description="the rebuilt report")
+    # In a room with peers, the report must also cite a peer-authored
+    # artifact (adversarial-review ruling, 2026-08-12).
+    service.fs_write(editor, "at-test", "review-report.md",
+                     "# verdict: matches the request\n",
+                     description="editor's review")
+    service.store_set(reader, "at-test", "plan:pdf",
+                      {"slices": {"reader": "rebuild", "editor": "review"}},
+                      expect_version=0)
     service.post_message(reader, "at-test", PostMessage(
         body="delivered: pdf rebuilt and reported", status="resolved",
-        reply_to=task.id))
+        reply_to=task.id,
+        data={"evidence": [{"kind": "store", "ref": "plan:pdf"},
+                           {"kind": "fs", "ref": "report.md@1"},
+                           {"kind": "fs", "ref": "review-report.md@1"}]}))
     assert task.id not in _owed_ids(service, reader)
+
+
+def test_bystander_cannot_settle_operators_request_via_settled_by_pointer(
+        service, fleet):
+    """The operator-request guard in `_prepare_structured()` must refuse
+    with a HubError, not crash on an undefined local."""
+    op, reader, editor, at1 = fleet
+    _delegate(service)
+    task = service.post_message(op, "at-test", PostMessage(
+        body="deliver the package and report it", status="open",
+        title="package commission"))
+    anchor = service.post_message(editor, "at-test", PostMessage(
+        body="supporting note", status="fyi"))
+    with pytest.raises(HubError) as exc:
+        service.post_message(at1, "at-test", PostMessage(
+            body="settled elsewhere", status="resolved", reply_to=task.id,
+            data={"settled_by": anchor.id}))
+    assert exc.value.status_code == 403
+    assert "only the operator, or a reporting delegate citing evidence" in exc.value.detail
+
+
+# -- fund1 regressions (2026-08-11): the funded opencode soak -----------------
+
+
+def test_structured_commission_releases_addressee_who_answered_their_asks(
+        service, fleet):
+    """fund1 commons#6: a commission with per-seat asks pinned EVERY
+    addressee until commission discharge — a seat that had answered the one
+    ask naming it (envelope: asks_naming_you=[]) was still re-woken by its
+    /owed row forever. An addressee is released once no pending ask names
+    it; the reporting delegate alone carries the commission to completion."""
+    op, reader, editor, at1 = fleet
+    _delegate(service)  # reader is the reporting delegate
+    task = service.post_message(op, "at-test", PostMessage(
+        body="build the prototype; self-organize",
+        status="open", title="commission", to=["reader", "editor", "at1"],
+        asks=[{"id": "1", "text": "carry end to end", "to": ["reader"]},
+              {"id": "2", "text": "your slice?", "to": ["editor"]},
+              {"id": "3", "text": "your slice?", "to": ["at1"]}]))
+    assert task.id in _owed_ids(service, editor)
+    service.post_message(editor, "at-test", PostMessage(
+        body="I own the editor slice", status="reply", reply_to=task.id,
+        answers=["2"]))
+    assert task.id not in _owed_ids(service, editor), \
+        "an addressee who answered every ask naming it stayed pinned"
+    # at1 has not answered ask 3: still owed.
+    assert task.id in _owed_ids(service, at1)
+    # The delegate answered its ask but still carries the commission until
+    # the evidence-cited completion report.
+    service.post_message(reader, "at-test", PostMessage(
+        body="owned end to end", status="reply", reply_to=task.id,
+        answers=["1"]))
+    assert task.id in _owed_ids(service, reader), \
+        "the reporting delegate was released before the completion report"
+
+
+def test_askless_commission_still_pins_engaged_addressees(service, fleet):
+    """The release is per-ask only: an ask-less operator broadcast keeps
+    every addressee pinned after a mere engagement reply (the 75-second-
+    discharge protection is unchanged)."""
+    op, reader, editor, _ = fleet
+    _delegate(service)
+    task = service.post_message(op, "at-test", PostMessage(
+        body="five requirements in prose", status="open",
+        title="broadcast", to=["editor"]))
+    service.post_message(editor, "at-test", PostMessage(
+        body="on it", status="reply", reply_to=task.id))
+    assert task.id in _owed_ids(service, editor), \
+        "an engagement reply released an ask-less commission addressee"
+
+
+def test_delegate_uncited_resolved_on_commission_is_refused_with_recipe(
+        service, fleet):
+    """fund1: the delegate posted three uncited 'delivery complete'
+    resolveds, each spawned by the debt the previous one failed to clear.
+    The hub now refuses the shape at post time and names the recipe."""
+    op, reader, editor, _ = fleet
+    _delegate(service)
+    task = service.post_message(op, "at-test", PostMessage(
+        body="build it", status="open", title="commission",
+        asks=[{"id": "1", "text": "carry it", "to": ["reader"]}]))
+    with pytest.raises(HubError) as exc:
+        service.post_message(reader, "at-test", PostMessage(
+            body="delivery complete", status="resolved", reply_to=task.id))
+    assert exc.value.status_code == 400
+    assert "data.evidence" in exc.value.detail
+    # fund1's real shape: every ask answered, THEN the cited report.
+    # A store citation satisfies it end to end — but in a room with peers
+    # the delegate's own row is not enough (2026-08-12): a peer-authored
+    # verdict must ride the evidence too. Then the commission leaves EVERY
+    # seat's ledger, including the delegate's.
+    service.post_message(reader, "at-test", PostMessage(
+        body="owned; carrying it", status="reply", reply_to=task.id,
+        answers=["1"]))
+    service.store_set(reader, "at-test", "decision:delivered",
+                      {"what": "shipped"}, expect_version=0)
+    with pytest.raises(HubError) as exc:
+        service.post_message(reader, "at-test", PostMessage(
+            body="delivery complete", status="resolved", reply_to=task.id,
+            data={"evidence": [{"kind": "store",
+                                "ref": "decision:delivered"}]}))
+    assert "uncontested" in exc.value.detail
+    service.store_set(editor, "at-test", "review:delivered",
+                      {"verdict": "checked against the commission"},
+                      expect_version=0)
+    # ...and a peer review alone is still not enough: the report must cite
+    # the agreed plan it delivered under (plan-mandatory ruling, 2026-08-12).
+    with pytest.raises(HubError) as exc:
+        service.post_message(reader, "at-test", PostMessage(
+            body="delivery complete; editor reviewed", status="resolved",
+            reply_to=task.id,
+            data={"evidence": [
+                {"kind": "store", "ref": "decision:delivered"},
+                {"kind": "store", "ref": "review:delivered"}]}))
+    assert "plan" in exc.value.detail
+    service.store_set(reader, "at-test", "plan:build",
+                      {"slices": {"reader": "carry", "editor": "review"}},
+                      expect_version=0)
+    service.post_message(reader, "at-test", PostMessage(
+        body="delivery complete; planned, built, editor reviewed",
+        status="resolved", reply_to=task.id,
+        data={"evidence": [{"kind": "store", "ref": "plan:build"},
+                           {"kind": "store", "ref": "decision:delivered"},
+                           {"kind": "store", "ref": "review:delivered"}]}))
+    assert task.id not in _owed_ids(service, reader)
+    assert task.id not in _owed_ids(service, editor)
+
+
+def test_bystander_plain_resolved_is_not_refused(service, fleet):
+    """The refusal is scoped to the reporting delegate (whose resolved IS
+    the completion report). A bystander's plain resolved reply stays legal
+    and simply does not close anything."""
+    op, reader, editor, _ = fleet
+    _delegate(service)
+    task = service.post_message(op, "at-test", PostMessage(
+        body="build it", status="open", title="commission"))
+    service.post_message(editor, "at-test", PostMessage(
+        body="fwiw looks done", status="resolved", reply_to=task.id))
+    assert task.id in _owed_ids(service, reader)

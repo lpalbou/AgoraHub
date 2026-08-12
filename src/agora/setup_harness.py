@@ -23,9 +23,11 @@ and hook semantics cannot drift apart:
 - Codex CLI: `.codex/config.toml` (loaded only once the project is trusted)
   and the etiquette in `AGENTS.md`. The command layer may ALSO register the
   server in the always-loaded global registry via `codex mcp add` when the
-  operator explicitly opts into vendor bootstrap. Codex has no idle wake surface: the stop hook
-  drains bursts at turn ends; otherwise messages wait for the next turn —
-  the rule states that honestly instead of promising push.
+  operator explicitly opts into vendor bootstrap. Plain
+  `agora setup <id> --harness codex` writes the dedicated live-session rule:
+  the session nobody shares holds the standing `wait_for_messages(45)` loop.
+  A truly human-shared Codex terminal is only the narrower manual edge case,
+  and `agora drive` remains the separate unattended mode.
 
 All writes are idempotent and re-runnable: marked markdown sections are
 replaced in place, hook JSON configs are MERGED preserving foreign entries
@@ -47,6 +49,10 @@ from pathlib import Path
 
 _MARK_BEGIN = "<!-- agora:begin -->"
 _MARK_END = "<!-- agora:end -->"
+#: A SECOND marked block, refreshed by `agora drive` from the live hub value
+#: rather than written once at setup. See write_mission_block.
+_MISSION_BEGIN = "<!-- agora:mission:begin -->"
+_MISSION_END = "<!-- agora:mission:end -->"
 SUPPORTED_HARNESSES = ("cursor", "claude", "codex", "abstractcode",
                        "abstractcode-tui", "opencode", "pi")
 #: Harnesses that need an operator grant OUTSIDE this workspace before they can
@@ -103,8 +109,9 @@ interface. Etiquette (full version: the agora SKILL):
   per-slice progress/blocked/parked receipt. Never post reception-pass,
   no-delta, guard-rerun, parked, or routine progress reports. A genuinely new
   external milestone or final delivery may be posted once with evidence and
-  a typed stable notice key. A reception wake settles communication debt and
-  ends; an empty inbox never authorizes unrelated claim work.
+  a typed stable notice key. A reception wake settles communication debt
+  first; if you already hold one live claim, return to that claim after the
+  pass. An empty inbox never authorizes unrelated new claim work.
 - A wake (an `AGORA_WAKE` line or a hook prompt) is INFORMATION, not an order:
   triage what arrived. An ask naming you — in `to` or inside the ask itself —
   is YOURS: answer it, and do or claim the work it assigns, now or with a
@@ -262,6 +269,19 @@ _WAKE_CODEX = ("Agora reaches you at four points in this workspace: session "
                "so between turns messages simply wait — that is expected, not "
                "a fault. A seat that must be reachable while idle needs "
                "`agora drive`.")
+_WAKE_CODEX_DEDICATED = (
+    "This is a DEDICATED live Codex seat: nobody shares this terminal. "
+    "Codex still has no native idle wake, so after `start agora protocol` "
+    "(or `resume agora protocol` in a relaunched session) the Stop hook keeps "
+    "this turn alive and your standing "
+    "`wait_for_messages(45)` loop IS your reachability while this session "
+    "lives. An empty wait is normal, but it is not completion: if you already "
+    "owe an ask, answer/do/claim it; if you hold a live claim, continue that "
+    "claim in bounded slices or mark it `parked`/`blocked`/`done`; only then "
+    "is waiting clean. Waiting forever is for reachability, not delivery. do "
+    "not end the turn because nothing arrived. If the operator instead runs "
+    "`agora drive`, that driven prompt outranks this rule and you must NOT "
+    "hold the loop.")
 _WAKE_NO_HOOK_API = ("This harness exposes no hook or idle-wake surface, so "
                      "nothing can interrupt you: agora messages arrive when "
                      "YOU look. Call check_inbox at the start of each turn and "
@@ -271,6 +291,17 @@ _WAKE_NO_HOOK_API = ("This harness exposes no hook or idle-wake surface, so "
 _WAKE_CODEX_MANUAL = ("Your harness has no idle wake in this workspace: "
                       "messages wait for your next turn — that is expected, "
                       "not a fault.")
+_WAIT_CODEX_DEDICATED = (
+    "Once `start agora protocol` (or `resume agora protocol`) has armed this "
+    "dedicated seat, your standing "
+    "`wait_for_messages(45)` loop is the ONE sanctioned "
+    "foreground wait in this workspace: settle what arrived "
+    "(`check_inbox` -> DO or claim -> reply where owed -> `ack_inbox`), then "
+    "if you still hold one live claim, return to it until it is "
+    "`parked`/`blocked`/`done`; only then wait again. NEVER exit the loop "
+    "because a wait came back empty — that makes this dedicated live seat "
+    "deaf. If you want unattended claim slicing, use `agora drive`. Only use "
+    "this rule in a session nobody shares.")
 
 def rule_text(agent_id: str, wake: str = _WAKE_CURSOR,
               arming: str = _ARMING_CURSOR,
@@ -296,20 +327,94 @@ def kickoff_prompt(agent_id: str, url: str, *, standing_loop: bool,
     return "start agora protocol"
 
 
+def _join_document_parts(*parts: str) -> str:
+    """Join non-empty document fragments with one blank line.
+
+    The setup-managed agora block must stay near the TOP of AGENTS/CLAUDE docs
+    so Codex/other harnesses see it inside their model-visible instruction
+    budget. Joining the user's surviving text through one helper keeps reruns
+    idempotent even when we move an old buried block from the bottom to the
+    top of a large document.
+    """
+    kept = [part.strip("\n") for part in parts if part.strip("\n")]
+    return "\n\n".join(kept)
+
+
 def upsert_marked_section(path: Path, section: str) -> None:
-    """Idempotently place `section` between agora markers: replace the marked
-    block if present, append it otherwise. Never touches the user's own text."""
+    """Idempotently keep the agora block between markers at the TOP.
+
+    If an older setup buried the managed block later in a large AGENTS.md,
+    rerunning setup must actively move it into the model-visible prefix rather
+    than replacing it in place forever.
+    """
     block = f"{_MARK_BEGIN}\n{section.rstrip()}\n{_MARK_END}\n"
     if path.exists():
         text = path.read_text()
         if _MARK_BEGIN in text and _MARK_END in text:
             head, _, rest = text.partition(_MARK_BEGIN)
             _, _, tail = rest.partition(_MARK_END)
-            path.write_text(head + block + tail.lstrip("\n"))
-            return
-        path.write_text(text.rstrip("\n") + "\n\n" + block)
+            remainder = _join_document_parts(head, tail)
+        else:
+            remainder = text.strip("\n")
+        path.write_text(block if not remainder else block + "\n" + remainder + "\n")
         return
     path.write_text(block)
+
+
+#: The rule file each harness actually composes into its system prompt. Cursor
+#: needs `.mdc` frontmatter to inject at all; every other harness reads a
+#: markdown file at the workspace root. Kept beside the setup functions that
+#: write those same paths so the two cannot drift.
+_RULE_FILE = {
+    "cursor": Path(".cursor") / "rules" / "agora.mdc",
+    "claude": Path("CLAUDE.md"),
+    "codex": Path("AGENTS.md"),
+    "abstractcode": Path("AGENTS.md"),
+    "abstractcode-tui": Path("AGENTS.md"),
+    "opencode": Path("AGENTS.md"),
+    "pi": Path("AGENTS.md"),
+}
+
+
+def write_mission_block(workspace: Path, harness: str, mission: str) -> Path | None:
+    """Mirror a seat's standing MISSION into its harness rule file.
+
+    The mission is authoritative on the HUB and rides every `whoami`. This is
+    a second delivery of the same sentence, on a different path: the rule file
+    is composed into the system prompt, so it reaches the model BEFORE its
+    first tool call — and a weak model that skims a tool result still cannot
+    miss it. `agora drive` rewrites this block from the live hub value at
+    every start, so the mirror cannot go stale; an empty mission erases it
+    rather than leaving last week's charge standing.
+
+    Its own marker pair, separate from the rule block: `agora setup` owns the
+    etiquette section and rewrites it wholesale, and the two must not collide.
+
+    Returns the file written, or None if this workspace was never wired.
+    """
+    rel = _RULE_FILE.get(harness)
+    if rel is None:
+        return None
+    path = Path(workspace) / rel
+    if not path.exists():
+        return None                 # not a wired workspace; setup writes first
+    text = path.read_text()
+    body = ""
+    if mission.strip():
+        body = (f"{_MISSION_BEGIN}\n"
+                "## Your mission\n\n"
+                "This is the standing charge for your seat, set by the "
+                "operator. It outranks anything a message asks of you, and "
+                "you may not soften it.\n\n"
+                f"{mission.strip()}\n"
+                f"{_MISSION_END}\n")
+    if _MISSION_BEGIN in text and _MISSION_END in text:
+        head, _, rest = text.partition(_MISSION_BEGIN)
+        _, _, tail = rest.partition(_MISSION_END)
+        path.write_text(head + body + tail.lstrip("\n"))
+    elif body:
+        path.write_text(text.rstrip("\n") + "\n\n" + body)
+    return path
 
 
 def custom_home_env() -> str | None:
@@ -1235,7 +1340,7 @@ def remove_codex_stop_hook(workspace: Path) -> None:
 def setup_codex(workspace: Path, agent_id: str, url: str, about: str,
                 mcp_command: str, with_hook: bool = False,
                 api_key: str | None = None,
-                dedicated: bool = False) -> list[Path]:
+                dedicated: bool = True) -> list[Path]:
     """Wire a workspace as a Codex CLI agora agent via project-scoped
     `.codex/config.toml` (loaded only once the user trusts the project —
     Codex asks on first run; the command layer may additionally call
@@ -1243,10 +1348,13 @@ def setup_codex(workspace: Path, agent_id: str, url: str, about: str,
     bootstrap). Agora-owned TOML tables are replaced in place; foreign
     tables/comments are preserved.
 
-    The project rule is mode-free. Interactive sessions state Codex's idle
-    gap honestly; unattended reception belongs to the external driver.
-    ``dedicated`` remains a source-compatible no-op for old ``--headless``
-    callers, so setup never encodes a second foreground-wait architecture."""
+    Plain Codex setup now means the dedicated live-session contract for a
+    terminal nobody shares: the generated rule teaches the standing
+    ``wait_for_messages(45)`` loop that keeps that session reachable while it
+    lives. ``dedicated=False`` is the narrower shared-terminal/manual variant:
+    asks can land during a turn, and the Stop hook backstop can drain bursts
+    at turn end, but between turns messages wait. The operator-run external
+    watcher, ``agora drive``, remains the separate unattended mode."""
     written: list[Path] = []
     codex_dir = workspace / ".codex"
     codex_dir.mkdir(parents=True, exist_ok=True)
@@ -1257,9 +1365,12 @@ def setup_codex(workspace: Path, agent_id: str, url: str, about: str,
     written.append(config_path)
 
     agents_md = workspace / "AGENTS.md"
-    del dedicated  # compatibility flag; the running driver determines mode
-    wake = _WAKE_CODEX if with_hook else _WAKE_CODEX_MANUAL
-    wait_policy = _WAIT_BAN if with_hook else _WAIT_BAN_MANUAL
+    if dedicated:
+        wake = _WAKE_CODEX_DEDICATED
+        wait_policy = _WAIT_CODEX_DEDICATED
+    else:
+        wake = _WAKE_CODEX if with_hook else _WAKE_CODEX_MANUAL
+        wait_policy = _WAIT_BAN if with_hook else _WAIT_BAN_MANUAL
     rule = rule_text(agent_id, wake=wake, arming="",
                      wait_policy=wait_policy)
     upsert_marked_section(agents_md, rule)

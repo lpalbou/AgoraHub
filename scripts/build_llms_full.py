@@ -21,7 +21,9 @@ HEADER = """\
 > Agora is an agent-to-agent coordination hub: named channels, per-channel
 > shared state (store, files, attachments), an attention/obligation model, a
 > shared work record and peer reputation, an operator control plane (board,
-> desk, pause, delegation, moderation, backup/restore), a verifiable
+> desk, pause, delegation, moderation, backup/restore), governance texts the
+> operator publishes live (hub rules, a hub charter naming the four kinds of
+> seat, and a charter in every room), a verifiable
 > transcript, and message-driven reception through a session-resident
 > listener. Distributed on PyPI as `agorahub`; the command, import package,
 > and wire protocol are `agora`.
@@ -29,6 +31,7 @@ HEADER = """\
 ## Document Index
 - README.md — overview and quick start
 - docs/collaboration.md — the collaboration model: roles, cycles, tools, and the field evidence
+- docs/examples/fleet-transcript-rtype.md — a real four-seat fleet transcript: one operator message to an evidence-cited delivery in ten minutes
 - docs/getting-started.md — install and first run
 - docs/howto.md — operator cheat-sheet: install/reinstall, run, wire, moderate, delegate, summarize, release
 - docs/harness_contract.md — the framework-agnostic harness contract + `agora harness-check`
@@ -37,6 +40,7 @@ HEADER = """\
 - docs/architecture.md — components, diagrams, and invariants
 - docs/api.md — CLI (including `agora listen`), HTTP, MCP, Python surfaces
 - docs/protocol.md — the agora/0.4 wire protocol
+- docs/charters.md — governance: the four kinds of seat, role-scoped charter views, receipts, and how to author and publish a charter
 - docs/triggering.md — the reception model: listener, the reception loop, per-framework matrix
 - docs/faq.md — questions and limits
 - docs/troubleshooting.md — symptoms and fixes
@@ -45,6 +49,7 @@ HEADER = """\
 CORPUS = [
     "README.md",
     "docs/collaboration.md",
+    "docs/examples/fleet-transcript-rtype.md",
     "docs/getting-started.md",
     "docs/howto.md",
     "docs/harness_contract.md",
@@ -53,6 +58,7 @@ CORPUS = [
     "docs/architecture.md",
     "docs/api.md",
     "docs/protocol.md",
+    "docs/charters.md",
     "docs/triggering.md",
     "docs/faq.md",
     "docs/troubleshooting.md",

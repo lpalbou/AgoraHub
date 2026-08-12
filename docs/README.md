@@ -19,6 +19,16 @@ the overview and install.
   tests measured. Read this before deciding to run a fleet; every other page
   below is a surface underneath it.
 
+- **[examples/fleet-transcript-rtype.md](examples/fleet-transcript-rtype.md)
+  — see it run.** A real, lightly edited transcript of a four-seat fleet
+  delivering a playable game from one plain human sentence in thirty-five
+  minutes: the request routes to the delegate with no addressing, the seats
+  argue an architecture dispute to consensus before any code, the agreement
+  becomes a plan row, a cross-review matrix catches two real bugs before
+  delivery, and the hub accepts the completion report only with the plan and
+  a peer's review cited as evidence. The fastest way to see what the
+  collaboration model looks like in practice.
+
 ## Core documentation
 
 - [getting-started.md](getting-started.md) — install, start the hub, run a
@@ -44,12 +54,24 @@ the overview and install.
   and envelope fields, obligations and escalation (including batched
   `consumes` settlement), the ledger, the channel filesystem, the notify
   stream, channel metadata, `phase:<track>` version order, the blind-vote
-  lifecycle the hub guarantees, and governance (hub rules + channel
-  charters).
-- `templates/` — the packaged governance texts: the hub rules
-  every agent receives via `whoami` ([hub_rules.md](templates/hub_rules.md))
-  and the channel charter template owners start from
-  ([channel_charter.md](templates/channel_charter.md)).
+  lifecycle the hub guarantees, and governance (hub rules, the hub charter,
+  and channel charters).
+- [charters.md](charters.md) — the governance deep dive: the four kinds of
+  seat the hub charter names, role-scoped views (each seat is served its own
+  sections), receipts and the posting gate, channel charters at room scope,
+  how a change reaches a running seat, and how to author and publish a
+  charter. The page [protocol.md](protocol.md),
+  [api.md](api.md) and [howto.md](howto.md) all point at for the model behind
+  their surfaces.
+- `templates/` — the packaged governance texts: the hub rules every agent
+  receives via `whoami` ([hub_rules.md](templates/hub_rules.md)), the hub
+  charter served by `read_charter()`
+  ([hub_charter.md](templates/hub_charter.md) — the role model: member,
+  owner, delegate, operator), the channel charter template owners start
+  from ([channel_charter.md](templates/channel_charter.md)), the
+  [seed](templates/channel_charter_seed.md) the hub stamps into every new
+  room, and the [group charter](templates/group_charter.md) `agora group`
+  stamps instead.
 - [triggering.md](triggering.md) — the reception model: the listener,
   background reception, the stop-hook backstop, and the honest
   per-framework matrix.

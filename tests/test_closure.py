@@ -11,6 +11,7 @@ import time
 from fastapi.testclient import TestClient
 
 from agora.hub.app import create_app
+from agora.hub.presence import _RECEPTION_STALE
 
 ADMIN_KEY = "test-admin"
 
@@ -22,7 +23,7 @@ def make_client() -> TestClient:
 
 
 def register(client: TestClient, agent_id: str, operator: bool = False) -> dict[str, str]:
-    r = client.post("/agents", json={"id": agent_id, "operator": operator},
+    r = client.post("/agents", json={"id": agent_id, "mission": f"seat {agent_id}", "operator": operator},
                     headers={"Authorization": f"Bearer {ADMIN_KEY}"})
     return {"Authorization": f"Bearer {r.json()['api_key']}"}
 
@@ -111,6 +112,26 @@ def test_operator_resolved_reply_closes():
     post(client, op, body="operator closes", status="resolved", reply_to=q["id"])
     client.post("/inbox/ack", json={"cursors": {"room": 10_000}}, headers=member)
     assert q["seq"] not in inbox_seqs(client, member)
+
+
+def test_non_delegate_settled_by_on_operator_request_is_refused_not_crashed():
+    client = make_client()
+    flow, op, member, closer = (register(client, "flow"),
+                                register(client, "op", operator=True),
+                                register(client, "member"),
+                                register(client, "closer"))
+    make_channel(client, flow, "room", op, member, closer)
+    q = post(client, op, body="operator question", title="q", status="open",
+             asks=[{"id": "1", "text": "a?"}])
+    ruling = post(client, member, body="settled elsewhere", title="ruling")
+
+    r = client.post("/channels/room/messages", headers=closer,
+                    json={"body": "closing with pointer",
+                          "status": "resolved",
+                          "reply_to": q["id"],
+                          "data": {"settled_by": ruling["id"]}})
+    assert r.status_code == 403
+    assert "reporting delegate" in r.json()["detail"]
 
 
 # -- 0062: teaching refusals (the c817 / c1113 shapes) ----------------------------
@@ -351,9 +372,9 @@ def test_peer_addressed_reply_elsewhere_obliges_the_named_seat():
     assert not any(o["id"] == directive["id"] for o in owed["to_answer"])
 
 
-def test_peer_addressed_fyi_never_obliges():
-    """0102: peer fyi is the terminal gesture — DMs auto-address every post,
-    so without a non-obliging status no DM thread could ever end."""
+def test_peer_addressed_fyi_without_tag_does_not_oblige():
+    """An untagged peer fyi stays terminal — DMs auto-address every post, so
+    plain addressed fyi must still be able to end a thread."""
     client = make_client()
     flow = register(client, "flow")
     code = register(client, "code")
@@ -361,6 +382,21 @@ def test_peer_addressed_fyi_never_obliges():
     base = post(client, flow, body="root", status="fyi")
     fyi = post(client, code, body="fyi, closing note", status="fyi",
                to=["flow"], reply_to=base["id"])
+    owed = client.get("/owed", headers=flow).json()
+    assert not any(o["id"] == fyi["id"] for o in owed["to_answer"])
+
+
+def test_tagged_peer_fyi_is_visible_but_not_owed():
+    """A tagged peer fyi targets visibility, not reply debt."""
+    client = make_client()
+    flow = register(client, "flow")
+    code = register(client, "code")
+    make_channel(client, flow, "room", code)
+    base = post(client, flow, body="root", status="fyi")
+    fyi = post(client, code, body="fyi for @flow: please confirm", status="fyi",
+               reply_to=base["id"])
+    inbox = client.get("/inbox", headers=flow).json()
+    assert any(e["id"] == fyi["id"] and e["to_me"] for e in inbox)
     owed = client.get("/owed", headers=flow).json()
     assert not any(o["id"] == fyi["id"] for o in owed["to_answer"])
 
@@ -390,17 +426,26 @@ def test_multi_addressee_directive_each_seat_owes_its_own_engagement():
                                client.get("/inbox", headers=uic).json()]
 
 
-def test_operator_addressed_fyi_obliges_too():
-    """0102 widening: operator words oblige whatever status the composer
-    picked — fyi included. Human words are few and never chatter."""
+def test_operator_addressed_fyi_is_visible_and_owed():
+    """An operator's addressed line obliges WHATEVER its status (ruling
+    2026-07-19: 'it MUST be'). Humans are allowed to be sloppy about status —
+    a directive typed as `fyi` still owes the named seat's engagement, and a
+    peer's fyi still obliges nobody (see `_is_addressed_debt`)."""
     client = make_client()
     op = register(client, "op", operator=True)
     code = register(client, "code")
     make_channel(client, op, "room", code)
     note = post(client, op, body="tomorrow: migrate the boards", status="fyi",
                 to=["code"])
+    inbox = client.get("/inbox", headers=code).json()
+    assert any(e["id"] == note["id"] and e["to_me"] for e in inbox)
     owed = client.get("/owed", headers=code).json()
     assert any(o["id"] == note["id"] for o in owed["to_answer"])
+    # The addressee's own reply clears it, like any directive debt.
+    post(client, code, body="noted — will migrate", status="reply",
+         to=["op"], reply_to=note["id"])
+    owed = client.get("/owed", headers=code).json()
+    assert not any(o["id"] == note["id"] for o in owed["to_answer"])
 
 
 def test_retired_operator_excluded_from_operator_ids():
@@ -567,7 +612,8 @@ def test_deaf_sweep_alerts_when_present_seat_stops_arming():
     # uic LOOKS present: keep its session activity fresh (NOT offline) but
     # make its reception loop stale — it was arming, then the listener died.
     service.presence.touch("uic")
-    service.presence._last_reception["uic"] = time.time() - 1000.0  # > 900s
+    service.presence._last_reception["uic"] = (
+        time.time() - _RECEPTION_STALE - 100.0)   # anchored, never a magic number
 
     assert service.dark_sweep() == ["uic"]      # DEAF, not DARK
     assert service.dark_sweep() == []           # same episode: no duplicate
@@ -602,7 +648,8 @@ def test_silence_watchdog_alert_addresses_reporting_steward():
     time.sleep(0.2)
     service = client.app.state.service
     service.presence.touch("uic")
-    service.presence._last_reception["uic"] = time.time() - 1000.0
+    service.presence._last_reception["uic"] = (
+        time.time() - _RECEPTION_STALE - 100.0)
     service.dark_sweep()
     msgs = client.get("/channels/hub-alerts/messages", headers=op).json()
     deaf = [m for m in msgs if "AGENT DEAF: uic" in m["body"]]
@@ -757,41 +804,6 @@ def test_dark_sweep_alerts_operator_once_per_episode():
     assert any("AGENT DARK: uic" in m["body"] for m in r.json())
 
 
-def test_retirement_proposal_after_long_dark_episode(monkeypatch):
-    """0107: long-dark seat with breached debt gets one retirement proposal."""
-    from agora.hub import service as hub_service
-
-    monkeypatch.setattr(hub_service, "DARK_RETIRE_PROPOSAL_SECONDS", 0.0)
-    client = make_client()
-    flow = register(client, "flow")
-    op = register(client, "op", operator=True)
-    dark = register(client, "uic")
-    make_channel(client, flow, "room", dark)
-    client.put("/channels/room/store/channel:meta",
-               json={"value": {"response_sla_minutes": 0.001}}, headers=flow)
-    post(client, flow, body="for uic", title="q", status="open", to=["uic"],
-         asks=[{"id": "1", "text": "a?"}])
-    time.sleep(0.2)
-    service = client.app.state.service
-    service.presence._last_seen.pop("uic", None)
-    service.dark_sweep()
-    assert "uic" in service._dark_since
-    msgs = client.get("/channels/hub-alerts/messages", headers=op).json()
-    assert any("RETIREMENT PROPOSAL: 'uic'" in m["body"] for m in msgs)
-    assert any(m.get("to") == ["op"] for m in msgs
-               if "RETIREMENT PROPOSAL" in m["body"])
-    assert service._retirement_proposal_sweep() == []
-
-    # Episode ends when the seat's overdue work clears: the asker closes the
-    # thread, so uic no longer holds an escalated obligation.
-    q_id = next(m["id"] for m in client.get("/channels/room/messages",
-                                            headers=flow).json()
-                if m["status"] == "open")
-    post(client, flow, body="closing", status="resolved", reply_to=q_id)
-    assert service.dark_sweep() == []
-    assert "uic" not in service._dark_since
-
-
 def test_escalation_rewake_re_emits_notify_once_per_sla_band(tmp_path):
     """0106: hub re-delivers escalated debts into notify files so listeners
     see the escalated flag; deduped per band; suppressed once DARK owns seat."""
@@ -828,8 +840,13 @@ def test_escalation_rewake_re_emits_notify_once_per_sla_band(tmp_path):
     assert service._escalation_rewake_sweep() == []  # same band: no storm
     assert len(log.read_text().strip().split("\n")) == len(lines)
 
-    # DARK episode suppresses further re-rings (0107 bound).
+    # DARK episode suppresses further re-rings (0107 bound). Going dark means
+    # BOTH clocks stop: dropping only `_last_seen` while the reception
+    # heartbeat still reads 'armed' is the contradiction the 2026-08-03 audit
+    # removed (a listening seat cannot be dark), so the seat is silenced
+    # properly here.
     service.presence._last_seen.pop("uic", None)
+    service.presence._last_reception.pop("uic", None)
     service.dark_sweep()
     assert "uic" in service._dark_since
     assert service._escalation_rewake_sweep() == []
@@ -866,7 +883,12 @@ def test_dropped_wake_re_emits_unread_pre_sla_on_armed_seat(tmp_path, monkeypatc
 
 
 def test_fleet_liveness_sweep_alerts_once_then_recovers(monkeypatch):
-    """0110: aggregate collapse raises FLEET DARK; recovery closes episode."""
+    """0110, denominator repaired 2026-08-04: FLEET DARK measures seats the
+    hub OBSERVED live vanishing — never a roster's graveyard. The old
+    denominator ("every seat ever registered") held the live hub in chronic
+    FLEET DARK (7 live / 50 registered), which silently paused the hourly
+    desk digest all through the novel-fleet stall. A cold roster no longer
+    alarms; a fleet that armed and then vanished still does."""
     from agora.hub import service as hub_service
 
     monkeypatch.setattr(hub_service, "FLEET_MIN_ELIGIBLE", 3)
@@ -875,8 +897,20 @@ def test_fleet_liveness_sweep_alerts_once_then_recovers(monkeypatch):
     op = register(client, "op", operator=True)
     a = register(client, "a")
     b = register(client, "b")
-    register(client, "c")
+    c = register(client, "c")
     service = client.app.state.service
+    # Never-observed seats are not a fleet: a cold roster raises nothing.
+    assert service._fleet_liveness_sweep() == []
+
+    # The hub observes all three live; a healthy fleet raises nothing.
+    for h in (a, b, c):
+        client.get("/owed", headers={**h, "X-Agora-Reception": "arm"})
+    assert service._fleet_liveness_sweep() == []
+
+    # All three vanish inside the signal window: THAT is a collapse.
+    for s in ("a", "b", "c"):
+        service.presence._last_reception[s] -= 4000.0
+        service.presence._last_seen[s] -= 4000.0
     assert service._fleet_liveness_sweep() == ["fleet-dark"]
     assert service._fleet_liveness_sweep() == []
 
@@ -900,9 +934,9 @@ def test_fleet_liveness_snapshot_on_status(monkeypatch):
     monkeypatch.setattr(hub_service, "FLEET_MIN_ELIGIBLE", 3)
     client = make_client()
     op = register(client, "op", operator=True)
-    register(client, "a")
-    register(client, "b")
-    register(client, "c")
+    seats = [register(client, s) for s in ("a", "b", "c")]
+    for h in seats:  # observed live: the denominator counts these (2026-08-04)
+        client.get("/owed", headers={**h, "X-Agora-Reception": "arm"})
     r = client.get("/status", headers=op)
     assert r.status_code == 200
     data = r.json()
@@ -912,116 +946,31 @@ def test_fleet_liveness_snapshot_on_status(monkeypatch):
     assert fleet["live"] <= fleet["eligible"]
     assert "live_fraction" in fleet
     assert "open_claims" in fleet
-    assert "report_digest" in data
+    assert "report_digest" not in data
 
 
-def test_report_digest_snapshot_on_status(monkeypatch):
-    """0109: /status exposes delegate digest cadence observability."""
-    from agora.hub import service as hub_service
-
-    monkeypatch.setattr(hub_service, "REPORT_DIGEST_PERIOD_SECONDS", 0.0)
+def test_retire_report_digest_rows_closes_legacy_hourly_digest_posts():
+    """Legacy timer-owned digest rows are retired instead of re-armed."""
     client = make_client()
     op = register(client, "op", operator=True)
     steward = register(client, "steward")
     client.put("/admin/delegation", headers={"Authorization": f"Bearer {ADMIN_KEY}"},
                json={"agent_id": "steward", "powers": ["reporting"]})
     service = client.app.state.service
-    service._report_digest_sweep()
-    r = client.get("/status", headers=op)
-    digest = r.json()["report_digest"]
-    assert digest["delegates"]
-    row = digest["delegates"][0]
-    assert row["delegate"] == "steward"
-    assert row["replied"] is False
-    assert row["desk_post_id"]
-
-
-def test_report_digest_sweep_missed_then_satisfied(monkeypatch):
-    """0109: hub posts desk facts; missed digest -> operator DM; reply clears."""
-    from agora.hub import service as hub_service
-
-    monkeypatch.setattr(hub_service, "REPORT_DIGEST_PERIOD_SECONDS", 0.0)
-    client = make_client()
-    op = register(client, "op", operator=True)
-    steward = register(client, "steward")
-    client.put("/admin/delegation", headers={"Authorization": f"Bearer {ADMIN_KEY}"},
-               json={"agent_id": "steward", "powers": ["reporting"]})
-    service = client.app.state.service
-    assert service._report_digest_sweep() == ["desk-facts:steward"]
-
-    assert service._report_digest_sweep() == ["missed-report:steward",
-                                              "desk-facts:steward"]
-    dm = client.get("/channels/dm:hub--op/messages", headers=op).json()
-    assert any("MISSED-REPORT: steward" in m["body"] for m in dm)
-
+    legacy = service.db.insert_message(
+        "hub-alerts", "hub",
+        kind="system", status="open", urgency="inbox",
+        title="hourly digest: desk facts",
+        body="legacy digest ask",
+        data={"report_digest": True},
+        reply_to=None, to=["steward"],
+    )
+    service.db.meta_set(
+        "report:steward",
+        "{\"period_start\": 1, \"desk_post_id\": \"" + legacy.id + "\"}",
+    )
+    assert service._retire_report_digest_rows() == ["retired-report-digest"]
+    assert service.db.meta_get("report:steward") == ""
     alerts = client.get("/channels/hub-alerts/messages", headers=op).json()
-    desk_post = next(m for m in reversed(alerts)
-                     if m.get("title") == "hourly digest: desk facts"
-                     and m["status"] == "open")
-    client.post("/channels/hub-alerts/messages",
-                json={"body": "Shipped: nothing new. Blocked: none. "
-                      "Fleet: all seats nudged to continue or re-check gates.",
-                      "status": "reply", "reply_to": desk_post["id"],
-                      "answers": ["digest"]},
-                headers=steward)
-    assert service._report_digest_sweep() == ["desk-facts:steward"]
-    dm2 = client.get("/channels/dm:hub--op/messages", headers=op).json()
-    assert sum("MISSED-REPORT: steward" in m["body"] for m in dm2) == 1
-
-
-def test_report_digest_paused_when_fleet_dark(monkeypatch):
-    """0109: no missed-report spam while aggregate fleet is dark."""
-    from agora.hub import service as hub_service
-
-    monkeypatch.setattr(hub_service, "REPORT_DIGEST_PERIOD_SECONDS", 0.0)
-    monkeypatch.setattr(hub_service, "FLEET_MIN_ELIGIBLE", 3)
-    monkeypatch.setattr(hub_service, "FLEET_DARK_CONFIRM_SECONDS", 0.0)
-    client = make_client()
-    op = register(client, "op", operator=True)
-    steward = register(client, "steward")
-    register(client, "a")
-    register(client, "b")
-    register(client, "c")
-    client.put("/admin/delegation", headers={"Authorization": f"Bearer {ADMIN_KEY}"},
-               json={"agent_id": "steward", "powers": ["reporting"]})
-    service = client.app.state.service
-    service._report_digest_sweep()
-    service._fleet_liveness_sweep()
-    assert service._report_digest_paused()
-    assert service._report_digest_sweep() == []
-
-
-def test_render_desk_facts_readability_glosses():
-    """0109: desk-facts render includes channel/seat glosses + prose template."""
-    client = make_client()
-    register(client, "op", operator=True)
-    steward = register(client, "steward")
-    flow = register(client, "flow")
-    client.put("/me/about",
-               json={"about": "Owns fleet stewardship and hourly digests."},
-               headers=steward)
-    client.put("/me/about",
-               json={"about": "Owns abstractflow visual editor."},
-               headers=flow)
-    client.put("/admin/delegation", headers={"Authorization": f"Bearer {ADMIN_KEY}"},
-               json={"agent_id": "steward", "powers": ["reporting"]})
-    service = client.app.state.service
-    assert service._gloss_channel("commons") == "commons (noticeboard)"
-    assert "private" in service._gloss_channel("dm:flow--op")
-    assert "abstractflow" in service._gloss_agent("flow")
-    line = service._format_desk_fact_line({
-        "channel": "dm:flow--op",
-        "who_waits": "flow",
-        "what": "flow editor walkthrough",
-        "age_minutes": 42.0,
-        "one_action": "answer or waive on the record",
-    })
-    assert "flow editor walkthrough" in line
-    assert "abstractflow" in line
-    assert "DM flow↔op (private)" in line
-    assert "42m old" in line
-    body, snapshot = service._render_desk_facts("steward")
-    assert snapshot["digest_prose_template"]
-    assert "Overnight:" in body
-    assert "re-check your gate" in body
-    assert "one unblock action" in body.lower()
+    assert any(m.get("reply_to") == legacy.id for m in alerts)
+    assert service._retire_report_digest_rows() == []

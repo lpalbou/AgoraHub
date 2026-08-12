@@ -19,6 +19,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from agora.hub.app import create_app
+from agora.hub.presence import _RECEPTION_STALE
 
 ADMIN_KEY = "test-admin"
 
@@ -31,7 +32,7 @@ def client() -> TestClient:
 
 def _register(client, agent_id):
     r = client.post("/agents", headers={"Authorization": f"Bearer {ADMIN_KEY}"},
-                    json={"id": agent_id, "about": ""})
+                    json={"id": agent_id, "mission": f"seat {agent_id}"})
     assert r.status_code == 200
     return r.json()["api_key"]
 
@@ -512,9 +513,15 @@ def test_prose_after_the_state_word_and_parked_claims(client, room):
     for slug, status in (("prose-done", "DONE — shipped xyz, receipt c123"),
                          ("prose-closed", "CLOSED by canvass, twice"),
                          ("parked-a", "PARKED until the gateway wave lands")):
+        # A park now carries its tag and its ask (operator ruling
+        # 2026-08-06): a park nobody can act on is the black hole this
+        # vocabulary exists to abolish. Terminal words need neither.
+        value = {"owner": "named", "status": status}
+        if slug == "parked-a":
+            value |= {"blocked_on": "external",
+                      "needs": "the gateway wave to land"}
         client.put(f"/channels/canvass/store/claim:{slug}", headers=_auth(key),
-                   json={"value": {"owner": "named", "status": status},
-                         "expect_version": 0})
+                   json={"value": value, "expect_version": 0})
     # c3363 second axis: the word under the legacy STATE key still counts
     # (a row closed under the wrong key must not nag forever).
     client.put("/channels/canvass/store/claim:state-key", headers=_auth(key),
@@ -670,7 +677,8 @@ def test_overview_silence_class_routes_sla_breach(client, room):
     assert named["silence_class"] == "seen-and-ignored"
 
     service.presence.touch("named")
-    service.presence._last_reception["named"] = time.time() - 1000.0
+    service.presence._last_reception["named"] = (
+        time.time() - _RECEPTION_STALE - 100.0)   # anchored, never a magic number
     rows = client.get("/admin/status",
                       headers={"Authorization": f"Bearer {ADMIN_KEY}"}).json()["agents"]
     named = next(r for r in rows if r["agent_id"] == "named")
@@ -696,7 +704,7 @@ def test_blocked_claims_are_exempt_like_parked(client, room):
     client.put("/admin/delegation", headers={"Authorization": f"Bearer {ADMIN_KEY}"},
                json={"agent_id": "bystander", "powers": ["reporting"]})
     client.put("/channels/canvass/store/claim:waiting", headers=_auth(key),
-               json={"value": {"owner": "named", "status": "blocked on the "
+               json={"value": {"owner": "named", "blocked_on": "external", "needs": "the vendor build to land", "status": "blocked on the "
                                "vendor's export"}, "expect_version": 0})
     client.put("/channels/canvass/store/claim:live", headers=_auth(key),
                json={"value": {"owner": "named", "status": "working"},
@@ -773,3 +781,114 @@ def test_watchdogs_only_cite_debt_the_seat_actually_owes(client, room):
     for seat in ("named", "bystander"):
         service._lurk_sweep_one(seat, set(), alerted)
     assert alerted == ["named"]
+
+
+def test_stalled_phase_alert_names_the_steward_and_its_blocking_ask(client, room):
+    """THE 17.5-HOUR STALL (2026-08-04). An OPEN phase row whose steward went
+    quiet was invisible to every sweep: `_steward_sweep` filters to `claim:`
+    keys and the blocked claims beside a stalled phase are exempt as parked.
+    Meanwhile the steward's actual blocking question sat in the operator's
+    owed pile (index 87 of 144). The phase sweep names BOTH — the stale
+    phase and the escalated ask it waits on — to the steward and the
+    reporting delegate, with the bounded-debt contract of every other
+    standing alert."""
+    service = client.app.state.service
+    from agora.hub.service import AgentInfo
+
+    # An operator in the room, and a phase stewarded by `named`.
+    op_info, op_key_raw = service.register_agent("op", "Op", operator=True, mission="seat op")
+    service.join_channel(op_info, "canvass", None)
+    # Created by the channel owner (a steward cannot self-nominate on
+    # create); every later touch is the named steward's own.
+    client.put("/channels/canvass/store/phase:novel", headers=_auth(room["asker"]),
+               json={"value": {"current": "packaging", "status": "open",
+                               "steward": "named", "next": "verification"},
+                     "expect_version": 0})
+    # The steward's blocking ask on the operator, already escalated.
+    r = client.post("/channels/canvass/messages", headers=_auth(room["named"]),
+                    json={"blocked_on": "external", "needs": "the vendor build to land", "status": "blocked", "to": ["op"],
+                          "body": "which toolchain may I use for the pdf?"})
+    ask_seq = r.json()["seq"]
+    service.db._conn.execute(
+        "UPDATE messages SET created_at = created_at - 7200 WHERE seq = ? "
+        "AND channel='canvass'", (ask_seq,))
+    service.db._conn.execute(
+        "UPDATE store SET updated_at = updated_at - 7200 "
+        "WHERE channel='canvass' AND key='phase:novel'")
+    service.db._conn.commit()
+
+    # No reporting delegate: the steward alone is still alerted.
+    out = service._phase_sweep()
+    assert out == ["stalled-phase:1"]
+    alerts = service.db.get_messages("hub-alerts", 0, 50)
+    alert = next(m for m in reversed(alerts) if "PHASE STALLED" in m.body)
+    assert alert.to == ["named"] and alert.status.value == "open"
+    assert "canvass/phase:novel" in alert.body
+    assert f"canvass#{ask_seq} (to op)" in alert.body     # the blocking ask
+    assert "relaunch" not in alert.body.lower()           # decide, not restart
+
+    # Unchanged set: the ONE standing alert is the whole truth.
+    assert service._phase_sweep() == []
+    n = sum("PHASE STALLED" in m.body
+            for m in service.db.get_messages("hub-alerts", 0, 100))
+    assert n == 1
+
+    # Touching the phase row is the receipt: the hub closes its own alert.
+    client.put("/channels/canvass/store/phase:novel", headers=_auth(room["named"]),
+               json={"value": {"current": "packaging", "status": "open",
+                               "steward": "named",
+                               "note": "waiting parked explicitly"},
+                     "expect_version": 1})
+    assert service._phase_sweep() == ["stalled-phase:cleared"]
+    assert any(r2.sender == "hub" and r2.status.value == "resolved"
+               for r2 in service.db.replies_to(alert.id))
+
+    # A COMPLETE phase never alerts, however old.
+    service.db._conn.execute(
+        "UPDATE store SET updated_at = updated_at - 7200 "
+        "WHERE channel='canvass' AND key='phase:novel'")
+    service.db._conn.commit()
+    client.put("/channels/canvass/store/phase:novel", headers=_auth(room["named"]),
+               json={"value": {"current": "packaging", "status": "complete",
+                               "steward": "named"},
+                     "expect_version": 2})
+    service.db._conn.execute(
+        "UPDATE store SET updated_at = updated_at - 7200 "
+        "WHERE channel='canvass' AND key='phase:novel'")
+    service.db._conn.commit()
+    assert service._phase_sweep() == []
+
+
+def test_waiting_on_sees_envelope_addressed_asks(client, room):
+    """THE BLIND DELEGATE (2026-08-04). `waiting_on` is the asker's radar —
+    "who has not delivered" — and it keyed ONLY on a per-ask `to`. The
+    obligation ledger has always ALSO honoured the message-level `to`, so a
+    delegate that addressed one seat per message and numbered its asks
+    inside got a full to_answer row on the WORKER side and an empty radar on
+    its own: measured live, five dispatched asks, zero waiting_on rows."""
+    service = client.app.state.service
+    # Envelope-addressed, asks carry no `to` of their own.
+    r = client.post("/channels/canvass/messages", headers=_auth(room["asker"]),
+                    json={"status": "open", "to": ["named"],
+                          "body": "your slice",
+                          "asks": [{"id": "1", "text": "draft it"},
+                                   {"id": "2", "text": "check it"}]})
+    assert r.status_code == 200
+    owed = client.get("/owed", headers=_auth(room["asker"])).json()
+    assert {w["seat"] for w in owed["waiting_on"]} == {"named"}, \
+        "the asker cannot see who it is waiting on"
+    # The worker's own ledger agrees it owes the work — the two halves of
+    # one dispatch must never disagree.
+    theirs = client.get("/owed", headers=_auth(room["named"])).json()
+    assert any(o["seq"] == r.json()["seq"] for o in theirs["to_answer"])
+
+    # A per-ask `to` still WINS over the envelope: an ask aimed at one seat
+    # inside a message addressed to another is that seat's, not everyone's.
+    r2 = client.post("/channels/canvass/messages", headers=_auth(room["asker"]),
+                     json={"status": "open", "to": ["named"], "body": "mixed",
+                           "asks": [{"id": "1", "text": "yours",
+                                     "to": ["bystander"]}]})
+    assert r2.status_code == 200
+    owed = client.get("/owed", headers=_auth(room["asker"])).json()
+    seats = {w["seat"] for w in owed["waiting_on"] if w["ask"] == "1"}
+    assert "bystander" in seats

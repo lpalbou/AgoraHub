@@ -135,6 +135,16 @@ def test_skill_teaches_every_cycle(skill_flat: str, cycle: str):
      "addressed fan-out is what made the orchestrated rerun converge"),
     ("supersession check is FIRST",
      "the record outranks the seat's memory across turn boundaries"),
+    ("names who has not delivered",
+     "measured on the live db 2026-08-03: over six days, 84 of 187 seats "
+     "named by an addressed ask never replied (45%) — a delegate that "
+     "dispatches and forgets loses half of what it hands out, and the hub "
+     "answers 'who has not delivered' (waiting_on) on the call every "
+     "reception pass already makes"),
+    ("re-route the work AND tell the operator",
+     "live msg-445: at5 declined #26, the delegate re-dispatched to editor "
+     "at #29 and THAT is what delivered; escalation alone would have parked "
+     "the arc on the human, who had posted nothing for 27 hours"),
 ])
 def test_skill_teaches_what_the_field_measured(skill_flat: str, teaching: str,
                                                evidence: str):
@@ -167,6 +177,39 @@ def test_skill_stays_within_its_token_budget(skill: str):
 ])
 def test_hub_rules_carry_the_collaboration_teachings(rule: str, evidence: str):
     assert rule in HUB_RULES_DEFAULT, evidence
+
+
+# -- the delegate brief: the ONE seat the whole arc routes through ----------
+#
+# `agora delegate --charter` prints this and the operator hands it over. It
+# had no test at all, which is how the monitoring half of the delegate's job
+# stayed unwritten while the ruling that created the role was pinned three
+# times over.
+
+@pytest.mark.parametrize("rule, evidence", [
+    ("USE THOSE REPLIES",
+     "the delegate must not reopen a second contribution round once seats "
+     "already answered on the operator thread"),
+    ("IN-THREAD ON THE ORIGINAL COMMISSION",
+     "a root pointer does not settle the operator commission; the delegate "
+     "must answer the operator thread directly"),
+    ("re-route the work to a seat that can do it",
+     "live msg-445: at5 declined the image ask at #26, the delegate "
+     "re-dispatched to editor at #29, and THAT is what delivered — "
+     "escalation alone parks the delivery on a human who, in that arc, had "
+     "posted nothing for 27 hours"),
+    ("RETIRE the obligations you pinned",
+     "measured by the collaboration acceptance arc (2026-08-03): after "
+     "re-routing a dark seat's ask, the chase the delegate had sent stayed "
+     "open and escalating on that seat forever, for work that had moved"),
+    ("45% of named seats\n   never reply",
+     "the live db, six days: 84 of 187 seats named by an addressed ask never "
+     "replied — monitoring is not a nicety, it is half the delegate's job"),
+])
+def test_delegate_brief_teaches_monitoring_not_just_dispatch(rule: str,
+                                                             evidence: str):
+    from agora.governance import DELEGATE_CHARTER
+    assert rule in DELEGATE_CHARTER, evidence
 
 
 def test_hub_rules_no_longer_order_the_chair_to_publish():

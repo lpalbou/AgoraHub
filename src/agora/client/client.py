@@ -419,6 +419,42 @@ class AgoraClient:
             f"/channels/{channel}/fshist/{path}",
             params={"since_seq": since_seq, "limit": limit}))
 
+    # -- charters (0146) -----------------------------------------------------------
+
+    async def read_charter(self, channel: str | None = None,
+                           full: bool = False) -> dict[str, Any]:
+        """The charter in force — the hub's (who is who) or a room's.
+        RECORDS this seat's receipt for the current version, like every
+        other head read of a charter.
+
+        Served as this seat's VIEW (0147): the sections addressed to the kind
+        of seat it is, a delegate's powers scoped to the ones it holds, and
+        `omitted` naming whatever was left out. `full=True` returns the whole
+        document. A room charter also carries the hub charter it inherits
+        under `hub` (included when this seat is behind on it)."""
+        params = {"full": "true"} if full else None
+        if channel:
+            return self._json(await self._http.get(
+                f"/channels/{channel}/charter", params=params))
+        return self._json(await self._http.get("/charter", params=params))
+
+    async def hub_charter_version(self, version: int | None = None) -> dict[str, Any]:
+        """One hub charter version verbatim (default: the one in force, read
+        through the archive so INSPECTING it records no receipt). 0 is always
+        the packaged default."""
+        if version is None:
+            version = (await self.whoami()).get("hub_charter", {}).get("version", 0)
+        return self._json(await self._http.get(f"/charter/versions/{version}"))
+
+    async def hub_charter_history(self, limit: int = 50) -> list[dict[str, Any]]:
+        return self._json(await self._http.get("/charter/history",
+                                               params={"limit": limit}))
+
+    async def charter_receipts(self, channel: str) -> dict[str, Any]:
+        """Who in this room has read the current charter version."""
+        return self._json(await self._http.get(
+            f"/channels/{channel}/charter/receipts"))
+
     async def ledger(self, channel: str, *, verify: bool = True) -> dict[str, Any]:
         """The channel's verbatim ledger: full ordered transcript + hash-chain
         head (the durable common record of a room/session)."""

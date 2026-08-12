@@ -4,8 +4,8 @@ These tests exercise the loop with an INJECTED spawn — no real cursor-agent �
 so the guarantees the design rests on are pinned deterministically: a wake
 drives exactly one bounded turn that yields by returning; the session id
 persists across wakes and rotates; a per-hour budget parks a runaway; a
-crashing wake is quarantined after N strikes (the poison-message bound);
-and the sandbox default is never silently dropped.
+crashing turn is SPACED and its wake kept (the one failure mechanism —
+nothing is ever dropped); and the sandbox default is never silently dropped.
 """
 
 from __future__ import annotations
@@ -19,13 +19,14 @@ from pathlib import Path
 
 import pytest
 
-from agora.drive import (BOOT_PROMPT, DEFAULT_BROADCAST_TURN_BUDGET,
+from agora.drive import (BACKOFF_MAX, BOOT_PROMPT,
+                         DEFAULT_BROADCAST_TURN_BUDGET,
                          DEFAULT_TURN_BUDGET, DEFAULT_WORK_BUDGET,
-                         FAILURE_LEDGER_MAX_BYTES, INFRA_BACKOFF_MAX,
-                         MUTE_NOTICE_INTERVAL, QUARANTINE_TTL,
+                         FAILURE_LEDGER_MAX_BYTES,
                          RECEPTION_TURN_TIMEOUT,
                          AbstractCodeDriveAdapter, CodexDriveAdapter,
-                         POISON_STRIKES, TURN_TIMEOUT, WAKE_PROMPT, Driver,
+                         TURN_TIMEOUT, WAKE_PROMPT, WORK_STRIKES,
+                         WORK_STRIKE_TTL, Driver,
                          ReceptionDebt, TurnEvidence, _make_adapter,
                          run_drive)
 from agora.mcp.runtime import MCPBinding
@@ -101,26 +102,101 @@ def test_structured_ask_rejects_prose_promise_without_real_claim(home, monkeypat
     d._reception_debt_verification_required = True
     d._reception_debt_before = ReceptionDebt(
         to_answer=frozenset({"message-1"}),
-        to_consume=frozenset(),
         structured=(("dm:operator--worker", 2, "message-1", frozenset({"1"})),),
     )
     monkeypatch.setattr(
         d, "_reception_debt",
-        lambda: ReceptionDebt(frozenset(), frozenset()),
+        lambda: ReceptionDebt(frozenset()),
     )
     monkeypatch.setattr(d, "_message_pending_asks", lambda *_: frozenset({"1"}))
-    monkeypatch.setattr(d, "_owned_live_claims", lambda: [])
+    monkeypatch.setattr(d, "_linked_claim_sources", lambda: set())
     evidence = d._verify_reception_debt(TurnEvidence(ok=True), "wake")
     assert not evidence.ok
     assert evidence.reason == "debt-remains"
     assert "pending_without_linked_claim=message-1" in (evidence.detail or "")
 
     monkeypatch.setattr(
-        d, "_owned_live_claims",
-        lambda: [("dm:operator--worker", "claim:msg-1", 1,
-                  {"source_message_id": "message-1"})],
-    )
+        d, "_linked_claim_sources", lambda: {"message-1"})
     assert d._verify_reception_debt(TurnEvidence(ok=True), "wake").ok
+
+
+def test_standing_claimed_commission_does_not_fail_the_turn(home, monkeypatch):
+    """2026-08-04: an operator commission stays in to_answer until the
+    completion report, BY DESIGN — so a delegate mid-delivery must not be
+    scored failed (and eventually muted) for the ledger doing its job. The
+    linked claim is the excusal; a surviving row with NO claim still
+    fails the turn, so the anti-lurk bound holds."""
+    d = _driver(home, lambda p, s: (s, True))
+    d._reception_debt_verification_required = True
+    d._reception_debt_before = ReceptionDebt(
+        to_answer=frozenset({"commission"}))
+    monkeypatch.setattr(d, "_reception_debt",
+                        lambda: ReceptionDebt(frozenset({"commission"})))
+    monkeypatch.setattr(d, "_linked_claim_sources", lambda: {"commission"})
+    assert d._verify_reception_debt(TurnEvidence(ok=True), "wake").ok
+    monkeypatch.setattr(d, "_linked_claim_sources", lambda: set())
+    v = d._verify_reception_debt(TurnEvidence(ok=True), "wake")
+    assert not v.ok and "to_answer=commission" in (v.detail or "")
+
+
+def test_linked_claim_sources_count_blocked_but_never_done(home, monkeypatch):
+    """A claim `blocked: waiting on the operator` is a materialized plan
+    with a recorded reason; a `done` claim links nothing (its obligation is
+    over) and another seat's claim is not this seat's receipt."""
+    d = _driver(home, None)
+    rows = [(1.0, "room", "claim:a"), (1.0, "room", "claim:b"),
+            (1.0, "room", "claim:c"), (1.0, "room", "phase:x")]
+    vals = {"claim:a": (1, {"owner": "worker",
+                            "blocked_on": "external", "needs": "the vendor build to land", "status": "blocked: waiting on operator",
+                            "source_message_id": "m-blocked"}),
+            "claim:b": (1, {"owner": "worker", "status": "done",
+                            "source_message_id": "m-done"}),
+            "claim:c": (1, {"owner": "other", "status": "in_progress",
+                            "source_message_id": "m-other"})}
+    monkeypatch.setattr(d, "_work_rows", lambda: rows)
+    monkeypatch.setattr(d, "_read_work_row", lambda ch, k: vals.get(k))
+    assert d._linked_claim_sources() == {"m-blocked"}
+
+
+def test_fanned_out_asks_only_count_the_seat_s_own_ask(home, monkeypatch):
+    """A decomposition that addresses each ask to a different seat must not
+    fail the seat that answered its own (live at-test#446: one message with
+    four per-ask `to` lists muted 5 of 7 seats that had all answered)."""
+    d = _driver(home, lambda p, s: (s, True))
+    row = {
+        "id": "message-1",
+        # Global pending: worker answered "1"; "2"/"3" are other seats' asks.
+        "pending_asks": ["2", "3"],
+        "data": {"asks": [
+            {"id": "1", "text": "yours", "to": ["worker", "other"]},
+            {"id": "2", "text": "not yours", "to": ["someone"]},
+            {"id": "3", "text": "not yours either", "to": ["editor"]},
+        ]},
+    }
+    monkeypatch.setattr("agora.config.get_cached_key", lambda *_: "k")
+
+    class _Resp:
+        @staticmethod
+        def json():
+            return row
+
+    monkeypatch.setattr("httpx.get", lambda *a, **k: _Resp())
+    # Worker's own ask is answered -> no debt of its own remains.
+    assert d._message_pending_asks("at-test", 446, "message-1") == frozenset()
+
+    # Its own ask still open -> the debt is real and still reported.
+    row["pending_asks"] = ["1", "2", "3"]
+    assert d._message_pending_asks("at-test", 446, "message-1") == frozenset({"1"})
+
+    # An ask addressed to nobody is everyone's obligation.
+    row["data"] = {"asks": [{"id": "1", "text": "broadcast"}]}
+    row["pending_asks"] = ["1"]
+    assert d._message_pending_asks("at-test", 446, "message-1") == frozenset({"1"})
+
+    # No structured asks: whole-message obligation, unchanged behaviour.
+    row["data"] = {}
+    row["pending_asks"] = ["1"]
+    assert d._message_pending_asks("at-test", 446, "message-1") == frozenset({"1"})
 
 
 def _fake_harness(tmp_path, name: str, *,
@@ -499,19 +575,25 @@ def test_spawn_turn_binds_mcp_without_exporting_credentials(home, monkeypatch):
     assert "agora_worker" not in joined
 
 
-def test_poison_wake_is_quarantined_after_strikes(home):
-    """A wake whose turn keeps crashing (spawn ok=False) is quarantined after
-    POISON_STRIKES so it stops eating turns; the attempt ledger drives it."""
-    (home / "worker-inbox.log").write_text("x")      # stable wake key
+def test_a_crashing_wake_is_spaced_out_never_dropped(home):
+    """A wake whose turn keeps crashing must stop EATING turns without ever
+    ceasing to be answerable: the next attempt is spaced, not dropped.
 
+    This replaces the poison quarantine. The old rule dropped the wake for an
+    hour, and since the wake key was the owed SIGNATURE, an obligation the
+    seat could not settle alone produced the same key forever — the seat went
+    deaf to precisely the debt it most needed help with.
+    """
     def spawn(prompt, sid):
         return sid, False                            # every turn crashes
 
     d = _driver(home, spawn)
-    for _ in range(POISON_STRIKES):
-        assert d.run_turn() is True                  # strikes accrue
-    # Next wake on the same (unchanged) backlog is quarantined: no spawn.
-    assert d.run_turn() is False
+    assert d.run_turn() is True                      # first crash: spawned
+    assert d._pending_wake is True                   # the wake is KEPT
+    assert d.run_turn() is False                     # ...and spaced out
+    assert d._hold(has_debt=True)[0] == "backoff"
+    d._retry_at = 0.0                                # the wait elapses
+    assert d.run_turn() is True                      # the SAME wake is retried
 
 
 def test_session_rotates_to_flush_bloat_and_residue(home):
@@ -545,6 +627,7 @@ def test_crashed_resume_drops_session_and_boots_next(home):
     assert d.reception_session_id == "s1"
     d.run_turn()                                     # crashes -> session dropped
     assert d.reception_session_id is None
+    d._retry_at = 0.0                                # the backoff elapses
     d.run_turn()                                     # boots fresh -> s2
     assert d.reception_session_id == "s2"
 
@@ -751,9 +834,23 @@ def test_codex_resume_omits_boot_only_sandbox_flag():
            "item": {"type": "mcp_tool_call", "server": "agora",
                     "tool": "ack_inbox", "status": "completed", "error": None}},
           {"type": "turn.completed"}], "codex-s"),
+        # A REAL stream-json transcript, not a bare envelope: the old fixture
+        # ({"session_id": ..., "result": "ok"}) asserted that claude emits no
+        # tool evidence, which is exactly the defect it should have caught.
         ("claude", setup_claude, "claude",
          "drive-worker.claude.reception-v2.session", ["--resume", "claude-s"],
-         [{"session_id": "claude-s", "result": "ok"}], "claude-s"),
+         [{"type": "system", "subtype": "init", "session_id": "claude-s",
+           "mcp_servers": [{"name": "agora", "status": "connected"}]},
+          {"type": "assistant", "session_id": "claude-s",
+           "message": {"content": [
+               {"type": "tool_use", "id": "t1",
+                "name": "mcp__agora__check_inbox", "input": {}}]}},
+          {"type": "user", "session_id": "claude-s",
+           "message": {"content": [
+               {"type": "tool_result", "tool_use_id": "t1", "is_error": None,
+                "content": [{"type": "text", "text": "{\"ok\": true}"}]}]}},
+          {"type": "result", "subtype": "success", "is_error": False,
+           "session_id": "claude-s", "result": "ok"}], "claude-s"),
     ],
 )
 def test_run_drive_launches_the_selected_harness_end_to_end(home, tmp_path,
@@ -892,10 +989,15 @@ def test_codex_reception_rejects_ack_only_when_original_debt_remains(
     d = Driver("worker", "http://hub:1", harness="codex", cwd=home)
     assert d.run_turn() is True
     assert d._last_turn_ok is False
-    assert d._pending_wake is True
     output = capsys.readouterr().out
     assert "stage=reception" in output and "reason=debt-remains" in output
     assert "question-1" in output
+    # DIAGNOSED, NOT PENALISED. The turn reached the hub and looked; a second
+    # identical turn has identical inputs. Live 2026-08-03: every one of these
+    # verdicts respawned a turn within the same second, and the held wake
+    # blocked the work chunk the debt was actually asking for.
+    assert d._pending_wake is False
+    assert d._fail_streak == 0                   # and no backoff either
 
 
 def test_reception_verification_fails_OPEN_when_the_hub_is_unreadable(
@@ -939,9 +1041,38 @@ def test_reception_verification_fails_OPEN_when_the_hub_is_unreadable(
     # ...but never silently: the skipped verification is on the record.
     assert "status=skipped" in output
     assert "no-owed-snapshot-before-turn" in output
-    # And it costs no poison strike.
-    assert d._attempts() == {}
-    assert d._quarantined == set()
+    # And it costs the seat nothing: no backoff, no held wake.
+    assert d._fail_streak == 0
+    assert d._pending_wake is False
+
+
+def test_unconsumed_answers_never_fail_a_turn(home, monkeypatch):
+    """The delegate's own penalty, deleted.
+
+    `to_consume` is the hub's advisory 'someone answered you; use it or close
+    it' ledger — it never escalates and never wakes anyone. The driver used to
+    score it as unsettled debt, so the seat that had just orchestrated a
+    fan-out was marked FAILED the moment its peers ANSWERED. Live 2026-08-03,
+    that is exactly what happened to the delegate at 00:27:49, 00:32:53 and
+    02:38:58 (`to_consume=<answer id>`), and each verdict respawned an
+    identical turn in the same second.
+    """
+    owed = {"to_answer": [{"id": "q-1"}],
+            "to_consume": [{"answer_id": "a-1"}, {"answer_id": "a-2"}],
+            "counts": {"to_answer": 1, "to_consume": 2}}
+    after = {"to_answer": [], "to_consume": [{"answer_id": "a-1"},
+                                             {"answer_id": "a-2"}],
+             "counts": {"to_answer": 0, "to_consume": 2}}
+    snapshots = iter([((1, 2), "q-1", owed), ((0, 2), "a-1,a-2", after)])
+    monkeypatch.setattr("agora.drive._owed_snapshot",
+                        lambda *a, **k: next(snapshots))
+    d = _driver(home, lambda p, s: ("s", True))
+    d.verify_reception_debt = True
+    d._reception_debt_verification_required = True
+    d._reception_debt_before = d._reception_debt()
+    assert d._reception_debt_before.to_answer == frozenset({"q-1"})
+    # The answered question is settled; the unread answers are NOT debt.
+    assert d._verify_reception_debt(TurnEvidence(ok=True), "wake").ok
 
 
 def test_codex_reception_accepts_original_debt_settled_during_turn(
@@ -1178,7 +1309,7 @@ def test_impossible_configuration_aborts_instead_of_retrying_forever(home):
     assert "no retry can fix it" in message
     assert "Supported values are" in message      # the harness's own words
     assert "--reasoning-effort" in message        # and where to look
-    assert d._attempts() == {}                    # not a poison strike either
+    assert d._fail_streak == 0                    # fatal, so never backed off
 
 
 def test_reasoning_vocabularies_match_each_harness(home):
@@ -1248,13 +1379,21 @@ def test_opencode_command_pins_dir_and_config_layer(home):
     cmd = a.build_command(WAKE_PROMPT, None)
     assert cmd[:2] == ["opencode", "run"]
     assert cmd[cmd.index("--dir") + 1] == str(home.resolve())
+    assert cmd[cmd.index("--title") + 1] == "agora:worker:turn"
     assert "-m" in cmd and cmd[cmd.index("-m") + 1] == "airelay/gpt-5.4-mini"
     cfg = json.loads(a.environment()["OPENCODE_CONFIG_CONTENT"])
     assert cfg["mcp"]["agora"]["command"] == [a.mcp.command]
     assert cfg["permission"]["agora*"] == "allow"
     assert cfg["permission"]["webfetch"] == "deny"      # write != all
+    env = a.environment()
+    assert env["XDG_DATA_HOME"] == str(home / ".agora" / "opencode" / "data")
+    assert env["XDG_CACHE_HOME"] == str(home / ".agora" / "opencode" / "cache")
+    assert env["XDG_STATE_HOME"] == str(home / ".agora" / "opencode" / "state")
+    assert Path(env["XDG_DATA_HOME"]).is_dir()
     # session resume
-    assert "--session" in a.build_command(WAKE_PROMPT, "ses_x")
+    resume = a.build_command(WAKE_PROMPT, "ses_x")
+    assert "--session" in resume
+    assert resume[resume.index("--title") + 1] == "agora:worker:resume"
 
 
 def test_opencode_rejected_agora_tool_fails_the_turn_despite_rc0(home):
@@ -1388,10 +1527,15 @@ def test_pi_truncated_stream_is_a_failed_turn(home):
 # Eight opencode seats went mute for hours while every driver stayed alive and
 # heartbeating. The provider (a free tier) began rate-limiting at 04:59; each
 # turn booted a session, called NOTHING, and was killed at the turn timeout.
-# The driver scored that as a harness crash, so three of them quarantined the
-# wake key — and because the key is the owed SIGNATURE, an obligation the seat
-# could not settle produced the SAME key forever. The seat went permanently
-# deaf to exactly the debt it most needed to answer.
+# The driver scored that as a harness crash, and three such turns QUARANTINED
+# the wake key — and because the key was the owed SIGNATURE, an obligation the
+# seat could not settle produced the SAME key forever. The seat went deaf to
+# exactly the debt it most needed to answer.
+#
+# The quarantine (and its on-disk strike ledger) is gone as of 2026-08-03: in
+# the entire live record it never fired once, and its only possible act was to
+# DROP an obligation. One mechanism remains — exponential backoff, which holds
+# the wake instead of dropping it and always expires. These tests pin that.
 
 
 def _hang(*_a, **_k):
@@ -1401,37 +1545,39 @@ def _hang(*_a, **_k):
 def test_timeout_with_no_tool_calls_is_infrastructure_not_a_strike(home,
                                                                   monkeypatch):
     """The outage shape: killed at the timeout having called nothing. That is
-    a fact about the PROVIDER, so it must be named, never struck."""
+    a fact about the PROVIDER, so it must be named, backed off — and the
+    obligation KEPT, however many times it repeats."""
     monkeypatch.setattr(subprocess, "run", _hang)
     d = Driver("worker", "http://127.0.0.1:1", harness="opencode", cwd=home)
-    for _ in range(POISON_STRIKES + 2):
-        d._infra_retry_at = 0.0            # stand in for the backoff elapsing
-        assert d.run_turn() is True
+    for _ in range(5):
+        d._retry_at = 0.0                  # stand in for the backoff elapsing
+        assert d.run_turn() is True        # every wake still SPAWNS a turn
     assert d._last_turn_stage == "infrastructure"
-    assert d._attempts() == {}                 # no poison strike, ever
-    assert d._quarantined == set()             # so the seat is never deafened
-    assert d._pending_wake is True             # and the obligation is HELD
-    assert d._infra_retry_after() > 0          # behind a real backoff
+    assert d._pending_wake is True             # the obligation is HELD...
+    assert d._backoff_retry_after() > 0        # ...behind a real backoff
+    assert d._hold(has_debt=True)[0] == "backoff"
 
 
-def test_provider_failure_backs_off_and_recovers(home, monkeypatch):
-    """Exponential backoff with a ceiling, cleared by one healthy turn."""
-    monkeypatch.setattr(subprocess, "run", _hang)
-    d = Driver("worker", "http://127.0.0.1:1", harness="opencode", cwd=home)
-    d.run_turn()
-    first = d._infra_retry_after()
-    d._infra_retry_at = 0.0                    # simulate the wait elapsing
-    d.run_turn()
-    assert d._infra_retry_after() > first      # ...and it grows
-    for _ in range(10):
-        d._infra_retry_at = 0.0
-        d.run_turn()
-    assert d._infra_retry_after() <= INFRA_BACKOFF_MAX + 1
+def test_repeated_harness_failure_backs_off_and_never_drops_the_wake(home):
+    """A crashing turn is the ONLY thing that used to earn a quarantine.
 
+    Now it earns spacing: the wake is held, the retry grows to a ceiling, and
+    a healthy turn clears the whole streak. Nothing is ever dropped, so the
+    seat cannot go deaf to a specific obligation.
+    """
+    d = _driver(home, lambda prompt, sid: (sid, False))
+    waits = []
+    for _ in range(6):
+        d._retry_at = 0.0                        # the previous wait elapsed
+        assert d.run_turn() is True              # ALWAYS retried
+        assert d._pending_wake is True           # ALWAYS kept
+        waits.append(d._backoff_retry_after())
+    assert waits[0] < waits[1] < waits[2]        # exponential...
+    assert waits[-1] <= BACKOFF_MAX + 1          # ...with a ceiling
     d._spawn = lambda prompt, sid: ("s1", True)
-    d._infra_retry_at = 0.0
+    d._retry_at = 0.0
     assert d.run_turn() is True
-    assert d._infra_failures == 0 and d._infra_retry_after() == 0.0
+    assert d._fail_streak == 0 and d._backoff_retry_after() == 0.0
 
 
 def test_a_failing_provider_never_blocks_a_wake_forever(home, monkeypatch):
@@ -1439,56 +1585,59 @@ def test_a_failing_provider_never_blocks_a_wake_forever(home, monkeypatch):
     monkeypatch.setattr(subprocess, "run", _hang)
     d = Driver("worker", "http://127.0.0.1:1", harness="opencode", cwd=home)
     for _ in range(5):
-        d._infra_retry_at = 0.0
+        d._retry_at = 0.0
         d.run_turn()
     ran = []
     d._spawn = lambda prompt, sid: (ran.append(sid) or ("s1", True))
-    d._infra_retry_at = 0.0
+    d._retry_at = 0.0
     assert d.run_turn() is True and len(ran) == 1
 
 
-def test_quarantine_expires_and_restores_the_seat(home):
-    """A quarantine is a bounded pause, not a life sentence: the wake key is
-    the owed signature, which for an unsettleable debt never changes."""
-    (home / "worker-inbox.log").write_text("x")
+def test_a_held_turn_announces_its_state_and_release(home, capsys):
+    """Every hold is on stdout with the second it releases — that IS the
+    'never silently mute' guarantee, now once per loop pass instead of once
+    per five minutes."""
     d = _driver(home, lambda prompt, sid: (sid, False))
-    for _ in range(POISON_STRIKES):
-        assert d.run_turn() is True
-    key = d._wake_key()
-    assert d.run_turn() is False                     # deaf, as designed...
-    d._quarantine_until[key] = time.time() - 1       # ...until the ttl lapses
-    ran = []
-    d._spawn = lambda prompt, sid: (ran.append(sid) or ("s1", True))
-    assert d.run_turn() is True and len(ran) == 1
-    assert d._attempts() == {}                       # strikes go with it
-
-
-def test_quarantine_is_announced_with_its_expiry(home, capsys):
-    (home / "worker-inbox.log").write_text("x")
-    d = _driver(home, lambda prompt, sid: (sid, False))
-    for _ in range(POISON_STRIKES):
-        d.run_turn()
-    d.run_turn()
+    d.run_turn()                                     # fails -> backoff
+    capsys.readouterr()
+    assert d.run_turn() is False                     # held, not spawned
     out = capsys.readouterr().out
-    assert "reason=quarantined" in out and "retry_in=" in out
-    assert f"ttl={QUARANTINE_TTL:.0f}s" in out
+    assert "AGORA_DRIVE state=backoff" in out
+    assert "wake=held" in out and "next=" in out
+
+    parked = _driver(home, lambda prompt, sid: ("s", True), turn_budget=1)
+    assert parked.run_turn() is True
+    capsys.readouterr()
+    assert parked.run_turn() is False
+    out = capsys.readouterr().out
+    assert "AGORA_DRIVE state=parked" in out and "reason=turn-budget" in out
+    assert "next=" in out
 
 
-def test_mute_seat_says_so_at_intervals(home, capsys):
-    """Never silent: a driver whose wakes are all held still heartbeats, so it
-    must announce that it is NOT processing obligations."""
-    d = _driver(home, lambda prompt, sid: (sid, False))
-    d._pending_wake = True
-    d._mute_notice()
-    assert "AGORA_DRIVE mute" in capsys.readouterr().out
-    d._mute_notice()                                  # throttled...
-    assert "AGORA_DRIVE mute" not in capsys.readouterr().out
-    d._last_mute_notice -= MUTE_NOTICE_INTERVAL + 1   # ...until the interval
-    d._mute_notice()
-    assert "AGORA_DRIVE mute" in capsys.readouterr().out
-    d._pending_wake = False
-    d._mute_notice()
-    assert "AGORA_DRIVE mute" not in capsys.readouterr().out
+def test_a_provider_failure_is_infrastructure_on_every_harness(home):
+    """One classifier, centrally: only opencode used to re-stage a 429, so the
+    same rate limit was `infrastructure` there and `harness` everywhere else.
+    Live 2026-08-03 02:37 recorded `stage=harness reason=timeout` with
+    `detail="429: timed out after 3600s"` — the diagnosis was in the detail
+    while the stage blamed the seat."""
+    d = _driver(home, lambda p, s: (s, True))
+    crashed = TurnEvidence(ok=False, stage="harness", reason="nonzero-exit",
+                           detail="upstream returned 429 Too Many Requests")
+    restaged = d._classify_provider_failure(crashed, "")
+    assert restaged.stage == "infrastructure"
+    assert restaged.reason == "provider-failure"
+    # Only the HARNESS's own words are read (stderr + the detail the adapter
+    # extracted from the harness), never the model's transcript — a turn that
+    # merely crashed stays a harness failure.
+    plain = TurnEvidence(ok=False, stage="harness", reason="nonzero-exit",
+                         detail="segmentation fault")
+    assert d._classify_provider_failure(plain, "").stage == "harness"
+    # A healthy turn is never re-staged.
+    assert d._classify_provider_failure(TurnEvidence(ok=True), "503").ok
+    # A config refusal is never laundered into "retry forever".
+    config = TurnEvidence(ok=False, stage="harness-config", reason="x",
+                          detail="503 service unavailable")
+    assert d._classify_provider_failure(config, "").stage == "harness-config"
 
 
 def test_every_failed_turn_lands_in_the_failure_ledger(home, monkeypatch):
@@ -1513,17 +1662,21 @@ def test_failure_ledger_is_size_capped(home, monkeypatch):
 
 
 def test_rate_limit_stderr_is_a_provider_failure(home):
-    """opencode's real 429 text, verified against the live log."""
+    """opencode's real 429 text, verified against the live log — now judged by
+    the ONE central classifier rather than that adapter's private branch."""
+    stderr = ("AI_APICallError: Rate limit exceeded. Please try again later.\n"
+              "providerID=opencode modelID=deepseek-v4-flash-free\n")
     a = _make_adapter("opencode", model=None, provider=None,
                       permissions="write", harness_args=None, cwd=home,
                       mcp=_binding(home), reasoning_effort=None)
-    ev = a.assess_turn(
-        "", "AI_APICallError: Rate limit exceeded. Please try again later.\n"
-        "providerID=opencode modelID=deepseek-v4-flash-free\n", 1, "wake")
+    d = _driver(home, lambda p, s: (s, True))
+    ev = d._classify_provider_failure(a.assess_turn("", stderr, 1, "wake"),
+                                      stderr)
     assert ev.ok is False and ev.stage == "infrastructure"
     assert ev.reason == "provider-failure"
     # A genuine harness crash still is one.
-    assert a.assess_turn("", "Segmentation fault", 139, "wake").stage == "harness"
+    crash = a.assess_turn("", "Segmentation fault", 139, "wake")
+    assert d._classify_provider_failure(crash, "").stage == "harness"
 
 
 def test_work_chunk_is_capped_and_announced_while_it_blocks(home, monkeypatch,
@@ -1537,17 +1690,178 @@ def test_work_chunk_is_capped_and_announced_while_it_blocks(home, monkeypatch,
     d._spawn = lambda prompt, sid: (seen.append(d._turn_timeout) or (sid, False))
     d.run_work_turn()
     assert seen[-1] == TURN_TIMEOUT              # healthy: the full budget
-    d._infra_failures = 1                        # provider just failed
+    d._fail_streak = 1                           # the harness just failed
     d.run_work_turn()
     assert seen[-1] == RECEPTION_TURN_TIMEOUT    # unproven: fail fast
     assert "AGORA_DRIVE turn-start" in capsys.readouterr().out
 
 
-def test_no_work_chunk_while_the_provider_is_failing(home):
+def test_no_work_chunk_while_the_harness_is_failing(home):
+    """A chunk runs the SAME binary against the SAME endpoint as the turn that
+    just failed, and it would blind the seat for up to --work-timeout doing
+    it. So the backoff gates both, and the listen window shrinks to the retry
+    instant instead of the idle ceiling."""
     d = _driver(home, lambda prompt, sid: (sid, True))
-    d._infra_retry_at = time.time() + 60
-    assert d._chain_step() is False              # never bet an hour on a dead
-    assert d._chain_live is False                # endpoint
+    d._retry_at = time.time() + 60
+    snap = ("commons", "claim:x", 1)
+    assert d._chain_step(snap) is False
+    assert d._chain_block(snap)[0] == "harness-failing"
+    assert 0 < d._listen_window(snap) <= 60      # not the 1200s ceiling
+
+
+def test_a_work_chunk_that_never_reached_the_hub_feeds_the_one_backoff(home):
+    """The chunk path used to bypass the ONLY failure mechanism.
+
+    Measured on this tree before the fix: three consecutive chunks against a
+    429 endpoint each still got the FULL --work-timeout (3600s), because the
+    "unproven harness" cap reads a streak that only reception ever fed. Three
+    hours deaf per row, with `_hold` and `_chain_block` both reporting healthy.
+    A transport failure is a transport failure whichever prompt hit it.
+    """
+    d = _driver(home, None, work_timeout=TURN_TIMEOUT)
+    seen = []
+
+    def spawn(prompt, sid):
+        seen.append(d._turn_timeout)
+        d._last_turn_stage = "infrastructure"     # a 429 on the WORK path
+        d._last_turn_detail = "429: rate limited"
+        return None, False
+
+    d._spawn = spawn
+    snap = ("commons", "claim:x", 1)
+    assert d._chain_step(snap) is True            # the first chunk runs
+    assert seen == [TURN_TIMEOUT]                 # ...at the full budget
+    assert d._fail_streak == 1                    # ...and IS recorded
+    # ...so the next chunk does not even start, and reception is spaced too.
+    assert d._chain_step(snap) is False
+    assert seen == [TURN_TIMEOUT]
+    assert d._chain_block(snap)[0] == "infrastructure"
+    assert d._hold(has_debt=True)[0] == "backoff"
+
+
+def test_off_row_receipt_takes_no_strike(home):
+    """THE NOVEL-FLEET STALL (2026-08-04). The strike rule read only the
+    SELECTED row, so a chunk that did exactly what WORK_PROMPT commands —
+    advance a claim and write done/blocked on it — still struck the phase
+    row that selected it (the terminal claim drops out of the snapshot,
+    which falls back to the unchanged phase). Three by-the-book chunks
+    retired the steward's only live row and six armed drivers idled 17.5h.
+    A receipt on ANY row this seat owns is work, not spinning."""
+    d = _driver(home, None)
+    d.run_work_turn = lambda: True
+    snap = ("scifi", "phase:novel", 5)
+    d._continuation_snapshot = lambda: snap        # selected row unchanged
+    now = time.time()
+    d._work_rows = lambda: [(now + 60.0, "scifi", "claim:export"),
+                            (now - 9999.0, "scifi", "phase:novel")]
+    d._read_work_row = lambda ch, key: (
+        2, {"owner": "worker", "blocked_on": "external", "needs": "the vendor build to land", "status": "blocked: waiting on operator"})
+    assert d._chain_step(snap) is True
+    assert d._strike_count("scifi/phase:novel@5") == 0   # receipt off-row
+
+    # The same chunk with NO receipt anywhere is still a strike: the
+    # anti-spin bound survives the fix.
+    d._work_rows = lambda: [(now - 9999.0, "scifi", "phase:novel")]
+    assert d._chain_step(snap) is True
+    assert d._strike_count("scifi/phase:novel@5") == 1
+
+    # Another seat's fresh row is NOT this seat's receipt.
+    d._work_rows = lambda: [(now + 60.0, "scifi", "claim:other"),
+                            (now - 9999.0, "scifi", "phase:novel")]
+    d._read_work_row = lambda ch, key: (1, {"owner": "someone-else"})
+    assert d._chain_step(snap) is True
+    assert d._strike_count("scifi/phase:novel@5") == 2
+
+
+def test_strikes_expire_after_cooldown(home):
+    """Strike-out used to last the process lifetime, and the only seat that
+    would ever bump a struck stewarded phase is the steward the strikes
+    had retired — a deadlock, not a bound. Strikes now age out."""
+    d = _driver(home, None)
+    ck = "scifi/phase:novel@5"
+    d._work_strikes[ck] = WORK_STRIKES
+    d._work_strike_at[ck] = time.time() - (WORK_STRIKE_TTL + 1)
+    assert d._strike_count(ck) == 0
+    assert ck not in d._work_strikes           # slate wiped, not just masked
+    # Fresh strikes still bind.
+    d._work_strikes[ck] = WORK_STRIKES
+    d._work_strike_at[ck] = time.time()
+    assert d._strike_count(ck) == WORK_STRIKES
+
+
+def test_a_workspace_only_chunk_is_never_a_transport_failure(home):
+    """The other half: a chunk that DID work but touched no Agora tool is a
+    SEMANTIC verdict (`mcp-use`). Holding reception for that would penalise a
+    seat for working, so only the per-version strike ledger bounds it."""
+    d = _driver(home, None)
+
+    def spawn(prompt, sid):
+        d._last_turn_stage = "mcp-use"            # ran fine, no agora call
+        d._last_turn_detail = "no successful Agora MCP tool call"
+        return None, False
+
+    d._spawn = spawn
+    assert d.run_work_turn() is True
+    assert d._fail_streak == 0                    # NOT spaced
+    assert d._hold(has_debt=True) is None         # reception untouched
+    assert d._chain_block(("commons", "claim:x", 1)) is None
+
+
+def test_a_held_pass_says_its_hold_exactly_once(home, monkeypatch):
+    """One honest line per loop pass. A pass that armed already stating its
+    hold must not repeat the identical line when the wake it was holding
+    rings again — a parked seat's log used to carry every hold twice."""
+    d = _driver(home, lambda prompt, sid: ("s", True), turn_budget=1,
+                max_wait=5.0)
+    log: list[str] = []
+    monkeypatch.setattr("agora.drive._emit", log.append)
+    # The pidfile touch IS the top of the loop, so it delimits one pass.
+    monkeypatch.setattr(d, "_touch_drive_pid", lambda: log.append("--- pass"))
+    calls = {"n": 0}
+
+    def listen(**kw):
+        calls["n"] += 1
+        if calls["n"] >= 5:
+            raise KeyboardInterrupt
+        return 2                                  # a real obligation, always
+
+    monkeypatch.setattr("agora.drive.run_listen", listen)
+    with pytest.raises(KeyboardInterrupt):
+        d.run()
+    passes, current = [], []
+    for line in log:
+        if line.startswith("--- pass"):
+            passes.append(current)
+            current = []
+        else:
+            current.append(line)
+    passes.append(current)
+    for lines in passes:
+        said = [ln.split(" agent=")[0] for ln in lines
+                if ln.startswith("AGORA_DRIVE state=")]
+        assert len(said) == len(set(said)), f"a pass said one state twice: {lines}"
+    # ...and a pass that holds the wake is never SILENT about holding it.
+    assert any("wake=held" in ln for ln in log)
+
+
+def test_an_unreadable_work_scan_never_reads_as_an_idle_seat(home, monkeypatch):
+    """`no-continuable-work` is a CLAIM about the hub, and a walk that raised
+    never earned it. A delegate mid hub-blip holding a live claim must not log
+    the same line as a seat that genuinely has nothing to do — that is the
+    difference between 'it finished' and 'it cannot see its own work'."""
+    d = _driver(home, lambda prompt, sid: ("s", True))
+    log: list[str] = []
+    monkeypatch.setattr("agora.drive._emit", log.append)
+    monkeypatch.setattr("agora.drive.run_listen",
+                        lambda **kw: (_ for _ in ()).throw(KeyboardInterrupt))
+    # No cached key -> the store walk cannot even start (_scan_ok stays False).
+    monkeypatch.setattr("agora.drive._config.get_cached_key",
+                        lambda hub, agent: None)
+    with pytest.raises(KeyboardInterrupt):
+        d.run()
+    armed = [ln for ln in log if ln.startswith("AGORA_DRIVE state=armed")]
+    assert armed and "reason=work-scan-unreadable" in armed[-1], armed
+    assert "no-continuable-work" not in armed[-1]
 
 
 def test_opencode_names_the_workspace_model(home):
@@ -1560,3 +1874,104 @@ def test_opencode_names_the_workspace_model(home):
     (home / "opencode.json").write_text(json.dumps({"model": "vendor/some-model"}))
     assert a.effective_model().startswith("vendor/some-model")
     assert "opencode.json" in a.effective_model()
+
+
+# -- the mute seat: claude turn evidence (2026-08-04) -------------------------
+
+
+def _claude_adapter(home=None):
+    return _make_adapter("claude", model=None, provider=None,
+                         permissions="all", harness_args=None,
+                         cwd=home or Path("."), mcp=_binding(home or Path(".")),
+                         reasoning_effort=None)
+
+
+def _claude_stream(*events) -> str:
+    return "\n".join(json.dumps(e) for e in events)
+
+
+_CLAUDE_INIT_OK = {"type": "system", "subtype": "init",
+                   "mcp_servers": [{"name": "agora", "status": "connected"}]}
+_CLAUDE_DONE = {"type": "result", "subtype": "success", "is_error": False,
+                "result": "done"}
+
+
+def _claude_call(tool: str, text: str = '{"ok": true}', *, err=None):
+    return ({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "t1",
+                 "name": f"mcp__agora__{tool}", "input": {}}]}},
+            {"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "t1", "is_error": err,
+                 "content": [{"type": "text", "text": text}]}]}})
+
+
+def test_claude_turn_with_no_tool_calls_is_scored_mcp_use():
+    """THE 6.8-SECOND TURN. A claude work chunk that called nothing exited 0
+    and was scored `ok=true`, because the adapter had no `assess_turn` and
+    `EVIDENCE` was None. Fleet-wide that hid 12 zero-tool turns, including a
+    reception wake whose own text said the agora server was unavailable."""
+    a = _claude_adapter()
+    prose_only = _claude_stream(_CLAUDE_INIT_OK, _CLAUDE_DONE)
+    ev = a.assess_turn(prose_only, "", 0, "work")
+    assert (ev.ok, ev.stage, ev.reason) == (False, "mcp-use", "no-agora-tool-call")
+    # A turn that really worked still passes, and now NAMES its tools.
+    ev = a.assess_turn(
+        _claude_stream(_CLAUDE_INIT_OK, *_claude_call("post_message"),
+                       _CLAUDE_DONE), "", 0, "work")
+    assert ev.ok and ev.tools == ("post_message",)
+
+
+def test_claude_dead_agora_server_fails_the_turn_despite_rc_zero():
+    """claude exits 0 with a dead MCP server: live on 2026-08-01 a seat spent
+    a whole wake replying 'AGORA_MCP_UNAVAILABLE ... reception pass cannot
+    complete' and was scored healthy, wake consumed, no backoff."""
+    a = _claude_adapter()
+    down = {"type": "system", "subtype": "init",
+            "mcp_servers": [{"name": "agora", "status": "failed"}]}
+    ev = a.assess_turn(_claude_stream(down, _CLAUDE_DONE), "", 0, "wake")
+    assert (ev.ok, ev.stage, ev.reason) == (
+        False, "mcp-init", "required-server-unavailable")
+
+
+def test_claude_agora_refusal_is_not_a_healthy_pass():
+    """A transport-successful call carrying agora's {"ok": false} refusal —
+    a 403'd post — must not score as a pass (codex/opencode guard this)."""
+    a = _claude_adapter()
+    ev = a.assess_turn(_claude_stream(
+        _CLAUDE_INIT_OK,
+        *_claude_call("post_message", '{"ok": false, "detail": "blocked"}'),
+        _CLAUDE_DONE), "", 0, "work")
+    assert not ev.ok and ev.stage == "mcp-call"
+
+
+def test_claude_truncated_stream_is_not_a_completed_turn():
+    """No terminal `result` event = the turn was cut off, not completed."""
+    a = _claude_adapter()
+    ev = a.assess_turn(
+        _claude_stream(_CLAUDE_INIT_OK, *_claude_call("check_inbox")),
+        "", 0, "wake")
+    assert (ev.ok, ev.reason) == (False, "missing-terminal-event")
+
+
+def test_claude_reception_pass_requires_check_inbox_only():
+    """Same relaxation codex carries: only check_inbox is required, and a
+    correct no-op reception pass must not be scored a failed turn."""
+    a = _claude_adapter()
+    ev = a.assess_turn(_claude_stream(
+        _CLAUDE_INIT_OK, *_claude_call("post_message"), _CLAUDE_DONE),
+        "", 0, "wake")
+    assert (ev.ok, ev.reason) == (False, "incomplete-reception-pass")
+    ev = a.assess_turn(_claude_stream(
+        _CLAUDE_INIT_OK, *_claude_call("check_inbox"), _CLAUDE_DONE),
+        "", 0, "wake")
+    assert ev.ok
+
+
+def test_claude_build_command_asks_for_a_parseable_stream():
+    """stream-json is what carries tool_use; --verbose is mandatory with it
+    (the CLI exits 1 otherwise), so the two must never drift apart."""
+    a = _claude_adapter()
+    argv = a.build_command("p", None)
+    assert "--output-format" in argv
+    assert argv[argv.index("--output-format") + 1] == "stream-json"
+    assert "--verbose" in argv

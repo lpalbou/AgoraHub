@@ -29,6 +29,14 @@ def agents(service):
     return alice, bob
 
 
+def _authored(rows: list) -> list:
+    """Drop the hub-owned `channel/` files. Every room is born with a charter
+    (0146), so a listing is never empty and these tests are about what MEMBERS
+    wrote — the seeded charter is scenery here, and covered in
+    tests/test_governance.py."""
+    return [r for r in rows if not r["path"].startswith("channel/")]
+
+
 # -- version archive (every edit's content is recoverable, with provenance) -----
 
 
@@ -99,7 +107,7 @@ def test_listing_carries_writer_description(service, agents):
     alice, bob = agents
     service.fs_write(alice, "design", "plans/topo.md", "# Topology\nbody",
                      description="consensus plan: 1 gateway + N runtimes")
-    [row] = service.fs_list(bob, "design")
+    [row] = _authored(service.fs_list(bob, "design"))
     assert row["description"] == "consensus plan: 1 gateway + N runtimes"
     assert row["described"] is True
     assert row["size"] == len("# Topology\nbody")
@@ -112,18 +120,25 @@ def test_listing_derives_description_when_writer_set_none(service, agents):
     alice, _ = agents
     service.fs_write(alice, "design", "notes.md",
                      "\n\n# Seam notes for v2\nlong body...")
-    [row] = service.fs_list(alice, "design")
+    [row] = _authored(service.fs_list(alice, "design"))
     assert row["description"] == "Seam notes for v2"   # first line, de-markdowned
     assert row["described"] is False                   # marked as derived
 
 
-def test_description_is_sanitized_and_capped(service, agents):
+def test_description_is_sanitized_and_an_over_cap_one_is_REFUSED(service, agents):
+    """A file description IS the listing's table of contents. Half of one,
+    silently, is worse than a refusal that says which field and by how much."""
+    from agora.models import TextTooLong
+
     alice, _ = agents
     service.fs_write(alice, "design", "x.md", "body",
-                     description="  spaced\n\nout  " + "y" * 500)
-    [row] = service.fs_list(alice, "design")
-    assert row["description"].startswith("spaced out")
-    assert len(row["description"]) <= 200
+                     description="  spaced\n\nout  ")
+    [row] = _authored(service.fs_list(alice, "design"))
+    assert row["description"] == "spaced out"
+
+    with pytest.raises(TextTooLong) as exc:
+        service.fs_write(alice, "design", "y.md", "body", description="y" * 500)
+    assert "description" in str(exc.value) and "cap is 200" in str(exc.value)
 
 
 # -- core lifecycle ------------------------------------------------------------
@@ -135,9 +150,9 @@ def test_write_read_list_delete(service, agents):
     assert f.version == 1 and f.path == "docs/plan.md" and f.size_bytes > 0
     # A peer on the same channel sees and reads it (shared workspace).
     assert service.fs_read(bob, "design", "docs/plan.md").content == "# Plan\nline"
-    assert [x["path"] for x in service.fs_list(bob, "design")] == ["docs/plan.md"]
+    assert [x["path"] for x in _authored(service.fs_list(bob, "design"))] == ["docs/plan.md"]
     assert service.fs_delete(bob, "design", "docs/plan.md") is True
-    assert service.fs_list(bob, "design") == []
+    assert _authored(service.fs_list(bob, "design")) == []
     with pytest.raises(HubError) as e:
         service.fs_read(bob, "design", "docs/plan.md")
     assert e.value.status_code == 404
@@ -214,7 +229,7 @@ def test_recreate_after_delete_with_create_semantics(service, agents):
     assert e.value.status_code == 404
     again = service.fs_write(alice, "design", "r.md", "two", expect_version=0)
     assert again.version == 3 and service.fs_read(alice, "design", "r.md").content == "two"
-    assert [x["path"] for x in service.fs_list(alice, "design")] == ["r.md"]
+    assert [x["path"] for x in _authored(service.fs_list(alice, "design"))] == ["r.md"]
 
 
 # -- boundaries: path safety, size, membership, store-guard --------------------
@@ -285,7 +300,8 @@ def test_http_fs_roundtrip_with_nested_path(http):
     assert w.status_code == 200 and w.json()["version"] == 1
     r = http.get("/channels/design/fs/docs/deep/plan.md", headers=alice)
     assert r.json()["content"] == "# hi"
-    assert http.get("/channels/design/fs", headers=alice).json()[0]["path"] == "docs/deep/plan.md"
+    listing = _authored(http.get("/channels/design/fs", headers=alice).json())
+    assert listing[0]["path"] == "docs/deep/plan.md"
     # stale CAS over HTTP -> 409
     conflict = http.put("/channels/design/fs/docs/deep/plan.md",
                         json={"content": "x", "expect_version": 0}, headers=alice)

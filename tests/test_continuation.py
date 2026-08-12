@@ -21,7 +21,8 @@ import pytest
 
 import agora.drive as drive_mod
 import agora.listen as listen_mod
-from agora.drive import (BOOT_PROMPT, WAKE_PROMPT, WORK_BOOT_PROMPT,
+from agora.drive import (BOOT_PROMPT, DRIVE_CHAIN_WAIT, WAKE_PROMPT,
+                         WORK_BOOT_PROMPT,
                          WORK_PROMPT, WORK_STRIKES, Driver)
 
 
@@ -43,7 +44,12 @@ def test_prompts_are_static_and_reception_starts_assigned_work():
     for prompt in (WORK_BOOT_PROMPT, WORK_PROMPT):
         assert "supersede" in prompt
         assert "re-read" in prompt
-    assert "START DOING THE WORK NOW" in WAKE_PROMPT
+    # 2026-08-06: the old phrase read as "code now, don't plan, don't tell
+    # anyone" — operator: "planning is work", and starting work is exactly
+    # what a seat SHOULD advertise. What stays banned is the bare promise.
+    assert "BEGIN IT THIS TURN" in WAKE_PROMPT
+    assert "BARE promise" in WAKE_PROMPT
+    assert "SAY SO" in WAKE_PROMPT          # advertise starts and milestones
     assert "Never write 'claiming' only in prose" in WAKE_PROMPT
     assert "routine progress receipts" in BOOT_PROMPT
     assert "ONLY per-slice receipt" in WORK_PROMPT
@@ -371,16 +377,23 @@ def test_pending_wake_cleared_by_normal_wake(home, monkeypatch):
     assert len(calls) == 2                       # later idle spawned nothing
 
 
-def test_wake_key_prefers_owed_signature(home):
-    """Poison-ledger key: owed signature (debt identity) when present —
-    rotation-proof and ws-mode-meaningful; size fallback otherwise."""
-    d = _driver(home, lambda p, s: ("s", True))
-    (home / "worker-inbox.log").write_text("xyz")
-    size_key = d._wake_key()
-    assert size_key == "3"
-    (home / "listen-worker.owedsig").write_text("id1,id2!3")
-    sig_key = d._wake_key()
-    assert sig_key != size_key and len(sig_key) == 12
+def test_a_failed_turn_never_costs_the_seat_its_next_wake(home, monkeypatch):
+    """What replaced the poison ledger and its wake key.
+
+    There is no per-wake ledger any more, so no wake can be singled out and
+    dropped. A failing turn spaces the NEXT attempt and keeps the obligation;
+    the loop runs it the moment the window releases.
+    """
+    calls = []
+    d = _driver(home, lambda p, s: (calls.append(p) or None, False))
+    _run_loop(d, [2], monkeypatch)                 # obligation wake: turn runs
+    assert len(calls) == 1 and d._pending_wake is True
+    _run_loop(d, [0, 0], monkeypatch)             # still backed off: no spawn
+    assert len(calls) == 1
+    d._retry_at = 0.0                             # the wait elapses...
+    d._spawn = lambda p, s: (calls.append(p) or "s", True)
+    _run_loop(d, [0], monkeypatch)
+    assert len(calls) == 2 and d._pending_wake is False
 
 
 # -- hub: owner-declared claim-due pings ----------------------------------------
@@ -463,16 +476,41 @@ def test_row_touch_clears_standing_ping(hub):
     assert _pings(hub) == []
 
 
-def test_done_and_parked_rows_never_ping(hub):
+def test_done_rows_never_ping(hub):
+    """Finished work has nothing to re-check."""
     hub.store_set(_agent("alice"), "room", "claim:a",
                   {"owner": "alice", "cadence_minutes": 60, "done": True})
-    hub.store_set(_agent("alice"), "room", "claim:b",
-                  {"owner": "alice", "cadence_minutes": 60,
-                   "status": "parked"})
-    for key in ("claim:a", "claim:b"):
-        _age_row(hub, "room", key, 7200)
+    _age_row(hub, "room", "claim:a", 7200)
     assert hub._claim_due_sweep() == []
     assert _pings(hub) == []
+
+
+def test_a_park_does_not_cancel_the_cadence_its_owner_declared(hub):
+    """CHANGED 2026-08-06, and the change is the point.
+
+    This test used to assert that a parked row never pings. That exemption
+    is right for `_steward_sweep`, where a THIRD PARTY would be re-asking a
+    question the status already answered. It was wrong here:
+    `cadence_minutes` is the OWNER saying "remind ME when this row idles",
+    and discarding their declaration because they also parked is the hub
+    quietly declining to do what its author asked.
+
+    Measured cost: `rt2-lead` parked a claim with `cadence_minutes: 60`
+    while waiting on a row in another room. That row completed 3m43s later.
+    The ping was due at 56 minutes and was discarded here. Seven seats sat
+    idle for hours on a finished milestone.
+
+    A seat that wants silence has a way to say so — `cadence_minutes: 0`,
+    pinned by test_cadence_zero_declares_off below."""
+    hub.store_set(_agent("alice"), "room", "claim:b",
+                  {"owner": "alice", "cadence_minutes": 60,
+                   "blocked_on": "external", "needs": "the vendor build to land", "status": "parked waiting on bob's manifest",
+                   "next_step": "Resume when claim:m1 changes"})
+    _age_row(hub, "room", "claim:b", 7200)
+    assert hub._claim_due_sweep(), "the owner's own declared cadence was dropped"
+    assert any("claim:b" in p.body for p in _pings(hub))
+    # The third-party staleness nag stays correctly silent on a parked row.
+    assert hub._steward_sweep() == []
 
 
 def test_cadence_zero_declares_off(hub):
@@ -554,10 +592,10 @@ def test_claimless_seat_surfaces_unchanged(hub):
 # the driver saw "nothing to continue" and the seat starved with work in hand.
 
 
-def _fake_store_hub(monkeypatch, rows: dict[str, dict[str, tuple[dict, int]]],
+def _fake_store_hub(monkeypatch, rows: dict[str, dict[str, tuple]],
                     *, channels: list[str] | None = None):
-    """Serve _scan_owned_rows from an in-memory {channel: {key: (value, ver)}}
-    over the three GETs it really makes."""
+    """Serve the continuation scan from an in-memory
+    {channel: {key: (value, version[, updated_at])}} over the GETs it makes."""
     import urllib.parse
 
     import httpx
@@ -580,10 +618,11 @@ def _fake_store_hub(monkeypatch, rows: dict[str, dict[str, tuple[dict, int]]],
         parts = path.split("/")                      # channels/<name>/store...
         channel = parts[1]
         if len(parts) == 3:
-            return _R([{"key": k} for k in rows.get(channel, {})])
+            return _R([{"key": k, "updated_at": (row[2] if len(row) > 2 else 0.0)}
+                       for k, row in rows.get(channel, {}).items()])
         key = urllib.parse.unquote(parts[3])
-        value, version = rows.get(channel, {}).get(key, ({}, 0))
-        return _R({"value": value, "version": version})
+        row = rows.get(channel, {}).get(key, ({}, 0))
+        return _R({"value": row[0], "version": row[1]})
 
     monkeypatch.setattr(httpx, "get", get)
 
@@ -591,7 +630,7 @@ def _fake_store_hub(monkeypatch, rows: dict[str, dict[str, tuple[dict, int]]],
 #: reader's exact hub state at the moment it starved.
 _READER_TRAP = {
     "at-test": {
-        "claim:msg-331": ({"owner": "reader", "status": "blocked",
+        "claim:msg-331": ({"owner": "reader", "blocked_on": "external", "needs": "the vendor build to land", "status": "blocked",
                            "next_step": "blocked: mlx-gen ModuleNotFoundError"},
                           3),
         "phase:manuscript": ({"current": "planning", "status": "open",
@@ -610,8 +649,8 @@ def test_blocked_claim_alone_is_not_continuable(home, monkeypatch):
     only spins. The bug was never that `blocked` is terminal for the ROW."""
     d = _reader(home, lambda p, s: ("s", True))
     _fake_store_hub(monkeypatch, {"at-test": {
-        "claim:msg-331": ({"owner": "reader", "status": "blocked"}, 3)}})
-    assert d._scan_owned_rows()[0] == []
+        "claim:msg-331": ({"owner": "reader", "blocked_on": "external", "needs": "the vendor build to land", "status": "blocked"}, 3)}})
+    assert d._owned_live_claims() == []
     assert d._continuation_snapshot() is None
 
 
@@ -620,9 +659,7 @@ def test_stewarded_open_phase_is_continuable_work(home, monkeypatch):
     continuable — the phase row, not the blocked claim, is what chains."""
     d = _reader(home, lambda p, s: ("s", True))
     _fake_store_hub(monkeypatch, _READER_TRAP)
-    claims, phases = d._scan_owned_rows()
-    assert claims == []                              # blocked: still terminal
-    assert [(c, k) for c, k, _, _ in phases] == [("at-test", "phase:manuscript")]
+    assert d._owned_live_claims() == []               # blocked: still terminal
     assert d._continuation_snapshot() == ("at-test", "phase:manuscript", 10)
 
 
@@ -661,7 +698,7 @@ def test_a_seat_with_nothing_continuable_still_fires_nothing(home, monkeypatch):
                               "next": "gate", "steward": "at5"}, 4),
         "claim:msg-113": ({"owner": "reader", "status": "done"}, 3),
     }})
-    assert d._scan_owned_rows() == ([], [])
+    assert d._owned_live_claims() == []
     assert d._continuation_snapshot() is None
     calls = []
     d = _reader(home, lambda p, s: (calls.append(p) or "s", True))
@@ -689,10 +726,10 @@ def test_a_phase_declaring_no_next_step_is_not_continuable(home, monkeypatch):
     assert d._continuation_snapshot() is None
 
 
-def test_a_stewarded_phase_parks_after_strikes(home, monkeypatch):
+def test_a_stewarded_phase_is_retired_after_strikes(home, monkeypatch):
     """Ignition, not fuel. Slice receipts land on CLAIM rows, so a stewarded
-    phase collects strikes and parks after WORK_STRIKES chunks — enough to
-    let the woken steward open a claim row, bounded enough that no steward
+    phase collects strikes and is retired after WORK_STRIKES chunks — enough
+    to let the woken steward open a claim row, bounded enough that no steward
     burns chunks forever on one untouched row."""
     calls = []
     d = _reader(home, lambda p, s: (calls.append(p) or "s", True))
@@ -727,3 +764,68 @@ def test_an_unowned_broadcast_does_not_reset_the_idle_countdown(
     calls.clear()
     _run_loop(d, [2, 2], monkeypatch)                # addressed: work defers
     assert all(not p.startswith("AGORA WORK CHUNK") for p in calls)
+
+
+def test_continuable_work_polls_at_chain_cadence_before_its_first_chunk(home):
+    """A delegate holding an open claim must not wait --max-wait for its FIRST
+    work chunk.
+
+    Live evidence (2026-08-03 revision arc): the cadence used to require that
+    a chunk had ALREADY run, so a seat that opened a claim and was then
+    interrupted by any wake fell back to the 1200s idle window, and every
+    further interrupt restarted it. Measured that hour: the editor's one chunk
+    started 1200.0s to the second after its previous turn ended — a chunk
+    needed a FULL uninterrupted ceiling — while the delegate's quiet gaps were
+    908s, 111s, 440s and 771s, so it held an open claim for 43 minutes, took
+    no chunk, and the operator had to post twice to move it.
+    """
+    d = _driver(home, lambda prompt, sid: (sid, True))
+    d._scan_ok = True
+    assert d._listen_window(None) == d.max_wait      # nothing continuable
+    assert d._listen_window(("at-test", "claim:msg-445", 3)) == DRIVE_CHAIN_WAIT
+
+
+def test_a_hub_blip_does_not_put_a_working_seat_to_sleep(home):
+    """A failed scan is not evidence that the work is gone. Keep the last
+    known answer and retry at the cadence — guessing 'idle' costs 20 minutes
+    of a delegate's arc, guessing 'work' costs one cheap re-scan."""
+    d = _driver(home, lambda prompt, sid: (sid, True))
+    d._has_work, d._scan_ok = True, False            # the GET raised
+    assert d._listen_window(None) == DRIVE_CHAIN_WAIT
+    d._has_work, d._scan_ok = False, True            # scanned: really nothing
+    assert d._listen_window(None) == d.max_wait
+
+
+def test_a_stale_row_never_starves_the_seat_of_its_real_work(home, monkeypatch):
+    """The starvation measured on 2026-08-03.
+
+    The delegate owned `dm:editor--reader/claim:msg-11` (v1, `in_progress`,
+    untouched for two days) and three more like it, plus its LIVE
+    `at-test/claim:msg-445`. Rows were walked in channel-then-key order and
+    the FIRST was taken, so chunks went to the stale row; three of them could
+    not move it and the chain parked on it — `initiative=parked
+    key=dm:editor--reader/claim:msg-11@1 reason=no-receipt` — leaving the seat
+    with no work engine at all while its real claim sat live.
+
+    Newest-first selection, and skipping a row that has spent its strikes.
+    """
+    calls = []
+    d = _reader(home, lambda p, s: (calls.append(p) or "s", True))
+    _fake_store_hub(monkeypatch, {
+        "dm:editor--reader": {"claim:msg-11": (
+            {"owner": "reader", "status": "in_progress"}, 1, 1000.0)},
+        "hub-alerts": {"claim:msg-757": (
+            {"owner": "reader", "status": "waiting_on_owners"}, 1, 900.0)},
+        "at-test": {"claim:msg-445": (
+            {"owner": "reader", "status": "in_progress"}, 26, 5000.0)},
+    })
+    assert d._continuation_snapshot() == ("at-test", "claim:msg-445", 26)
+
+    # ...and when the live row IS struck out, the seat still works: the next
+    # candidate is picked instead of the whole chain parking.
+    d._work_strikes["at-test/claim:msg-445@26"] = WORK_STRIKES
+    assert d._continuation_snapshot() == ("dm:editor--reader", "claim:msg-11", 1)
+    d._work_strikes["dm:editor--reader/claim:msg-11@1"] = WORK_STRIKES
+    assert d._continuation_snapshot() == ("hub-alerts", "claim:msg-757", 1)
+    d._work_strikes["hub-alerts/claim:msg-757@1"] = WORK_STRIKES
+    assert d._continuation_snapshot() is None        # only now: nothing to do

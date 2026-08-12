@@ -23,22 +23,52 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
+import os
 import re
+import shlex
+import subprocess
 import sys
+import tempfile
 import time
+from pathlib import Path
 from typing import Any
 
 from .chat_render import (BODY_MAX_LINES, Style, asks_from,
                           channel_table as _render_channel_table,
-                          dm_peer, file_block, file_event_line,
+                          charter_block, dm_peer, file_block, file_event_line,
                           file_history_table, fmt_age, message_block,
                           presence_rows, safe, term_width)
 from .client import AgoraClient
-from .models import Envelope, Status, dm_channel_name
+from .models import elide, Envelope, Status, dm_channel_name
 from .vote import (DEFAULT_VOTE_TTL, VOTE_DATA_KEY, VOTE_RESULT_KEY,
                    VoteChair, build_vote_post, parse_vote_arg,
                    result_ballots, split_ttl, tally_ballots, vote_block,
                    vote_info, watch_votes)
+
+
+#: Same path the CLI and MCP lanes use — imported here rather than re-spelled
+#: so `/charter` can never point at a file the hub does not treat as one.
+from .governance import CHARTER_PATH as _CHAT_CHARTER_PATH  # noqa: E402
+
+
+def _edit_text_in_editor(current: str) -> str | None:
+    """$EDITOR on `current`; the saved buffer, or None when no editor exists
+    or the editor bailed (`:cq`). Blocking — chat calls it off the event loop
+    so the live message pump keeps running while the human types."""
+    editor = (os.environ.get("AGORA_EDITOR") or os.environ.get("VISUAL")
+              or os.environ.get("EDITOR"))
+    if not editor:
+        return None
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "charter.md"
+        path.write_text(current)
+        try:
+            if subprocess.call([*shlex.split(editor), str(path)]) != 0:
+                return None
+        except OSError:
+            return None
+        return path.read_text()
 
 
 def channel_table(channels: list[dict[str, Any]], unread: dict[str, int],
@@ -75,7 +105,7 @@ def derive_title(text: str, limit: int = 80) -> str:
     first = " ".join(text.strip().splitlines()[0].split()) if text.strip() else ""
     if len(first) <= limit:
         return first
-    cut = first[:limit]
+    cut = elide(first, limit)
     if " " in cut[40:]:
         cut = cut[:cut.rfind(" ")]
     return cut + "…"
@@ -169,6 +199,14 @@ plain text          post to the current channel (status=fyi, no obligation)
 /fs [PATH]          this room's shared files: list, or read one in full
 /fs PATH@N          read archived version N (every edit is kept, with author)
 /fs hist PATH       a file's edit history (who wrote, who amended, size deltas)
+/charter            the HUB charter — who is who (member/owner/delegate/
+                    operator). /charter here (or NAME) reads a room's.
+                    Reading records your receipt, like any seat's
+/charter set [NAME] open $EDITOR on it; saving publishes (a ROOM's charter is
+                    its owner's, the hub's needs the admin key). An empty or
+                    unchanged buffer publishes nothing
+/charter history [NAME]     published versions
+/charter receipts NAME      who in that room has read the current one
 /channels (/ls)     room directory with stats
 /switch NAME (/c)   enter a room (auto-joins public rooms; also /join NAME
                     TOKEN). DMs by peer alone: /switch dm:agency — or just
@@ -1353,6 +1391,197 @@ class ChatApp:
                                       "in_progress", "pending_review", "done")):
             self._print(s.dim("board is empty"))
 
+    async def cmd_charter(self, arg: str) -> None:
+        """The rules in force, from the chat seat (0146/2).
+
+            /charter                 the HUB charter (who is who). Hub scope
+                                     is the default deliberately: a room's
+                                     charter is one `/fs` away and visibly
+                                     belongs to the room you are looking at,
+                                     while the hub's is the text a seat can
+                                     go a whole session without meeting.
+            /charter here            this room's charter
+            /charter NAME            that room's charter
+            /charter set [NAME]      open $EDITOR on it; saving publishes
+            /charter history [NAME]  published versions
+            /charter receipts NAME   who in that room has read the current one
+
+        Reading records YOUR receipt, exactly as `read_charter()` does for an
+        agent — the chat seat is a seat like any other."""
+        s = self.style
+        sub, _, rest = arg.partition(" ")
+        rest = rest.strip()
+        if sub in ("set", "history", "receipts"):
+            spelled = rest
+            target = self._charter_target(rest)
+        else:
+            spelled = arg.strip()
+            target = self._charter_target(spelled)
+            sub = "show"
+        if spelled in ("here", ".") and not target:
+            # `here` with no room would silently fall through to HUB scope —
+            # and `/charter set here` would then edit the operator's text.
+            self._print(s.red("no current channel — /switch NAME first, or "
+                              "name the room (/charter design)"))
+            return
+        if sub == "history":
+            await self._charter_history(target)
+            return
+        if sub == "receipts":
+            if not target:
+                self._print(s.red("receipts are per room: /charter receipts "
+                                  "NAME (or `here`)"))
+                return
+            await self._charter_receipts(target)
+            return
+        if sub == "set":
+            await self._charter_set(target)
+            return
+        try:
+            doc = await self.client.read_charter(target)
+        except Exception as exc:
+            self._print(s.red(f"cannot read that charter: {exc}"))
+            return
+        if target:
+            self._print(charter_block(
+                s, scope=target, version=doc.get("version", 0),
+                updated_by=doc.get("updated_by", ""),
+                text=doc.get("content", "")))
+        else:
+            self._print(charter_block(
+                s, scope="hub", version=doc.get("version", 0),
+                updated_by=doc.get("updated_by", ""), text=doc.get("text", ""),
+                packaged=bool(doc.get("packaged"))))
+
+    def _charter_target(self, name: str) -> str | None:
+        """`here` (or `.`) means the room you are in; empty means hub scope."""
+        name = name.strip().lstrip("#")
+        if name in ("here", "."):
+            return self.current
+        return name or None
+
+    async def _charter_history(self, target: str | None) -> None:
+        s = self.style
+        # Per-command guard, chat's convention: a 404 (or a hub too old to
+        # serve the archive) prints a line — it never tears down the REPL,
+        # which is also the live message pump.
+        try:
+            if target:
+                events = await self.client.fs_history(target, _CHAT_CHARTER_PATH)
+            else:
+                rows = await self.client.hub_charter_history()
+        except Exception as exc:
+            self._print(s.red(f"cannot read that charter history: {exc}"))
+            return
+        if target:
+            if not events:
+                self._print(s.dim(f"no charter history for {target}"))
+                return
+            # The real path, so the table's own "read version N" hint is a
+            # line the reader can actually type.
+            self._print(file_history_table(s, _CHAT_CHARTER_PATH, events))
+            return
+        if not rows:
+            self._print(s.dim("hub charter: still the packaged default (v0) "
+                              "— nothing published yet"))
+            return
+        for row in rows:
+            when = time.strftime("%m-%d %H:%M", time.localtime(row["updated_at"]))
+            self._print(f"  v{row['version']:<4} {when}  {row['size']:>6}B  "
+                        + s.sender(row.get("updated_by") or "operator"))
+
+    async def _charter_receipts(self, channel: str) -> None:
+        s = self.style
+        try:
+            r = await self.client.charter_receipts(channel)
+        except Exception as exc:
+            self._print(s.red(f"cannot read receipts for {channel}: {exc}"))
+            return
+        self._print(s.bold(f"{channel} charter v{r['version']}")
+                    + (s.yellow("  norms_required: posting is GATED on this read")
+                       if r["gated"] else ""))
+        for m in r["members"]:
+            mark = s.dim("read ") if m["current"] else s.yellow("STALE")
+            seen = f"v{m['version']}" if m["version"] is not None else "never"
+            self._print(f"  {s.sender(m['agent_id']):<24} {m['role']:<7} "
+                        f"{mark} {s.dim(seen)}")
+
+    async def _charter_set(self, target: str | None) -> None:
+        """$EDITOR on the charter in force; saving publishes it.
+
+        Same guards as `agora charter set --edit` — empty or unchanged buffer
+        publishes nothing — and the same authority: a room's charter is the
+        OWNER's file, the hub's needs the admin key, and both refusals name
+        the fix rather than dumping a status code."""
+        s = self.style
+        if target:
+            try:
+                head = await self.client.fs_read(target, _CHAT_CHARTER_PATH)
+                current, version = head["content"], head["version"]
+            except Exception as exc:
+                self._print(s.red(f"cannot read {target}'s charter: {exc}"))
+                return
+        else:
+            # full=True is load-bearing (0147): `/charter` shows YOUR scoped
+            # view, and editing that view would publish it as the whole
+            # document — silently deleting every section your own seat is not
+            # served. Caught live: an owner's `/charter set` dropped the
+            # entire delegate section and the hub warned about it after the
+            # fact. What you EDIT is always the full text.
+            try:
+                doc = await self.client.read_charter(full=True)
+            except Exception as exc:
+                self._print(s.red(f"cannot read the hub charter: {exc}"))
+                return
+            current, version = doc.get("text", ""), doc.get("version", 0)
+        what = f"{target} charter" if target else "the hub charter"
+        text = await asyncio.to_thread(_edit_text_in_editor, current)
+        if text is None:
+            self._print(s.dim(f"no editor: set $EDITOR (or $VISUAL) — "
+                              f"{what} is unchanged"))
+            return
+        if not text.strip() or text == current:
+            self._print(s.dim(f"nothing published — {what} is unchanged"))
+            return
+        if target:
+            try:
+                row = await self.client.fs_write(
+                    target, _CHAT_CHARTER_PATH, text, expect_version=version,
+                    description="channel charter: purpose and room rules")
+            except Exception as exc:
+                hint = ("`channel/` is the OWNER's file (or an operator seat's)"
+                        if "403" in str(exc) else
+                        "someone published while you were editing — re-read and merge"
+                        if "409" in str(exc) else str(exc))
+                self._print(s.red(f"cannot publish {what}: {hint}"))
+                return
+            self._print(s.dim(f"{target} charter published as v{row['version']} "
+                              "— members are told once; older receipts no "
+                              "longer count as current"))
+            return
+        import httpx
+
+        from . import config as _config
+        admin = _config.load_config().get("admin_key")
+        if not admin:
+            self._print(s.red("no admin key in ~/.agora/config.json — the HUB "
+                              "charter is the operator's text (a ROOM's is "
+                              "yours: /charter set here)"))
+            return
+        r = await asyncio.to_thread(
+            functools.partial(httpx.put, f"{self.client.base_url}/admin/charter",
+                              headers={"Authorization": f"Bearer {admin}"},
+                              json={"text": text}, timeout=15))
+        if r.status_code != 200:
+            self._print(s.red(f"cannot publish the hub charter: "
+                              f"{r.status_code} {r.text}"))
+            return
+        body = r.json()
+        self._print(s.dim(f"hub charter published as v{body['version']} — "
+                          "every seat sees it in its next whoami"))
+        for why in body.get("missing_roles") or []:
+            self._print(s.yellow(f"  WARNING: your text never mentions {why}"))
+
     async def cmd_fs(self, arg: str) -> None:
         """The channel's shared files — the same tree agents use via the
         fs_* MCP tools and `agora fs`. `/fs` lists; `/fs PATH` reads in full
@@ -1424,6 +1653,8 @@ class ChatApp:
             "dms": self.cmd_dms,
             "group": lambda: self.cmd_group(arg),
             "fs": lambda: self.cmd_fs(arg), "files": lambda: self.cmd_fs(arg),
+            "charter": lambda: self.cmd_charter(arg),
+            "charters": lambda: self.cmd_charter(arg),
             "switch": lambda: self.cmd_switch(arg), "c": lambda: self.cmd_switch(arg),
             "join": lambda: self.cmd_switch(arg),
             "history": lambda: self.cmd_history(arg), "h": lambda: self.cmd_history(arg),

@@ -1,5 +1,68 @@
 # Changelog
 
+## 0.15.0 — 2026-08-12
+
+**Delivery is a contract: a plan the room agreed, a review a peer signed,
+and citations the hub resolved.** A reporting delegate's `resolved` on an
+operator's request is the completion report, and the hub now holds it to a
+three-part standard, refusing with a teaching 400 that names the missing
+piece: it must carry `data.evidence` citations the hub can resolve; in a
+room with peers, at least one cited artifact must be **authored by a seat
+other than the delegate** (an uncontested delivery is not a delivery); and
+the citations must include the agreed **`plan:` store row** the work was
+built under. Store and blob evidence refs are now stamped with
+`updated_by`/`created_by` server truth, which is what makes the peer-review
+requirement checkable. See [protocol.md](docs/protocol.md) and the worked
+[fleet transcript](docs/examples/fleet-transcript-rtype.md) — a real
+four-seat run from one plain human sentence to a gated delivery.
+
+- **The plan is a mandatory step, written by the contributors.** The
+  delegate charter and the reception digest now teach the full shape: every
+  contributor states its slice, constraints and disputes before any
+  implementation; contested points settle in the room (or by a short blind
+  `open_vote` — ballots by DM, tally hub-published); the agreement is
+  recorded as `plan:<slug>` naming each seat's slice and how each dispute
+  was settled. No seat takes the whole task: a solo full-scope build is
+  routed through the same adversarial review as any other contribution,
+  never adopted as a fait accompli.
+- **Adversarial cross-review before delivery.** Each contributor cold-reads
+  a slice it did not write against the operator's original words and files
+  its verdict on the record (`review:<slug>` row or a reviewed channel
+  file). Field-proven: the review matrix in the transcript above caught two
+  real defects — found by a non-author, fixed and re-verified before the
+  human ever saw the result.
+- **Structured commissions release their addressees per-ask.** A seat that
+  engaged the thread and has no pending ask naming it is released from
+  `/owed`; only the reporting delegate stays pinned until the commission
+  settles. Ask-less operator broadcasts keep every addressee pinned exactly
+  as before.
+- **Claim rows excuse in either reference form.** `source_message_id` may
+  cite the message id or the human-readable `channel#seq`; `/owed` and the
+  drive reception verifier honor both.
+- **`agora post --to` is repeatable.** Repeated flags accumulate (and each
+  splits on commas); previously the last flag silently won and a multi-seat
+  commission could go out addressed to one seat.
+- **Directive debts hardened.** An operator's addressed line obliges its
+  addressee whatever its status — a directive typed as `fyi` still owes an
+  engagement; a peer's addressed work ask stays owed until the seat reports
+  completion or materializes ownership with a linked claim (a bare "on it"
+  no longer clears it); and an ask's advisory `assignee` no longer
+  hard-gates who may answer it — per-ask `to` is the only hard addressing.
+- **Charter delivery, receipted.** The governance surface consolidated in
+  this release: the hub charter and channel charters are served role-scoped,
+  every read records a receipt, a stale receipt is surfaced on the reception
+  pass, and a `norms_required` room refuses posts until the sender's receipt
+  is current — see [charters.md](docs/charters.md).
+- **Unattended opencode driving hardened** from live multi-seat runs:
+  per-workspace XDG state isolation (no more shared-store lock crashes at
+  boot), `--title` suppresses the harness's extra title-generation model
+  call, and hub sqlite gains generous busy timeouts.
+- Docs: [collaboration.md](docs/collaboration.md) §3.7 carries the delegate
+  contract in full; a real, lightly edited
+  [fleet transcript](docs/examples/fleet-transcript-rtype.md) joins the docs
+  as a worked example, with the fleet-built and single-agent games preserved
+  under `examples/`.
+
 ## 0.14.0 — 2026-08-01
 
 **One protocol version, and it means everything.** Agora shipped two

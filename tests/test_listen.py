@@ -74,6 +74,15 @@ def test_parse_line_accepts_notify_lines_and_skips_markers_and_junk():
     assert lenient is not None and lenient["seq"] == 12        # legacy string seq
 
 
+def test_notify_line_marks_peer_broadcast_work_as_unassigned():
+    peer = parse_line(notify_line(_envelope(status=Status.open)))
+    assert peer is not None and "unassigned" in peer["flags"]
+    human = parse_line(notify_line(_envelope(status=Status.open,
+                                             sender="laurent",
+                                             from_operator=True)))
+    assert human is not None and "unassigned" not in human["flags"]
+
+
 def test_pre_0_4_notify_line_is_refused_out_loud_not_in_silence(capsys):
     """agora/0.4 renamed the notify line's `from` to `sender`. A line in the
     old shape means the HUB is older than this listener (or 0086 resumed us
@@ -113,19 +122,21 @@ def test_minimal_legacy_event_flows_through_pipeline():
 
 
 @pytest.mark.parametrize("flags,status,expected", [
-    ("to-me", "fyi", True),
-    ("reply-to-me", "fyi", True),
+    ("to-me", "fyi", False),
+    ("reply-to-me", "fyi", False),
     ("critical", "fyi", True),
     ("escalated", "fyi", True),
-    # OBLIGATIONS WAKE, FYI WAITS — room-wide open/blocked qualifies again.
-    # The 0.10.x narrowing (bare open dropped after a nine-seat wake-storm
-    # debrief) was falsified in the operator's own test (2026-07-14): a
-    # room-wide /ask woke NOBODY, contradicting every taught surface
-    # ("obligations, not fyi chatter"). Storm control is the debounce,
-    # per-ask `to` precision, and fyi never waking — not dead-air asks.
+    # Legacy bare open/blocked lines (no addressed metadata) still wake:
+    # degrade toward noise, never deafness.
     ("", "open", True),
     ("", "blocked", True),
+    # Current-hub peer broadcasts are labelled unassigned: visible, not
+    # wakeful, until someone actually owns them.
+    ("unassigned", "open", False),
+    ("unassigned", "blocked", False),
     ("to-me", "open", True),          # addressed (to= or a pending ask): wake
+    ("addressed", "open", False),     # somebody else's ask
+    ("addressed,from-operator", "open", True),   # human task: whole room evaluates
     ("", "fyi", False),               # plain broadcast: not important
     ("", "reply", False),
     ("", "resolved", False),
@@ -206,6 +217,21 @@ def test_an_empty_wake_digest_authorizes_silence():
     owing = once_digest(events, (2, 0))
     assert "WITHOUT posting" not in owing
     assert "settle those before new work" in owing
+
+
+def test_operator_room_task_digest_names_the_contribution_decision():
+    """A human room-wide open/blocked task is not an empty wake: the seat
+    must evaluate whether it should contribute from what it owns."""
+    from agora.listen import once_digest
+
+    human = [_event(channel="commons", seq=6, status="open",
+                    flags="open,from-operator")]
+    text = once_digest(human, (0, 0))
+    assert "human open/blocked task in a shared room" in text
+    assert "reply once with the ONE slice you own" in text
+    assert "PLAN COMES FIRST AND IS MANDATORY" in text
+    assert "NEVER take the whole task" in text
+    assert "Nothing is owed by you" not in text
 
 
 def test_wake_line_carries_hub_age_from_ulid():
@@ -1180,6 +1206,12 @@ def _proc_env(home: Path) -> dict:
     host machine's live config can never leak into a test."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("AGORA_")}
     env["AGORA_HOME"] = str(home)
+    # Subprocess listeners often chdir into a temporary workspace fixture.
+    # Keep the checked-out src tree importable there too: a relative
+    # PYTHONPATH=src would otherwise resolve against that temp cwd and fall
+    # back to whatever Agora is installed on the host machine.
+    if env.get("PYTHONPATH") == "src":
+        env["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent / "src")
     return env
 
 

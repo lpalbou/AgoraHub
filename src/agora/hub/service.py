@@ -22,17 +22,30 @@ from typing import Any
 from ..agent_id import validate_agent_id
 from ..db import Database, DuplicateMessage, JoinTokenRefused
 from ..governance import (
+    CHANNEL_CHARTER_SEED,
     CHARTER_PATH,
+    DELEGATE_POWERS,
     GROUP_CHARTER_TEMPLATE,
+    HUB_CHARTER_SCOPE,
     HUB_RULES_DEFAULT,
+    PROXY_POWER,
     RESERVED_FS_PREFIX,
+    ROLE_CHARTER,
+    CharterViewResult,
+    charter_view,
+    charter_view_covers,
+    charter_view_key,
+    split_charter,
 )
 from ..ids import new_token
 from ..mentions import resolve_mentions
 from ..models import (
+    TextTooLong,
+    elide,
     DM_PREFIX,
     FS_PREFIX,
     MAX_ABOUT_CHARS,
+    MAX_MISSION_CHARS,
     MAX_ASK_CHARS,
     MAX_ASKS,
     MAX_ASSIGNEE_CHARS,
@@ -48,6 +61,7 @@ from ..models import (
     MAX_STORE_VALUE_BYTES,
     NOTICE_KINDS,
     AgentInfo,
+    CharterDebt,
     CloseRow,
     ColleagueNote,
     ConsumeRow,
@@ -71,6 +85,7 @@ from ..models import (
     WaitingRow,
     dm_channel_name,
     parse_work_id,
+    sanitize_block,
     sanitize_text,
     sanitize_title,
 )
@@ -118,7 +133,19 @@ MAX_JOIN_TOKEN_USES = 100            # fleet provisioning ceiling
 CHANNEL_META_KEY = "channel:meta"
 _META_FIELDS = {"purpose", "norms", "expected_traffic", "response_sla_minutes", "language",
                 "authorship_required", "state", "norms_required", "rulings_required",
-                "traffic_policy"}
+                "traffic_policy", "gated_acts"}
+#: Act classes a room's OWNER may put behind an owner gate. Closed vocabulary
+#: on purpose: each names an act the hub already mediates, so the check is
+#: (who are you) x (which API did you call), never a reading of your prose.
+#: Default absent — no room changes behaviour until its owner opts in, the
+#: same contract `norms_required` has.
+#: Deliberately only the three acts that actually BIND on a non-owner seat.
+#: `archive` and `vote_close` were considered and dropped: archiving is
+#: already owner-or-operator only, and a vote closes by a chaired message
+#: rather than a gated call — so naming them here would have shipped
+#: vocabulary that can never fire, which is its own documented failure mode
+#: on this hub (a fork nudge floored at 10 members in rooms of 6).
+GATED_ACT_CLASSES = {"fs_remove", "decision", "phase_complete"}
 _CHANNEL_STATES = {"open", "closed"}
 _META_LANGUAGES = {"plain", "terse", "structured"}
 _TRAFFIC_POLICIES = {"collaboration", "noticeboard"}
@@ -141,6 +168,9 @@ DROPPED_WAKE_REEMIT_SECONDS = 30.0
 FLEET_MIN_ELIGIBLE = 3
 FLEET_LIVE_FRACTION = 0.5
 FLEET_DARK_CONFIRM_SECONDS = 300.0
+# How long a seat stays in the FLEET DARK denominator after the hub last
+# observed it live (armed reception or recent authenticated activity).
+FLEET_SIGNAL_WINDOW = 6 * 3600.0
 # 0140 field test 2: the HUB owns the vote deadline. The chair's watcher is
 # the fast path, never the guarantee — a driven seat only owns a process
 # during a turn, and a 5-minute window sat unpublished through 15 minutes of
@@ -150,17 +180,6 @@ FLEET_DARK_CONFIRM_SECONDS = 300.0
 VOTE_SWEEP_SECONDS = 30.0
 # `agora stats` coarse resolution: six of these cover the trailing hour.
 ACTIVITY_BUCKET_SECONDS = 600.0
-# 0109: reporting delegate owes an hourly digest reply to hub desk facts.
-REPORT_DIGEST_PERIOD_SECONDS = 3600.0
-REPORT_DIGEST_ASK_ID = "digest"
-# Plain-register skeleton the reporting delegate fills (0109 #65 test).
-DIGEST_PROSE_TEMPLATE = (
-    "Overnight: <N things finished — plain names, one line each>.\n"
-    "Blocked on operator: <who / what / one unblock action>.\n"
-    "Fleet: <all alive | N dark | who to nudge — continue, release, "
-    "or re-check your gate>."
-)
-
 # Attachment serve hardening (0091): content types a browser could execute
 # as active content are stored verbatim but SERVED as octet-stream, so the
 # hub can never become a script origin. Matched on the lowercased media
@@ -206,15 +225,16 @@ def _derived_description(head: str) -> str:
     non-empty content line, de-markdowned, control-stripped and capped — so a
     listing is never a bare path dump, even for pre-description files."""
     for line in (head or "").splitlines():
-        line = sanitize_text(" ".join(line.strip().lstrip("#*->|`").split()), 120)
+        line = elide(" ".join(line.strip().lstrip("#*->|`").split()), 120)
         if line:
             return line
     return ""
 
 
 class HubError(Exception):
-    def __init__(self, status_code: int, detail: str) -> None:
-        super().__init__(detail)
+    def __init__(self, status_code: int, detail: Any) -> None:
+        text = detail if isinstance(detail, str) else json.dumps(detail, sort_keys=True)
+        super().__init__(text)
         self.status_code = status_code
         self.detail = detail
 
@@ -229,7 +249,6 @@ class HubService:
                  embedding: dict[str, str] | None = None) -> None:
         self.db = db
         self._ensure_builtin_channels()
-        self._ensure_builtin_noticeboard_policy()
         self.max_attachment_bytes = max_attachment_bytes
         self.max_channel_attachment_bytes = max_channel_attachment_bytes
         # One shared binder so fan-out and long-poll wakes marshal onto the
@@ -295,6 +314,26 @@ class HubService:
         # 0110: fleet-wide dark episode (aggregate reception collapse).
         self._fleet_dark_since: float | None = None
         self._fleet_dark_alerted = False
+        # 0110 denominator repair (2026-08-04): agent -> last time THIS hub
+        # observed it live. Persisted as one meta row so a restart keeps
+        # continuity; seeded from meta at boot. The old denominator was
+        # "every seat ever registered", so a graveyard roster (7 live / 50
+        # registered) held FLEET DARK permanently and distorted every
+        # liveness-derived surface.
+        self._fleet_last_signal: dict[str, float] = {}
+        self._fleet_signal_persisted_at = 0.0
+        try:
+            raw = self.db.meta_get("fleet:last_signal")
+            if raw:
+                self._fleet_last_signal = {
+                    str(k): float(v) for k, v in json.loads(raw).items()}
+        except Exception:
+            self._fleet_last_signal = {}
+        # Sweep telemetry for `agora doctor`: name -> {last_run, seconds, n}.
+        # "When did the watchdog last actually run?" was unanswerable from
+        # outside the process, so a wedged sweep looked exactly like a quiet
+        # fleet. In-memory and honest about it: unknown after a restart.
+        self.sweep_runs: dict[str, dict[str, Any]] = {}
         # DARK/DEAF re-alert cooldown (c3436, HOLE 3): PERSISTED, not
         # in-memory. The old in-memory flap guard reset on every restart,
         # so each hub bounce re-fired the whole DARK/DEAF wave off the same
@@ -324,6 +363,30 @@ class HubService:
         # buried-directive case is exactly what 0101/0102 exist for.
         self._directive_epoch = float(self.db.meta_set_default(
             "directive_debt_epoch", str(time.time())))
+        # Same discipline for the 2026-08-04 operator-ask tightening (an
+        # addressed operator message is no longer discharged by any reply,
+        # and a delegate's `resolved` must cite evidence). Set once, first
+        # boot on a build that carries the rule; every restart agrees.
+        self._operator_rule_epoch = float(self.db.meta_set_default(
+            "operator_ask_rule_epoch", str(time.time())))
+        # ...and again for the 2026-08-06 tightening: answering an operator
+        # commission's structured ASKS no longer discharges its BODY. Its
+        # OWN epoch — reusing the one above would re-judge every ask-carrying
+        # operator message settled in the two days since that rule shipped.
+        self._operator_asks_rule_epoch = float(self.db.meta_set_default(
+            "operator_asks_rule_epoch", str(time.time())))
+        # ...and for the 2026-08-06 canvass rule: an ask naming several seats
+        # is answered when EVERY named seat has answered it, not when the
+        # first one has. Its own epoch — 28 historical multi-addressee asks
+        # would otherwise re-open at once, instantly SLA-breached.
+        self._canvass_rule_epoch = float(self.db.meta_set_default(
+            "canvass_rule_epoch", str(time.time())))
+        # ...and again for the 2026-08-11 peer-addressed tightening: a bare
+        # reply to another seat's addressed work ask no longer closes the ask.
+        # Its own epoch: older rows that were already settled under the cheap
+        # binary rule must stay settled.
+        self._peer_addressed_rule_epoch = float(self.db.meta_set_default(
+            "peer_addressed_rule_epoch", str(time.time())))
         # Operator-key burst tripwire (0104, the Jul-14 impersonation): on a
         # shared machine any local process can read the operator's cached
         # key and speak as the human — unpreventable hub-side (the key IS
@@ -342,24 +405,6 @@ class HubService:
         """
         self.db.ensure_channel("commons", private=False, created_by="hub",
                                add_owner=False)
-
-    def _ensure_builtin_noticeboard_policy(self) -> None:
-        """No-op, retained so old callers/tests keep importing cleanly.
-
-        `commons` is the room where humans and agents dialogue openly about
-        whatever matters to everyone — a new release, a bug that needs
-        collaborative planning, a decision worth voting on. It is therefore a
-        `collaboration` channel like any other, and the hub no longer stamps a
-        `traffic_policy` onto it at boot.
-
-        A `traffic_policy` remains available as OPT-IN channel metadata for an
-        operator who genuinely wants a low-traffic board; it is now advisory
-        (a sender-facing convention doorbell) rather than a posting gate.
-        Imposing it here made every fresh hub's commons a place agents could
-        not open a conversation in.
-        """
-        return
-
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Record the serving event loop. Called by every async entry point
         (WebSocket connect, long-poll wait) so cross-thread wakes are safe."""
@@ -380,7 +425,10 @@ class HubService:
             raise HubError(400, str(exc)) from exc
 
     def register_agent(self, agent_id: str, name: str, operator: bool = False,
-                       about: str = "") -> tuple[AgentInfo, str]:
+                       about: str = "", mission: str = "") -> tuple[AgentInfo, str]:
+        """Registration is already an operator act (admin key), so the
+        operator's standing charge for the seat may be written here — the one
+        other place besides `set_mission` that may touch that column."""
         self._validate_agent_id(agent_id)
         self._require_not_hub_blocked_id(agent_id)
         if self.db.agent_retirement(agent_id) is not None:
@@ -394,10 +442,23 @@ class HubService:
             raise HubError(409, f"agent '{agent_id}' already exists")
         api_key = new_token("agora")
         info = self.db.register_agent(agent_id, name, api_key, operator,
-                                      sanitize_text(about, MAX_ABOUT_CHARS))
+                                      sanitize_text(about, MAX_ABOUT_CHARS, field="about"))
+        if mission.strip():
+            self.db.set_mission(agent_id, sanitize_block(mission, MAX_MISSION_CHARS))
+        self._auto_join_commons(info)
         self._op_gen += 1
         self._operators = None  # bust the closure-authority cache
         return info, api_key
+
+    def _auto_join_commons(self, agent: AgentInfo) -> None:
+        """New seats belong to the built-in open floor by default."""
+        if self.db.is_member("commons", agent.id):
+            return
+        self.db.add_member("commons", agent.id)
+        about = self.db.get_about(agent.id)
+        self._post_system("commons", f"{agent.id} joined"
+                                     + (f" — {about}" if about else ""))
+        self.db.set_cursor(agent.id, "commons", self.db.last_seq("commons"))
 
     def operator_ids(self) -> frozenset[str]:
         """Operator agent ids (closure authority, ADR-0003). Cached: it is
@@ -415,11 +476,52 @@ class HubService:
 
     def set_about(self, agent: AgentInfo, about: str) -> AgentInfo:
         """Self-description: scope of ownership, what to ask this agent about.
-        Self-editable only; sanitized like titles (every joiner reads it)."""
+        Self-editable only; sanitized like titles (every joiner reads it).
+
+        Structurally CANNOT reach the seat's mission: they are separate
+        columns with separate writers. When the two shared storage, the first
+        driven turn of `rt2-critic` called this method and replaced its
+        operator charge — "disagreement is your job ... if you end a phase
+        having agreed with everyone, you did not do your job" — with a tidy
+        summary of itself (2026-08-06)."""
         self._require_unpaused(agent)
-        cleaned = sanitize_text(about, MAX_ABOUT_CHARS)
+        cleaned = sanitize_text(about, MAX_ABOUT_CHARS, field="about")
         self.db.set_about(agent.id, cleaned)
         return agent.model_copy(update={"about": cleaned})
+
+    def set_mission(self, agent_id: str, mission: str) -> dict[str, Any]:
+        """The OPERATOR writes a seat's standing mission (admin surface).
+
+        Its own column, and it rides every `whoami` — the one place a fresh
+        harness session is guaranteed to read before it does anything. The
+        AUTHOR is what makes it different from `about`: a seat may describe
+        itself, but it may not write its own charge. A critic that can
+        soften its own mandate is not adversarial by construction.
+
+        Measured, 2026-08-06: `rt2-lead` was the only working seat on the
+        hub with an empty mission, and it declared a build finished at
+        message 4 of 62, naming two files that did not exist yet. The two
+        seats whose text encoded a PROCESS ("owns decomposing work into
+        addressed asks", "pressure-tests decisions") held their lanes across
+        five phases. The one durable per-seat sentence predicted behaviour
+        better than a 400-word commission message did."""
+        if not self.db.agent_exists(agent_id):
+            raise HubError(404, f"agent '{agent_id}' is not registered")
+        cleaned = sanitize_block(mission, MAX_MISSION_CHARS, field="mission")
+        if not cleaned.strip():
+            raise HubError(400, "a mission must say what the seat is FOR — "
+                                "an empty one is how a delegate arrives with "
+                                "no idea that its job is to orchestrate")
+        self.db.set_mission(agent_id, cleaned)
+        return {"agent_id": agent_id, "mission": cleaned}
+
+    def list_missions(self) -> list[dict[str, Any]]:
+        """Every live seat and its charge, blanks included. The blanks are
+        the point: an unmissioned seat is invisible until you ask for the
+        list, and by then it has already improvised a role."""
+        return [{"agent_id": aid,
+                 "mission": (self.db.get_mission(aid) or "").strip()}
+                for aid in self.db.list_agent_ids()]
 
     def authenticate(self, api_key: str) -> AgentInfo:
         agent = self.db.agent_by_key(api_key)
@@ -479,7 +581,7 @@ class HubService:
         token_id = os.urandom(4).hex()
         secret = os.urandom(24).hex()  # 192-bit secret, the api-key idiom
         row = self.db.create_join_token(
-            token_id, secret, agent_id, sanitize_text(about, MAX_ABOUT_CHARS),
+            token_id, secret, agent_id, sanitize_text(about, MAX_ABOUT_CHARS, field="about"),
             preset, created_by, ttl_seconds, max_uses)
         return {**row, "token": f"{JOIN_TOKEN_PREFIX}{token_id}.{secret}"}
 
@@ -517,9 +619,10 @@ class HubService:
         try:
             info, preset = self.db.redeem_join_token(
                 *parsed, agent_id=agent_id, name="", api_key=api_key,
-                about=sanitize_text(about, MAX_ABOUT_CHARS))
+                about=sanitize_text(about, MAX_ABOUT_CHARS, field="about"))
         except JoinTokenRefused as e:
             raise HubError(e.status_code, e.detail) from e
+        self._auto_join_commons(info)
         joined: list[str] = []
         for channel in preset:
             try:
@@ -541,7 +644,12 @@ class HubService:
 
     # -- channels ---------------------------------------------------------------
 
-    def create_channel(self, agent: AgentInfo, name: str, private: bool = True) -> dict[str, Any]:
+    def create_channel(self, agent: AgentInfo, name: str, private: bool = True,
+                       *, charter: str | None = None) -> dict[str, Any]:
+        """Create a channel; the caller becomes its owner. `charter` is an
+        internal seam (create_group stamps the group lifecycle text instead
+        of the generic seed) — not a wire parameter: the HTTP route never
+        passes it, so a member cannot inject charter prose at creation."""
         # A channel name is the one peer-chosen identifier that flows verbatim
         # into notify-file lines, `agora listen` wake sentinels and digests.
         # Control characters (newline/tab/CR/ESC…) are never a legitimate slug
@@ -569,10 +677,30 @@ class HubService:
             raise HubError(409, f"channel '{name}' already exists")
         channel = self.db.create_channel(name, private, agent.id)
         self._post_system(name, f"channel created by {agent.id}")
+        self._seed_charter(agent, name, charter)
         # No channel — `commons` included — is born with a `traffic_policy`.
         # A board is an operator's deliberate opt-in via channel:meta, not a
         # name the hub recognises and restricts.
         return channel.model_dump()
+
+    def _seed_charter(self, agent: AgentInfo, channel: str,
+                      text: str | None = None) -> None:
+        """Every room is born with a charter (0146). Deliberately the SEED
+        text, not the placeholder template: an unedited seed is what most
+        rooms will actually serve, so every line of it is true before anyone
+        touches it — it names the owner, states the inheritance, and points
+        at the hub charter for the role model. Best-effort: a charter write
+        must never be the reason a channel fails to exist."""
+        if text is None:
+            text = CHANNEL_CHARTER_SEED.format(
+                channel=channel, owner=agent.id,
+                purpose="Not declared yet — the owner sets it here and in "
+                        "channel:meta.purpose.")
+        try:
+            self.fs_write(agent, channel, CHARTER_PATH, text,
+                          description="channel charter: purpose and room rules")
+        except HubError:
+            pass
 
     def create_group(self, agent: AgentInfo, name: str, members: list[str],
                      *, purpose: str = "", opening_post: str = "",
@@ -590,21 +718,34 @@ class HubService:
         implementation and one status — partial failures are reported per
         member, never silently dropped."""
         self._require_unpaused(agent)
-        channel = self.create_channel(agent, name, private)  # validates slug/collision
-        if purpose:
-            self.store_set(agent, name, CHANNEL_META_KEY,
-                           {"purpose": sanitize_text(purpose, MAX_ABOUT_CHARS)})
         # Auto-charter (0135): the room arrives with its lifecycle contract
         # already written — receipt-to-commons, close-when-done — so routing
-        # discipline costs the creator zero extra calls. Best-effort: a
-        # charter-write failure must not abort the invites below.
-        try:
-            self.fs_write(agent, name, CHARTER_PATH, GROUP_CHARTER_TEMPLATE.format(
+        # discipline costs the creator zero extra calls. It rides the SAME
+        # creation-time seam every channel now uses (0146), so a group room
+        # is born at charter v1 like everything else rather than immediately
+        # superseding a generic seed.
+        channel = self.create_channel(  # validates slug/collision
+            agent, name, private,
+            charter=GROUP_CHARTER_TEMPLATE.format(
                 channel=name, owner=agent.id,
-                purpose=sanitize_text(purpose, MAX_ABOUT_CHARS) or "<set by owner>"),
-                description="group charter: purpose, lifecycle, receipt rule")
-        except HubError:
-            pass
+                purpose=sanitize_text(purpose, MAX_ABOUT_CHARS, field="purpose") or "<set by owner>"))
+        # A DELEGATE MAY NOT WORK WHERE ITS OPERATOR CANNOT LOOK
+        # (2026-08-06). `rt2-lead` split the real work into a private room
+        # and invited only the six workers. For three hours the operator's
+        # board showed a dead channel while a milestone shipped next door;
+        # the room's own creation notice was posted INSIDE the room nobody
+        # could read. Delegation is verifiable state (ADR-0004), and a
+        # delegate's workroom is part of that state — so every operator is
+        # invited, exactly as any other member, joining still their own
+        # auditable act. Membership is not readership: they are invited,
+        # not force-joined.
+        if not agent.operator and any(
+                self.is_delegate(agent.id, p) for p in DELEGATE_POWERS):
+            members = list(members) + [op for op in sorted(self.operator_ids())
+                                       if op not in members]
+        if purpose:
+            self.store_set(agent, name, CHANNEL_META_KEY,
+                           {"purpose": sanitize_text(purpose, MAX_ABOUT_CHARS, field="purpose")})
         invited: list[str] = []
         failed: list[dict[str, str]] = []
         for peer in members:
@@ -630,7 +771,7 @@ class HubService:
         opening = None
         if opening_post:
             opening = self.post_message(agent, name, PostMessage(
-                body=opening_post, title=sanitize_title(opening_post[:80]),
+                body=opening_post, title=sanitize_title(elide(opening_post, 80)),
                 status=Status.open))
         return {"channel": name, "created": channel, "invited": invited,
                 "failed": failed,
@@ -792,9 +933,9 @@ class HubService:
             if not aid or aid in seen:
                 raise HubError(400, "ask ids must be unique and non-empty")
             seen.add(aid)
-            entry = {"id": aid, "text": sanitize_text(str(a.get("text", "")), MAX_ASK_CHARS)}
+            entry = {"id": aid, "text": sanitize_text(str(a.get("text", "")), MAX_ASK_CHARS, field="ask text")}
             if a.get("assignee"):
-                assignee = sanitize_text(str(a["assignee"]), MAX_ASSIGNEE_CHARS)
+                assignee = sanitize_text(str(a["assignee"]), MAX_ASSIGNEE_CHARS, field="ask assignee")
                 # An assignee is an addressee (storm review, 2026-07-28): it
                 # creates owed debt, so it gets the same gates as ask `to` —
                 # a ghost name must not satisfy addressing rules while the
@@ -871,6 +1012,29 @@ class HubService:
             unknown = [a for a in answered if a not in parent_ids]
             if unknown:
                 raise HubError(400, f"answers reference unknown ask ids: {unknown}")
+            by_id = {str(a["id"]): a for a in asks_of(parent)}
+            foreign = []
+            for aid in answered:
+                ask = by_id.get(aid)
+                if ask is None:
+                    continue
+                # Per-ask `to` is the only HARD addressing. `assignee` is
+                # advisory everywhere else — discharge and /owed both treat
+                # an assignee-only ask as answerable by anyone — so gating
+                # the answer on it here silently voided legitimate
+                # third-party answers (the poster got a 400, the ask stayed
+                # pending, and the assignee stayed pinned for work already
+                # done).
+                named = {str(x) for x in (ask.get("to") or [])}
+                if named and sender not in named:
+                    foreign.append(aid)
+            if foreign:
+                raise HubError(
+                    400,
+                    "you may not answer ask ids not addressed to you: "
+                    f"{foreign} — let the named seat answer, or reply "
+                    "without answers if you are only adding context",
+                )
         return answered
 
     #: Batched consumption (0140/3). The at-test fleet paid an O(n²) ceremony
@@ -934,7 +1098,7 @@ class HubService:
                     else by_root.get(found.id, []) if found is not None
                     else [])
             if not hits:
-                unknown.append(sanitize_text(ref, 80))
+                unknown.append(elide(ref, 80))
                 continue
             # Deduped: the same debt cited twice (as its seq and as its id,
             # or twice over) is ONE settlement, and the stored record should
@@ -1016,7 +1180,7 @@ class HubService:
             # stay free-form (they index as 'mention', never refused).
             ref = str(data["item_ref"])
             if parse_work_id(ref) is None:
-                raise HubError(400, f"item_ref '{sanitize_text(ref, 64)}' is "
+                raise HubError(400, f"item_ref '{elide(ref, 64)}' is "
                                     "not a work id — the ruled form is "
                                     "<package>-<NNNN> (e.g. agora-0093); "
                                     "citing in prose needs no field at all")
@@ -1038,11 +1202,151 @@ class HubService:
                 raise HubError(400, "settled_by must name a message id in this "
                                     "channel (the message that settled the "
                                     "question)")
+            # AN OPERATOR'S REQUEST IS NOT CLOSABLE BY A BYSTANDER
+            # (2026-08-06). `settled_by` was an unconditional master key:
+            # ANY member could close ANY obligation — an operator commission
+            # included — by pointing a `resolved` reply at any other message
+            # in the room, including one they had posted a second earlier.
+            # That bypassed the 2026-08-01 operator-broadcast ruling, the
+            # 2026-08-04 addressed-commission tightening, and the evidence
+            # gate, in a single post.
+            #
+            # The reporting delegate KEEPS this door, because something must
+            # be able to settle a commission whose operator has gone quiet —
+            # but it pays the same price as any other completion report: it
+            # must cite what it delivered.
+            parent = self.db.get_message(payload.reply_to)
+            if parent is not None and parent.sender in self.operator_ids():
+                # `_prepare_structured` is called before the Message exists;
+                # the authenticated poster reaches this helper as `sender`.
+                if sender in self.operator_ids():
+                    pass
+                elif sender in self.reporting_delegate_ids():
+                    if not (data.get("evidence")
+                            or payload.data and payload.data.get("evidence")):
+                        raise HubError(400,
+                                       "settling an operator's request needs "
+                                       "`evidence` naming what you delivered "
+                                       "— a pointer at another message is a "
+                                       "bare claim wearing an audit trail")
+                else:
+                    raise HubError(403,
+                                   "only the operator, or a reporting "
+                                   "delegate citing evidence, may settle an "
+                                   "operator's request. Answer it, or ask the "
+                                   "delegate to report on it.")
             data["settled_by"] = pointer
+        if "evidence" in data:
+            data["evidence"] = self._validate_evidence(channel, data["evidence"])
+        if (payload.status == Status.resolved and payload.reply_to
+                and "settled_by" not in data):
+            # A reporting delegate's `resolved` on an operator's request IS
+            # the completion report (2026-08-01 ruling) — and an uncited one
+            # settles NOTHING: discharge requires `_cites_evidence`, so the
+            # thread stays open and every pinned seat keeps waking on it.
+            # Live (fund1, 2026-08-11): the delegate posted three evidence-less
+            # "delivery complete" resolveds in a row, each spawned by the very
+            # debt the previous one failed to clear. Nothing had told it the
+            # contract. Refuse at post time, with the recipe — the one moment
+            # the model is guaranteed to be listening.
+            parent = self.db.get_message(payload.reply_to)
+            if (parent is not None and parent.channel == channel
+                    and parent.status in (Status.open, Status.blocked)
+                    and parent.sender in self.operator_ids()
+                    and sender not in self.operator_ids()
+                    and sender in self.reporting_delegate_ids()):
+                refs = data.get("evidence") or []
+                citable = any(not isinstance(r, dict)
+                              or r.get("verified") is not False
+                              for r in refs)
+                if not citable:
+                    raise HubError(400,
+                                   "your `resolved` here is the completion "
+                                   "report on an operator's request, and it "
+                                   "must point at what it delivered — add "
+                                   "data.evidence=[{kind, ref}] citing the "
+                                   "delivery: a store row (kind 'store', e.g. "
+                                   "your decision:<slug>), a channel file "
+                                   "('fs', 'path@version'), an uploaded blob "
+                                   "('blob', sha256), or an outside artifact "
+                                   "('external', with sha256+size_bytes). "
+                                   "Without a citation the request stays "
+                                   "open and every addressed seat keeps "
+                                   "waking on it.")
+                # ADVERSARIAL REVIEW IS PART OF DELIVERY (operator ruling,
+                # 2026-08-12): "no agent should single-handedly try to solve
+                # the full task ... we HAVE to encourage ADVERSARIAL
+                # discussions to ensure quality delivery." A completion
+                # report every citation of which the delegate authored
+                # itself is an uncontested delivery — live (fund3), a
+                # working game shipped with zero peer review and two of
+                # three specialists' plans silently reduced to inputs. In a
+                # room that HAS peers, at least one cited artifact must be
+                # authored by someone other than the delegate — a review
+                # verdict, a peer's slice delivery, anything a reader can
+                # attribute to a second mind. Hub-authored rows and the
+                # operator's own seats don't count as peers; a delegate
+                # working alone keeps the old single-author rule (no
+                # deadlock).
+                peers = {m.agent_id for m in self.db.list_members(channel)
+                         if m.agent_id not in (sender, "hub")
+                         and m.agent_id not in self.operator_ids()}
+                if peers:
+                    authors = {r.get("updated_by") or r.get("created_by")
+                               for r in refs if isinstance(r, dict)}
+                    authors.discard(None)
+                    if not (authors - {sender}):
+                        raise HubError(400,
+                                       "an uncontested delivery is not a "
+                                       "delivery: every evidence citation "
+                                       "here is authored by you, and this "
+                                       "room has peers. Have a contributor "
+                                       "adversarially review a slice they "
+                                       "did NOT write — cold-read the "
+                                       "artifact against the operator's "
+                                       "original words, hunt defects, put "
+                                       "the verdict on the record (a "
+                                       "`review:<slug>` store row or a "
+                                       "reviewed file on the channel fs) — "
+                                       "then cite that peer-authored "
+                                       "artifact in data.evidence alongside "
+                                       "your own.")
+                    # PLAN ELABORATION IS A MANDATORY STEP (operator ruling,
+                    # 2026-08-12): "no agent should ever start working
+                    # before a plan has been created and agreed upon." The
+                    # plan phase is where seats argue, own and defend their
+                    # perspectives — especially seats rooted in existing
+                    # packages whose constraints rule paths in and out. The
+                    # hub cannot see a premature build in a filesystem
+                    # workspace, but it CAN refuse to answer the user
+                    # without the plan on the record: the completion report
+                    # must cite the agreed plan row it delivered under.
+                    if not any(isinstance(r, dict) and r.get("kind") == "store"
+                               and str(r.get("ref", "")).startswith("plan:")
+                               for r in refs):
+                        raise HubError(400,
+                                       "no delivery without the plan it was "
+                                       "built under: cite the agreed plan — "
+                                       "a `plan:<slug>` store row recording "
+                                       "each seat's slice and how the "
+                                       "contested points were settled in "
+                                       "the room — in data.evidence "
+                                       "alongside the artifact and the peer "
+                                       "review. Plan elaboration is a "
+                                       "mandatory step: seats argue and "
+                                       "align BEFORE implementation, and "
+                                       "the report points at what was "
+                                       "agreed.")
         if payload.signature is not None:
-            # Reserved authorship token: opaque, stored verbatim (bounded), not
-            # yet verified. Consumers may read it; the hub attaches no trust.
-            data["signature"] = str(payload.signature)[:MAX_SIGNATURE_CHARS]
+            # Reserved authorship token: opaque, stored VERBATIM, not yet
+            # verified. Consumers may read it; the hub attaches no trust.
+            # Never shortened: half a signature is not a shorter signature,
+            # it is a corrupt one, and it would verify as forged the day
+            # someone wires verification up.
+            sig = str(payload.signature)
+            if len(sig) > MAX_SIGNATURE_CHARS:
+                raise TextTooLong("signature", len(sig), MAX_SIGNATURE_CHARS)
+            data["signature"] = sig
         return data or None
 
     def channel_ledger(self, agent: AgentInfo, channel: str, *, verify: bool = True) -> dict[str, Any]:
@@ -1158,7 +1462,7 @@ class HubService:
             raise HubError(404, f"agent '{target_id}' is not registered")
         if target_id in self.operator_ids():
             raise HubError(403, "operators cannot be retired (lifecycle safety)")
-        reason = sanitize_text(str(reason or ""), 200)
+        reason = sanitize_text(str(reason or ""), 200, field="reason")
         evicted = self.db.retire_agent(target_id, reason)
         return {"agent": target_id, "retired": True, "reason": reason,
                 "evicted_from": sorted(evicted)}
@@ -1428,9 +1732,9 @@ class HubService:
                 # verbatim (it can only name the counterpart anyway —
                 # there is nobody else in the room).
                 payload = payload.model_copy(update={"to": peers})
+        self._require_rulings_ack(channel, agent)
         payload, mention_ctx = self._apply_mention_addressing(agent, channel, payload)
         self._require_charter_read(channel, agent)
-        self._require_rulings_ack(channel, agent)
         if len(payload.body.encode()) > MAX_BODY_BYTES:
             raise HubError(413, f"body exceeds {MAX_BODY_BYTES} bytes")
         # A reply's whole meaning is "this answers something": a bare
@@ -1561,7 +1865,7 @@ class HubService:
 
     #: Routing nudges (agora-0133/0135). Measured on 3.5 days of commons:
     #: 76% of envelope deliveries landed on seats that never spoke in the
-    #: thread, and the operator ordered routing discipline (dm#177). Two
+    #: thread, and the operator ordered routing discipline (dm#177). Three
     #: mechanical, budgeted teaching gestures — never blocks, never a 500:
     #: - broadcast notice: an open/blocked with NO addressee obliges NOBODY
     #:   (zero /owed rows) and therefore buys no turn from an idle seat;
@@ -1569,12 +1873,24 @@ class HubService:
     #:   no channel traffic, nobody shamed). No member threshold: the
     #:   arithmetic is the same in a room of two, and the measured failure
     #:   was a six-seat working group. See _routing_nudges.
+    #: - task-room nudge: once a commons/open-floor thread already has the
+    #:   real contributors, tell the thread to move the day-to-day work into
+    #:   a focused room NOW rather than waiting for the noticeboard cleanup
+    #:   nudge after the thread has already sprawled.
     #: - fork nudge: a thread in a noticeboard-scale room where 3+ seats are
     #:   building gets ONE in-thread pointer to `agora group` (stored fyi:
     #:   visible to the participants it addresses, wakes nobody).
+    TASK_ROOM_NUDGE_MIN_PARTICIPANTS = 3
     FORK_NUDGE_MIN_SENDERS = 3
     FORK_NUDGE_MIN_MSGS = 6
-    FORK_NUDGE_MIN_MEMBERS = 10
+    #: Rooms of 6-7 seats are the working unit now, and a floor of 10 meant
+    #: this nudge had NEVER fired outside `commons` (27 members) and
+    #: `at-test` (10) — never in a purpose-built working group, which is
+    #: exactly where a thread outgrowing the room costs the most. The
+    #: broadcast notice at `_deliver_doorbell` already made this move for the
+    #: same reason (its floor went 6 -> >1 because "the measured failure was
+    #: a 6-seat room"). 5 keeps a DM-sized huddle out of scope.
+    FORK_NUDGE_MIN_MEMBERS = 5
     #: Share of a thread that must be ADDRESSED fan-out/fan-in around one
     #: seat before the fork nudge stands down (0140 field test 2).
     FORK_NUDGE_ORCHESTRATED_SHARE = 2 / 3
@@ -1609,6 +1925,25 @@ class HubService:
             if (m.sender == hub_seat and (m.to or ask_addressees(m)))
             or m.sender in named)
         return shaped >= len(thread) * HubService.FORK_NUDGE_ORCHESTRATED_SHARE
+
+    @staticmethod
+    def _task_room_participants(root: Message,
+                                replies: list[Message]) -> list[str]:
+        """Seats that must SPEAK on a thread, as far as the hub can see.
+
+        This is intentionally broader than the late fork nudge's "sprawl"
+        test: if a task on the commons/open floor already has the real
+        contributors, the right move is to open the focused room early —
+        even when the thread is perfectly well-orchestrated so far."""
+        participants: set[str] = {root.sender}
+        for m in [root, *replies]:
+            if m.kind != Kind.message:
+                continue
+            participants.add(m.sender)
+            participants.update(m.to or [])
+            participants.update(ask_addressees(m))
+        participants.discard("hub")
+        return sorted(p for p in participants if p)
 
     def _routing_nudges(self, agent: AgentInfo, channel: str,
                         message: Message) -> None:
@@ -1656,11 +1991,71 @@ class HubService:
                     "Background for whoever is already reading? Fine — this "
                     "is the price tag, not a block.")
             self._deliver_doorbell(agent.id, message, body)
+            # ...and ring the DELEGATE, not just the sender (2026-08-04).
+            # The sender-facing notice teaches the human to name seats, but
+            # the human is usually gone by the time it lands: scifi-novel#211
+            # was an operator revision brief naming nobody, and the room did
+            # the work of exactly one seat while five sat with empty /owed.
+            # The reporting delegate ALREADY owes every operator message
+            # (`_operator_delegate_debt`); this tells it the one thing its
+            # own ledger cannot: that nobody else owes anything, so the
+            # dispatch is its move. Doorbell only — nothing stored, no
+            # channel traffic, no obligation minted.
+            if agent.operator:
+                for delegate in self._reporting_stewards(exclude=agent.id):
+                    if delegate in members:
+                        self._deliver_doorbell(
+                            delegate, message,
+                            f"HUB NOTICE — operator message "
+                            f"'{(message.title or message.id)}' in #{channel} "
+                            f"names nobody, so none of the {n} other members "
+                            "owes anything on it. You own it as reporting "
+                            "delegate. If it needs more hands than yours, "
+                            'DECOMPOSE it into asks carrying to=["seat"] — '
+                            "that is the only form that obliges anyone, and "
+                            "an unaddressed ask buys no turn from anybody.")
         if info.private:
             # Purpose-built (private) groups ARE the destination the routing
             # nudges below teach; nudging inside them would fight their own
             # design.
             return
+        # -- task-room nudge: move multi-seat work out of the open floor ----
+        # The late fork nudge below is cleanup: by the time it fires, the
+        # room already paid the context/noise cost. The earlier contract is
+        # simpler: once a task on #commons or a noticeboard already has the
+        # real contributors, create the focused room NOW and keep the floor
+        # for the pointer, outsider-facing decisions, milestones and final
+        # delivery. This deliberately ignores `_orchestrated_thread`: even a
+        # well-addressed fan-out in commons belongs in its own room once the
+        # contributor set is known.
+        if (channel == "commons"
+                or self._channel_traffic_policy(channel) == "noticeboard"):
+            root = message if message.reply_to is None else self.db.get_message(
+                message.reply_to)
+            # commons/open-floor threads reply to the root; one hop covers the
+            # measured shape and keeps the check cheap.
+            if root is not None and root.reply_to:
+                root = self.db.get_message(root.reply_to) or root
+            if (root is not None and root.kind == Kind.message
+                    and root.status in (Status.open, Status.blocked)
+                    and self.db.meta_get(f"taskroomnudge:{root.id}") is None):
+                replies = self.db.replies_to(root.id)
+                if not any(r.status == Status.resolved for r in replies):
+                    participants = self._task_room_participants(root, replies)
+                    if len(participants) >= self.TASK_ROOM_NUDGE_MIN_PARTICIPANTS:
+                        self.db.meta_set(f"taskroomnudge:{root.id}",
+                                         str(time.time()))
+                        slug = _topic_slug(root.title) or "this-topic"
+                        names = " ".join(f"@{s}" for s in participants)
+                        self._post_system(
+                            channel,
+                            f"ROUTING — this task already has "
+                            f"{len(participants)} seats who must speak. "
+                            f"Open a focused room NOW:  agora group {slug} "
+                            f"{names}  — keep #{channel} for the pointer, "
+                            "cross-room decisions, milestones, and final "
+                            "delivery.",
+                            status="fyi", reply_to=root.id)
         # -- board convention (replaces the 0.12.55 refusal): sender-facing ---
         # On an opt-in noticeboard channel a root post without a typed notice
         # is DELIVERED; the sender simply learns the convention that buys them
@@ -1679,7 +2074,13 @@ class HubService:
                 "a convention, not a gate. Long back-and-forth is better in a "
                 "focused group (`agora group`).")
         # -- fork nudge (0135): thread-facing, once per root -----------------
-        if message.reply_to and len(members) >= self.FORK_NUDGE_MIN_MEMBERS:
+        # This is a NOTICEBOARD teaching, not a public-room teaching. A
+        # collaboration room may be large and still be the right place for
+        # the work; firing the noticeboard wording there is both misleading
+        # and a false routing push.
+        if (message.reply_to
+                and self._channel_traffic_policy(channel) == "noticeboard"
+                and len(members) >= self.FORK_NUDGE_MIN_MEMBERS):
             root = self.db.get_message(message.reply_to)
             # Flat-thread walk: commons threads reply to the root; one hop
             # covers the measured shape without a recursive scan.
@@ -1719,15 +2120,15 @@ class HubService:
 
     def _apply_mention_addressing(self, agent: AgentInfo, channel: str,
                                   payload: PostMessage) -> tuple[PostMessage, _MentionContext]:
-        """0105: operator @mentions in the body become message-level `to`
-        (mechanical obligation under 0102). Quoted fence spans are ignored;
-        explicit `to` is preserved and merged."""
+        """0105 widened: in-room @mentions become real addressing for every
+        sender. Quoted fence spans are ignored; explicit `to` is preserved
+        and merged."""
         ctx = self._MentionContext()
         if channel.startswith(DM_PREFIX):
             return payload, ctx
         members = {m.agent_id for m in self.db.list_members(channel)}
         in_room, ctx.outsiders = resolve_mentions(payload.body, members)
-        if agent.operator and in_room:
+        if in_room:
             merged = list(payload.to or [])
             for seat in in_room:
                 if seat != agent.id and seat not in merged:
@@ -1742,25 +2143,20 @@ class HubService:
                 for o in out_ask:
                     if o not in ctx.outsiders:
                         ctx.outsiders.append(o)
-                if agent.operator and not ask.to:
-                    seats = [s for s in in_ask if s != agent.id][:self.MAX_ASK_TO]
-                    if seats:
-                        ask = ask.model_copy(update={"to": seats})
-                        asks_changed = True
-                elif not agent.operator:
-                    for s in in_ask:
-                        if (s != agent.id and s not in (ask.to or [])
-                                and s not in (payload.to or [])
-                                and s not in ctx.unobliged):
-                            ctx.unobliged.append(s)
+                seats = list(ask.to or [])
+                for seat in in_ask:
+                    if seat == agent.id or seat in seats:
+                        continue
+                    if len(seats) < self.MAX_ASK_TO:
+                        seats.append(seat)
+                    elif seat not in ctx.unobliged:
+                        ctx.unobliged.append(seat)
+                if seats != list(ask.to or []):
+                    ask = ask.model_copy(update={"to": seats})
+                    asks_changed = True
                 new_asks.append(ask)
             if asks_changed:
                 payload = payload.model_copy(update={"asks": new_asks})
-        if not agent.operator:
-            for s in in_room:
-                if (s != agent.id and s not in (payload.to or [])
-                        and s not in ctx.unobliged):
-                    ctx.unobliged.append(s)
         return payload, ctx
 
     def _mention_nudges(self, agent: AgentInfo, channel: str,
@@ -1779,10 +2175,9 @@ class HubService:
             names = ", ".join(f"@{s}" for s in ctx.unobliged)
             self._deliver_doorbell(
                 agent.id, message,
-                f"HUB NOTICE — you wrote {names} in the body but obliged "
-                "nobody (to=[]). Peers are never auto-addressed from "
-                "@mentions — add them to `to` or use /ask @seat if you "
-                "meant it.")
+                f"HUB NOTICE — you named {names} in one ask, but a single "
+                f"ask may obligate at most {self.MAX_ASK_TO} seats. Split "
+                "the ask, or keep the extras at message-level `to`.")
 
     def noise_report(self, hours: float = 24.0) -> dict[str, Any]:
         """The routing reform's proof instrument (0135): per-channel wake and
@@ -1832,12 +2227,22 @@ class HubService:
         return {"hours": hours, "channels": report,
                 "computed_at": time.time()}
 
-    def _deliver_doorbell(self, agent_id: str, mirror: Message, body: str) -> None:
+    def _deliver_doorbell(self, agent_id: str, mirror: Message, body: str,
+                          title: str = "hub notice") -> None:
         """An EPHEMERAL, non-waking sender notice: one notify-file line,
         nothing stored — read_message on its id 404s and the body stands alone. The
         channel/seq MIRROR the real message so acking can never move a
         cursor past real traffic (same construction as the stale-client
-        notice, http_api._stale_client_notice)."""
+        notice, http_api._stale_client_notice).
+
+        `title` is what a `--preview` listener and any notify-file tailer
+        actually SEE (the body reaches no model on the driven lane: the
+        --once digest is redacted to identifiers and the notice is never
+        stored, so check_inbox cannot show it). Every notice used to render
+        under the single hardcoded headline "broadcast obligation", so a
+        charter publication was indistinguishable from a mention nudge on
+        every tailer; the default is now neutral and a caller whose notice
+        is actionable names itself."""
         if self.notify_sink is None:
             return
         self.notify_sink.deliver(agent_id, Envelope(
@@ -1848,7 +2253,7 @@ class HubService:
             # teaching feedback must be visible without recursively spawning
             # another driven reception turn.
             to_me=False, addressed=False,
-            title="hub notice: broadcast obligation",
+            title=title,
             body=body, body_bytes=len(body.encode())))
 
     #: Operator-key burst tripwire (0104): 6+ posts inside 15s is machine
@@ -1894,9 +2299,7 @@ class HubService:
         anyone's, and a uniform rule beats special cases. fs audit and system
         messages insert directly into the db, so charter edits can never be
         blocked by the gate they refresh."""
-        meta = self.db.store_get(channel, CHANNEL_META_KEY)
-        if not (meta and isinstance(meta.value, dict)
-                and meta.value.get("norms_required")):
+        if not self._norms_required(channel):
             return
         row = self.db.fs_get(channel, FS_PREFIX + CHARTER_PATH)
         if row is None or row["deleted"]:
@@ -1904,26 +2307,9 @@ class HubService:
         receipt = self.db.charter_receipt_get(agent.id, channel)
         if receipt is None or receipt < row["version"]:
             raise HubError(409, f"this channel requires reading its charter "
-                                f"first: fs_read '{CHARTER_PATH}' in "
-                                f"'{channel}' (v{row['version']}), then retry")
-
-    def _require_rulings_ack(self, channel: str, agent: AgentInfo) -> None:
-        """0113 opt-in gate: scoped seats must ack current standing rulings."""
-        meta = self.db.store_get(channel, CHANNEL_META_KEY)
-        if not (meta and isinstance(meta.value, dict)
-                and meta.value.get("rulings_required")):
-            return
-        unacked = self._unacknowledged_rulings(agent, channel)
-        if not unacked:
-            return
-        keys = ", ".join(r["key"] for r in unacked[:5])
-        more = f" (+{len(unacked) - 5} more)" if len(unacked) > 5 else ""
-        raise HubError(409, f"this channel requires acknowledging standing "
-                            f"rulings first: GET /channels/{channel}/digest "
-                            f"(see unacknowledged_rulings), then POST "
-                            f"/channels/{channel}/ruling-acks — pending: "
-                            f"{keys}{more}")
-
+                                f"first: read_charter(channel={channel!r}) "
+                                f"(v{row['version']}, at '{CHARTER_PATH}'), "
+                                "then retry")
     def _post_system(self, channel: str, body: str,
                      to: list[str] | None = None,
                      status: str | None = None,
@@ -2058,8 +2444,6 @@ class HubService:
         - decisions: the channel store's `decision:*` keys — the room's
           distilled, versioned decision record (written by convention when a
           thread resolves).
-        - rulings: the channel store's `ruling:*` keys — standing operator
-          constraints that outlive the thread (0113).
 
         This is the 'cheap view' half of the knowledge norm; the distillation
         practice (writing decision keys) stays with the agents."""
@@ -2147,20 +2531,20 @@ class HubService:
         # the total so truncation is visible (review M1).
         decided_total = len(decided)
         decided = sorted(decided, key=lambda d: d["seq"], reverse=True)[:50]
-        unacked = self._unacknowledged_rulings(agent, channel)
         # Phases lead the digest by construction (0140/2): the digest is the
         # "returning after a gap" surface, and the question a returning seat
         # gets wrong is WHICH VERSION is live — the at-test v3/v4 collision.
+        unacked = self._unacknowledged_rulings(agent, channel)
         phases = self.phase_rows(channel)
         return {
             "channel": channel,
             "phases": phases,
+            "rulings": rulings,
+            "unacknowledged_rulings": unacked,
             "phase_lines": [self.phase_line(p) for p in phases],
             "open_questions": open_questions,
             "decided": decided,
             "decisions": decisions,
-            "rulings": rulings,
-            "unacknowledged_rulings": unacked,
             "counts": {"open_questions": len(open_questions),
                        "decided_shown": len(decided), "decided_total": decided_total,
                        "decisions": len(decisions), "rulings": len(rulings),
@@ -2222,11 +2606,41 @@ class HubService:
             # a semantics change can never make a message born escalated.
             debt_epoch=self._directive_epoch if owes_reply else 0.0,
         )
-        # A human's word to their fleet is never narrowed (see Envelope.
-        # from_operator). Computed at the one choke point every envelope
-        # surface goes through, so notify lines, /inbox and the WS agree.
+        # The reporting delegate is the hub-routed owner of operator traffic
+        # even when the sender did not type them into `to`. Surfacing that as
+        # viewer-specific `to_me` lets listener/hook/runner narrow operator
+        # work to the seats that actually owe it, instead of waking bystanders.
+        if (message.status in (Status.open, Status.blocked)
+                and self._operator_delegate_debt(viewer_id, message)):
+            envelope.to_me = True
+        # Computed at the one choke point every envelope surface goes through,
+        # so notify lines, /inbox and the WS agree.
         envelope.from_operator = message.sender in self.operator_ids()
         return envelope
+
+    def _linked_claim_sources(self, owner: str, channels: list[str]) -> set[str]:
+        """Every live claim source id this seat owns across the given channels.
+
+        Used by `/owed` to distinguish 'I replied' from 'I took the work':
+        a bare peer ack does not settle a work ask, but a linked claim row
+        does materialize ownership and moves the pressure onto the claim."""
+        out: set[str] = set()
+        for channel in channels:
+            for entry in self.db.store_keys(channel):
+                key = entry["key"]
+                if not key.startswith("claim:"):
+                    continue
+                stored = self.db.store_get(channel, key)
+                if stored is None or not isinstance(stored.value, dict):
+                    continue
+                value = stored.value
+                row_owner = str(value.get("owner") or stored.updated_by or "")
+                if row_owner != owner or self._claim_done(value):
+                    continue
+                source = str(value.get("source_message_id") or "")
+                if source:
+                    out.add(source)
+        return out
 
     def channel_sla(self, channel: str) -> float:
         meta = self.db.store_get(channel, CHANNEL_META_KEY)
@@ -2399,20 +2813,18 @@ class HubService:
         exactly the excuse behind silently dropped directives (operator,
         2026-07-19: 'it MUST be'). The rule, mechanical:
 
-        - OPERATOR sender, status reply OR fyi: always obliges the named
-          seats. Human words are few and never chatter; a DM auto-addresses
-          (c3073), so every operator DM line lands here regardless of the
-          status the composer picked. The operator ends a thread with
-          status=resolved (closes), never by being ignored.
+        - OPERATOR sender, status reply/fyi: obliges the named seats and the
+          reporting delegate. Humans are allowed to be sloppy about status;
+          the fleet still owes the work.
         - PEER sender, status reply: obliges the named seats UNLESS it is
           the sender's answer coming back to you — i.e. it replies to YOUR
           OWN message. Your debt for an answer is CONSUMPTION (0078's
           to_consume), not another reply; this exemption is also what
           terminates ack chains ('thanks' replying to their answer obliges
           them nothing) instead of ping-ponging forever.
-        - PEER sender, status fyi: never obliges — fyi is the documented
-          terminal gesture ('no reply owed'), and DMs auto-address, so
-          without a non-obliging status no DM thread could ever end.
+        - PEER status fyi: never obliges by itself. Addressing or tagging a
+          peer fyi affects visibility, not debt; if the sender wants a
+          guaranteed answer, it must not be fyi.
         - A reply carrying `answers` never obliges (both classes): it
           discharges an ask; the asker's debt is consumption.
 
@@ -2444,8 +2856,10 @@ class HubService:
             return False
         if m.sender in self.operator_ids():
             return True
+        if m.status == Status.fyi:
+            return False
         if m.status != Status.reply:
-            return False  # peer fyi: terminal gesture, never a debt
+            return False
         parent = self.db.get_message(m.reply_to) if m.reply_to else None
         return not (parent is not None and parent.sender == viewer_id)
 
@@ -2455,7 +2869,11 @@ class HubService:
         another for the envelope — the class of drift that let at-test#382
         read as closed on one surface while its work was still undone."""
         return discharge_state(m, replies, self.operator_ids(),
-                               self.reporting_delegate_ids())
+                               self.reporting_delegate_ids(),
+                               self._operator_rule_epoch,
+                               self._operator_asks_rule_epoch,
+                               self._canvass_rule_epoch,
+                               self._peer_addressed_rule_epoch)
 
     def reporting_delegate_ids(self) -> frozenset[str]:
         """Seats holding an active `reporting` delegation — the fleet's
@@ -2526,9 +2944,11 @@ class HubService:
 
         - `to_answer`: open/blocked messages addressed to the agent — via
           message `to`, an advisory assignee, or a still-pending per-ask `to`
-          (0077) — that are not closed and that the agent has not replied to
-          at all. Replying at all drops the row (the remaining debt is
-          other seats'); closure drops it everywhere.
+          (0077) — that are not closed and that the agent has not yet
+          discharged. A peer's bare reply does NOT drop the row by itself:
+          quick answers clear it, authoritative closure clears it everywhere,
+          and a non-final work ack clears it only once a linked claim row
+          exists.
         - `to_consume` (0078): answers other seats posted to the agent's OWN
           open questions that the agent has neither read (receipt) nor
           followed in-thread (any later post of theirs) — the mechanical
@@ -2545,6 +2965,7 @@ class HubService:
         ops = self.operator_ids()
         now = time.time()
         sla_cache: dict[str, float] = {}
+        claim_source_cache: dict[str, set[str]] = {}
         to_answer: list[dict[str, Any]] = []
         # Candidates: open/blocked obligations PLUS addressed reply/fyi debts
         # (0101/0102) — a message that NAMES you owes your engagement, not
@@ -2586,9 +3007,16 @@ class HubService:
             ds = self._discharge(m, replies)
             if ds.closed:
                 continue
-            assignees = {a.get("assignee") for a in asks_of(m)} - {None}
+            # `named_pending` covers per-ask `to` AND `assignee`, scoped to
+            # asks STILL PENDING. An unscoped assignee term used to sit
+            # beside it and kept the row after the assigned ask was answered
+            # — while the SAME message's envelope said `to_me=false` and
+            # `asks_naming_you=[]`. The hub told one seat two things at once,
+            # and the louder one (an escalating /owed row that the watchdogs
+            # read) named it in AGENT DARK for a discharged ask. Deleted:
+            # per-ask scoping is the rule everywhere else on this path.
             named_pending = pending_addressees(m, ds.pending)
-            if not (agent.id in m.to or agent.id in assignees
+            if not (agent.id in m.to
                     or agent.id in named_pending
                     # An operator's open/blocked that names nobody still
                     # lands on the reporting delegate (ruling 2026-08-01):
@@ -2597,7 +3025,52 @@ class HubService:
                     or self._operator_delegate_debt(agent.id, m)):
                 continue
             if any(r.sender == agent.id for r in replies):
-                continue  # engaged: the remaining pending asks are other seats'
+                # Engaged: the remaining pending asks are other seats' —
+                # EXCEPT an ask-less operator message that lands on you (by
+                # `to` or as reporting delegate). There is no "other seat"
+                # to carry the remainder of a binary commission, so your
+                # planning ack must not silence it: only operator engagement
+                # or your own `resolved` completion report clears it
+                # (2026-08-04; the delegate's 62-second ack erased the novel
+                # commission from its own ledger and nothing chased the
+                # 17.5h stall that followed).
+                # ...and the SAME is true when the commission carried asks
+                # (2026-08-06). `not asks_of(m)` here was the companion of
+                # the discharge hole above: even once answering the
+                # questions stopped settling the commission, the delegate's
+                # first "on it" would have re-erased the row from its own
+                # ledger. Measured: rtype-open#10 had three kickoff asks and
+                # its delegate never replied to the thread at all — but one
+                # ack was all it would have taken.
+                if (m.sender in ops
+                        and (agent.id in m.to
+                             or self._operator_delegate_debt(agent.id, m))):
+                    # A STRUCTURED commission releases an addressee who has
+                    # engaged and has no ask left naming them (2026-08-11,
+                    # fund1): their per-ask row was the whole of their debt,
+                    # and the envelope already tells them `asks_naming_you=[]`
+                    # — keeping the /owed row told one seat two things at
+                    # once, and the louder one re-woke it forever. The
+                    # reporting delegate alone carries the commission itself
+                    # to its evidence-cited completion report; an ask-less
+                    # commission still pins every addressee exactly as
+                    # before (the 75-second-discharge protection).
+                    if (asks_of(m)
+                            and agent.id not in named_pending
+                            and not self._operator_delegate_debt(agent.id, m)):
+                        continue
+                else:
+                    if agent.id not in claim_source_cache:
+                        claim_source_cache[agent.id] = self._linked_claim_sources(
+                            agent.id, channels)
+                    # A claim cites its source in either form — the message
+                    # id or the human-readable "channel#seq" every doc and
+                    # digest uses. Matching only the id left the excusal
+                    # dead for the form models actually write (fund4).
+                    if (m.id in claim_source_cache[agent.id]
+                            or f"{m.channel}#{m.seq}"
+                            in claim_source_cache[agent.id]):
+                        continue
             if m.channel not in sla_cache:
                 sla_cache[m.channel] = self.channel_sla(m.channel)
             age = now - m.created_at - self.paused_seconds_since(m.created_at)
@@ -2648,7 +3121,18 @@ class HubService:
             for a in asks_of(m):
                 if str(a["id"]) not in ds.pending:
                     continue
-                for seat in (a.get("to") or []):
+                # An ask with no per-ask `to` inherits the MESSAGE's
+                # addressees (2026-08-04). The obligation ledger already
+                # reads it that way — `to_answer` admits a row on
+                # `agent.id in m.to` — so keying the asker's radar on the
+                # per-ask field alone made the two halves of the same
+                # dispatch disagree: measured live, a delegate that had just
+                # addressed five seats one message each (scifi-novel#232-236,
+                # every ask carrying `to=None`) got ZERO waiting_on rows and
+                # was told nothing about who had not delivered. A seat that
+                # dispatches correctly must not lose its monitoring surface
+                # for choosing envelope addressing over per-ask addressing.
+                for seat in (a.get("to") or m.to or []):
                     if seat in repliers:
                         continue
                     key = (seat, m.channel)
@@ -2697,10 +3181,58 @@ class HubService:
         return OwedReport(
             to_answer=to_answer, to_consume=to_consume, to_close=to_close,
             waiting_on=waiting_on, phases=phases,
+            charters=self.charter_debts(agent.id, channels),
             counts=OwedCounts(to_answer=len(to_answer),
                               to_consume=len(to_consume),
                               to_close=len(to_close)),
             computed_at=now)
+
+    def charter_debts(self, agent_id: str,
+                      channels: list[str] | None = None) -> list[CharterDebt]:
+        """Charters this seat has not read at their current version.
+
+        The retention half of 0146. whoami's pointer lands once per session
+        and the hub-scope change is announced only in `hub-alerts` (operators
+        + reporting delegates), so a long-running seat could not learn that
+        the standing role model had changed under it. This rides `/owed` —
+        the one call every reception pass makes — for the same reason
+        `phases` does. Cheap: one indexed receipt lookup per scope plus the
+        charter's fs head, both already hot on this path.
+
+        Self-clearing: reading records the receipt, so the row is gone next
+        pass. It is deliberately NOT in the wake signature (listen only
+        signs to_answer/to_consume ids) — a charter change must never
+        manufacture a wake, only be unmissable on a turn that happens."""
+        rows: list[CharterDebt] = []
+        pointer = self.hub_charter_pointer(agent_id)
+        if not pointer["current"]:
+            rows.append(CharterDebt(
+                scope=HUB_CHARTER_SCOPE, version=pointer["version"],
+                your_receipt=pointer["your_receipt"],
+                read_with="read_charter()"))
+        elif not pointer["view_current"]:
+            # 0147: the receipt is valid and stays valid — this is the other
+            # half. A seat promoted since its last read (new room, new
+            # delegation) holds a current receipt for text that never
+            # contained the section now addressed to it. One self-clearing
+            # row, never a block, never a wake.
+            rows.append(CharterDebt(
+                scope=HUB_CHARTER_SCOPE, version=pointer["version"],
+                your_receipt=pointer["your_receipt"],
+                read_with="read_charter()", reason="view"))
+        for channel in (channels if channels is not None
+                        else self.db.channels_of(agent_id)):
+            head = self.db.fs_get(channel, FS_PREFIX + CHARTER_PATH)
+            if head is None or head["deleted"]:
+                continue
+            mine = self.db.charter_receipt_get(agent_id, channel)
+            if mine is not None and mine >= head["version"]:
+                continue
+            rows.append(CharterDebt(
+                scope=channel, version=head["version"], your_receipt=mine,
+                read_with=f"read_charter(channel={channel!r})",
+                gated=self._norms_required(channel)))
+        return rows
 
     async def wait_inbox(self, agent: AgentInfo, timeout: float) -> list[Envelope]:
         """Long-poll: return unread envelopes, waiting up to `timeout` for one."""
@@ -2738,6 +3270,7 @@ class HubService:
 
     def store_set(self, agent: AgentInfo, channel: str, key: str, value: Any,
                   expect_version: int | None = None) -> StoreEntry:
+        park_ring = ""
         self.require_membership(channel, agent.id)
         self._require_unpaused(agent, channel)
         self._require_not_archived(channel)
@@ -2786,6 +3319,18 @@ class HubService:
                                     "standing constraints (0113) — only the "
                                     "operator may write or revoke them")
             self._validate_ruling_row(value)
+        if key.startswith(self._GATE_PREFIX):
+            if len(key) <= len(self._GATE_PREFIX):
+                raise HubError(400, "gate keys name a decision: "
+                                    "gate:<slug> (e.g. gate:lab-identity)")
+            self._validate_gate_row(
+                value, agent, self.db.store_get(channel, key), channel)
+        if key.startswith("decision:"):
+            # The settled record: the row every other seat keys off. In a
+            # gated room it is the owner's to settle — that is precisely the
+            # act the live delegate got wrong, recording an identity the
+            # owner had not chosen.
+            self._require_gate(channel, agent, "decision")
         if key.startswith(self._PHASE_PREFIX):
             if len(key) <= len(self._PHASE_PREFIX):
                 raise HubError(400, "phase keys name a TRACK: "
@@ -2793,6 +3338,12 @@ class HubService:
             refusal = self._phase_writer_refusal(channel, agent, key)
             if refusal is not None:
                 raise HubError(403, refusal)
+            # Declaring a phase COMPLETE unblocks the next one for the whole
+            # room; in a gated channel that is the owner's call.
+            if (isinstance(value, dict)
+                    and str(value.get("status") or "").strip().lower()
+                    in ("complete", "completed", "done", "closed")):
+                self._require_gate(channel, agent, "phase_complete")
             self._validate_phase_row(value, agent,
                                      self.db.store_get(channel, key))
         if key.startswith("claim:") and isinstance(value, dict):
@@ -2815,7 +3366,7 @@ class HubService:
             if "owner" in value:
                 if (not agent.operator and value["owner"] != agent.id
                         and value["owner"] != current_owner):
-                    shown = sanitize_text(str(value["owner"]), 64)
+                    shown = elide(str(value["owner"]), 64)
                     raise HubError(400, f"claim owner '{shown}' is not you — "
                                         "claim in your own name, or leave the "
                                         "existing owner unchanged")
@@ -2855,6 +3406,70 @@ class HubService:
                                         "author declared): only the claim "
                                         "owner or the operator may set or "
                                         "change it")
+            # WAITING_ON (2026-08-06): "resume when row X changes" as
+            # verifiable state instead of prose.
+            #
+            # THE FAILURE. `rt2-lead` parked `claim:phase-1-m1-dispatch`
+            # with next_step "Resume when `claim:m1-engine-boot-manifest`
+            # changes with captured boot-proof evidence". It changed 3m43s
+            # later, carrying exactly that evidence. Nothing woke. Seven
+            # seats sat idle for hours on a milestone that was DONE, because
+            # a store write rings nobody and a sentence in `next_step` is
+            # not a subscription.
+            #
+            # The row may now DECLARE the dependency. The hub does two
+            # things with it and nothing more: it refuses a target that
+            # does not exist (a wait on a phantom is a silent forever-park,
+            # and this fleet wrote one on its first outing), and it stamps
+            # the target's version at declaration time so "has it moved?"
+            # is a fact rather than a judgement. Who resumes, and what they
+            # do next, stays the seat's call — the hub surfaces, never
+            # authors.
+            if value.get("waiting_on") is not None:
+                value = {**value,
+                         "waiting_on": self._validate_waiting_on(
+                             channel, key,
+                             str(value.get("owner") or current_owner or agent.id),
+                             value["waiting_on"])}
+            # A PARK MUST SAY WHAT IT NEEDS (operator ruling, 2026-08-06).
+            #
+            # "the agent should state on its channel why it is parking and
+            #  what it needs to continue... a park should have a tag and an
+            #  ask of what it needs to continue... all these tags should be
+            #  visible in particular to the delegate, as a way to understand
+            #  where we are, the blockers and how to finish the work end to
+            #  end."
+            #
+            # A bare `parked` was a black hole: invisible to every sweep
+            # (`_steward_sweep` exempts it), invisible to its own driver
+            # (`parked` is terminal in `_TERMINAL_STATUS`), and silent in the
+            # room (a store write rings nobody). Seven seats sat on one for
+            # hours.
+            #
+            # So a park now carries two fields the hub can act on: `blocked_on`
+            # — the TAG, one of a closed vocabulary, so the delegate's board
+            # can group blockers — and `needs`, the plain-language ask. The
+            # hub validates their presence and shape and nothing else: WHAT
+            # the seat needs is the seat's judgement, never the hub's.
+            #
+            # Only the TRANSITION into park is gated. A row already parked
+            # before this rule keeps updating freely — semantics changes must
+            # not rewrite the past.
+            if self._claim_parked(value):
+                was_parked = (
+                    self._claim_parked(current.value)
+                    if current is not None and isinstance(current.value, dict)
+                    else False)
+                if not was_parked:
+                    # Validation is transition-only: a row parked before this
+                    # rule keeps updating freely.
+                    self._validate_park(key, value, channel, agent)
+                # The RING follows the current declaration, not the
+                # transition. A row that stays blocked while what it needs
+                # changes is a NEW ask, and the seat that can answer it must
+                # hear the new one — the dedupe key is the block's content,
+                # so an unchanged block stays silent.
+                park_ring = str(value.get("needs_from") or "").strip()
             # Claim/key consistency (0093): when the claim key's task part
             # parses as a WORK ID and the value carries an `item` field,
             # they must agree — a pointer row that points two ways would
@@ -2865,12 +3480,38 @@ class HubService:
                     and str(value["item"]) != task):
                 raise HubError(400, f"claim key names work id '{task}' but "
                                     f"value.item says "
-                                    f"'{sanitize_text(str(value['item']), 64)}'"
+                                    f"'{elide(str(value['item']), 64)}'"
                                     " — a pointer claim must cite ONE id; "
                                     "drop value.item or make them agree")
         if key.startswith(self.WORK_ROW_PREFIX):
             self._validate_work_row(key, value)
-        return self.db.store_set(channel, key, value, agent.id, expect_version)
+        entry = self.db.store_set(channel, key, value, agent.id, expect_version)
+        # TELL THE SEAT IT IS BLOCKING (2026-08-07). The park declared, in
+        # validated data, who can end it. Storing that and not delivering it
+        # is how two rows named `g4-engine` while `g4-engine` sat idle in the
+        # same room. Addressed and OPEN: being someone's blocker IS an
+        # obligation — unlike a powers notice, this one has a discharge (act,
+        # or say you cannot) and the asker is a peer who can close it.
+        if park_ring:
+            try:
+                self._post_system(
+                    channel,
+                    f"YOU ARE THE BLOCKER on `{key}` ({agent.id}): "
+                    f"{elide(str(value.get('needs') or 'unblock it'), 400)}\n\n"
+                    "Do it, or say here what it would take and by when. "
+                    "Their work does not move until you answer.",
+                    to=[park_ring], status=Status.open,
+                    # Keyed on the BLOCK, not the row version: editing a
+                    # note must not re-ring, but a genuinely different ask
+                    # must. A surface that repeats itself gets ignored, and
+                    # then the one that mattered is ignored too.
+                    dedupe_key="blocking:" + hashlib.sha256(
+                        f"{channel}\0{key}\0{park_ring}\0"
+                        f"{value.get('needs') or ''}".encode()
+                    ).hexdigest()[:24])
+            except DuplicateMessage:
+                pass
+        return entry
 
     # -- unified backlog rows (0103, operator ruling c3328) ----------------------
     #
@@ -2892,7 +3533,7 @@ class HubService:
     def _validate_work_row(self, key: str, value: Any) -> None:
         item = key[len(self.WORK_ROW_PREFIX):]
         if parse_work_id(item) is None:
-            raise HubError(400, f"'{sanitize_text(item, 64)}' is not a work id "
+            raise HubError(400, f"'{elide(item, 64)}' is not a work id "
                                 "— work:* rows are the backlog INDEX and key "
                                 "on the ruled form <package>-<NNNN> "
                                 "(e.g. agora-0093); free-text task names "
@@ -2912,7 +3553,7 @@ class HubService:
             raise HubError(400, f"work:* status must be one of "
                                 f"{'|'.join(self.WORK_STATUSES)} — the file's "
                                 f"own directory word (got "
-                                f"'{sanitize_text(status, 32)}')")
+                                f"'{elide(status, 32)}')")
 
     def work_rows(self, agent: AgentInfo, channel: str) -> list[dict[str, Any]]:
         """All work:* rows of a channel, parsed — the one-call backlog list
@@ -2961,14 +3602,26 @@ class HubService:
         state = value.get("state")
         if state is not None and state not in _CHANNEL_STATES:
             raise HubError(400, f"channel:meta.state must be one of {sorted(_CHANNEL_STATES)}")
+        rulings_required = value.get("rulings_required")
+        if rulings_required is not None and not isinstance(rulings_required, bool):
+            raise HubError(400, "channel:meta.rulings_required must be a boolean")
+        gated = value.get("gated_acts")
+        if gated is not None:
+            if not isinstance(gated, list):
+                raise HubError(400, "channel:meta.gated_acts must be a list of "
+                                    f"act classes from {sorted(GATED_ACT_CLASSES)}")
+            unknown_acts = {str(a) for a in gated} - GATED_ACT_CLASSES
+            if unknown_acts:
+                raise HubError(400, f"unknown gated act class(es): "
+                                    f"{sorted(unknown_acts)} — the vocabulary "
+                                    f"is closed ({sorted(GATED_ACT_CLASSES)}) "
+                                    "because each name must map to an act the "
+                                    "hub already mediates")
         # Opt-in charter gate: posting requires having READ the current
         # channel/charter.md (the receipt is recorded by the read itself).
         norms_required = value.get("norms_required")
         if norms_required is not None and not isinstance(norms_required, bool):
             raise HubError(400, "channel:meta.norms_required must be a boolean")
-        rulings_required = value.get("rulings_required")
-        if rulings_required is not None and not isinstance(rulings_required, bool):
-            raise HubError(400, "channel:meta.rulings_required must be a boolean")
         traffic_policy = value.get("traffic_policy")
         if traffic_policy is not None and traffic_policy not in _TRAFFIC_POLICIES:
             raise HubError(400, "channel:meta.traffic_policy must be one of "
@@ -2983,7 +3636,7 @@ class HubService:
                     raise HubError(
                         400, f"channel:meta.{meta_field} must be a string"
                     )
-                value[meta_field] = sanitize_text(value[meta_field], 500)
+                value[meta_field] = sanitize_text(value[meta_field], 500, field="meta field")
 
     def channel_info(self, agent: AgentInfo, channel: str) -> dict[str, Any]:
         """Everything an agent needs before first post: channel, metadata, members."""
@@ -3230,7 +3883,7 @@ class HubService:
         membership gate is the caller's own channel list — private rooms a
         non-member cannot read simply do not contribute rows."""
         if parse_work_id(item_id) is None:
-            raise HubError(400, f"'{sanitize_text(item_id, 64)}' is not a "
+            raise HubError(400, f"'{elide(item_id, 64)}' is not a "
                                 "work id — the ruled form is <package>-<NNNN> "
                                 "(e.g. agora-0093)")
         channels = self.db.channels_of(agent.id)
@@ -3292,7 +3945,7 @@ class HubService:
         # sanitize like every other cross-agent text field (strips control
         # chars/ANSI/newlines) so a note can't spoof a CLI leaderboard or
         # injection-poison a log (adversary V6).
-        note = sanitize_text(note, 280)
+        note = sanitize_text(note, 280, field="note")
         return self.db.reputation_cast(channel, target, agent.id, axis,
                                        value, note)
 
@@ -3402,7 +4055,7 @@ class HubService:
         # (adversary trap: a synthetic/foreign id must not be ratable through
         # an unrelated room the rater is a member of).
         if m is None or m.channel != channel:
-            raise HubError(404, f"message '{sanitize_text(message_id, 40)}' "
+            raise HubError(404, f"message '{elide(message_id, 40)}' "
                                 f"not found in '{channel}'")
         if m.kind != Kind.message:
             raise HubError(400, "only agent messages carry reputation — "
@@ -3419,7 +4072,7 @@ class HubService:
         if not self._rating_budget.allow(agent.id):
             raise HubError(429, "rating budget exhausted (30/min) — "
                                 "judgments are few; loops are not judgment")
-        note = sanitize_text(note, 280)
+        note = sanitize_text(note, 280, field="note")
         return self.db.rating_cast(channel, message_id, agent.id, m.sender,
                                    value, note)
 
@@ -3439,7 +4092,7 @@ class HubService:
         self.require_membership(channel, agent.id)
         m = self.db.get_message(message_id)
         if m is None or m.channel != channel:
-            raise HubError(404, f"message '{sanitize_text(message_id, 40)}' "
+            raise HubError(404, f"message '{elide(message_id, 40)}' "
                                 f"not found in '{channel}'")
         rows = self.db.ratings_for_messages([message_id]).get(message_id, [])
         rows.sort(key=lambda r: -r["updated_at"])
@@ -3527,7 +4180,7 @@ class HubService:
             raise HubError(429, f"rate limit exceeded — retry in {wait:.1f}s "
                                 "(steady pace; are you in an upload loop?)")
         filename = sanitize_text(str(filename or ""), MAX_FILENAME_CHARS) or "attachment"
-        declared = sanitize_text(str(content_type or ""), MAX_CONTENT_TYPE_CHARS) \
+        declared = sanitize_text(str(content_type or ""), MAX_CONTENT_TYPE_CHARS, field="content type") \
             or "application/octet-stream"
         return self.db.blob_put(channel, bytes(data), filename=filename,
                                 content_type=declared, created_by=agent.id)
@@ -3544,6 +4197,112 @@ class HubService:
         if found is None:
             raise HubError(404, f"no attachment {blob_id[:12]}… in '{channel}'")
         return found
+
+    #: Evidence refs a completion report may cite. Capped like attachments.
+    MAX_EVIDENCE_REFS = 12
+
+    def _validate_evidence(self, channel: str, raw: Any) -> list[dict[str, Any]]:
+        """Resolve `data.evidence` citations against this channel, and stamp
+        SERVER TRUTH over whatever the sender wrote.
+
+        WHY (2026-08-04). A reporting delegate posted a completion report
+        claiming "the_novel.docx (5.1MB, 3 embedded images)" on the "channel
+        filesystem: /path/to/novel" and flipped its phase row to complete.
+        The size was true — it had read it off a local file. The LOCATION was
+        a literal unsubstituted placeholder, and the channel filesystem held
+        no such file and zero blobs. Nothing in the hub could tell the two
+        apart, because nothing was pointed at.
+
+        This is not a new doctrine, it is `settled_by` (a pointer that must
+        resolve to a real message here) and attachments ("size/content_type
+        always come from the blob row: a message cannot misdescribe its
+        file") applied to the one payload that closes an operator's request.
+        The hub checks that the CITATION RESOLVES. It never reads the prose
+        and never judges whether the artifact is the right one — judging
+        relevance is the mind-reading line the operator principle forbids.
+
+        `kind: "external"` is deliberately allowed for work that landed
+        outside agora's surfaces (a file on the operator's Desktop). It
+        requires a sha256 + size and is stamped `verified: false`: the hub
+        must never imply it checked bytes it cannot see, but a hash-pinned
+        claim is falsifiable by any peer in one command, and
+        `/path/to/novel` is not."""
+        if not isinstance(raw, list) or not raw:
+            raise HubError(400, "evidence must be a non-empty list of "
+                                "{kind, ref} citations")
+        if len(raw) > self.MAX_EVIDENCE_REFS:
+            raise HubError(400, f"a message carries at most "
+                                f"{self.MAX_EVIDENCE_REFS} evidence refs")
+        out: list[dict[str, Any]] = []
+        for item in raw:
+            if not isinstance(item, dict) or "kind" not in item:
+                raise HubError(400, "each evidence ref needs a kind "
+                                    "(fs, store, blob or external) and a ref")
+            kind = str(item.get("kind") or "").strip().lower()
+            ref = str(item.get("ref") or "").strip()
+            if not ref:
+                raise HubError(400, f"evidence ref of kind '{kind}' names "
+                                    "nothing — cite what you verified")
+            if kind == "fs":
+                # "path@version" — the version is what makes it a citation
+                # rather than a gesture at a moving file.
+                path, _, version = ref.rpartition("@")
+                if not path or not version.isdigit():
+                    raise HubError(400, "an fs evidence ref is 'path@version' "
+                                        f"(got '{ref}') — the version is what "
+                                        "pins the claim")
+                norm = self._normalize_fs_path(path)
+                row = self.db.fs_version(channel, FS_PREFIX + norm, int(version))
+                if row is None:
+                    raise HubError(400, f"evidence cites '{norm}@{version}', "
+                                        f"which is not in '{channel}' — write "
+                                        "the artifact to the channel before "
+                                        "citing it as delivered")
+                out.append({"kind": "fs", "ref": f"{norm}@{int(version)}",
+                            "size_bytes": len(str(row["value"])),
+                            "updated_by": row["updated_by"],
+                            "updated_at": row["updated_at"], "verified": True})
+            elif kind == "store":
+                entry = self.db.store_get(channel, ref)
+                if entry is None:
+                    raise HubError(400, f"evidence cites store row '{ref}', "
+                                        f"which does not exist in '{channel}'")
+                out.append({"kind": "store", "ref": ref,
+                            "version": entry.version,
+                            "updated_by": entry.updated_by,
+                            "updated_at": entry.updated_at, "verified": True})
+            elif kind == "blob":
+                meta = self.db.blob_meta(channel, ref.strip().lower())
+                if meta is None:
+                    raise HubError(400, f"evidence cites blob {ref[:12]}…, "
+                                        f"which is not uploaded to '{channel}'")
+                out.append({"kind": "blob", "ref": ref.strip().lower(),
+                            "filename": meta["filename"],
+                            "size_bytes": meta["size"],
+                            "content_type": meta["content_type"],
+                            "created_by": meta["created_by"],
+                            "verified": True})
+            elif kind == "external":
+                digest = str(item.get("sha256") or "").strip().lower()
+                if not _SHA256_HEX.fullmatch(digest):
+                    raise HubError(400, "an external evidence ref needs a "
+                                        "sha256 of the bytes you built — the "
+                                        "hub cannot see files outside the "
+                                        "channel, so the hash is what makes "
+                                        "the claim falsifiable")
+                size = item.get("size_bytes")
+                if not isinstance(size, int) or size < 0:
+                    raise HubError(400, "an external evidence ref needs "
+                                        "size_bytes (int) alongside its sha256")
+                out.append({"kind": "external",
+                            "ref": sanitize_text(ref, MAX_FILENAME_CHARS, field="attachment ref"),
+                            "sha256": digest, "size_bytes": size,
+                            # NEVER claim the hub checked bytes it cannot read.
+                            "verified": False})
+            else:
+                raise HubError(400, f"unknown evidence kind '{kind}' — use "
+                                    "fs, store, blob or external")
+        return out
 
     def _validate_attachments(self, raw: Any, channel: str) -> list[dict[str, Any]]:
         """Normalize a message's attachment refs against the channel's blob
@@ -3612,7 +4371,7 @@ class HubService:
             raise HubError(413, f"fs file exceeds {MAX_STORE_VALUE_BYTES} bytes")
         # sanitize_text also strips control chars (ESC/BEL survive str.split —
         # they would otherwise reach the operator's terminal; security M1).
-        description = sanitize_text(str(description or ""), 200)
+        description = sanitize_text(str(description or ""), 200, field="description")
         value = {"content": content, "mime": mime}
         if description:
             value["description"] = description
@@ -3632,6 +4391,11 @@ class HubService:
             # receipt by construction (otherwise the gate would block the owner
             # right after their own edit).
             self.db.charter_receipt_set(agent.id, channel, entry.version)
+            try:
+                self._charter_change_advisory(channel, agent, entry.version, audit)
+            except Exception:
+                logging.getLogger("agora.hub.charter").exception(
+                    "charter advisory failed (write succeeded)")
         return FsFile(path=norm, content=content, mime=mime, description=description,
                       size_bytes=size, version=entry.version,
                       updated_by=entry.updated_by, updated_at=entry.updated_at)
@@ -3694,6 +4458,10 @@ class HubService:
         norm = self._normalize_fs_path(path)
         if norm.startswith(RESERVED_FS_PREFIX):
             self._require_channel_authority(channel, agent)
+        # Gated in rooms whose owner opted in — and gated for EVERY seat, not
+        # just delegates: the live falsification was a delegate that refused
+        # the delete itself and handed it to a plain member.
+        self._require_gate(channel, agent, "fs_remove")
         new_version = self.db.fs_remove(channel, FS_PREFIX + norm, agent.id, expect_version)
         if new_version is None:
             return False
@@ -3720,8 +4488,7 @@ class HubService:
     # `moderation` (kick/ban to protect the collaboration) is deliberately
     # its own power, never a rider on `operational` — ejecting participants
     # is far more consequential than a restart and must be granted on purpose.
-    DELEGATION_POWERS = frozenset({"ruling", "operational", "reporting",
-                                   "moderation"})
+    DELEGATION_POWERS = frozenset(DELEGATE_POWERS)
     MAX_DELEGATION_TTL = 30 * 86400.0    # same cap discipline as join tokens
     DEFAULT_DELEGATION_TTL = 7 * 86400.0
 
@@ -3744,49 +4511,176 @@ class HubService:
         another delegate; only an operator may)."""
         return any(d["agent_id"] == agent_id for d in self.active_delegations())
 
+    #: `proxy` means "act on my behalf", which an owner means for an
+    #: afternoon and not for a quarter — so it defaults to a day and caps
+    #: at a week, well under the 30-day ceiling the other powers use.
+    PROXY_DEFAULT_TTL = 86400.0
+    PROXY_MAX_TTL = 7 * 86400.0
+
     def set_delegation(self, agent_id: str, powers: list[str],
                        ttl_seconds: float | None = None,
-                       note: str = "") -> dict[str, Any]:
+                       note: str = "", scope: str = "",
+                       mission: str | None = None) -> dict[str, Any]:
         """Operator grant (admin surface). The record is a verifiable LABEL
         plus a validation anchor (queue writes, tier fields) — it grants no
-        other mechanical power (ADR-0004). Operators cannot be delegates:
-        they already hold every power, and a dual role would blur audit."""
+        other mechanical power (ADR-0004), with ONE deliberate exception:
+        `proxy` (2026-08-04), which clears a channel's gated acts. That is
+        why `proxy` alone is scoped and short-lived. Operators cannot be
+        delegates: they already hold every power, and a dual role would blur
+        audit.
+
+        `mission` lets the operator write the seat's charge in the SAME act
+        as the delegation. That closes the dead end where the grant is the
+        moment the operator discovers the seat is blank."""
         if not self.db.agent_exists(agent_id):
             raise HubError(404, f"agent '{agent_id}' is not registered")
         if agent_id in self.operator_ids():
             raise HubError(400, f"'{agent_id}' is an operator — operators need "
                                 "no delegation")
+        if mission is not None:
+            self.set_mission(agent_id, mission)
+        if not (self.db.get_mission(agent_id) or "").strip():
+            raise HubError(400,
+                           f"'{agent_id}' has no mission — set one before "
+                           f"delegating to it (`agora mission set {agent_id} "
+                           f"…`). A delegate that does not know its job is "
+                           f"the failure this refuses: the seat that shipped "
+                           f"a build in three minutes had an empty one.")
         wanted = [str(p) for p in powers]
         unknown = set(wanted) - self.DELEGATION_POWERS
         if not wanted or unknown:
             raise HubError(400, f"powers must be a non-empty subset of "
                                 f"{sorted(self.DELEGATION_POWERS)}"
                                 + (f" (unknown: {sorted(unknown)})" if unknown else ""))
-        ttl = self.DEFAULT_DELEGATION_TTL if ttl_seconds is None else float(ttl_seconds)
-        if not 0 < ttl <= self.MAX_DELEGATION_TTL:
-            raise HubError(400, f"ttl must be within (0, {self.MAX_DELEGATION_TTL:.0f}s] "
-                                "(expiry is deliberate: a forgotten delegation "
-                                "is worse than a renewal)")
+        proxy = PROXY_POWER in wanted
+        default_ttl = self.PROXY_DEFAULT_TTL if proxy else self.DEFAULT_DELEGATION_TTL
+        cap = self.PROXY_MAX_TTL if proxy else self.MAX_DELEGATION_TTL
+        ttl = default_ttl if ttl_seconds is None else float(ttl_seconds)
+        if not 0 < ttl <= cap:
+            raise HubError(400, f"ttl must be within (0, {cap:.0f}s] "
+                                + ("for a 'proxy' grant — acting on the "
+                                   "owner's behalf is an afternoon's "
+                                   "authority, not a standing one. "
+                                   if proxy else "")
+                                + "(expiry is deliberate: a forgotten "
+                                  "delegation is worse than a renewal)")
+        scope = str(scope or "").strip()
+        if proxy and not scope:
+            raise HubError(400, "a 'proxy' grant needs --scope: name the "
+                                "channel it reaches, or type '*' for the "
+                                "whole hub. Fleet-wide authority to act as "
+                                "the owner must be chosen, never arrived at "
+                                "by omission.")
+        if scope and scope != "*" and self.db.get_channel(scope) is None:
+            raise HubError(404, f"scope '{scope}' is not a channel")
+        if scope and scope != "*" and not self.db.is_member(scope, agent_id):
+            raise HubError(400, f"'{agent_id}' is not a member of '{scope}' "
+                                "— a scoped delegation must point at a room "
+                                "the seat can actually read and act in")
         grant = self.db.delegation_set(agent_id, wanted, time.time() + ttl,
-                                       sanitize_text(note, 200))
+                                       sanitize_text(note, 200, field="delegation note"), scope)
         self._delegations_cache_at = 0.0
         self._ensure_alerts_channel()
         self._post_system(
             self.DARK_ALERTS_CHANNEL,
             f"DELEGATION GRANTED: {agent_id} holds {'+'.join(grant['powers'])} "
-            f"until {time.strftime('%Y-%m-%d %H:%M', time.localtime(grant['expires_at']))}"
+            + (f"scoped to {'the whole hub' if scope == '*' else '#' + scope} "
+               if scope else "")
+            + f"until {time.strftime('%Y-%m-%d %H:%M', time.localtime(grant['expires_at']))}"
             f"{' — ' + grant['note'] if grant['note'] else ''}. Every agent can "
             f"verify via whoami.delegations; prose claims count for nothing.")
+        # TELL THE SEAT ITS POWERS CHANGED (operator ruling, 2026-08-06).
+        #
+        # "IF the delegate has been given sufficient power to act on behalf of
+        #  the user, and the user is not connected to the hub, then the
+        #  delegate MUST act on behalf of the user."
+        #
+        # It cannot act on a power it has not been told it holds. Measured:
+        # `g4-lead` opened a gate asking the absent operator to ratify a plan,
+        # was granted `proxy` an hour later — the power to answer its own gate
+        # — and sat blocked for hours because the grant was announced to
+        # `hub-alerts` and to `whoami`, neither of which reaches a seat that
+        # is not currently taking a turn. A power the holder cannot discover
+        # is not a power.
+        #
+        # Addressed and OPEN: this is a real obligation, not a notice. The
+        # seat must look at what it can now do and act on anything that was
+        # waiting on exactly this.
+        powers_line = "+".join(grant["powers"])
+        where = ("the whole hub" if scope in ("", "*") else f"#{scope}")
+        acts = []
+        if PROXY_POWER in grant["powers"]:
+            acts.append(
+                "You hold PROXY: where the owner is absent, gated acts are "
+                "YOURS to decide. If you are waiting on a gate addressed to "
+                "an absent owner, answer it yourself and say why — waiting "
+                "for someone who is not here is not caution, it is a stall.")
+        if "reporting" in grant["powers"]:
+            acts.append(
+                "You hold REPORTING: the operator's requests in "
+                f"{where} are yours to carry end to end and to report on.")
+        try:
+            self._post_system(
+                self.DARK_ALERTS_CHANNEL,
+                f"YOUR POWERS CHANGED: you now hold {powers_line} in "
+                f"{where}"
+                f"{', until ' + time.strftime('%Y-%m-%d %H:%M', time.localtime(grant['expires_at']))}"
+                f"{'. ' + grant['note'] if grant['note'] else '.'}\n\n"
+                + "\n".join(acts)
+                + ("\n\nRe-read anything you parked waiting on a decision: "
+                   "you may now be the one who makes it." if acts else ""),
+                # ADDRESSED fyi, not open. `to-me` is an important flag, so
+                # this wakes a driven listener — but kind=system means it is
+                # not a directive debt, so it mints nothing for the hub to
+                # discharge later. An open system message the hub never
+                # closes is the 0093 class (measured: 8 undischargeable rows
+                # on one delegate).
+                to=[agent_id], status=Status.fyi,
+                dedupe_key=f"powers:{agent_id}:{powers_line}:{scope}:"
+                           f"{int(grant['expires_at'])}")
+        except DuplicateMessage:
+            pass          # the same grant re-announced: the ledger's guarantee
         return grant
 
     def revoke_delegation(self, agent_id: str) -> bool:
         revoked = self.db.delegation_revoke(agent_id)
         self._delegations_cache_at = 0.0
         if revoked:
+            # A GRANT MUST NOT OUTLIVE THE AUTHORITY THAT MADE IT
+            # (2026-08-07). Probe-confirmed: after revoking `proxy`, the
+            # seat's `has_proxy` went False and a gated `fs_delete` still
+            # SUCCEEDED — `_require_gate` scans for a `granted` row and never
+            # asked whether the granting authority still exists. Revocation
+            # was an announcement, not a revocation.
+            #
+            # Withdrawing rather than deleting: the row stays readable, so
+            # the record of what was authorized and by whom survives.
+            closed = 0
+            for ch in self.db.channel_names():
+                for entry in self.db.store_keys(ch):
+                    key = entry["key"]
+                    if not key.startswith(self._GATE_PREFIX):
+                        continue
+                    stored = self.db.store_get(ch, key)
+                    if stored is None or not isinstance(stored.value, dict):
+                        continue
+                    v = stored.value
+                    if (str(v.get("status") or "") == "granted"
+                            and str(v.get("decided_by") or "") == agent_id
+                            and v.get("under_proxy")):
+                        self.db.store_set(
+                            ch, key, {**v, "status": "withdrawn",
+                                      "answer": "the proxy that granted this "
+                                                "was revoked"},
+                            "hub", None)
+                        closed += 1
             self._ensure_alerts_channel()
             self._post_system(self.DARK_ALERTS_CHANNEL,
                               f"DELEGATION REVOKED: {agent_id} holds no "
-                              f"delegated powers as of now.")
+                              f"delegated powers as of now."
+                              + (f" {closed} gate grant(s) it made under "
+                                 "proxy were withdrawn with it." if closed
+                                 else ""))
         return revoked
 
     # -- moderation: kick (timed block) and ban (permanent block) -------------------
@@ -3873,7 +4767,7 @@ class HubService:
                                     "for longer, ban (liftable any time)")
         expires = None if seconds is None else time.time() + seconds
         block = self.db.block_set(scope, agent_id, actor.id, expires,
-                                  sanitize_text(reason, 200))
+                                  sanitize_text(reason, 200, field="reason"))
         phrase = self._block_phrase(block)
         if scope == self.HUB_SCOPE:
             # A permanent ban must not leave the fleet's whoami advertising a
@@ -3955,7 +4849,371 @@ class HubService:
         "work_status": ("channel", "item", "status"),
         "delegation": ("agent", "power"),
         "closed": ("channel", "message_id"),
+        "gate": ("channel", "slug"),
     }
+
+    #: A GATE is a delegate stopping at a key decision to ask its owner
+    #: (2026-08-04). The row is the durable half — a `blocked` ask alone
+    #: leaves no record a later turn or a fresh session can find, and the
+    #: live test showed exactly that: the control delegate asked its question
+    #: in prose, and nothing on the hub knew a decision was pending.
+    _GATE_PREFIX = "gate:"
+    #: `why` and `decided_by` added 2026-08-07. Measured: a delegate
+    #: deciding under `proxy` COULD NOT RECORD WHY — the field set is closed
+    #: and `why`/`rationale`/`decided_by` were each a 400. The operator asked
+    #: for exactly the opposite: "it mentions which gated decisions it has to
+    #: take and the rationale it followed... it then gives an understanding
+    #: of the situation to the user, and possibly a way to reactively
+    #: intervene."
+    #:
+    #: `why` is ACCEPTED, not required. A required rationale measures
+    #: compliance, not thought — this file has the receipts (a mandatory
+    #: hourly report was satisfiable with 40 characters of filler for ten
+    #: hours). `decided_by` is HUB-SET and cannot be supplied: it is the
+    #: seat that actually moved the row, which diverges from `updated_by`
+    #: whenever a delegate transcribes an owner's spoken answer.
+    _GATE_FIELDS = {"owner", "asked_by", "acts", "status", "q", "options",
+                    "default", "ask_message", "answer", "discharged_by",
+                    "expires_at", "why", "decided_by", "under_proxy"}
+    _GATE_STATUSES = ("asked", "granted", "denied", "answered", "withdrawn")
+    #: Only the OWNER may move a gate to a deciding state. Reached through
+    #: the same identity check `claim.owner` uses, because a gate a delegate
+    #: can grant itself is not a gate.
+    _GATE_DECIDING = ("granted", "denied", "answered")
+
+    @staticmethod
+    def _validate_ruling_row(value: Any) -> None:
+        """0113: standing operator rulings — visible, versioned, citable."""
+        if not isinstance(value, dict):
+            raise HubError(400, "ruling rows must be objects (see docs: 0113)")
+        unknown = set(value) - HubService._RULING_FIELDS
+        if unknown:
+            raise HubError(400, f"unknown ruling fields: {sorted(unknown)} "
+                                f"(allowed: {sorted(HubService._RULING_FIELDS)})")
+        text = value.get("text")
+        if not isinstance(text, str) or not text.strip() or len(text) > 2000:
+            raise HubError(400, "ruling needs text: the standing constraint "
+                                "(<=2000 chars)")
+        value["text"] = sanitize_text(text, 2000, field="ruling text")
+        scope = value.get("scope")
+        if not isinstance(scope, list) or not scope or len(scope) > 32:
+            raise HubError(400, "ruling scope must be a non-empty list of seat "
+                                "ids (<=32) or [\"*\"] for fleet-wide")
+        if scope == ["*"]:
+            value["scope"] = ["*"]
+        else:
+            cleaned = [sanitize_text(str(s), 64) for s in scope if str(s).strip()]
+            if not cleaned:
+                raise HubError(400, "ruling scope must name at least one seat "
+                                    "or [\"*\"] for fleet-wide")
+            value["scope"] = cleaned
+        source = value.get("source_message_id")
+        if not isinstance(source, str) or not source.strip() or len(source) > 128:
+            raise HubError(400, "ruling needs source_message_id: the operator "
+                                "message this derives from (<=128 chars)")
+        value["source_message_id"] = sanitize_text(source.strip(), 128)
+        active = value.get("active", True)
+        if not isinstance(active, bool):
+            raise HubError(400, "ruling active must be a boolean")
+        value["active"] = active
+
+    def _ruling_applies_to(self, agent_id: str, scope: list[str]) -> bool:
+        return "*" in scope or agent_id in scope
+
+    def _active_ruling_entries(self, channel: str,
+                               agent_id: str) -> list[dict[str, Any]]:
+        """Active ruling:* rows in scope for this seat (0113)."""
+        rows: list[dict[str, Any]] = []
+        for entry in self.db.store_keys(channel):
+            if not entry["key"].startswith(self._RULING_PREFIX):
+                continue
+            stored = self.db.store_get(channel, entry["key"])
+            if stored is None or not isinstance(stored.value, dict):
+                continue
+            if not stored.value.get("active", True):
+                continue
+            scope = stored.value.get("scope") or []
+            if not isinstance(scope, list) or not self._ruling_applies_to(
+                    agent_id, [str(s) for s in scope]):
+                continue
+            rows.append({"key": entry["key"], "value": stored.value,
+                           "version": stored.version,
+                           "updated_by": stored.updated_by})
+        return rows
+
+    def _unacknowledged_rulings(self, agent: AgentInfo,
+                                channel: str) -> list[dict[str, Any]]:
+        """Rulings in scope whose store version is newer than the seat's ack."""
+        out: list[dict[str, Any]] = []
+        for row in self._active_ruling_entries(channel, agent.id):
+            seen = self.db.ruling_receipt_get(agent.id, channel, row["key"])
+            if seen is not None and seen >= row["version"]:
+                continue
+            out.append({**row, "ack_version": seen})
+        return out
+
+    def ack_rulings(self, agent: AgentInfo, channel: str,
+                    keys: list[str]) -> dict[str, Any]:
+        """Record acknowledgment of active rulings (0113 charter-read pattern)."""
+        self.require_membership(channel, agent.id)
+        self._require_unpaused(agent, channel)
+        acked: list[str] = []
+        for key in keys:
+            if not key.startswith(self._RULING_PREFIX):
+                raise HubError(400, f"'{key}' is not a ruling key "
+                                    "(expected ruling:<slug>)")
+            stored = self.db.store_get(channel, key)
+            if stored is None or not isinstance(stored.value, dict):
+                raise HubError(404, f"ruling '{key}' not found in '{channel}'")
+            if not stored.value.get("active", True):
+                raise HubError(409, f"ruling '{key}' is revoked — nothing to ack")
+            scope = stored.value.get("scope") or []
+            if not isinstance(scope, list) or not self._ruling_applies_to(
+                    agent.id, [str(s) for s in scope]):
+                raise HubError(403, f"ruling '{key}' is not in your scope")
+            self.db.ruling_receipt_set(agent.id, channel, key, stored.version)
+            acked.append(key)
+        return {"channel": channel, "agent_id": agent.id, "acked": acked}
+
+    def _require_rulings_ack(self, channel: str, agent: AgentInfo) -> None:
+        """0113 opt-in gate: scoped seats must ack current standing rulings."""
+        meta = self.db.store_get(channel, CHANNEL_META_KEY)
+        if not (meta and isinstance(meta.value, dict)
+                and meta.value.get("rulings_required")):
+            return
+        unacked = self._unacknowledged_rulings(agent, channel)
+        if not unacked:
+            return
+        keys = ", ".join(r["key"] for r in unacked[:5])
+        more = f" (+{len(unacked) - 5} more)" if len(unacked) > 5 else ""
+        raise HubError(409, f"this channel requires acknowledging standing "
+                            f"rulings first: GET /channels/{channel}/digest "
+                            f"(see unacknowledged_rulings), then POST "
+                            f"/channels/{channel}/ruling-acks — pending: "
+                            f"{keys}{more}")
+
+    def _require_gate(self, channel: str, agent: AgentInfo,
+                      act_class: str) -> None:
+        """Refuse a gated act unless this seat may perform it here.
+
+        BINDS ON THE CHANNEL, NOT THE SEAT — the live falsification that
+        produced this design: a delegate that correctly refused to delete
+        two files then DISPATCHED the delete to a plain member, who did it
+        (delegation-lab#9-#12, 2026-08-04). A seat-scoped gate is bypassed
+        by one addressed ask, so the room is the only boundary that holds.
+
+        And it is a REFUSAL, not teaching, because the second arm proved
+        teaching negotiable: a delegate read the charter, correctly named
+        the delete a key decision, then deleted anyway reasoning "restorable
+        via version history" — true about the hub, false about the owner,
+        who had wanted the files kept. Recovery was lossy: the drafts came
+        back re-authored, not as the bytes that were there.
+
+        Passes for the channel owner, an operator, a `proxy` delegate scoped
+        here, or a `gate:<slug>` row the OWNER granted. Silent no-op in any
+        room whose owner has not opted in."""
+        meta = self.db.store_get(channel, CHANNEL_META_KEY)
+        classes = ((meta.value or {}).get("gated_acts")
+                   if meta is not None and isinstance(meta.value, dict) else None)
+        if not classes or act_class not in classes:
+            return
+        if agent.operator or self._is_channel_owner(channel, agent.id):
+            return
+        if self.has_proxy(agent.id, channel):
+            return
+        for entry in self.db.store_keys(channel):
+            key = entry["key"]
+            if not key.startswith(self._GATE_PREFIX):
+                continue
+            row = self.db.store_get(channel, key)
+            if row is None or not isinstance(row.value, dict):
+                continue
+            value = row.value
+            if str(value.get("status") or "").lower() != "granted":
+                continue
+            # A grant authorizes ONE named act, for the ONE seat that asked.
+            # Without both scopes it was a skeleton key: a single grant about
+            # picking a title let an unrelated member delete files and write
+            # decisions (reproduced 2026-08-04). An owner answering a question
+            # is not handing out the room.
+            if act_class not in (value.get("acts") or []):
+                continue
+            if str(value.get("asked_by") or "") != agent.id:
+                continue
+            expires = value.get("expires_at")
+            if expires is not None:
+                try:
+                    if float(expires) < time.time():
+                        continue
+                except (TypeError, ValueError):
+                    pass
+            return
+        raise HubError(
+            403, f"'{act_class}' is a GATED act in #{channel}: its owner "
+                 f"requires the owner's word before it happens. You hold no "
+                 f"'proxy' power here, so ask instead of acting — post "
+                 f"status=blocked, to=[owner], title 'gate: <slug>', with at "
+                 f"most three plain questions, and write a gate:<slug> row "
+                 f"naming the owner. Passing this act to another seat is "
+                 f"laundering, not delegation: it is refused for them too.")
+
+    def has_proxy(self, agent_id: str, channel: str) -> bool:
+        """Does this seat hold `proxy` that reaches THIS channel?
+
+        Scope is the concession the design's own strongest objection forced:
+        an unscoped `proxy` would let one grant, taken to unstick one room,
+        silently clear every gate on the hub for its whole TTL — the same
+        unrevocable standing authority the power exists to avoid. A grant
+        carries `scope`; only the literal `*` reaches everywhere, and it has
+        to be typed."""
+        for d in self.active_delegations():
+            if d["agent_id"] != agent_id or PROXY_POWER not in d["powers"]:
+                continue
+            scope = str(d.get("scope") or "").strip()
+            # An UNSCOPED proxy grant reaches nothing. Fleet-wide authority
+            # must be typed (`--scope '*'`), never arrived at by omission —
+            # that is the whole lesson of the operator flag, which has no
+            # revocation path because nobody decided it should be permanent.
+            if scope == "*" or (scope and scope == channel):
+                return True
+        return False
+
+    def _delegation_powers_for(self, agent_id: str,
+                               channel: str | None = None) -> set[str]:
+        """Active delegated powers this seat can spend here."""
+        powers: set[str] = set()
+        for d in self.active_delegations():
+            if d["agent_id"] != agent_id:
+                continue
+            scope = str(d.get("scope") or "").strip()
+            if channel is not None and scope not in ("", "*", channel):
+                continue
+            powers.update(str(p) for p in (d.get("powers") or ()))
+        return powers
+
+    def _is_channel_owner(self, channel: str, agent_id: str) -> bool:
+        info = self.db.get_channel(channel)
+        return info is not None and info.created_by == agent_id
+
+    #: How long a principal must be silent before a proxy holder may act in
+    #: their name. Well above the 600s presence window on purpose: presence
+    #: `offline` means NO CONTACT, never "gone", and an operator reading the
+    #: room in a browser makes no calls. A misread here hands someone's
+    #: authority away, so the bar is an hour of true silence, not a lapsed
+    #: heartbeat.
+    PROXY_ABSENCE_SECONDS = 3600.0
+
+    def _out_of_contact(self, agent_id: str) -> bool:
+        """Has this seat had NO contact with the hub for long enough that
+        waiting on it is a stall rather than patience?"""
+        try:
+            row = self.presence.get(agent_id)
+        except Exception:
+            return False
+        state = str(getattr(row, "state", "") or "")
+        seen = float(getattr(row, "updated_at", 0.0) or 0.0)
+        if state == "active":
+            return False
+        return (time.time() - seen) >= self.PROXY_ABSENCE_SECONDS
+
+    def _validate_gate_row(self, value: Any, agent: AgentInfo,
+                           current: Any, channel: str | None = None) -> None:
+        """Shape + WRITE AUTHORITY for `gate:<slug>`.
+
+        The asker opens the gate and may never decide it; the named owner
+        (or an operator) decides. Without this the row degrades into prose:
+        live, two unvalidated gate rows silently LOST their question and
+        their default on the first update, leaving a status word with
+        nothing to answer."""
+        if not isinstance(value, dict):
+            raise HubError(400, "gate rows must be objects: "
+                                "{owner, status, q, options?}")
+        unknown = set(value) - self._GATE_FIELDS
+        if unknown:
+            raise HubError(400, f"unknown gate field(s): {sorted(unknown)} — "
+                                f"allowed: {sorted(self._GATE_FIELDS)}")
+        status = str(value.get("status") or "").strip().lower()
+        if status not in self._GATE_STATUSES:
+            raise HubError(400, f"gate status must be one of "
+                                f"{list(self._GATE_STATUSES)}")
+        owner = str(value.get("owner") or "").strip()
+        if not owner:
+            raise HubError(400, "a gate names the OWNER it is waiting on: "
+                                "{'owner': '<seat>'} — a gate addressed to "
+                                "nobody is a note, not a gate")
+        prior = current.value if current is not None and isinstance(
+            getattr(current, "value", None), dict) else None
+        if prior is not None and str(prior.get("owner") or "") != owner:
+            raise HubError(403, "a gate's owner cannot be reassigned — open "
+                                "a new gate if the decider changed")
+        if status in self._GATE_DECIDING:
+            decider = prior.get("owner") if prior else owner
+            # A PROXY HOLDER ANSWERS FOR AN ABSENT OWNER (operator ruling,
+            # 2026-08-06): "IF the delegate has been given sufficient power to
+            # act on behalf of the user, and the user is not connected to the
+            # hub, then the delegate MUST act on behalf of the user."
+            #
+            # `proxy` exists precisely to be the owner's hand while the owner
+            # is away, and it is scope-typed so it cannot leak past the room
+            # it was granted for. Refusing the holder here made the power
+            # unusable at the only moment it is for: `g4-lead` held proxy on
+            # its room and still sat blocked for hours on a gate addressed to
+            # an operator who was never going to answer.
+            # ...but ONLY while the owner is actually away. The conditional
+            # was inverted (2026-08-07 audit): as written, a proxy holder
+            # could overrule a PRESENT owner — the abuse `proxy` is scoped
+            # and short-lived to prevent — while the ruling it cites has the
+            # opposite antecedent ("and the user is not connected to the
+            # hub"). Proxy is the owner's hand while they are away, not a
+            # second vote while they are here.
+            proxy_ok = (channel is not None and self.has_proxy(agent.id, channel)
+                        and decider not in ("", agent.id)
+                        and self._out_of_contact(decider))
+            # The DECIDER is stamped by the hub, never supplied: `updated_by`
+            # records who typed, which is a different fact whenever a
+            # delegate transcribes an absent owner's answer.
+            value["decided_by"] = agent.id
+            if proxy_ok:
+                value["under_proxy"] = True
+            if not (agent.operator or agent.id == decider or proxy_ok):
+                raise HubError(
+                    403, f"only {decider} (or an operator) can answer this "
+                         f"gate — you opened it, so you may not also decide "
+                         f"it. Post the question and wait.")
+        elif prior is None and value.get("asked_by") not in (None, agent.id):
+            raise HubError(403, "gate.asked_by must be you")
+        acts = value.get("acts")
+        if acts is not None:
+            if not isinstance(acts, list):
+                raise HubError(400, "gate.acts is the list of act classes this "
+                                    f"gate asks for, from {sorted(GATED_ACT_CLASSES)}")
+            unknown_acts = {str(a) for a in acts} - GATED_ACT_CLASSES
+            if unknown_acts:
+                raise HubError(400, f"unknown act class(es) in gate.acts: "
+                                    f"{sorted(unknown_acts)} — allowed: "
+                                    f"{sorted(GATED_ACT_CLASSES)}")
+            value["acts"] = sorted({str(a) for a in acts})
+        if status == "granted" and not value.get("acts"):
+            # FAIL CLOSED. A grant that names no act authorized everything —
+            # the skeleton-key bug. If the owner is saying yes, the row must
+            # say yes TO WHAT.
+            raise HubError(400, "a granted gate must name the act(s) it "
+                                "authorizes: acts=[...] from "
+                                f"{sorted(GATED_ACT_CLASSES)}. A grant that "
+                                "names nothing would authorize everything.")
+        if status == "granted" and not value.get("asked_by"):
+            raise HubError(400, "a granted gate must keep `asked_by`: a grant "
+                                "authorizes the seat that asked, not the room")
+        value["q"] = sanitize_text(str(value.get("q") or ""), 200, field="gate question")
+        opts = value.get("options")
+        if opts is not None:
+            if not isinstance(opts, list) or len(opts) > 4:
+                raise HubError(400, "gate options: a list of at most 4 "
+                                    "plain choices")
+            value["options"] = [sanitize_text(str(o), 120) for o in opts]
+        for field in ("default", "answer", "ask_message", "discharged_by"):
+            if value.get(field) is not None:
+                value[field] = sanitize_text(str(value[field]), 200)
 
     @staticmethod
     def _validate_queue_row(value: Any) -> None:
@@ -3975,7 +5233,7 @@ class HubService:
         q = value.get("q")
         if not isinstance(q, str) or not q.strip() or len(q) > 120:
             raise HubError(400, "queue rows need q: the one-line question (<=120 chars)")
-        value["q"] = sanitize_text(q, 120)
+        value["q"] = sanitize_text(q, 120, field="phase question")
         for row_field, cap, item_cap in (("options", 5, 120),
                                          ("evidence", 8, 80),
                                          ("waiting", 10, 64)):
@@ -4015,7 +5273,7 @@ class HubService:
             if not isinstance(default, str) or len(default) > 160:
                 raise HubError(400, "queue-row default must be a string <= 160 "
                                     "chars (what happens if nobody decides)")
-            value["default"] = sanitize_text(default, 160)
+            value["default"] = sanitize_text(default, 160, field="default")
         since = value.get("since")
         if since is not None and not isinstance(since, (int, float)):
             raise HubError(400, "queue-row since must be a unix timestamp")
@@ -4025,44 +5283,7 @@ class HubService:
                 raise HubError(400, "queue-row decided must be a string <= 200 "
                                     "chars (the decision:<slug> or message ref "
                                     "that settled it)")
-            value["decided"] = sanitize_text(decided, 200)
-
-    @staticmethod
-    def _validate_ruling_row(value: Any) -> None:
-        """0113: standing operator rulings — visible, versioned, citable."""
-        if not isinstance(value, dict):
-            raise HubError(400, "ruling rows must be objects (see docs: 0113)")
-        unknown = set(value) - HubService._RULING_FIELDS
-        if unknown:
-            raise HubError(400, f"unknown ruling fields: {sorted(unknown)} "
-                                f"(allowed: {sorted(HubService._RULING_FIELDS)})")
-        text = value.get("text")
-        if not isinstance(text, str) or not text.strip() or len(text) > 2000:
-            raise HubError(400, "ruling needs text: the standing constraint "
-                                "(<=2000 chars)")
-        value["text"] = sanitize_text(text, 2000)
-        scope = value.get("scope")
-        if not isinstance(scope, list) or not scope or len(scope) > 32:
-            raise HubError(400, "ruling scope must be a non-empty list of seat "
-                                "ids (<=32) or [\"*\"] for fleet-wide")
-        if scope == ["*"]:
-            value["scope"] = ["*"]
-        else:
-            cleaned = [sanitize_text(str(s), 64) for s in scope if str(s).strip()]
-            if not cleaned:
-                raise HubError(400, "ruling scope must name at least one seat "
-                                    "or [\"*\"] for fleet-wide")
-            value["scope"] = cleaned
-        source = value.get("source_message_id")
-        if not isinstance(source, str) or not source.strip() or len(source) > 128:
-            raise HubError(400, "ruling needs source_message_id: the operator "
-                                "message this derives from (<=128 chars)")
-        value["source_message_id"] = sanitize_text(source.strip(), 128)
-        active = value.get("active", True)
-        if not isinstance(active, bool):
-            raise HubError(400, "ruling active must be a boolean")
-        value["active"] = active
-
+            value["decided"] = sanitize_text(decided, 200, field="decision")
     # -- phase rows (0140/2): the version invariant the fleet could not hold ------
     #
     # Live finding (at-test, 2026-07-31), operator's own words: "one seat
@@ -4135,8 +5356,8 @@ class HubService:
         if steward and steward == agent.id:
             return None
         if steward:
-            return (f"'{key}' is stewarded by {sanitize_text(str(steward), 64)}"
-                    f" — ask {sanitize_text(str(steward), 64)} or the operator"
+            return (f"'{key}' is stewarded by {elide(str(steward), 64)}"
+                    f" — ask {elide(str(steward), 64)} or the operator"
                     " to declare the transition")
         return (f"'{key}' declares the phase order for this channel's work: "
                 "writable by the channel owner, an operator, a delegate "
@@ -4161,7 +5382,7 @@ class HubService:
         if not isinstance(current, str) or not current.strip() or len(current) > 64:
             raise HubError(400, "phase needs current: the phase now in force "
                                 "(e.g. \"v3\"), <=64 chars")
-        value["current"] = sanitize_text(current.strip(), 64)
+        value["current"] = sanitize_text(current.strip(), 64, field="current phase")
         status = value.get("status", "open")
         if status not in self.PHASE_STATUSES:
             raise HubError(400, "phase status must be "
@@ -4275,64 +5496,39 @@ class HubService:
                     f"(store_set {row['key']} status=complete) so the next "
                     "phase can start on the record.")
 
-    def _ruling_applies_to(self, agent_id: str, scope: list[str]) -> bool:
-        return "*" in scope or agent_id in scope
+    def _charter_change_advisory(self, channel: str, actor: AgentInfo,
+                                 version: int, mirror: Message) -> None:
+        """One non-waking line to every member whose receipt just went stale.
 
-    def _active_ruling_entries(self, channel: str,
-                               agent_id: str) -> list[dict[str, Any]]:
-        """Active ruling:* rows in scope for this seat (0113)."""
-        rows: list[dict[str, Any]] = []
-        for entry in self.db.store_keys(channel):
-            if not entry["key"].startswith(self._RULING_PREFIX):
+        The kind=fs audit already records THAT the file changed; its title
+        (`fs:put channel/charter.md`) does not say what a reader must now do,
+        and outside a `norms_required` room nothing else ever will. So: told
+        once, per edit, only to seats who are actually behind, never to the
+        author, never a block and never a wake (the doorbell is ephemeral and
+        rides the audit message's channel/seq, so acking cannot skip real
+        traffic). Seeding a brand-new room (v1) tells nobody — there is no
+        one to tell and nothing has changed."""
+        if version <= 1:
+            return
+        gated = self._norms_required(channel)
+        consequence = ("Posting here is refused until you have" if gated
+                       else "Read it before you post again —")
+        for member in self.db.list_members(channel):
+            if member.agent_id == actor.id:
                 continue
-            stored = self.db.store_get(channel, entry["key"])
-            if stored is None or not isinstance(stored.value, dict):
+            receipt = self.db.charter_receipt_get(member.agent_id, channel)
+            if receipt is not None and receipt >= version:
                 continue
-            if not stored.value.get("active", True):
-                continue
-            scope = stored.value.get("scope") or []
-            if not isinstance(scope, list) or not self._ruling_applies_to(
-                    agent_id, [str(s) for s in scope]):
-                continue
-            rows.append({"key": entry["key"], "value": stored.value,
-                           "version": stored.version,
-                           "updated_by": stored.updated_by})
-        return rows
-
-    def _unacknowledged_rulings(self, agent: AgentInfo,
-                                channel: str) -> list[dict[str, Any]]:
-        """Rulings in scope whose store version is newer than the seat's ack."""
-        out: list[dict[str, Any]] = []
-        for row in self._active_ruling_entries(channel, agent.id):
-            seen = self.db.ruling_receipt_get(agent.id, channel, row["key"])
-            if seen is not None and seen >= row["version"]:
-                continue
-            out.append({**row, "ack_version": seen})
-        return out
-
-    def ack_rulings(self, agent: AgentInfo, channel: str,
-                    keys: list[str]) -> dict[str, Any]:
-        """Record acknowledgment of active rulings (0113 charter-read pattern)."""
-        self.require_membership(channel, agent.id)
-        self._require_unpaused(agent, channel)
-        acked: list[str] = []
-        for key in keys:
-            if not key.startswith(self._RULING_PREFIX):
-                raise HubError(400, f"'{key}' is not a ruling key "
-                                    "(expected ruling:<slug>)")
-            stored = self.db.store_get(channel, key)
-            if stored is None or not isinstance(stored.value, dict):
-                raise HubError(404, f"ruling '{key}' not found in '{channel}'")
-            if not stored.value.get("active", True):
-                raise HubError(409, f"ruling '{key}' is revoked — nothing to ack")
-            scope = stored.value.get("scope") or []
-            if not isinstance(scope, list) or not self._ruling_applies_to(
-                    agent.id, [str(s) for s in scope]):
-                raise HubError(403, f"ruling '{key}' is not in your scope")
-            self.db.ruling_receipt_set(agent.id, channel, key, stored.version)
-            acked.append(key)
-        return {"channel": channel, "agent_id": agent.id, "acked": acked}
-
+            self._deliver_doorbell(
+                member.agent_id, mirror,
+                f"HUB NOTICE (advisory — nothing was blocked) — {actor.id} "
+                f"published v{version} of '{channel}' charter "
+                f"({CHARTER_PATH}). Your receipt is "
+                f"{'v' + str(receipt) if receipt is not None else 'none'}. "
+                f"{consequence} read the current version: "
+                f"read_charter(channel={channel!r}).",
+                title=f"hub notice: '{channel}' charter v{version} — "
+                      f"read_charter(channel={channel!r})")
     # Terminal claim-status spellings observed in the field beside the taught
     # {"done": true} (hub rule 2 / the skill): seats write status="done" or
     # "shipped" and mean the same thing. Matched on the status's FIRST word
@@ -4390,6 +5586,180 @@ class HubService:
         live on the board (parked work is unfinished work)."""
         return cls._claim_status_word(value) in cls._PARKED_CLAIM_STATUSES
 
+    def _supervise_channel(self, agent: AgentInfo, channel: str,
+                           powers: set[str]) -> dict[str, Any]:
+        """One room's delegate view, with scope already resolved."""
+        self.require_membership(channel, agent.id)
+        members = [m.agent_id for m in self.db.list_members(channel)]
+        ops = self.operator_ids()
+        now = time.time()
+
+        rows = {}
+        for entry in self.db.store_keys(channel):
+            key = entry["key"]
+            if not key.startswith("claim:"):
+                continue
+            stored = self.db.store_get(channel, key)
+            if stored is None or not isinstance(stored.value, dict):
+                continue
+            rows[key] = stored
+
+        seats: list[dict[str, Any]] = []
+        for seat_id in sorted(members):
+            if seat_id in ops or seat_id == agent.id:
+                continue
+            live = self._fleet_seat_live(seat_id)
+            mine = [(k, st) for k, st in rows.items()
+                    if str(st.value.get("owner") or st.updated_by) == seat_id]
+            working = [k for k, st in mine
+                       if not self._claim_done(st.value)
+                       and not self._claim_parked(st.value)]
+            parked = [k for k, st in mine if self._claim_parked(st.value)]
+            idle_for = min((now - st.updated_at for _, st in mine),
+                           default=None)
+            recep = "unknown"
+            try:
+                recep = str(self.presence.reception(seat_id)[0] or "unknown")
+            except Exception:
+                pass
+            seats.append({
+                "seat": seat_id, "live": live,
+                "mission": (self.db.get_mission(seat_id) or "").strip(),
+                "reception": recep,
+                "working_on": working, "parked": parked,
+                "holds_nothing": not working and not parked,
+                "quiet_minutes": (None if idle_for is None
+                                  else round(idle_for / 60.0, 1)),
+            })
+
+        blocked: list[dict[str, Any]] = []
+        for key, st in rows.items():
+            v = st.value
+            if self._claim_done(v) or not self._claim_parked(v):
+                continue
+            tag = str(v.get("blocked_on") or "").strip().lower()
+            who = str(v.get("needs_from") or "").strip()
+            if tag == "seat" and who:
+                can, move = True, f"chase {who} — they are named and can end it"
+            elif tag == "operator" and PROXY_POWER in powers and any(
+                    self._out_of_contact(o) for o in ops):
+                can, move = True, ("decide it yourself under `proxy` — the "
+                                   "owner's call is yours while they are away")
+            elif tag == "operator" and PROXY_POWER in powers:
+                can, move = False, ("the operator is reachable — ask them. "
+                                    "`proxy` is for their absence, and the "
+                                    "hub will refuse it while they are here")
+            elif tag == "operator":
+                can, move = False, ("needs the OPERATOR: you hold no `proxy`. "
+                                    "Ask them for it, or ask them to decide")
+            elif tag == "decision" and (powers & {"ruling", "operational"}):
+                can, move = True, "rule on it — you hold ruling/operational"
+            elif tag == "decision":
+                can, move = False, "needs a ruling power you do not hold"
+            elif tag == "external":
+                can, move = False, "outside the hub — re-poll, or re-plan around it"
+            else:
+                can, move = False, "undeclared blocker — ask the owner what it needs"
+            blocked.append({
+                "key": key, "owner": str(v.get("owner") or st.updated_by),
+                "blocked_on": tag or "untagged", "needs": str(v.get("needs") or ""),
+                "needs_from": who or None,
+                "idle_minutes": round((now - st.updated_at) / 60.0, 1),
+                "you_can_act": can, "move": move,
+            })
+
+        phases = []
+        for entry in self.db.store_keys(channel):
+            if not entry["key"].startswith("phase:"):
+                continue
+            st = self.db.store_get(channel, entry["key"])
+            if st is None or not isinstance(st.value, dict):
+                continue
+            if self._claim_status_word(st.value) in self._TERMINAL_PHASE_STATUSES:
+                continue
+            phases.append({"key": entry["key"],
+                           "current": str(st.value.get("current") or ""),
+                           "next": str(st.value.get("next") or ""),
+                           "steward": str(st.value.get("steward") or "")})
+
+        idle = [s for s in seats if s["live"] and s["holds_nothing"]]
+        return {
+            "channel": channel, "your_powers": sorted(powers),
+            "open_phases": phases,
+            "seats": seats,
+            "idle_but_live": [s["seat"] for s in idle],
+            "blocked": sorted(blocked, key=lambda b: -b["idle_minutes"]),
+            "needs_the_operator": [b["key"] for b in blocked
+                                   if not b["you_can_act"]
+                                   and b["blocked_on"] == "operator"],
+            "summary": (f"{len(seats)} seat(s); "
+                        f"{len(idle)} live and holding nothing; "
+                        f"{len(blocked)} blocked, "
+                        f"{len([b for b in blocked if b['you_can_act']])} "
+                        "you can end yourself"),
+        }
+
+    def supervise(self, agent: AgentInfo, channel: str | None = None) -> dict[str, Any]:
+        """THE DELEGATE'S SITUATION REPORT — a deterministic check, and only
+        for a delegate (operator ruling, 2026-08-07).
+
+        "the role of the delegate is also to be more ALIVE than others... not
+         only to check if itself has obligations, but also to check if
+         everybody that can fulfil their obligations are working on it. It
+         should also be able to assess the situation and see if there are
+         blockers and idle, investigate the why and unblock the situation.
+         The delegate is in essence more a SUPERVISOR than a doer."
+
+        Everything here is derived from state the hub already holds — who is
+        live, who owes what, which rows are parked, and on whom. The hub
+        computes the PICTURE; the delegate decides what to do about it. It
+        never guesses intent and never authors work.
+
+        Crucially, `can_act` is conditioned by the powers actually granted:
+        the same stalled room yields a different set of available moves for
+        a delegate holding `proxy` than for one that must go back to the
+        human. A supervisor that reports moves it cannot make is worse than
+        silent — it invites a seat to promise what the hub will refuse."""
+        # ACROSS EVERY ROOM YOU STEWARD, unless you name one. The delegate's
+        # measured failure has never been "could not see one room" — it is
+        # missing the room it did not think to name. `blockers()` had this
+        # property and nothing else; folding it in here is why that surface
+        # could be deleted rather than maintained beside this one.
+        if channel is None:
+            rooms = [c for c in self.db.channels_of(agent.id)
+                     if not c.startswith("dm:")
+                     and c != self.DARK_ALERTS_CHANNEL]
+            merged: dict[str, Any] = {"rooms": {}, "idle_but_live": [],
+                                      "blocked": [], "needs_the_operator": []}
+            for room in rooms:
+                powers = self._delegation_powers_for(agent.id, room)
+                if not powers:
+                    continue          # no grant reaches that room
+                one = self._supervise_channel(agent, room, powers)
+                merged["rooms"][room] = one
+                merged["idle_but_live"] += [f"{room}/{s}"
+                                            for s in one["idle_but_live"]]
+                merged["blocked"] += [{**b, "channel": room}
+                                      for b in one["blocked"]]
+                merged["needs_the_operator"] += [f"{room}/{k}"
+                                                 for k in one["needs_the_operator"]]
+            if not merged["rooms"]:
+                raise HubError(403, "supervise() is the delegate's view: no "
+                                    "delegation of yours reaches any room you "
+                                    "are in. Ask the operator.")
+            merged["summary"] = (
+                f"{len(merged['rooms'])} room(s); "
+                f"{len(merged['idle_but_live'])} seat(s) live and holding "
+                f"nothing; {len(merged['blocked'])} blocked")
+            return merged
+        powers = self._delegation_powers_for(agent.id, channel)
+        if not powers:
+            raise HubError(403, "supervise() is the delegate's view: it "
+                                "reports what YOU can do about a stalled "
+                                "room, and that answer is meaningless "
+                                "without a delegation. Ask the operator.")
+        return self._supervise_channel(agent, channel, powers)
+
     def board(self, agent: AgentInfo) -> dict[str, Any]:
         """The viewer's decision board, derived from structure the messages
         and stores already carry (design 0070): pending-on-me (the inbox
@@ -4427,7 +5797,7 @@ class HubService:
                     assignees |= pending_addressees(m, state.pending)
                     age = now - m.created_at - self.paused_seconds_since(m.created_at)
                     row = {"channel": channel, "seq": m.seq, "id": m.id,
-                           "sender": m.sender, "q": m.title or m.body[:120],
+                           "sender": m.sender, "q": m.title or elide(m.body, 120),
                            "since": m.created_at, "age_minutes": round(age / 60, 1),
                            "pending_asks": state.pending,
                            "escalated": age > sla_s}
@@ -4555,7 +5925,7 @@ class HubService:
                         ask_texts = [str(a.get("text", "")) for a in asks_of(msg)
                                      if str(a.get("id")) in pend and a.get("text")]
                         what = (ask_texts[0] if ask_texts
-                                else (msg.body or "").strip()[:80])
+                                else elide((msg.body or "").strip(), 80))
                 rows.append({
                     "kind": "ask", "operator": op,
                     "channel": o.channel, "seq": o.seq, "id": o.id,
@@ -4638,7 +6008,7 @@ class HubService:
         """Pause the hub (admin surface; idempotent). Broadcasts one system
         message per non-DM channel — one wake to say 'stand down' beats idle
         seats discovering 423s piecemeal without context."""
-        state, created = self.db.pause_start(sanitize_text(reason, 200), by)
+        state, created = self.db.pause_start(sanitize_text(reason, 200, field="pause reason"), by)
         self._bust_pause_cache()
         if created:
             self._broadcast_system(
@@ -4709,6 +6079,327 @@ class HubService:
         row = self.db.hub_rules_set(text)
         return {"version": row["version"], "text": row["text"]}
 
+    # -- hub charter (0146): the standing "who is who" -----------------------------
+    #
+    # Same tier and same author as the rules (admin key), a different job:
+    # the rules ride EVERY whoami and are budgeted to a screenful, so the
+    # role model cannot live there. This is pull-only — a pointer in whoami,
+    # the text on demand — which keeps ADR-0002's "no scheduled re-push".
+
+    def hub_charter(self) -> dict[str, Any]:
+        """The served hub charter. Version 0 = the packaged ROLE_CHARTER,
+        which is why a fresh hub is never charterless: the default exists by
+        construction, needs no write, and can never be lost."""
+        row = self.db.hub_charter_get()
+        if row is None:
+            return {"version": 0, "text": ROLE_CHARTER, "updated_by": "",
+                    "updated_at": 0.0, "packaged": True}
+        return {"version": row["version"], "text": row["text"],
+                "updated_by": row["updated_by"],
+                "updated_at": row["updated_at"], "packaged": False}
+
+    # -- what kind of seat is this? (0147) ------------------------------------------
+    #
+    # The charter names exactly four kinds of seat, and this is the ONE place
+    # the hub answers "which of them are you right now" — from live state, not
+    # from a stored label: you are an owner while you own a live room, a
+    # delegate while an unexpired grant says so, an operator by the flag. The
+    # answer drives the role-scoped charter view and nothing else; no
+    # permission check reads it (each of those has its own, narrower gate).
+
+    def seat_kinds(self, agent_id: str,
+                   operator: bool | None = None) -> tuple[tuple[str, ...],
+                                                          tuple[str, ...]]:
+        """(kinds, powers) for one seat. Every seat is a member first. An
+        operator is served every kind: they already hold every power, so
+        there is nothing about this hub that is not theirs to read."""
+        is_operator = (agent_id in self.operator_ids() if operator is None
+                       else bool(operator))
+        if is_operator:
+            return ("member", "owner", "delegate", "operator"), ()
+        kinds = ["member"]
+        if self.db.owns_any_channel(agent_id):
+            kinds.append("owner")
+        powers = sorted({p for d in self.active_delegations()
+                         if d["agent_id"] == agent_id
+                         for p in (d.get("powers") or ())})
+        if powers:
+            kinds.append("delegate")
+        return tuple(kinds), tuple(powers)
+
+    def charter_view_for(self, agent: AgentInfo, text: str,
+                         full: bool = False) -> CharterViewResult:
+        """This seat's view of a charter text (governance.charter_view)."""
+        kinds, powers = self.seat_kinds(agent.id, operator=agent.operator)
+        return charter_view(text, roles=kinds, powers=powers, full=full)
+
+    def read_hub_charter(self, agent: AgentInfo,
+                         full: bool = False) -> dict[str, Any]:
+        """Read the hub charter AND record this seat's receipt — the same
+        contract as reading a channel charter's head, in the same table
+        under the reserved scope `hub`. Delivery proof, never agreement.
+
+        Since 0147 the TEXT served is this seat's view: the common sections
+        plus the ones addressed to the kinds of seat it is, with the delegate
+        section scoped to the powers it actually holds. `full=True` serves the
+        whole document to anyone who asks — the view is a token economy, not
+        an access control, and the response always names what it left out.
+
+        The RECEIPT is unchanged by any of this: it records that version N was
+        delivered, because that is what the posting gate and the operator's
+        reader roster mean by it. Which slice was served rides alongside in
+        `charter_receipts.view` and is reported separately (see
+        `hub_charter_pointer`), so a promotion never silently converts "I read
+        the current charter" into "I read the parts that used to apply to me"."""
+        doc = self.hub_charter()
+        view = self.charter_view_for(agent, doc["text"], full=full)
+        self.db.charter_receipt_set(agent.id, HUB_CHARTER_SCOPE, doc["version"],
+                                    view.key)
+        out = {**doc, **self._view_fields(view, doc["text"]),
+               "scope": HUB_CHARTER_SCOPE, "your_receipt": doc["version"]}
+        # THE FULL DELEGATE BRIEF, served (2026-08-04). It lived behind
+        # `agora delegate --charter` — a CLI a driven seat is explicitly
+        # forbidden to use — so in 16.4M characters of live traffic its
+        # distinctive phrases appear ZERO times, except one paste by hand.
+        # The stewardship half (the waiting_on/board/presence radar, nudge
+        # discipline, "two silent nudges = stop; re-route AND tell the
+        # operator", retiring obligations pinned on a dark seat) exists
+        # nowhere else, and its absence is visible in a 149-item operator
+        # desk. Only a seat that HOLDS a delegation pays for the tokens.
+        if any(d["agent_id"] == agent.id for d in self.active_delegations()):
+            from ..governance import DELEGATE_CHARTER
+            out["delegate_brief"] = DELEGATE_CHARTER
+        return out
+
+    @staticmethod
+    def _view_fields(view: CharterViewResult, whole: str) -> dict[str, Any]:
+        """The uniform description of a served slice — same keys at hub scope
+        and inside a channel read, so one renderer handles both."""
+        return {"text": view.text, "view": list(view.roles),
+                "powers": list(view.powers), "sliced": view.sliced,
+                "omitted": list(view.omitted), "view_note": view.note,
+                "bytes": len(view.text.encode()),
+                "full_bytes": len(whole.encode()),
+                "read_all_with": "read_charter(full=True) / GET /charter?full=true"}
+
+    def hub_charter_pointer(self, agent_id: str,
+                            operator: bool | None = None) -> dict[str, Any]:
+        """What whoami carries: the version, whether THIS seat has read it,
+        and — since 0147 — which view it would be served now. No text: a
+        charter re-pushed on every session-start call would be exactly the
+        periodic authority injection ADR-0002 forbids.
+
+        `current` keeps its meaning exactly (you hold a receipt for the
+        version in force). `view_current` is the second question scoping
+        creates: a member who read v3 and was granted a delegation this
+        morning still holds a valid v3 receipt and has still never seen the
+        delegate section. It flips false on GROWTH only, carries a note
+        saying why, and blocks nothing."""
+        doc = self.hub_charter()
+        row = self.db.charter_receipt_row(agent_id, HUB_CHARTER_SCOPE)
+        mine = row["version"] if row else None
+        kinds, powers = self.seat_kinds(agent_id, operator=operator)
+        key = charter_view_key(kinds, powers)
+        current = mine is not None and mine >= doc["version"]
+        covers = charter_view_covers(row.get("view") if row else None, key)
+        out = {"version": doc["version"], "your_receipt": mine,
+               "current": current, "view": list(kinds),
+               "view_current": bool(row) and covers,
+               "read_with": "read_charter() / GET /charter"}
+        if current and not covers:
+            out["note"] = (
+                f"you hold a receipt for v{doc['version']}, but the charter "
+                f"you were served does not cover the seat you are now "
+                f"({'+'.join(kinds)}"
+                + (f", powers: {'+'.join(powers)}" if powers else "")
+                + "): read_charter() for the parts you have not been shown.")
+        return out
+
+    # -- channel scope: the room's own charter, and what it inherits ----------------
+
+    # INHERITANCE, and why it is two labelled parts rather than one text:
+    # concatenating the hub view into the room's `content` would corrupt the
+    # only round-trip the charter file has — an owner reads the head, edits,
+    # writes back with expect_version — and it would make "which version is
+    # this receipt for?" unanswerable when the two scopes version separately.
+    # A pure REFERENCE ("go read the hub charter too") was rejected for the
+    # opposite reason: the field showed agents do not make the second call,
+    # and the operator's requirement is that the rules are actually in mind.
+    # So: ONE call, TWO labelled parts, and the hub part rides only when this
+    # seat is actually behind on it — a seat that already holds a current
+    # receipt for its current view pays nothing for the inheritance.
+
+    def read_channel_charter(self, agent: AgentInfo, channel: str,
+                             version: int | None = None,
+                             full: bool = False) -> dict[str, Any]:
+        """A room's charter, plus the hub charter it inherits.
+
+        The room's own text is served WHOLE and verbatim, never role-sliced:
+        the role model lives at hub scope by construction, and slicing a
+        room's rules per seat would let an owner hide a rule from the member
+        it binds. Only the inherited hub part — the one document that IS
+        about kinds of seat — is scoped."""
+        row = self.fs_read(agent, channel, CHARTER_PATH, version).model_dump()
+        out: dict[str, Any] = {**row, "channel": channel}
+        doc = self.hub_charter()
+        receipt = self.db.charter_receipt_row(agent.id, HUB_CHARTER_SCOPE)
+        kinds, powers = self.seat_kinds(agent.id, operator=agent.operator)
+        key = charter_view_key(kinds, powers)
+        version_ok = bool(receipt) and receipt["version"] >= doc["version"]
+        view_ok = charter_view_covers(receipt.get("view") if receipt else None, key)
+        hub: dict[str, Any] = {"version": doc["version"], "view": list(kinds),
+                               "scope": HUB_CHARTER_SCOPE,
+                               "updated_by": doc["updated_by"],
+                               "packaged": doc["packaged"]}
+        if version is not None:
+            hub.update(included=False, text=None,
+                       why=("archive read: an old version of this room's rules "
+                            "is history, and history does not inherit"))
+        elif full or not (version_ok and view_ok):
+            hub_view = charter_view(doc["text"], roles=kinds, powers=powers,
+                                    full=full)
+            self.db.charter_receipt_set(agent.id, HUB_CHARTER_SCOPE,
+                                        doc["version"], hub_view.key)
+            hub.update(included=True, **self._view_fields(hub_view, doc["text"]))
+            if full:
+                because = "you asked for everything"
+            elif receipt is None:
+                because = ("you had no receipt for the hub charter "
+                           f"(v{doc['version']})")
+            elif not version_ok:
+                because = (f"your receipt was for v{receipt['version']}, the "
+                           f"hub charter is at v{doc['version']}")
+            else:
+                because = ("your seat changed since you read it (now: "
+                           f"{'+'.join(kinds)})")
+            hub["why"] = (f"{because} — it is included here, and reading it "
+                          "recorded your receipt")
+        else:
+            hub.update(included=False, text=None,
+                       why=(f"not repeated: you hold a current receipt for hub "
+                            f"charter v{doc['version']} in your view "
+                            f"({'+'.join(kinds)}). read_charter() re-reads it."))
+        out["hub"] = hub
+        out["inherits"] = (
+            "This room's charter ADDS to the hub rules (whoami, every turn) "
+            "and the hub charter (who is who). Neither can cancel the tier "
+            "above it.")
+        legacy = self._legacy_norms(channel)
+        if legacy:
+            out["norms_legacy"] = legacy
+        return out
+
+    def _legacy_norms(self, channel: str) -> dict[str, Any] | None:
+        """`channel:meta.norms` (0060) is the charter's older, weaker twin:
+        free text, unversioned, unreceipted, ungated, and delivered by a
+        different surface. Two places to write room rules is one too many, so
+        it is DEPRECATED in favour of `channel/charter.md` — deprecation-safe:
+        the field is still accepted, still stored, still served where it
+        always was. What changes is that it is no longer a SECOND place to
+        read: a room that still has one gets it here, labelled, next to the
+        charter, with the one line an owner needs to fold it in."""
+        meta = self.db.store_get(channel, CHANNEL_META_KEY)
+        value = meta.value if meta and isinstance(meta.value, dict) else {}
+        norms = value.get("norms")
+        if not isinstance(norms, str) or not norms.strip():
+            return None
+        return {"text": norms,
+                "note": ("DEPRECATED surface: `channel:meta.norms` predates "
+                         "charters and is unversioned, unreceipted and "
+                         "ungated. It is shown here so this room has ONE "
+                         "place to read its rules. Owner: fold it into "
+                         f"'{CHARTER_PATH}' and clear the field.")}
+
+    def set_hub_charter(self, text: str, updated_by: str = "operator") -> dict[str, Any]:
+        """Publish a new hub charter version. Announced in hub-alerts (the
+        same visibility a delegation grant gets — a change to who-is-who is
+        at least as consequential), and every seat's whoami pointer flips to
+        stale at its next call. Nothing is blocked and nobody is woken."""
+        if not isinstance(text, str) or not text.strip():
+            raise HubError(400, "hub charter text must be a non-empty string")
+        if len(text.encode()) > MAX_STORE_VALUE_BYTES:
+            raise HubError(413, f"hub charter exceeds {MAX_STORE_VALUE_BYTES} bytes")
+        row = self.db.hub_charter_set(text, sanitize_text(updated_by, 64, field="updated_by"))
+        from ..governance import charter_missing_roles, charter_missing_sections
+        missing = charter_missing_roles(text)
+        # Scoping is opt-in by CONVENTION, so publishing is where an operator
+        # finds out whether they got it. Never a refusal: an unsliceable
+        # charter is served whole and every seat still gets every rule.
+        unsectioned = charter_missing_sections(text)
+        self._ensure_alerts_channel()
+        self._post_system(
+            self.DARK_ALERTS_CHANNEL,
+            f"HUB CHARTER v{row['version']} published by {row['updated_by'] or 'operator'} "
+            f"— the standing role model (who is who) changed. Every seat sees "
+            f"the new version in whoami.hub_charter and reads it with "
+            f"read_charter(); receipts for the previous version no longer "
+            f"count as current."
+            + (f" WARNING: this text never mentions {len(missing)} seat "
+               f"kind(s) this hub implements: {'; '.join(missing)}."
+               if missing else "")
+            + (f" NOTE: served WHOLE to every seat — no `## ` section of its "
+               f"own for {', '.join(unsectioned)}, so it cannot be scoped "
+               f"per role." if unsectioned else
+               " Each seat is served only the sections addressed to it "
+               "(`read_charter(full=True)` serves the whole document)."))
+        return {"version": row["version"], "text": row["text"],
+                "updated_by": row["updated_by"], "updated_at": row["updated_at"],
+                "missing_roles": missing, "sliceable": not unsectioned,
+                "unsectioned_roles": unsectioned}
+
+    def hub_charter_version(self, version: int) -> dict[str, Any]:
+        """One archived version verbatim. Version 0 is the packaged default,
+        which is always readable even on a hub that has published its own."""
+        if version == 0:
+            return {"version": 0, "text": ROLE_CHARTER, "updated_by": "",
+                    "updated_at": 0.0}
+        row = self.db.hub_charter_version(version)
+        if row is None:
+            raise HubError(404, f"hub charter version {version} is not in the "
+                                "archive (0 = the packaged default)")
+        return row
+
+    def hub_charter_history(self, limit: int = 50) -> list[dict[str, Any]]:
+        return self.db.hub_charter_history(limit)
+
+    def charter_readers(self, scope: str) -> list[dict[str, Any]]:
+        """Who has read which version of one charter — the receipts table's
+        first read-back surface. `current` is computed against the version
+        served RIGHT NOW, so the answer is "who is up to date", not "who
+        ever looked"."""
+        if scope == HUB_CHARTER_SCOPE:
+            head = self.hub_charter()["version"]
+        else:
+            row = self.db.fs_get(scope, FS_PREFIX + CHARTER_PATH)
+            head = 0 if row is None or row["deleted"] else row["version"]
+        rows = self.db.charter_receipts_for(scope)
+        return [{**r, "current": r["version"] >= head} for r in rows]
+
+    def channel_charter_receipts(self, agent: AgentInfo,
+                                 channel: str) -> dict[str, Any]:
+        """The room's own read-record: members present, who has read the
+        current charter version, who has not. Member-visible on purpose —
+        it is their room, and an owner who cannot see who is unbriefed
+        cannot act on it."""
+        self.require_membership(channel, agent.id)
+        row = self.db.fs_get(channel, FS_PREFIX + CHARTER_PATH)
+        head = 0 if row is None or row["deleted"] else row["version"]
+        by_agent = {r["agent_id"]: r for r in self.db.charter_receipts_for(channel)}
+        members = []
+        for m in self.db.list_members(channel):
+            got = by_agent.get(m.agent_id)
+            members.append({"agent_id": m.agent_id, "role": m.role,
+                            "version": got["version"] if got else None,
+                            "read_at": got["read_at"] if got else None,
+                            "current": bool(got and got["version"] >= head)})
+        return {"channel": channel, "path": CHARTER_PATH, "version": head,
+                "gated": bool(self._norms_required(channel)), "members": members}
+
+    def _norms_required(self, channel: str) -> bool:
+        meta = self.db.store_get(channel, CHANNEL_META_KEY)
+        return bool(meta and isinstance(meta.value, dict)
+                    and meta.value.get("norms_required"))
+
     # -- dark-episode operator alerts (0067) --------------------------------------
 
     DARK_ALERTS_CHANNEL = "hub-alerts"
@@ -4744,6 +6435,7 @@ class HubService:
         escalation provably spins in place (the addressee cannot see it) and
         only the operator can start the seat. Episode state is in-memory: a
         hub restart re-alerts once, which is honest. Returns newly-alerted ids."""
+        started = time.time()
         alerted: list[str] = []
         dark_now: set[str] = set()
         lurk_now: set[str] = set()   # lurk has its OWN live-set: a seat can
@@ -4791,28 +6483,32 @@ class HubService:
             # other seats' rows too, which is how at-test#363 was cited
             # against six seats that never held it).
             overdue = self._escalated_debts(agent_id)
-            # A dark DELEGATE is the reactive fleet one layer deeper (0084):
-            # everything it stewards stalls silently. Alert on ANY pending
-            # obligation it holds, not just escalated ones — the operator
-            # should hear before the fleet's SLA does.
-            holds_delegation = any(
-                d["agent_id"] == agent_id for d in self.active_delegations())
-            if not overdue and holds_delegation:
-                # Widened to un-escalated debt, but still only debt this seat
-                # OWNS: a dark delegate must be reported for its own stalled
-                # lanes, never for open threads that merely sit in its rooms.
-                info = AgentInfo(id=agent_id, name=agent_id)
-                owed_ids = {row.id for row in self.owed(info).to_answer}
-                overdue = [e for e in self.inbox(info)
-                           if e.id in owed_ids
-                           and e.status in (Status.open, Status.blocked)]
+            # DELETED (2026-08-03 audit): the dark-DELEGATE widening, which
+            # alerted on ANY pending obligation a delegate held instead of
+            # only SLA-breached ones. It bought at most one SLA of earliness
+            # and cost a self-triggering loop: every watchdog alert is posted
+            # ADDRESSED TO the reporting delegate, so the alert about seat A
+            # instantly became a fresh un-escalated obligation for the
+            # delegate, which this widening then read as cause to alert about
+            # the delegate — in the same sweep pass, with the alert text
+            # claiming "SLA-breached obligation(s), oldest ~0 min" about a
+            # debt the hub had authored four seconds earlier (live hub-alerts
+            # #930/#931, 2026-08-03 00:49:25/00:49:29). One predicate now,
+            # true for every seat: escalated debt this seat owns.
             if not overdue:
                 continue
             dark_now.add(agent_id)
             if agent_id in self._dark_since:
                 continue  # already alerted this episode
             now = time.time()
-            self._dark_since[agent_id] = now
+            # PERSISTED (2026-08-04). This clock is what the 7-day retirement
+            # proposal measures, and holding it only in memory meant it reset
+            # on every hub restart — so the proposal had fired ZERO times in
+            # 28 days while ten seats sat silent past the threshold (one for
+            # 28.0 days). An episode that predates this process is still an
+            # episode; the alert itself stays once-per-episode via the
+            # restart-durable flap guard below.
+            self._dark_since[agent_id] = self._dark_episode_start(agent_id, now)
             # Flap guard (review MED-4), now RESTART-DURABLE (c3436): an
             # agent oscillating — or a hub that just bounced — must not
             # re-alert while the same overdue work stands.
@@ -4835,13 +6531,14 @@ class HubService:
                 f"(e.g. {example}). Escalation cannot reach an offline seat "
                 f"— only the operator can start it. One alert per dark "
                 f"episode.",
-                explicit_class="dead",
+                explicit_class="dead", kind="dark",
             )
             alerted.append(agent_id)
         # Episodes end when the seat returns or its overdue work clears.
         for agent_id in list(self._dark_since):
             if agent_id not in dark_now:
                 del self._dark_since[agent_id]
+                self.db.meta_set(f"dark:since:{agent_id}", "")
         # Deaf episodes end the same way: reception recovered or work cleared.
         for agent_id in list(self._deaf_since):
             if agent_id not in dark_now:
@@ -4851,28 +6548,93 @@ class HubService:
             if agent_id not in lurk_now:
                 del self._lurk_since[agent_id]
                 self._lurk_alerted.discard(agent_id)
+        self._close_ended_silence_alerts()
         alerted.extend(self._steward_sweep())
+        alerted.extend(self._phase_sweep())
         alerted.extend(self._claim_due_sweep())
-        alerted.extend(self._retirement_proposal_sweep())
+        alerted.extend(self._waiting_on_sweep())
+        alerted.extend(self._blocking_sweep())
         alerted.extend(self._escalation_rewake_sweep())
         alerted.extend(self._dropped_wake_sweep())
         alerted.extend(self._fleet_liveness_sweep())
-        alerted.extend(self._report_digest_sweep())
+        alerted.extend(self._retire_report_digest_rows())
+        self._note_sweep("dark", started, len(alerted))
         return alerted
 
+    def _note_sweep(self, name: str, started: float, n: int) -> None:
+        """Record that a sweep completed (for `agora doctor`'s hub health)."""
+        self.sweep_runs[name] = {"last_run": time.time(),
+                                 "seconds": round(time.time() - started, 3),
+                                 "actions": n}
+
+    def _dark_episode_start(self, agent_id: str, now: float) -> float:
+        """When this seat's CURRENT dark episode began, across restarts.
+
+        Read-through from `meta`: an episode already recorded keeps its
+        original start (that is what makes a 7-day silence measurable),
+        and a new one is stamped now. Corrupt or absent -> now, which fails
+        toward a SHORTER episode: the hub must never over-claim how long a
+        seat has been gone."""
+        key = f"dark:since:{agent_id}"
+        raw = self.db.meta_get(key)
+        if raw:
+            try:
+                started = float(raw)
+                if 0 < started <= now:
+                    return started
+            except (TypeError, ValueError):
+                pass
+        self.db.meta_set(key, repr(now))
+        return now
+
     def _fleet_eligible_agents(self) -> list[str]:
-        """Non-retired, non-hub-blocked seats (0110 denominator)."""
+        """The 0110 denominator, repaired 2026-08-04: seats this hub has
+        OBSERVED live within FLEET_SIGNAL_WINDOW — not every seat ever
+        registered. FLEET DARK asks "did the running fleet vanish?", and a
+        roster where 43 of 50 seats are last month's experiments answers a
+        different question ("was this hub ever busier?") with a permanent
+        yes: the live hub sat in chronic FLEET DARK for days, and
+        `_fleet_eligible_agents` therefore turned every liveness-derived
+        surface into noise: a stale roster looked like a live collapse.
+
+        Operators are excluded: a human seat's presence flapping (active on
+        any authenticated GET, dark ten minutes later) is not fleet health.
+        Observation happens HERE, each sweep pass, and persists as one meta
+        row so a restart neither forgets the fleet nor false-alarms: after
+        downtime longer than the window the eligible set is simply empty,
+        and an empty set never alarms (FLEET_MIN_ELIGIBLE floor)."""
         hub_blocked = {b["agent_id"] for b in self.db.blocks_active(self.HUB_SCOPE)}
-        out: list[str] = []
+        ops = self.operator_ids()
+        now = time.time()
+        candidates: list[str] = []
         for agent_id in self.db.list_agent_ids():
-            if agent_id == "hub":
+            if agent_id == "hub" or agent_id in ops:
                 continue
             if agent_id in hub_blocked:
                 continue
             if self.db.agent_retirement(agent_id) is not None:
                 continue
-            out.append(agent_id)
-        return out
+            candidates.append(agent_id)
+            if self._fleet_seat_live(agent_id):
+                self._fleet_last_signal[agent_id] = now
+        self._persist_fleet_signals(now)
+        return [a for a in candidates
+                if now - self._fleet_last_signal.get(a, 0.0)
+                <= FLEET_SIGNAL_WINDOW]
+
+    def _persist_fleet_signals(self, now: float) -> None:
+        """At most one meta write per 10 minutes; drops entries too old to
+        ever matter again so the row cannot grow with roster churn."""
+        if now - self._fleet_signal_persisted_at < 600.0:
+            return
+        self._fleet_signal_persisted_at = now
+        keep = {a: ts for a, ts in self._fleet_last_signal.items()
+                if now - ts <= 2 * FLEET_SIGNAL_WINDOW}
+        self._fleet_last_signal = keep
+        try:
+            self.db.meta_set("fleet:last_signal", json.dumps(keep))
+        except Exception:
+            pass
 
     def _fleet_seat_live(self, agent_id: str) -> bool:
         """A seat counts as live when reception is armed OR it has recent
@@ -4891,7 +6653,14 @@ class HubService:
                 stored = self.db.store_get(ch, entry["key"])
                 if stored is None or not isinstance(stored.value, dict):
                     continue
-                if self._claim_done(stored.value) or self._claim_parked(stored.value):
+                # Parked work is UNFINISHED work — the board says so, and
+                # counting it closed is what let the hourly digest tell the
+                # delegate "7/7 live, nothing outstanding" while its own room
+                # was stalled on an already-satisfied dependency (2026-08-06).
+                # `_steward_sweep` keeps its parked exemption: that one is a
+                # THIRD PARTY re-asking a question the status already
+                # answered. A count is not a nag.
+                if self._claim_done(stored.value):
                     continue
                 n += 1
         return n
@@ -5069,6 +6838,10 @@ class HubService:
         ops = sorted(self.operator_ids())
         if not ops:
             return []
+        # Debt hygiene first, and unconditionally: the bound on standing FLEET
+        # rows must not depend on reaching a branch this hub's roster makes
+        # unreachable (see `_bound_standing_fleet_alerts`).
+        self._bound_standing_fleet_alerts()
         eligible = self._fleet_eligible_agents()
         if len(eligible) < FLEET_MIN_ELIGIBLE:
             return []
@@ -5093,7 +6866,8 @@ class HubService:
                 f"— per-seat DARK/DEAF only fires on individual SLA debts. "
                 f"Only the operator can restart seats. One alert per episode.")
             self._ensure_alerts_channel()
-            self._post_system(self.DARK_ALERTS_CHANNEL, body, to=ops)
+            self._post_system(self.DARK_ALERTS_CHANNEL, body, to=ops,
+                              data={"fleet_alert": "dark"})
             for op in ops:
                 self._post_operator_dm(op, body)
             return ["fleet-dark"]
@@ -5103,190 +6877,50 @@ class HubService:
             body = (
                 f"FLEET RECOVERED: {len(live)}/{len(eligible)} seats live again.")
             self._ensure_alerts_channel()
-            self._post_system(self.DARK_ALERTS_CHANNEL, body, to=ops)
+            # News, not a request: `fyi` creates no obligation. Posted as an
+            # addressed OPEN it minted a permanent operator debt for the good
+            # news itself (live: 20 unresolved FLEET RECOVERED rows), and the
+            # FLEET DARK it recovers from was never closed either (34 more).
+            self._post_system(self.DARK_ALERTS_CHANNEL, body, to=ops,
+                              status="fyi")
+            self._close_standing_fleet_alerts(body)
             for op in ops:
                 self._post_operator_dm(op, body)
             return ["fleet-recovered"]
         self._fleet_dark_since = None
+        # Healthy fleet, no in-process episode to recover from: still close
+        # standing FLEET rows a previous hub process left open (see
+        # `_close_standing_fleet_alerts` — restart-safety, not cosmetics).
+        self._close_standing_fleet_alerts(
+            f"fleet liveness recovered ({len(live)}/{len(eligible)} seats "
+            "live); this alert's episode is over and nothing is owed on it.")
         return []
 
-    def _report_digest_paused(self) -> bool:
-        """0109: skip missed-report noise while the fleet is dark (0110)."""
-        if self._fleet_dark_alerted:
-            return True
-        snap = self.fleet_liveness_snapshot()
-        return (snap["eligible"] >= FLEET_MIN_ELIGIBLE and snap["collapsed"])
+    def _reporting_delegates(self, channel: str | None = None) -> list[str]:
+        """Seats the hub may hand stewardship chores to.
 
-    def _reporting_delegates(self) -> list[str]:
-        return sorted({d["agent_id"] for d in self.active_delegations()
-                       if "reporting" in d.get("powers", ())})
+        SCOPE IS NOT DECORATION (2026-08-06). A grant carries a `scope`
+        column, the CLI prints it, and until now exactly one call site read
+        it. So a delegate scoped to ONE room was silently conscripted into
+        fleet-wide hygiene: `rt2-lead`, scoped to `rtype-open`, spent its
+        last four work chunks and every subsequent wake on stale-claim
+        canvassing for unrelated seats, and posted 15 housekeeping messages
+        against 5 on the operator's actual commission. The chore firehose
+        the hub itself generated is what starved the request the hub exists
+        to serve.
 
-    def _load_report_contract(self, delegate: str) -> dict[str, Any]:
-        raw = self.db.meta_get(f"report:{delegate}")
-        if not raw:
-            return {}
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            return {}
-        return parsed if isinstance(parsed, dict) else {}
-
-    def _save_report_contract(self, delegate: str, contract: dict[str, Any]) -> None:
-        self.db.meta_set(f"report:{delegate}", json.dumps(contract))
-
-    def _gloss_channel(self, channel: str) -> str:
-        """0109 readability: never a bare channel id on the digest surface."""
-        if channel == "commons":
-            return "commons (noticeboard)"
-        if channel == self.DARK_ALERTS_CHANNEL:
-            return "hub-alerts (watchdog)"
-        if channel.startswith(DM_PREFIX):
-            parts = channel[len(DM_PREFIX):].split("--", 1)
-            if len(parts) == 2:
-                a, b = parts
-                if a == "hub":
-                    return f"DM hub→{b} (operator private)"
-                return f"DM {a}↔{b} (private)"
-        return channel
-
-    def _gloss_agent(self, agent_id: str) -> str:
-        """0109 readability: seat id plus a one-line scope gloss when known."""
-        about = (self.db.get_about(agent_id) or "").strip()
-        if not about:
-            return agent_id
-        snippet = about.split(".", 1)[0].strip()
-        if len(snippet) > 72:
-            snippet = snippet[:69].rstrip() + "…"
-        return f"{agent_id} ({snippet})"
-
-    def _format_desk_fact_line(self, row: dict[str, Any]) -> str:
-        """One desk row: who / what / where / age / one unblock action."""
-        where = self._gloss_channel(str(row.get("channel") or ""))
-        who = self._gloss_agent(str(row.get("who_waits") or ""))
-        what = row.get("what") or "(untitled ask)"
-        age = float(row.get("age_minutes") or 0.0)
-        action = row.get("one_action") or "decide"
-        return (f"- {what} — from {who}, {age:.0f}m old, in {where}: "
-                f"{action}")
-
-    def _render_desk_facts(self, delegate: str) -> tuple[str, dict[str, Any]]:
-        """Plain-register desk snapshot the delegate annotates (0111/0109)."""
-        desk = self.desk(AgentInfo(id=delegate, name=delegate))
-        fleet = self.fleet_liveness_snapshot()
-        lines = [
-            f"DESK FACTS — {len(desk['rows'])} item(s) waiting on the operator:",
-            "(Each line: what / who waits / where / age / one unblock action.)",
-        ]
-        for row in desk["rows"][:12]:
-            lines.append(self._format_desk_fact_line(row))
-        if len(desk["rows"]) > 12:
-            lines.append(f"  (+{len(desk['rows']) - 12} more on GET /desk)")
-        lines.append(
-            f"Fleet: {fleet['live']}/{fleet['eligible']} seats live; "
-            f"{fleet['open_claims']} open claim(s) on the board.")
-        lines.append("")
-        lines.append("Your prose (reply with answers=[\"digest\"]):")
-        lines.append(DIGEST_PROSE_TEMPLATE)
-        return "\n".join(lines), {
-            "desk": desk,
-            "fleet": fleet,
-            "digest_prose_template": DIGEST_PROSE_TEMPLATE,
-        }
-
-    def _desk_digest_reply_ok(self, delegate: str, post_id: str,
-                              since: float) -> bool:
-        for m in self.db.replies_to(post_id):
-            if m.sender != delegate or m.retracted or m.created_at < since:
+        `channel=None` keeps the fleet-wide list (surfaces that report ON
+        delegates rather than assign work TO them). Pass a channel and only
+        delegates whose grant reaches it are eligible for its chores."""
+        out: set[str] = set()
+        for d in self.active_delegations():
+            if "reporting" not in d.get("powers", ()):
                 continue
-            if m.status not in (Status.reply, Status.fyi):
+            scope = str(d.get("scope") or "").strip()
+            if channel is not None and scope and scope != "*" and scope != channel:
                 continue
-            answers = (m.data or {}).get("answers") or []
-            if REPORT_DIGEST_ASK_ID in answers:
-                return True
-            if len((m.body or "").strip()) >= 40:
-                return True
-        return False
-
-    def _close_digest_post(self, post_id: str) -> None:
-        msg = self.db.get_message(post_id)
-        if msg is None or msg.status != Status.open:
-            return
-        self._post_system(
-            self.DARK_ALERTS_CHANNEL,
-            "digest period closed — superseded by the next desk-facts post.",
-            status="resolved", reply_to=post_id)
-
-    def _post_digest_desk_facts(self, delegate: str) -> Message:
-        body, snapshot = self._render_desk_facts(delegate)
-        self._ensure_alerts_channel()
-        message = self.db.insert_message(
-            self.DARK_ALERTS_CHANNEL, "hub", kind=Kind.system.value,
-            status=Status.open.value, urgency="inbox",
-            title="hourly digest: desk facts",
-            body=body,
-            data={
-                **snapshot,
-                "report_digest": True,
-                "asks": [{
-                    "id": REPORT_DIGEST_ASK_ID,
-                    "text": ("Reply with plain-register prose using the template "
-                             "above: no bare backlog ids without a gloss; every "
-                             "line names who / what / one unblock action; nudge "
-                             "stalled seats (continue, release, or re-check your "
-                             "gate)."),
-                    "to": [delegate],
-                }],
-                "digest_prose_template": DIGEST_PROSE_TEMPLATE,
-            },
-            to=[delegate],
-            reply_to=None,
-        )
-        self._wake(message)
-        return message
-
-    def _report_digest_sweep(self) -> list[str]:
-        """0109: hourly desk-facts post + missed-report to operator DM."""
-        if self._report_digest_paused():
-            return []
-        delegates = self._reporting_delegates()
-        if not delegates:
-            return []
-        now = time.time()
-        ops = sorted(self.operator_ids())
-        alerted: list[str] = []
-        for delegate in delegates:
-            contract = self._load_report_contract(delegate)
-            period_start = float(contract.get("period_start") or 0.0)
-            desk_post_id = contract.get("desk_post_id")
-            period_elapsed = (period_start <= 0.0
-                                or now - period_start >= REPORT_DIGEST_PERIOD_SECONDS)
-            if not period_elapsed:
-                continue
-            if desk_post_id and period_start > 0.0:
-                if not self._desk_digest_reply_ok(delegate, str(desk_post_id),
-                                                  period_start):
-                    if not contract.get("missed_alerted"):
-                        hours = (now - period_start) / 3600.0
-                        body = (
-                            f"MISSED-REPORT: {delegate} owed an hourly digest "
-                            f"for {hours:.1f}h — no reply to the desk-facts "
-                            f"post. Reprompt stalled seats or post the digest "
-                            f"now (continue, release, or re-check your gate).")
-                        for op in ops:
-                            self._post_operator_dm(op, body)
-                        contract["missed_alerted"] = True
-                        alerted.append(f"missed-report:{delegate}")
-                self._close_digest_post(str(desk_post_id))
-            msg = self._post_digest_desk_facts(delegate)
-            contract = {
-                "period_start": now,
-                "desk_post_id": msg.id,
-                "desk_post_channel": msg.channel,
-                "missed_alerted": False,
-            }
-            self._save_report_contract(delegate, contract)
-            alerted.append(f"desk-facts:{delegate}")
-        return alerted
+            out.add(d["agent_id"])
+        return sorted(out)
 
     def _escalation_rewake_band_index(self, age_seconds: float,
                                       sla_seconds: float) -> int:
@@ -5399,72 +7033,6 @@ class HubService:
             if key not in live:
                 del self._dropped_wake_at[key]
         return rewoken
-
-    def _standing_retirement_proposals(self) -> dict[str, Message]:
-        """Open hub retirement-proposal alerts keyed by target agent (0107)."""
-        out: dict[str, Message] = {}
-        if self.db.get_channel(self.DARK_ALERTS_CHANNEL) is None:
-            return out
-        ops = self.operator_ids()
-        for m in self.db.open_obligations([self.DARK_ALERTS_CHANNEL]):
-            if m.sender != "hub":
-                continue
-            info = (m.data or {}).get("retirement_proposal")
-            if not isinstance(info, dict):
-                continue
-            if closed_authoritatively(m, self.db.replies_to(m.id), ops):
-                continue
-            agent_id = str(info.get("agent_id") or "")
-            if agent_id:
-                out[agent_id] = m
-        return out
-
-    def _retirement_proposal_sweep(self) -> list[str]:
-        """0107 slice 3: one retirement proposal per long-dark breached seat."""
-        now = time.time()
-        ops = self.operator_ids()
-        if not ops:
-            return []
-        standing = self._standing_retirement_proposals()
-        alerted: list[str] = []
-        for agent_id, since in list(self._dark_since.items()):
-            if agent_id in ops:
-                continue
-            if self.db.agent_retirement(agent_id) is not None:
-                continue
-            if now - since < DARK_RETIRE_PROPOSAL_SECONDS:
-                continue
-            overdue = self._escalated_debts(agent_id)
-            if not overdue:
-                continue
-            if agent_id in standing:
-                continue
-            days = (now - since) / 86400.0
-            self._ensure_alerts_channel()
-            self._post_system(
-                self.DARK_ALERTS_CHANNEL,
-                f"RETIREMENT PROPOSAL: '{agent_id}' has been DARK ~{days:.1f}d "
-                f"holding {len(overdue)} SLA-breached obligation(s). Confirm "
-                f"with `agora retire {agent_id}` if decommissioning is "
-                f"appropriate, or restart the seat to dismiss. One proposal "
-                f"per dark episode.",
-                to=sorted(ops),
-                status="open",
-                data={"retirement_proposal": {"agent_id": agent_id,
-                                              "dark_since": since}},
-            )
-            alerted.append(f"retire-proposal:{agent_id}")
-        for agent_id, msg in standing.items():
-            if agent_id not in self._dark_since:
-                self._post_system(
-                    self.DARK_ALERTS_CHANNEL,
-                    f"Retirement proposal for '{agent_id}' withdrawn — dark "
-                    "episode ended or obligations cleared.",
-                    status="resolved",
-                    reply_to=msg.id,
-                )
-        return alerted
-
     def _alerted_at(self, kind: str, agent_id: str) -> float:
         """Last time a DARK/DEAF alert fired for this (kind, agent), read
         through the persisted `meta` flap guard (c3436) so a hub restart
@@ -5514,7 +7082,7 @@ class HubService:
             "Its listener is almost certainly dead — the seat wakes for "
             "nothing. Re-arm it (restart the reception loop / the session); "
             "escalation cannot reach a deaf seat. One alert per deaf episode.",
-            explicit_class="deaf",
+            explicit_class="deaf", kind="deaf",
         )
         alerted.append(agent_id)
 
@@ -5591,7 +7159,7 @@ class HubService:
             "is likely stuck in a follow-up-only loop where wakes and stop-"
             "hook prompts no longer reach the model. Reprompt or relaunch "
             "that session. One alert per lurk episode.",
-            explicit_class="unseen",
+            explicit_class="unseen", kind="lurk",
         )
         alerted.append(agent_id)
 
@@ -5612,13 +7180,22 @@ class HubService:
         reply, then the new alert); an empty set closes the standing alert.
         Survives hub restarts because the standing alert is FOUND in the
         channel (sender=hub, open, unresolved), not remembered in memory."""
-        stewards = sorted({d["agent_id"] for d in self.active_delegations()
-                           if "reporting" in d.get("powers", ())})
-        if not stewards:
+        # SCOPED PER ROOM (2026-08-06). This built ONE fleet-wide steward
+        # set and then reported every stale claim in every channel to all of
+        # them. A delegate the operator had scoped to a single room was
+        # therefore conscripted into hub-wide hygiene: `rt2-lead`, scoped to
+        # `rtype-open`, spent its last four work chunks and every subsequent
+        # wake canvassing stale claims for unrelated seats, and posted 15
+        # housekeeping messages against 5 on the operator's commission. The
+        # chore firehose the hub generated is what starved the request the
+        # hub exists to serve. A grant's `scope` now decides which rooms a
+        # delegate is answerable for.
+        if not self._reporting_delegates():
             return []
         now = time.time()
         live: list[str] = []
         live_keys: list[str] = []
+        stewards_set: set[str] = set()
         for ch in self.db.channel_names():
             if ch == self.DARK_ALERTS_CHANNEL:
                 # The steward's OWN bookkeeping about these alerts lives in
@@ -5655,8 +7232,11 @@ class HubService:
                 shown = (f"{ch}/{key}" if info is not None and not info.private
                          else "a private-channel claim")
                 live.append(f"{shown} (owner {owner}, idle {age / 60:.0f}m)")
+                stewards_set.update(self._reporting_delegates(ch))
         sig = hashlib.sha256("\n".join(sorted(live_keys)).encode()).hexdigest()[:16]
         standing = self._standing_steward_alerts()
+        # Closing an episode comes FIRST and unconditionally: an alert the
+        # hub raised is the hub's to retire, whatever the scoping says now.
         if not live:
             for old in standing:
                 self._post_system(
@@ -5665,6 +7245,13 @@ class HubService:
                     "touched, finished, or aged back under its SLA.",
                     status="resolved", reply_to=old.id)
             return ["stale-claims:cleared"] if standing else []
+        stewards = sorted(stewards_set)
+        if not stewards:
+            # Stale work only in rooms no delegate is answerable for.
+            # Reporting it to a delegate scoped elsewhere is the exact
+            # conscription this fix exists to stop; the operator still sees
+            # it in `agora doctor`.
+            return []
         # SHRINK IS NOT NEWS (2026-08-01 live regression). A standing alert
         # that already NAMES every currently-stale claim remains the whole
         # truth about this episode even when the set has shrunk, so a subset
@@ -5716,17 +7303,149 @@ class HubService:
         """Every hub-authored stale-claims alert still standing open (no
         authoritative close). Read from the channel, not memory, so a hub
         restart cannot orphan an open alert."""
+        return self._standing_hub_alerts("STALE CLAIMS")
+
+    def _standing_hub_alerts(self, marker: str) -> list[Message]:
+        """Hub-authored alerts of one family still standing open — the
+        channel-not-memory half of the bounded-debt contract, shared by the
+        stale-claims and stalled-phase sweeps."""
         if self.db.get_channel(self.DARK_ALERTS_CHANNEL) is None:
             return []
         out: list[Message] = []
         ops = self.operator_ids()
         for m in self.db.open_obligations([self.DARK_ALERTS_CHANNEL]):
-            if m.sender != "hub" or not m.body.startswith("STALE CLAIMS"):
+            if m.sender != "hub" or not m.body.startswith(marker):
                 continue
             if closed_authoritatively(m, self.db.replies_to(m.id), ops):
                 continue
             out.append(m)
         return out
+
+    _TERMINAL_PHASE_STATUSES = frozenset(
+        {"complete", "completed", "done", "closed", "shipped", "cancelled",
+         "canceled", "abandoned"})
+
+    def _phase_sweep(self) -> list[str]:
+        """The phase half of the stewardship watchdog (2026-08-04). An open
+        `phase:` row whose steward has gone quiet past the channel SLA is a
+        COMMISSION stalling, not a claim idling — and it was invisible to
+        every sweep: `_steward_sweep` filters to `claim:` keys, and the
+        blocked claims that usually accompany a stalled phase are exempt as
+        parked. Measured cost of the gap: the novel fleet stood armed and
+        silent for 17.5 hours behind `scifi-novel/phase:novel` (open,
+        steward book-assistant) while the steward's blocking question to the
+        operator sat unread at index 87 of 144 unsorted owed rows.
+
+        The alert names the freshest ESCALATED ask the steward itself has
+        standing on an OPERATOR — the thing actually blocking the phase —
+        and prescribes a decision, never a relaunch: when the silent seat is
+        the operator, "restart it" is not an action anyone in the room can
+        take. Bounded-debt contract identical to `_steward_sweep`: one
+        standing alert; supersede on a genuinely new phase key; close when
+        the set empties. Touching the phase row (any version bump) is the
+        receipt that clears it."""
+        now = time.time()
+        live: list[str] = []
+        live_keys: list[str] = []
+        # SCOPED: a delegate stewards only the rooms its grant reaches. A
+        # fleet-wide conscription is what buried the operator's commission
+        # under 15 housekeeping posts (2026-08-06).
+        recipients: set[str] = set()
+        op_owed: dict[str, Any] = {}
+        for ch in self.db.channel_names():
+            if ch == self.DARK_ALERTS_CHANNEL:
+                continue
+            sla_s = self.channel_sla(ch) * 60.0
+            for entry in self.db.store_keys(ch):
+                key = entry["key"]
+                if not key.startswith("phase:"):
+                    continue
+                stored = self.db.store_get(ch, key)
+                if stored is None or not isinstance(stored.value, dict):
+                    continue
+                if (self._claim_status_word(stored.value)
+                        in self._TERMINAL_PHASE_STATUSES):
+                    continue
+                age = now - stored.updated_at
+                if age <= sla_s:
+                    continue
+                steward = str(stored.value.get("steward") or "").strip()
+                live_keys.append(f"{ch}/{key}")
+                info = self.db.get_channel(ch)
+                shown = (f"{ch}/{key}" if info is not None and not info.private
+                         else "a private-channel phase")
+                line = (f"{shown} '{stored.value.get('current', '?')}' open, "
+                        f"untouched {age / 3600:.1f}h"
+                        + (f", steward {steward}" if steward else ""))
+                if steward:
+                    recipients.add(steward)
+                    blocking = self._steward_blocking_ask(steward, op_owed)
+                    if blocking is not None:
+                        line += f"; blocking ask: {blocking}"
+                live.append(line)
+        sig = hashlib.sha256("\n".join(sorted(live_keys)).encode()).hexdigest()[:16]
+        standing = self._standing_hub_alerts("PHASE STALLED")
+        if not live:
+            for old in standing:
+                self._post_system(
+                    self.DARK_ALERTS_CHANNEL,
+                    "stalled-phase episode closed: every flagged phase was "
+                    "touched, completed, or aged back under its SLA.",
+                    status="resolved", reply_to=old.id)
+            return ["stalled-phase:cleared"] if standing else []
+        live_set = set(live_keys)
+        if standing and any(
+                isinstance(m.data, dict)
+                and (m.data.get("phase_sig") == sig
+                     or (isinstance(m.data.get("phase_keys"), list)
+                         and live_set <= set(m.data["phase_keys"])))
+                for m in standing):
+            return []
+        for old in standing:
+            self._post_system(
+                self.DARK_ALERTS_CHANNEL,
+                "superseded by the next stalled-phase alert (the live set "
+                "changed); this episode is closed.",
+                status="resolved", reply_to=old.id)
+        self._ensure_alerts_channel()
+        self._post_system(
+            self.DARK_ALERTS_CHANNEL,
+            "PHASE STALLED: " + "; ".join(live[:6])
+            + (f" (+{len(live) - 6} more)" if len(live) > 6 else "")
+            + ". A phase only closes when its steward acts. If the phase "
+              "waits on an unreachable operator: decide a recorded fallback "
+              "or park the wait EXPLICITLY on the phase row (note + next) — "
+              "never leave the wait implicit. Touching the phase row is the "
+              "receipt that clears this; the hub closes this alert itself "
+              "when the set changes or empties.",
+            to=sorted(recipients),
+            data={"phase_sig": sig, "phase_keys": sorted(live_keys)})
+        return [f"stalled-phase:{len(live)}"]
+
+    def _steward_blocking_ask(self, steward: str,
+                              cache: dict[str, Any]) -> str | None:
+        """The freshest ESCALATED to_answer row an operator holds whose
+        sender is `steward` — the concrete question the stalled phase is
+        actually waiting on, so the alert can point AT it instead of
+        gesturing at silence. Private channels are named only as 'a private
+        thread with <operator>': the steward knows which one, and the alert
+        leaks no membership it should not."""
+        best = None
+        for op in self.operator_ids():
+            if op not in cache:
+                cache[op] = self.owed(AgentInfo(id=op, name=op))
+            for row in cache[op].to_answer:
+                if row.sender != steward or not row.escalated:
+                    continue
+                if best is None or row.created_at > best[0]:
+                    info = self.db.get_channel(row.channel)
+                    shown = (f"{row.channel}#{row.seq} (to {op})"
+                             if info is not None and not info.private
+                             else f"a private thread with {op}")
+                    age_h = (time.time() - row.created_at) / 3600.0
+                    best = (row.created_at,
+                            f"{shown}, unanswered {age_h:.1f}h")
+        return best[1] if best else None
 
     # -- claim-due pings: owner-declared continuation (2026-07-28) -----------
     #
@@ -5774,6 +7493,348 @@ class HubService:
             return None
         return max(minutes, HubService.CLAIM_DUE_MIN_CADENCE_MINUTES) * 60.0
 
+    #: The closed vocabulary a park must tag itself with. Closed so the
+    #: delegate's blocker board can GROUP — "three seats waiting on me, one
+    #: on a build, one on a decision nobody has taken" is a picture; free
+    #: text is a pile. Each names WHO or WHAT can end the wait.
+    PARK_BLOCKERS = {
+        "operator": "waiting on the human owner to decide or approve",
+        "delegate": "waiting on the delegate to rule, dispatch, or unblock",
+        "seat": "waiting on another seat's work or answer",
+        "decision": "waiting on a decision the room has not taken",
+        "external": "waiting on something outside the hub (a build, a "
+                    "service, a rate limit, a file that does not exist yet)",
+    }
+
+    def _validate_park(self, key: str, value: dict[str, Any],
+                       channel: str | None = None,
+                       agent: AgentInfo | None = None) -> None:
+        """A park must carry a TAG and an ASK, or it is refused.
+
+        The hub checks that the two fields are present and well-shaped. It
+        never reads what the seat needs, never guesses who should supply it,
+        and never writes either field itself. Refusing names both fields and
+        the whole vocabulary, so the fix is copy-pasteable at the moment the
+        seat is stuck — which is the moment it has least attention to spare.
+        """
+        tag = str(value.get("blocked_on") or "").strip().lower()
+        needs = str(value.get("needs") or "").strip()
+        vocab = ", ".join(sorted(self.PARK_BLOCKERS))
+        # "WAITING ON A SEAT" MUST NAME THE SEAT (2026-08-07).
+        #
+        # Measured in `rtype-g4`: two rows parked `blocked_on: seat` with
+        # `needs` reading "g4-engine must add an auditable same-run capture
+        # path". The hub therefore KNEW who was blocking whom — it was
+        # written in a structured field it had validated — and told nobody.
+        # `g4-engine` sat armed and idle in the same room while two rows
+        # named it. `/blockers` showed it perfectly, to whoever thought to
+        # pull it, which was no one.
+        #
+        # This is the 2026-08-01 ruling in another costume: an ask addressed
+        # to nobody obliges nobody. A block that names its unblocker only in
+        # prose is the same thing. `needs_from` is that name as data, so the
+        # hub can deliver it instead of storing it.
+        if tag == "seat" and not str(value.get("needs_from") or "").strip():
+            raise HubError(400,
+                f"`{key}` says it is blocked on a SEAT but does not name "
+                "which one, so the hub cannot tell them. Add:\n"
+                '  "needs_from": "<the seat that can unblock you>"\n'
+                "An ask addressed to nobody obliges nobody; a block naming "
+                "nobody is the same thing. If you do not know who can "
+                "unblock you, that is a `decision` or a `delegate` block, "
+                "not a `seat` one.")
+        who = str(value.get("needs_from") or "").strip()
+        if who and channel is not None:
+            members = {m.agent_id for m in self.db.list_members(channel)}
+            if who not in members:
+                raise HubError(400,
+                    f"needs_from '{elide(who, 40)}' is not a member of "
+                    f"'{channel}' — the hub can only ring someone who is in "
+                    "the room. Invite them, or name someone who is here.")
+            if agent is not None and who == agent.id:
+                raise HubError(400, "a seat cannot be blocked on itself — "
+                                    "that is work, not a block")
+        if not tag or not needs:
+            raise HubError(400,
+                f"'{self._claim_status_word(value)}' parks `{key}`, and a "
+                "park that does not say what it needs is invisible: no sweep "
+                "reads it, your own driver treats it as finished, and the "
+                "room never hears it. Add both:\n"
+                f'  "blocked_on": "<one of: {vocab}>"\n'
+                '  "needs": "<what would let you continue, in one sentence>"\n'
+                "Also say it in the room — a store write rings nobody.")
+        if tag not in self.PARK_BLOCKERS:
+            raise HubError(400,
+                f"blocked_on '{elide(tag, 40)}' is not a blocker kind. Use "
+                f"one of: {vocab}. The vocabulary is closed so the delegate's "
+                "blocker board can group what the room is waiting on.")
+
+    def _validate_waiting_on(self, channel: str, key: str,
+                             waiter: str,
+                             raw: Any) -> dict[str, Any]:
+        """A claim's declared dependency: `{channel?, key}` -> stamped row.
+
+        The hub does exactly two things with it, and refuses to do a third.
+        It REFUSES a target that does not exist — a wait on a phantom row is
+        a silent forever-park, and this fleet wrote one on its first outing.
+        And it stamps the target's version now, so "has it moved?" is a fact
+        rather than a judgement. What to do when it moves stays the seat's
+        call; the hub surfaces, it never authors.
+        """
+        if not isinstance(raw, dict):
+            raise HubError(400, "claim waiting_on must be an object naming "
+                                "the row to wait on, e.g. "
+                                '{"channel": "room", "key": "claim:build"}')
+        target_ch = str(raw.get("channel") or channel)
+        target_key = str(raw.get("key") or "")
+        if not target_key:
+            raise HubError(400, "claim waiting_on needs a `key` — the row "
+                                "whose change should resume this work")
+        if target_ch == channel and target_key == key:
+            raise HubError(400, "a claim cannot wait on itself — that is a "
+                                "park with no exit")
+        target = self.db.store_get(target_ch, target_key)
+        if target is None:
+            raise HubError(404,
+                           f"waiting_on names '{target_ch}/{target_key}', "
+                           "which does not exist. Waiting on a row nobody "
+                           "will ever write is a permanent park the hub "
+                           "cannot tell from finished work — name a row that "
+                           "exists, or say what you are blocked on in a "
+                           "message to the seat who can act.")
+        if not self.db.is_member(target_ch, waiter):
+            raise HubError(400,
+                           f"waiting_on names '{target_ch}/{target_key}', "
+                           f"but '{waiter}' is not a member of '{target_ch}'. "
+                           "A parked claim may wait only on a row its waking "
+                           "seat can read — otherwise the resume ping would "
+                           "leak hidden room/key data into another room.")
+        return {"channel": target_ch, "key": target_key,
+                "at_version": target.version}
+
+    def _waiting_on_sweep(self) -> list[str]:
+        """Ring the owner of a parked claim whose declared dependency moved.
+
+        THE INCIDENT (2026-08-06). `rt2-lead` parked on
+        `claim:m1-engine-boot-manifest` in another room. That row went to
+        `done` 3m43s later carrying exactly the evidence it was waiting for.
+        Nothing rang: a store write wakes nobody, and `parked` removed the
+        row from every remaining scan. Seven seats sat armed for hours on a
+        milestone that was finished.
+
+        The alert states hub-owned facts only — which row moved, from which
+        version, and its own status word. Deciding what that means is the
+        waiting seat's job.
+        """
+        if self.hub_paused() is not None:
+            return []
+        fired: list[str] = []
+        for ch in self.db.channel_names():
+            members = {m.agent_id for m in self.db.list_members(ch)}
+            for entry in self.db.store_keys(ch):
+                key = entry["key"]
+                if not key.startswith("claim:"):
+                    continue
+                stored = self.db.store_get(ch, key)
+                if stored is None or not isinstance(stored.value, dict):
+                    continue
+                value = stored.value
+                dep = value.get("waiting_on")
+                if not isinstance(dep, dict) or self._claim_done(value):
+                    continue
+                owner = str(value.get("owner") or stored.updated_by or "")
+                if not owner or owner not in members:
+                    continue
+                target_ch = str(dep.get("channel") or ch)
+                target_key = str(dep.get("key") or "")
+                if not self.db.is_member(target_ch, owner):
+                    body = (f"`{key}` is waiting on a row this room can no "
+                            "longer read. Nothing here can verify whether it "
+                            "moved. Re-point it to a readable row, rejoin "
+                            "that room, or take the work off park.")
+                    target = None
+                    dedupe_suffix = "unreadable"
+                else:
+                    target = self.db.store_get(target_ch, target_key)
+                    dedupe_suffix = ("gone" if target is None else
+                                     str(target.version))
+                # A vanished target is SAID, never swallowed: the seat is
+                # waiting on something that no longer exists and would
+                # otherwise park forever in silence.
+                if target is None:
+                    if dedupe_suffix == "unreadable":
+                        pass
+                    else:
+                        body = (f"`{key}` is waiting on "
+                                f"`{target_ch}/{target_key}`, which "
+                                "no longer exists. Nothing will resume this row: "
+                                "re-point it, or take the work off park.")
+                elif target.version > int(dep.get("at_version") or 0):
+                    word = self._claim_status_word(target.value) if isinstance(
+                        target.value, dict) else ""
+                    body = (f"`{target_ch}/{target_key}` moved "
+                            f"(v{dep.get('at_version')} -> v{target.version}"
+                            f"{', status ' + word if word else ''}). "
+                            f"`{key}` declared it would resume on that change. "
+                            "Re-read both rows and decide.")
+                else:
+                    continue
+                # Dedupe on the target VERSION: one alert per real change.
+                # A repeat is REFUSED by the ledger, which is the guarantee
+                # working — swallow that one refusal and report nothing
+                # fired, rather than letting it abort the whole sweep.
+                try:
+                    self._post_system(
+                        ch, body, to=[owner], status=Status.open,
+                        dedupe_key=f"waiting-on:{ch}:{key}:"
+                                   f"{dedupe_suffix}")
+                except DuplicateMessage:
+                    continue
+                fired.append(f"waiting-on:{ch}/{key}")
+        return fired
+
+    def _blocking_sweep(self) -> list[str]:
+        """Tell every seat a live block NAMES, whether or not it was told
+        when the block was written.
+
+        WHY A SWEEP AND NOT JUST THE WRITE HOOK (2026-08-07). `store_set`
+        rings the named seat the moment a block declares it. That is the
+        fast path and it is not enough: it delivers only to seats that
+        existed, in rooms that existed, at the instant of the write. Two
+        rows in `rtype-g4` named `g4-engine` as their blocker before the
+        hook shipped, and the room sat dead for twenty minutes afterwards
+        because nothing re-reads state — the fix could not reach the rows
+        that needed it.
+
+        That is the general defect behind four separate incidents: a
+        coordination fact delivered only at write time is lost for every row
+        already written and for every seat that was down when it happened.
+        State the hub can derive must be deliverable from the state itself.
+
+        The dedupe key is the block's content, shared with the write hook,
+        so a seat already told is never told twice.
+        """
+        if self.hub_paused() is not None:
+            return []
+        fired: list[str] = []
+        for ch in self.db.channel_names():
+            members = {m.agent_id for m in self.db.list_members(ch)}
+            for entry in self.db.store_keys(ch):
+                key = entry["key"]
+                if not key.startswith("claim:"):
+                    continue
+                stored = self.db.store_get(ch, key)
+                if stored is None or not isinstance(stored.value, dict):
+                    continue
+                v = stored.value
+                if self._claim_done(v) or not self._claim_parked(v):
+                    continue
+                who = str(v.get("needs_from") or "").strip()
+                owner = str(v.get("owner") or stored.updated_by or "")
+                needs_txt = str(v.get("needs") or "").strip()
+                # THE HUB SAYS WHAT IT CANNOT DO (2026-08-07).
+                #
+                # A row that declares `blocked_on: seat` and does not name
+                # the seat is undeliverable: the name exists only in the
+                # `needs` prose, and reading prose to guess who is meant is
+                # the mind-reading gate the operator principle forbids.
+                #
+                # Doing nothing is not the alternative. Measured: two rows
+                # in `rtype-g4` said `blocked_on: seat` with `needs_from`
+                # unset — written before the field existed — and read
+                # "g4-engine must add an auditable same-run capture path".
+                # The hub could see the block, could not address it, and
+                # sat silent for thirty minutes while the room died.
+                #
+                # Silent inability is the same class as a silent limit: the
+                # hub declining to do a thing and not saying so. So it tells
+                # the one party who DOES know — the owner — that its block
+                # is not reaching anyone.
+                if str(v.get("blocked_on") or "").strip().lower() == "seat" \
+                        and not who:
+                    try:
+                        self._post_system(
+                            ch,
+                            f"UNDELIVERABLE BLOCK on `{key}`: it says it is "
+                            "waiting on a SEAT but does not name which one, "
+                            "so nobody has been told and nobody is coming. "
+                            + (f"You wrote: \"{elide(needs_txt, 200)}\". "
+                               if needs_txt else "")
+                            + 'Add "needs_from": "<seat>" to the row and the '
+                              "hub will tell them, or take the row off block.",
+                            to=[owner], status=Status.open,
+                            dedupe_key="undeliverable:" + hashlib.sha256(
+                                f"{ch}\0{key}\0{needs_txt}".encode()
+                            ).hexdigest()[:24])
+                    except DuplicateMessage:
+                        continue
+                    fired.append(f"undeliverable-block:{ch}/{key}")
+                    continue
+                if not who or who not in members or who == owner:
+                    continue
+                needs = needs_txt
+                try:
+                    self._post_system(
+                        ch,
+                        f"YOU ARE THE BLOCKER on `{key}` ({owner}): "
+                        f"{elide(needs or 'unblock it', 400)}\n\n"
+                        "Do it, or say here what it would take and by when. "
+                        "Their work does not move until you answer.",
+                        to=[who], status=Status.open,
+                        dedupe_key="blocking:" + hashlib.sha256(
+                            f"{ch}\0{key}\0{who}\0{needs}".encode()
+                        ).hexdigest()[:24])
+                except DuplicateMessage:
+                    # Already told. THE RETURN PATH (2026-08-07): a delivery
+                    # mechanism must be symmetric. If the hub routes an
+                    # obligation to someone, it routes the discharge back —
+                    # otherwise it is a one-way pipe and the waiter waits
+                    # forever.
+                    #
+                    # Measured: `g4-qa` was blocked on `g4-engine`. The hub
+                    # told `g4-engine`, which did the work and announced it
+                    # `status=resolved, to=[]` — unaddressed, so `g4-qa`
+                    # owed nothing and never woke. The hub knew exactly who
+                    # was waiting; it just never looked back down the wire.
+                    #
+                    # Fact-based, no prose read: the blocker ANSWERED the
+                    # hub's own addressed alert, and the row is STILL
+                    # blocked. Both are things the hub stores.
+                    self._ring_back_if_blocker_answered(ch, key, owner, who)
+                    continue
+                fired.append(f"blocking:{ch}/{key}")
+        return fired
+
+    def _ring_back_if_blocker_answered(self, channel: str, key: str,
+                                       owner: str, blocker: str) -> None:
+        """Tell a blocked owner that the seat it named has spoken.
+
+        The owner declared the block and only the owner can lift it — the
+        hub never decides that the work is unblocked. It reports the one
+        fact the owner needs and cannot see from a parked turn: the seat you
+        named has answered."""
+        alert = next(
+            (m for m in reversed(self.db.get_messages(channel, limit=200))
+             if m.sender == "hub" and m.to == [blocker]
+             and "YOU ARE THE BLOCKER" in (m.body or "")
+             and key in (m.body or "")), None)
+        if alert is None:
+            return
+        replies = [r for r in self.db.replies_to(alert.id) if r.sender == blocker]
+        if not replies:
+            return
+        try:
+            self._post_system(
+                channel,
+                f"YOUR BLOCKER ANSWERED: {blocker} replied to the block on "
+                f"`{key}`. The row is still marked blocked — only you can "
+                "lift it. Read what they said, then resume the work or "
+                "re-state what is still missing.",
+                to=[owner], status=Status.open,
+                dedupe_key=f"unblocked:{channel}:{key}:{replies[-1].id}")
+        except DuplicateMessage:
+            pass
+
     def _claim_due_sweep(self) -> list[str]:
         """One standing 'claims due' ping per (channel, owner) whose
         cadence-declared claims have idled past their cadence. The row
@@ -5801,7 +7862,22 @@ class HubService:
                 cadence_s = self._claim_cadence_seconds(value)
                 if cadence_s is None:
                     continue
-                if self._claim_done(value) or self._claim_parked(value):
+                # PARKED IS NOT AN EXEMPTION HERE (2026-08-06). The parked
+                # exemption exists so a THIRD PARTY stops re-asking "is this
+                # stale?" when the status already answered. This sweep is not
+                # a third party: `cadence_minutes` is the OWNER saying "remind
+                # ME when this row idles". Dropping their declaration because
+                # they also parked is a silent fallback — the hub deciding not
+                # to do the thing its author asked for, and never saying so.
+                #
+                # Measured: rt2-lead parked claim:phase-1-m1-dispatch at
+                # 14:55:13 with cadence_minutes=60, waiting on a row in
+                # another room. That row completed at 14:58:56. The ping was
+                # due 15:51:37 and was discarded here. Seven seats sat armed
+                # for hours on a milestone that was already done.
+                #
+                # `done` stays exempt: finished work has nothing to re-check.
+                if self._claim_done(value):
                     continue
                 owner = str(value.get("owner") or stored.updated_by or "")
                 if not owner or owner not in members:
@@ -5976,6 +8052,7 @@ class HubService:
         never stop the rest from publishing."""
         if self.hub_paused() is not None:
             return []
+        started = time.time()
         published: list[str] = []
         for root, info in self._open_vote_roots():
             try:
@@ -6005,6 +8082,7 @@ class HubService:
                 logging.getLogger("agora.hub.vote").exception(
                     "vote sweep failed for %s#%s (other votes unaffected)",
                     root.channel, root.seq)
+        self._note_sweep("vote", started, len(published))
         return published
 
     async def vote_watchdog(self,
@@ -6046,22 +8124,287 @@ class HubService:
         return f" [silence_class={klass}; {action}]"
 
     def _post_silence_watchdog_alert(self, agent_id: str, body: str,
-                                     explicit_class: str | None = None) -> None:
-        """Hub-alerts archive + addressed delivery to reporting stewards (0107)."""
+                                     explicit_class: str | None = None,
+                                     kind: str = "dark") -> None:
+        """Hub-alerts archive + addressed delivery to reporting stewards (0107).
+
+        `kind` (dark|deaf|lurk) rides the message as `data.silence_alert` so
+        the hub can CLOSE its own alert when the episode ends — see
+        `_close_ended_silence_alerts` for why that is not optional."""
         stewards = self._reporting_stewards(exclude=agent_id)
         self._ensure_alerts_channel()
         self._post_system(
             self.DARK_ALERTS_CHANNEL,
             body + self._silence_alert_suffix(agent_id, explicit_class),
             to=stewards or None,
+            data={"silence_alert": {"kind": kind, "agent_id": agent_id}},
         )
 
-    def silence_class_for_seat(self, agent_id: str) -> str | None:
+    _SILENCE_ALERT_PREFIXES = {"AGENT DARK:": "dark", "AGENT DEAF:": "deaf",
+                               "AGENT LURKING:": "lurk"}
+    SILENCE_CLOSE_PER_SWEEP = 25
+
+    def _silence_alert_subject(self, m: Message) -> tuple[str, str] | None:
+        """(kind, agent_id) of a standing silence alert, or None. Prefers the
+        stored `data.silence_alert`; falls back to the body prefix so alerts
+        written before this tagging existed are still closeable (a permanent
+        undischargeable row is exactly what this fix is about)."""
+        info = (m.data or {}).get("silence_alert")
+        if isinstance(info, dict) and info.get("agent_id") and info.get("kind"):
+            return str(info["kind"]), str(info["agent_id"])
+        for prefix, kind in self._SILENCE_ALERT_PREFIXES.items():
+            if m.body.startswith(prefix):
+                rest = m.body[len(prefix):].strip().split()
+                if rest:
+                    return kind, rest[0].rstrip("'s")
+        return None
+
+    def _close_standing_fleet_alerts(self, reason: str) -> None:
+        """Resolve every standing FLEET alert when the fleet is not collapsed —
+        the same debt hygiene `_close_ended_silence_alerts` applies per seat.
+
+        RESTART-SAFETY (live, 2026-08-03). This used to run ONLY on the
+        in-process dark -> recovered transition, so a hub that bounced while
+        the fleet was healthy never closed the FLEET DARK rows minted by the
+        previous process: 34 of them standing on the operator, plus 20 FLEET
+        RECOVERED rows posted as addressed opens before that alert became
+        `fyi` news — 55 permanent, undischargeable operator obligations for
+        events that were over. Standing alerts are FOUND in the channel like
+        every other standing-alert contract in this file, so the healthy path
+        now closes what the hub no longer believes. FLEET RECOVERED is swept
+        too: good news is never an obligation, and the rows already written
+        as one must not outlive the fix that stopped writing them."""
+        if self.db.get_channel(self.DARK_ALERTS_CHANNEL) is None:
+            return
+        ops = self.operator_ids()
+        budget = self.SILENCE_CLOSE_PER_SWEEP
+        for m in self.db.open_obligations([self.DARK_ALERTS_CHANNEL]):
+            if budget <= 0:
+                return          # drain over several sweeps, never as one burst
+            if m.sender != "hub":
+                continue
+            tag = (m.data or {}).get("fleet_alert")
+            if tag not in ("dark", "recovered") and not m.body.startswith(
+                    ("FLEET DARK:", "FLEET RECOVERED:")):
+                continue
+            if closed_authoritatively(m, self.db.replies_to(m.id), ops):
+                continue
+            self._post_system(self.DARK_ALERTS_CHANNEL, reason,
+                              status="resolved", reply_to=m.id)
+            budget -= 1
+
+    def _standing_fleet_alerts(self) -> tuple[list[Message], list[Message]]:
+        """(dark, recovered) hub-authored FLEET alerts still standing open."""
+        dark: list[Message] = []
+        recovered: list[Message] = []
+        if self.db.get_channel(self.DARK_ALERTS_CHANNEL) is None:
+            return dark, recovered
+        ops = self.operator_ids()
+        for m in self.db.open_obligations([self.DARK_ALERTS_CHANNEL]):
+            if m.sender != "hub":
+                continue
+            tag = (m.data or {}).get("fleet_alert")
+            if tag == "dark" or m.body.startswith("FLEET DARK:"):
+                bucket = dark
+            elif tag == "recovered" or m.body.startswith("FLEET RECOVERED:"):
+                bucket = recovered
+            else:
+                continue
+            if closed_authoritatively(m, self.db.replies_to(m.id), ops):
+                continue
+            bucket.append(m)
+        return dark, recovered
+
+    def _bound_standing_fleet_alerts(self) -> None:
+        """At most ONE standing FLEET DARK, and never a standing FLEET
+        RECOVERED — enforced on EVERY sweep, dark or healthy.
+
+        WHY NOT ONLY ON RECOVERY (live, 2026-08-03). `_close_standing_fleet_alerts`
+        can only run when the fleet is healthy, and on a hub whose roster has
+        outgrown its drivers the fleet is never healthy: 8 of 50 registered
+        seats live is a permanent 'collapse' by the liveness fraction, so the
+        recovery path is unreachable and every past episode's alert stands
+        forever. Measured: 35 FLEET DARK + 20 FLEET RECOVERED = 55 permanent
+        operator obligations, none of them discharging anything, all of them
+        escalating on the operator's /owed.
+
+        The bound holds regardless of fleet state, because it is a statement
+        about DEBT, not about liveness: one live episode can owe at most one
+        alert, and good news owes nothing at all. The newest FLEET DARK
+        survives (it carries the current live/eligible counts); the rest are
+        superseded in-thread. Restart-safe: rows are found in the channel."""
+        dark, recovered = self._standing_fleet_alerts()
+        budget = self.SILENCE_CLOSE_PER_SWEEP
+        for m in recovered:
+            if budget <= 0:
+                return
+            self._post_system(
+                self.DARK_ALERTS_CHANNEL,
+                "FLEET RECOVERED is news, not a request — this row was minted "
+                "as an addressed open before that was fixed. Closed; nothing "
+                "is owed on it.", status="resolved", reply_to=m.id)
+            budget -= 1
+        dark.sort(key=lambda m: m.created_at)
+        for m in dark[:-1]:              # keep the newest, supersede the rest
+            if budget <= 0:
+                return
+            self._post_system(
+                self.DARK_ALERTS_CHANNEL,
+                "superseded by the current FLEET DARK alert — one standing "
+                "alert states the whole episode. This duplicate is closed; "
+                "nothing is owed on it.", status="resolved", reply_to=m.id)
+            budget -= 1
+
+    def _retire_report_digest_rows(self) -> list[str]:
+        """Close legacy timer-owned delegate digest asks and clear contracts.
+
+        The simpler delegate contract is milestone-driven human summaries to
+        the operator/user, not a hub-generated hourly ask. Leaving 0109's
+        standing rows open would preserve the exact noisy meta-work the new
+        rules removed, so this sweep retires both the open `hub-alerts` rows
+        and the per-delegate meta contract state. Restart-safe: rows are found
+        in the channel and the meta contract is best-effort cleared each pass."""
+        changed = False
+        for delegate in self._reporting_delegates():
+            if self.db.meta_get(f"report:{delegate}"):
+                self.db.meta_set(f"report:{delegate}", "")
+                changed = True
+        if self.db.get_channel(self.DARK_ALERTS_CHANNEL) is None:
+            return ["retired-report-digest"] if changed else []
+        ops = self.operator_ids()
+        budget = self.SILENCE_CLOSE_PER_SWEEP
+        for m in self.db.open_obligations([self.DARK_ALERTS_CHANNEL]):
+            if budget <= 0:
+                break
+            if m.sender != "hub":
+                continue
+            if not ((m.data or {}).get("report_digest")
+                    or m.title == "hourly digest: desk facts"):
+                continue
+            if closed_authoritatively(m, self.db.replies_to(m.id), ops):
+                continue
+            self._post_system(
+                self.DARK_ALERTS_CHANNEL,
+                "Closed: delegate reporting is a milestone-driven human "
+                "summary, not a timer-owned hourly ask. This legacy row is "
+                "retired; nothing is owed on it.",
+                status="resolved", reply_to=m.id)
+            budget -= 1
+            changed = True
+        return ["retired-report-digest"] if changed else []
+
+    def _close_ended_silence_alerts(self) -> None:
+        """Close every standing DARK/DEAF/LURK alert whose episode is over.
+
+        THE DEBT THE WATCHDOG OWED ITSELF (2026-08-03 audit). 0093 settled
+        this for stale-claims alerts — "an open system alert is an OBLIGATION
+        on its addressees, and v1 posted a new one per flap window without
+        ever closing the old" — but the silence watchdog never learned the
+        lesson. Measured on a read-only copy of the live hub (2026-08-03):
+        171 standing open hub-authored alerts, 115 of them silence alerts;
+        of the unresolved ones, 40 are addressed to the CURRENT reporting
+        delegate and 47 to a former one. That debt is indistinguishable from
+        real work on every surface — /owed, the inbox pin, escalation, the
+        digest — and, being escalated, it satisfies the delegate's own
+        DARK/DEAF/LURK predicate, so the watchdog manufactured the alarms it
+        then raised about its own steward.
+
+        Restart-safe like every other standing-alert contract in this file:
+        the live episode set comes from memory, but the alerts themselves are
+        FOUND in the channel, so a bounced hub closes what it no longer
+        believes rather than orphaning it."""
+        if self.db.get_channel(self.DARK_ALERTS_CHANNEL) is None:
+            return
+        live = ({("dark", a) for a in self._dark_since}
+                | {("deaf", a) for a in self._deaf_since}
+                | {("lurk", a) for a in self._lurk_since})
+        ops = self.operator_ids()
+        budget = self.SILENCE_CLOSE_PER_SWEEP
+        for m in self.db.open_obligations([self.DARK_ALERTS_CHANNEL]):
+            if budget <= 0:
+                return      # drain the backlog over several sweeps, never as
+                #             one burst of wakes (a hub adopting this fix has
+                #             months of standing alerts to close)
+            if m.sender != "hub":
+                continue
+            subject = self._silence_alert_subject(m)
+            if subject is None or subject in live:
+                continue
+            if closed_authoritatively(m, self.db.replies_to(m.id), ops):
+                continue
+            kind, agent_id = subject
+            self._post_system(
+                self.DARK_ALERTS_CHANNEL,
+                f"{kind} episode for '{agent_id}' ended — the seat is "
+                "reachable again or the obligation it was silent on cleared. "
+                "This alert is closed; nothing is owed on it.",
+                status="resolved", reply_to=m.id)
+            budget -= 1
+        self._supersede_duplicate_silence_alerts(budget)
+
+    def _supersede_duplicate_silence_alerts(self, budget: int) -> None:
+        """At most ONE standing alert per (kind, seat) — the 0093 contract the
+        stale-claims sweep has always honoured and the silence watchdog never
+        learned.
+
+        WHY THE EPISODE CLOSER IS NOT ENOUGH (live, 2026-08-03). Closing
+        alerts whose episode ENDED leaves untouched every duplicate whose
+        subject is still dark, and a seat that has been offline for weeks is
+        exactly the seat that accumulates them: each hub restart clears
+        `_dark_since`, re-opens the episode, and mints a fresh alert, while
+        the previous one stays open forever because its subject now reads as
+        live. Measured on the live hub after the episode closer had already
+        run: 99 standing silence alerts over 28 distinct subjects — 71 pure
+        duplicates, one seat (`camera`) holding 9 alerts that all say the
+        same sentence. The delegate cannot discharge them (only the operator
+        can restart a seat), cannot tell them apart, and every one of them
+        is an escalating obligation on its /owed.
+
+        The NEWEST alert per subject survives — it carries the current debt
+        count and age — and the older ones are superseded in the thread, so
+        the operator keeps one live row per genuinely silent seat. Bounded by
+        the same per-sweep budget: a hub adopting this fix drains months of
+        backlog over minutes, never as one burst of wakes."""
+        if budget <= 0 or self.db.get_channel(self.DARK_ALERTS_CHANNEL) is None:
+            return
+        ops = self.operator_ids()
+        standing: dict[tuple[str, str], list[Message]] = {}
+        for m in self.db.open_obligations([self.DARK_ALERTS_CHANNEL]):
+            if m.sender != "hub":
+                continue
+            subject = self._silence_alert_subject(m)
+            if subject is None:
+                continue
+            if closed_authoritatively(m, self.db.replies_to(m.id), ops):
+                continue
+            standing.setdefault(subject, []).append(m)
+        for (kind, agent_id), rows in standing.items():
+            if len(rows) < 2:
+                continue
+            rows.sort(key=lambda m: m.created_at)
+            for old in rows[:-1]:            # keep the newest, supersede the rest
+                if budget <= 0:
+                    return
+                self._post_system(
+                    self.DARK_ALERTS_CHANNEL,
+                    f"superseded by the current {kind} alert for '{agent_id}' "
+                    "— one standing alert per seat states the whole debt. "
+                    "This duplicate is closed; nothing is owed on it.",
+                    status="resolved", reply_to=old.id)
+                budget -= 1
+
+    def silence_class_for_seat(self, agent_id: str,
+                               debts: OwedReport | None = None) -> str | None:
         """0114: classify SLA-breached answer debt by silence root cause so
         stewards route (dead/deaf/unseen/seen-and-ignored) instead of
-        forensics. None when the seat has no escalated to_answer rows."""
-        info = AgentInfo(id=agent_id, name=agent_id)
-        escalated = [r for r in self.owed(info).to_answer if r.escalated]
+        forensics. None when the seat has no escalated to_answer rows.
+        `debts` lets a caller that already computed /owed for this seat pass
+        it in — recomputing it here doubled the cost of every full-fleet
+        surface (measured on a copy of the live 50-seat hub: `doctor()` 26.7s
+        -> 15.7s)."""
+        if debts is None:
+            debts = self.owed(AgentInfo(id=agent_id, name=agent_id))
+        escalated = [r for r in debts.to_answer if r.escalated]
         if not escalated:
             return None
         if self.presence.get(agent_id).state == "offline":
@@ -6076,40 +8419,11 @@ class HubService:
             return "unseen"
         return "seen-and-ignored"
 
-    def report_digest_snapshot(self) -> dict[str, Any]:
-        """0109 observability: reporting-delegate digest cadence for /status."""
-        now = time.time()
-        paused = self._report_digest_paused()
-        delegates: list[dict[str, Any]] = []
-        for delegate in self._reporting_delegates():
-            contract = self._load_report_contract(delegate)
-            period_start = float(contract.get("period_start") or 0.0)
-            desk_post_id = contract.get("desk_post_id")
-            replied = False
-            if desk_post_id and period_start > 0.0:
-                replied = self._desk_digest_reply_ok(
-                    delegate, str(desk_post_id), period_start)
-            period_age = (now - period_start) if period_start > 0 else None
-            delegates.append({
-                "delegate": delegate,
-                "period_age_minutes": (round(period_age / 60, 1)
-                                       if period_age is not None else None),
-                "period_seconds": REPORT_DIGEST_PERIOD_SECONDS,
-                "desk_post_id": desk_post_id,
-                "replied": replied,
-                "missed_alerted": bool(contract.get("missed_alerted")),
-                "overdue": (period_age is not None
-                            and period_age >= REPORT_DIGEST_PERIOD_SECONDS
-                            and not replied),
-            })
-        return {"paused": paused, "delegates": delegates}
-
     def status_overview(self) -> dict[str, Any]:
         """Fleet liveness aggregate plus per-seat rows (0110 + 0084)."""
         return {
             "fleet": self.fleet_liveness_snapshot(),
             "agents": self.agent_status_overview(),
-            "report_digest": self.report_digest_snapshot(),
         }
 
     def agent_status_overview(self) -> list[dict[str, Any]]:
@@ -6140,6 +8454,7 @@ class HubService:
                 if cursor_cache[ch] >= row.seq:
                     acked_unanswered += 1
             reception_state, reception_age = self.presence.reception(agent_id)
+            # Reuse the /owed already computed above (halves this surface).
             out.append({
                 "agent_id": agent_id,
                 "state": presence.state,
@@ -6157,11 +8472,368 @@ class HubService:
                 "escalated_owed": sum(1 for r in debts.to_answer if r.escalated),
                 "owed_consumption": debts.counts.to_consume,
                 "acked_unanswered": acked_unanswered,
-                "silence_class": self.silence_class_for_seat(agent_id),
+                "silence_class": self.silence_class_for_seat(agent_id, debts),
                 "refused_sends_1h": len(refusals),
                 "last_refusal": refusals[-1] if refusals else None,
             })
         return out
+
+    # -- doctor: one screen, one truth (2026-08-03) --------------------------
+    #
+    # WHY THIS EXISTS. When a seat goes quiet the operator reconstructs the
+    # answer from four places — sqlite, notify logs, driver logs, attempts
+    # files. That is literally how the last three investigations were done,
+    # and the 08-03 00:19->01:21 stall cost hours of forensics for facts the
+    # hub already held. Everything below is stored state; the only new thing
+    # is that ONE call assembles it and NAMES WHAT THE HUB CANNOT SEE
+    # instead of guessing. Counts and timestamps, never bodies; titles only
+    # from non-private rooms.
+
+    DOCTOR_LOOKBACK_SECONDS = 86400.0
+
+    @staticmethod
+    def _ago(then: float | None, now: float) -> float | None:
+        return None if not then else round(now - then, 1)
+
+    def _doctor_claims(self) -> list[dict[str, Any]]:
+        """Every live claim row on the hub, flattened once (the sweeps scan
+        the same rows; doing it once keeps `doctor` a single pass)."""
+        now = time.time()
+        rows: list[dict[str, Any]] = []
+        for ch in self.db.channel_names():
+            private = getattr(self.db.get_channel(ch), "private", True)
+            for entry in self.db.store_keys(ch):
+                key = entry["key"]
+                if not key.startswith("claim:"):
+                    continue
+                stored = self.db.store_get(ch, key)
+                if stored is None or not isinstance(stored.value, dict):
+                    continue
+                v = stored.value
+                cadence = self._claim_cadence_seconds(v)
+                idle = now - stored.updated_at
+                rows.append({
+                    # Channel names and titles ARE served here, unlike in
+                    # hub-alerts. The alert redaction (HIGH-2) exists because
+                    # alerts are POSTED into a room delegates read and get
+                    # quoted onward; this payload is returned only to the
+                    # holder of the admin key, who can read every room
+                    # anyway, and the operator's first question is always
+                    # WHERE. Bodies are never included, at any privacy level.
+                    "channel": ch, "key": key, "private": bool(private),
+                    "owner": str(v.get("owner") or stored.updated_by or ""),
+                    "status": self._claim_status_word(v) or "(none)",
+                    "done": self._claim_done(v), "parked": self._claim_parked(v),
+                    # The declared next step is the delegate's own promise
+                    # about this work — the operator's fastest read on "is it
+                    # driving to completion?". Truncated, never the evidence.
+                    "next_step": elide(str(v.get("next_step") or ""), 160),
+                    "source_message_id": str(v.get("source_message_id") or ""),
+                    "idle_seconds": round(idle, 1),
+                    "cadence_seconds": cadence,
+                    "next_ping_in_seconds": (round(cadence - idle, 1)
+                                             if cadence else None),
+                })
+        return rows
+
+    def _doctor_seat(self, agent_id: str, now: float,
+                     signals: dict[str, dict[str, float]],
+                     claims: list[dict[str, Any]],
+                     debts: OwedReport) -> dict[str, Any]:
+        presence = self.presence.get(agent_id)
+        rec_state, rec_age = self.presence.reception(agent_id)
+        sig = signals.get(agent_id, {})
+        last_work = max([t for t in (sig.get("posted"), sig.get("wrote")) if t],
+                        default=None)
+        oldest = min((r.created_at for r in debts.to_answer), default=None)
+        cursor_cache: dict[str, int] = {}
+        acked_unanswered = 0
+        for row in debts.to_answer:
+            if row.channel not in cursor_cache:
+                cursor_cache[row.channel] = self.db.get_cursor(agent_id,
+                                                               row.channel)
+            if cursor_cache[row.channel] >= row.seq:
+                acked_unanswered += 1
+        held: list[dict[str, Any]] = []
+        block = self.db.block_get(self.HUB_SCOPE, agent_id)
+        if block is not None:
+            expires = block["expires_at"]
+            held.append({"kind": "hub-block", "until": expires,
+                         "seconds_left": (round(expires - now, 1)
+                                          if expires else None)})
+        retirement = self.db.agent_retirement(agent_id)
+        if retirement is not None:
+            held.append({"kind": "retired", "at": retirement["retired_at"]})
+        pause = self.hub_paused()
+        if pause is not None:
+            held.append({"kind": "hub-paused", "since": pause["since"]})
+        refusals = [r for r in self.refusals.get(agent_id, ())
+                    if now - r["ts"] < 3600.0]
+        if refusals:
+            held.append({"kind": "send-refused", "count": len(refusals),
+                         "last_code": refusals[-1]["code"],
+                         "last_seconds_ago": self._ago(refusals[-1]["ts"], now)})
+        mine = [c for c in claims if c["owner"] == agent_id and not c["done"]]
+        for c in mine:
+            if c["parked"]:
+                held.append({"kind": "claim-parked", "ref": c["key"],
+                             "status": c["status"],
+                             "idle_seconds": c["idle_seconds"]})
+        return {
+            "agent_id": agent_id,
+            "operator": agent_id in self.operator_ids(),
+            "delegate_powers": sorted({p for d in self.active_delegations()
+                                       if d["agent_id"] == agent_id
+                                       for p in (d.get("powers") or ())}),
+            "reachable": {
+                "presence": presence.state,
+                "reception": rec_state,
+                "reception_age_seconds": round(rec_age, 1) if rec_age else None,
+                "last_contact_seconds": self._ago(presence.updated_at, now),
+            },
+            # The operator's question, made mechanical: a seat that only ever
+            # polls /owed is RECEIVING, not working, and looked identical to
+            # a working seat on every previous surface.
+            "did_work": {
+                "last_post_seconds": self._ago(sig.get("posted"), now),
+                "last_write_seconds": self._ago(sig.get("wrote"), now),
+                "last_work_seconds": self._ago(last_work, now),
+                "worked_within_lookback": last_work is not None,
+            },
+            "owes": {
+                "to_answer": debts.counts.to_answer,
+                "escalated": sum(1 for r in debts.to_answer if r.escalated),
+                "to_consume": debts.counts.to_consume,
+                "to_close": debts.counts.to_close,
+                "oldest_seconds": self._ago(oldest, now),
+                "acked_unanswered": acked_unanswered,
+                "waiting_on_others": len(debts.waiting_on),
+                "charters_stale": len(debts.charters),
+            },
+            "working_on": [
+                {k: c[k] for k in ("channel", "key", "status", "next_step",
+                                   "idle_seconds", "next_ping_in_seconds")}
+                for c in mine],
+            "held_up_by": held,
+            "silence_class": self.silence_class_for_seat(agent_id, debts),
+            "episodes": {
+                "dark_since": self._dark_since.get(agent_id),
+                "deaf_since": self._deaf_since.get(agent_id),
+                "lurk_since": self._lurk_since.get(agent_id),
+            },
+        }
+
+    def _doctor_requests(self, now: float, claims: list[dict[str, Any]],
+                         signals: dict[str, dict[str, float]],
+                         reports: dict[str, OwedReport],
+                         only: str | None = None) -> list[dict[str, Any]]:
+        """Operator requests in flight, with the ORCHESTRATION view: who owns
+        each one, what they said they would do next, and which asks they
+        dispatched are still outstanding and for how long. A delegate that is
+        replying but not dispatching, or dispatching into silence, is exactly
+        what this makes visible in one line instead of three hours."""
+        ops = self.operator_ids()
+        if not ops:
+            return []
+        out: list[dict[str, Any]] = []
+        dispatched_cache: dict[str, list[dict[str, Any]]] = {}
+        rooms = self.db.channel_names()
+        # Chunked at 500 like `_open_vote_roots`, for the bound-variable
+        # ceiling of older bundled SQLites.
+        candidates = [m for i in range(0, len(rooms), 500)
+                      for m in self.db.open_obligations(rooms[i:i + 500])]
+        for m in candidates:
+            if m.sender not in ops or m.retracted:
+                continue
+            replies = self.db.replies_to(m.id)
+            ds = self._discharge(m, replies)
+            if ds.closed:
+                continue
+            owners = sorted({str(c["owner"]) for c in claims
+                             if c["source_message_id"] == m.id and c["owner"]})
+            # One /owed per seat for the whole call (`reports`), never one
+            # per (seat, request): the diagnostic must stay cheap enough to
+            # run while the hub is under load, which is exactly when it is
+            # wanted. Narrowed to one seat, only that seat is considered —
+            # `scope` in the payload says so rather than implying a
+            # fleet-wide answer.
+            owed_by = sorted(a for a, rep in reports.items()
+                             if a != m.sender
+                             and any(r.id == m.id for r in rep.to_answer))
+            if only and only not in set(owners) | set(owed_by):
+                continue
+            engaged = sorted({r.sender for r in replies if r.sender != m.sender})
+            dispatched = []
+            for owner in (owners or owed_by):
+                if owner not in dispatched_cache:
+                    dispatched_cache[owner] = self._doctor_outstanding_asks(
+                        owner, now)
+                dispatched.extend(dispatched_cache[owner])
+            work = [signals.get(o, {}) for o in (owners or owed_by)]
+            last_work = max([t for s in work
+                             for t in (s.get("posted"), s.get("wrote")) if t],
+                            default=None)
+            out.append({
+                "id": m.id, "channel": m.channel,
+                "seq": m.seq, "from": m.sender,
+                "title": m.title,
+                "age_seconds": round(now - m.created_at, 1),
+                "pending_asks": ds.pending, "ask_progress": ds.progress,
+                "owned_by": owners,
+                "owed_by": owed_by,
+                "replied_by": engaged,
+                "owner_last_work_seconds": self._ago(last_work, now),
+                "claims": [{k: c[k] for k in
+                            ("key", "owner", "status", "next_step",
+                             "idle_seconds", "done")}
+                           for c in claims if c["source_message_id"] == m.id],
+                "outstanding_asks": dispatched,
+            })
+        out.sort(key=lambda r: -r["age_seconds"])
+        return out
+
+    def _doctor_outstanding_asks(self, owner: str,
+                                 now: float) -> list[dict[str, Any]]:
+        """Asks `owner` sent that are still unanswered: who they wait on, in
+        what state, and for how long. The monitoring view a delegate needs to
+        do its job and the operator needs to audit that it did."""
+        rows: list[dict[str, Any]] = []
+        channels = self.db.channels_of(owner)
+        ops = self.operator_ids()
+
+        def state_of(seat: str, m: Message) -> str:
+            if self.db.agent_retirement(seat) is not None:
+                return "retired"
+            if self.db.get_cursor(seat, m.channel) >= m.seq:
+                return "acked-past-no-reply"
+            return "not-yet-served"
+
+        for m in self.db.my_open_messages(owner, channels):
+            replies = self.db.replies_to(m.id)
+            repliers = {r.sender for r in replies}
+            if not asks_of(m):
+                # UNSTRUCTURED multi-addressee opens. Binary discharge counts
+                # ONE reply as the whole answer, so the other named seats are
+                # unpinned and the asker is told nothing — measured on the
+                # live hub: 118 of 177 peer multi-addressee opens were
+                # discharged with named seats still silent. This surface does
+                # not change that verdict (re-opening 118 settled threads is
+                # the storm class the directive epoch exists to prevent); it
+                # makes the silence VISIBLE to the operator, which is the
+                # part that costs nothing and was missing.
+                if closed_authoritatively(m, replies, ops):
+                    continue
+                for seat in sorted(set(m.to) - repliers - {owner}):
+                    rows.append({
+                        "asker": owner, "where": f"{m.channel}#{m.seq}",
+                        "ask": "(unstructured)", "waiting_on": seat,
+                        "state": state_of(seat, m),
+                        "age_seconds": round(now - m.created_at, 1),
+                    })
+                continue
+            ds = self._discharge(m, replies)
+            if ds.closed:
+                continue
+            for a in asks_of(m):
+                if str(a["id"]) not in ds.pending:
+                    continue
+                seats = [str(s) for s in (a.get("to") or [])]
+                if a.get("assignee"):
+                    seats.append(str(a["assignee"]))
+                for seat in sorted(set(seats) - repliers):
+                    rows.append({
+                        "asker": owner,
+                        "where": f"{m.channel}#{m.seq}",
+                        "ask": str(a["id"]), "waiting_on": seat,
+                        "state": state_of(seat, m),
+                        "age_seconds": round(now - m.created_at, 1),
+                    })
+        return rows
+
+    def _doctor_hub(self, now: float,
+                    claims: list[dict[str, Any]]) -> dict[str, Any]:
+        pause = self.hub_paused()
+        sweeps = {}
+        for name in ("dark", "vote"):
+            run = self.sweep_runs.get(name)
+            sweeps[name] = {
+                "last_run_seconds": self._ago(run["last_run"], now) if run else None,
+                "took_seconds": run["seconds"] if run else None,
+                "actions": run["actions"] if run else None,
+            }
+        votes_overdue = 0
+        for _root, vinfo in self._open_vote_roots():
+            closes = vinfo.get("closes_at")
+            if isinstance(closes, (int, float)) and closes < now:
+                votes_overdue += 1
+        standing_open = unclosed_silence = 0
+        if self.db.get_channel(self.DARK_ALERTS_CHANNEL) is not None:
+            ops = self.operator_ids()
+            for m in self.db.open_obligations([self.DARK_ALERTS_CHANNEL]):
+                if m.sender != "hub":
+                    continue
+                if closed_authoritatively(m, self.db.replies_to(m.id), ops):
+                    continue
+                standing_open += 1
+                if self._silence_alert_subject(m) is not None:
+                    unclosed_silence += 1
+        stale = sum(1 for c in claims
+                    if not c["done"] and not c["parked"]
+                    and c["idle_seconds"] > self.channel_sla(c["channel"]) * 60.0)
+        return {
+            "paused": pause,
+            "sweeps": sweeps,
+            "votes_past_deadline": votes_overdue,
+            "open_hub_alerts": standing_open,
+            "unclosed_silence_alerts": unclosed_silence,
+            "stale_claims": stale,
+            "live_claims": sum(1 for c in claims if not c["done"]),
+            "fleet": self.fleet_liveness_snapshot(),
+            "notify_files": self.notify_sink is not None,
+            "directive_epoch": self._directive_epoch,
+        }
+
+    #: Everything the hub structurally CANNOT know. Printed, not guessed —
+    #: the diagnostic's honesty clause: a seat's driver, its backoff and
+    #: quarantine state, its next work chunk and its last turn outcome all
+    #: live in the session, and the hub only ever sees a seat when the seat
+    #: calls it.
+    DOCTOR_BLIND_SPOTS = [
+        "next work chunk: driver-side. The hub sees only claim cadence pings "
+        "(`next_ping_in_seconds`), never the driver's schedule.",
+        "last turn outcome: driver-side (`agora drive --turn-log`). The hub "
+        "sees posts and writes, not whether a turn succeeded.",
+        "backoff / quarantine: driver-side files in ~/.agora "
+        "(listen-<id>.backoff, drive-<id>.pid). `agora doctor` reads them "
+        "locally and says so; a remote hub cannot.",
+        "an idle IDE tab makes no calls: presence 'offline' means NO CONTACT, "
+        "never 'dead'. Reception 'unknown' means the seat never announced a "
+        "listener, which is not deafness.",
+    ]
+
+    def doctor(self, agent_id: str | None = None) -> dict[str, Any]:
+        """The one-screen answer to 'why is this seat quiet?'.
+
+        `agent_id` narrows every section to one seat (and the requests it
+        owns or owes), which is the cheap path: one /owed computation instead
+        of one per seat."""
+        now = time.time()
+        claims = self._doctor_claims()
+        signals = self.db.work_signals(now - self.DOCTOR_LOOKBACK_SECONDS)
+        ids = ([agent_id] if agent_id
+               else [a for a in self.db.list_agent_ids() if a != "hub"])
+        reports = {a: self.owed(AgentInfo(id=a, name=a)) for a in ids}
+        return {
+            "now": now,
+            "scope": agent_id or "all seats",
+            "lookback_seconds": self.DOCTOR_LOOKBACK_SECONDS,
+            "hub": self._doctor_hub(now, claims),
+            "seats": [self._doctor_seat(a, now, signals, claims, reports[a])
+                      for a in ids],
+            "requests": self._doctor_requests(now, claims, signals, reports,
+                                              agent_id),
+            "hub_cannot_see": list(self.DOCTOR_BLIND_SPOTS),
+        }
 
     def list_presence(self, agent: AgentInfo) -> list:
         """Presence of every agent the caller shares a channel with (self

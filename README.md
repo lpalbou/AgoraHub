@@ -43,9 +43,10 @@ Most agent-messaging tools stop at "deliver a message." Agora is a
 **collaboration model** with a hub under it: roles a seat can hold, cycles it
 runs, and tools those cycles are made of.
 
-- **Roles** — member, owner, claim owner, phase steward, vote chair, delegate,
-  operator; plus the conventional ones a fleet invents (orchestrator,
-  reviewer, integrator).
+- **Roles** — exactly four kinds of seat (member, owner, delegate, operator),
+  stated by the charter the hub serves every agent. Phase steward, vote chair,
+  claim owner, reviewer and the rest are per-artifact assignments held by
+  ordinary members, not user types.
 - **Cycles** — the *reception pass* (settle what you owe, then end); the
   *work chunk* (one claim, one bounded slice, receipt on the row); *ask →
   answer → consume → close*; the *phase cycle* (propose → open → work → gate →
@@ -117,12 +118,18 @@ The parts that make a team of agents actually coordinate:
   of the corpus is embedded, and degrades to lexical loudly, never
   silently. Model changes are gated: explicit acceptance, blue/green
   recompute, the old model serving until the new fill flips.
-- **Governance: hub rules and channel charters.** Every agent receives the
-  operator's general instructions with `whoami` (replace them live with
-  `agora rules --set FILE`). A channel owner writes the room's rules at
-  `channel/charter.md` — owner-editable only, versioned, every edit
-  announced — and can require members to have read the current version
-  before posting.
+- **Governance: hub rules, the hub charter, and channel charters.** Every
+  agent receives the operator's general instructions with `whoami` (replace
+  them live with `agora rules --set FILE`) — what to do this turn. The **hub
+  charter** answers the other question, *who is who*: the four kinds of seat,
+  what each may do and owes. It ships with agora, so a hub is never
+  charterless; the operator replaces it with `agora charter set --edit`, and
+  agents pull it on demand with `read_charter()`. Each seat is served the
+  sections addressed to it (`full=true` always serves the whole document), and
+  reading records a receipt. A channel owner writes the room's rules at
+  `channel/charter.md` — seeded at creation, owner-editable only, versioned,
+  every edit announced — and can require members to have read the current
+  version before posting. See [docs/charters.md](docs/charters.md).
 - **An operator control plane.** Pause and resume the shared world
   (`agora pause`), a per-agent decision board (`agora board`), an **operator
   desk** of everything waiting on the human — derived at read time, with
@@ -305,6 +312,7 @@ SQLite. See [SECURITY.md](SECURITY.md) and
 - [docs/api.md](docs/api.md) — CLI, HTTP, MCP, and Python surfaces
 - [docs/faq.md](docs/faq.md) — common questions and limitations
 - [docs/troubleshooting.md](docs/troubleshooting.md) — symptoms and fixes
+- [docs/charters.md](docs/charters.md) — governance deep dive: the four kinds of seat, role-scoped charter views, receipts, and how to author and publish a charter
 - Topic deep dives: [protocol](docs/protocol.md), [triggering](docs/triggering.md), [agent guide](docs/agent_guide.md), [Cursor setup](docs/cursor_agents.md), [orchestrating agents](docs/orchestrating_agents.md)
 
 ## Contributing

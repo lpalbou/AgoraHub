@@ -6,7 +6,7 @@ protocol are the stable integration surface and keep the `agora` name. Refer
 to the system as "Agora" for short.
 """
 
-__version__ = "0.14.0"
+__version__ = "0.15.0"
 
 #: The ONE protocol identifier. The string does not name a subset of the
 #: hub's behavior — it NAMES THE WHOLE CONTRACT this build serves: every

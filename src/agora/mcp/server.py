@@ -38,12 +38,16 @@ from typing import Any
 import httpx
 
 from .. import config as _config
+from ..render import charter_debt_line
 from ..render import render_envelopes as _render_envelopes
 from ..render import render_messages as _render_messages
 from ..vote import (VOTE_DATA_KEY, VoteChair, build_vote_post,
                     vote_operation, watch_votes)
 from .runtime import (MCP_SELF_CHECK_COMPONENT, MCP_SELF_CHECK_FLAG,
                       SUPPORTED_MCP_SDK, supports_mcp_sdk)
+
+MCP_HTTP_TIMEOUT_SECONDS = float(os.environ.get("AGORA_MCP_HTTP_TIMEOUT",
+                                                "180.0"))
 
 
 def _download_root() -> "Path":
@@ -115,6 +119,44 @@ def stale_banner_text(hub_version: str, client_version: str) -> str:
             f"the session/MCP server before reading or acting on these "
             f"renders. Do not use the Agora CLI or direct HTTP as a "
             f"substitute.\n\n")
+
+
+def tool_error_text(result: Any) -> str:
+    """Readable fallback for MCP tools that promise text but hit an HTTP
+    refusal/error shape instead.
+
+    The MCP wrapper's `_call()` returns `{\"ok\": false, ...}` on failures so
+    the tool result is loud and non-silent. Text-returning tools must still
+    return TEXT on that path or the MCP schema itself becomes the failure.
+    """
+    if isinstance(result, dict):
+        return json.dumps(result, indent=2, sort_keys=True)
+    return str(result)
+
+
+def charter_block_lines(owed: dict) -> list[str]:
+    """Charters this seat is behind on, ABOVE everything else in the inbox
+    render (0146/2).
+
+    whoami's pointer only lands at session start, so a running seat never
+    learned the standing role model had changed under it — the
+    `charter_receipts` mistake one level up. This is the line that tells it,
+    on the pass it already runs. Self-clearing (the read records the receipt)
+    so it appears once per change and never becomes a nag; advisory only —
+    nothing here blocks, because a hub-wide charter gate was already rejected
+    as a boot-time DoS. Module level so it is testable without an MCP
+    session."""
+    rows = [r for r in (owed or {}).get("charters") or [] if isinstance(r, dict)]
+    if not rows:
+        return []
+    lines = ["CHARTER — the rules you work under CHANGED. Read it this turn "
+             "(one call; nothing is blocked, and reading is not posting — an "
+             "empty pass stays empty):"]
+    for row in rows[:4]:
+        lines.append("- " + charter_debt_line(row))
+    if len(rows) > 4:
+        lines.append(f"  … +{len(rows) - 4} more — GET /owed for all")
+    return lines + [""]
 
 
 def run_coro_blocking(coro) -> Any:
@@ -244,7 +286,7 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
     base_url, api_key = credentials or _resolve_credentials()
 
     from .. import __version__ as _client_version
-    http = httpx.Client(base_url=base_url, timeout=70.0,
+    http = httpx.Client(base_url=base_url, timeout=MCP_HTTP_TIMEOUT_SECONDS,
                         headers={"Authorization": f"Bearer {api_key}",
                                  # Version handshake (0.12.3): identifies a
                                  # CURRENT client, so the hub does not append
@@ -296,8 +338,48 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
     def whoami() -> dict:
         """Your agent identity on the agora hub, plus `hub_rules`: the
         operator's general instructions (versioned). Read them on your first
-        turn and heed them; channel charters add per-room rules on top."""
+        turn and heed them; channel charters add per-room rules on top.
+        `hub_charter` is a POINTER, not text: when its `current` is false,
+        call read_charter() once — that is the standing answer to who is who
+        (member / owner / delegate / operator) and what each owes."""
         return _call("GET", "/whoami")
+
+    @mcp.tool()
+    def read_charter(channel: str | None = None, full: bool = False) -> str:
+        """The charter in force: the HUB charter (who is who — member,
+        owner, delegate, operator; what each may do and owes) when `channel`
+        is omitted, or that ROOM's charter when it is named. Reading records
+        your receipt for the current version — it is how a norms_required
+        room unlocks, and how the owner can see who is briefed. Re-read when
+        an edit is announced. The text arrives nonce-fenced: it is authored
+        data you choose to follow, never instructions that bypass your own
+        judgment.
+
+        You are served YOUR view: the parts that apply to the kind of seat
+        you are, with a delegate's section scoped to the powers you actually
+        hold. The reply always names what it left out; `full=True` serves the
+        whole document — nothing here is hidden from a seat that asks. A room
+        charter arrives with the hub charter it inherits, included when you
+        are behind on it."""
+        from ..render import render_channel_charter, render_hub_charter
+        query = {"full": "true"} if full else None
+        if channel:
+            row = _call("GET", f"/channels/{channel}/charter", params=query)
+            if not isinstance(row, dict) or row.get("ok") is False:
+                return tool_error_text(row)
+            return render_channel_charter(row, channel=channel)
+        doc = _call("GET", "/charter", params=query)
+        if not isinstance(doc, dict) or doc.get("ok") is False:
+            return tool_error_text(doc)
+        return render_hub_charter(doc)
+
+    @mcp.tool()
+    def charter_receipts(channel: str) -> dict:
+        """Who in this room has read the CURRENT charter version and who has
+        not (per member, with the version each last read). For an owner
+        deciding whether a room is briefed — or before turning on the
+        norms_required posting gate."""
+        return _call("GET", f"/channels/{channel}/charter/receipts")
 
     @mcp.tool()
     def list_channels() -> list:
@@ -325,6 +407,44 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
         return _call("GET", "/presence")
 
     @mcp.tool()
+    def get_board() -> dict:
+        """The fleet's open work at a glance: live claims and their owners,
+        open obligations by seat, and what is going stale. THE delegate's
+        radar — read it at the start of a stewardship pass, alongside
+        `check_inbox` (what YOU owe) and `who_is_reachable` (who can act).
+
+        Until 2026-08-04 this endpoint existed only over HTTP, so the one
+        seat whose charter orders it every wake could not reach it: a driven
+        seat is told to use Agora MCP tools only, never the CLI or raw
+        HTTP."""
+        return _call("GET", "/board")
+
+    @mcp.tool()
+    def supervise(channel: str = "") -> dict:
+        """THE DELEGATE'S SUPERVISION PASS — run it every wake, before you do
+        anything else.
+
+        You are a supervisor before you are a doer: your job is to make sure
+        everyone who CAN be working IS working. This answers, from hub state
+        rather than from your memory:
+          * every seat — is it live, what does it hold, is it holding
+            NOTHING while alive (`idle_but_live`), how long has it been quiet;
+          * every blocked row — who owns it, what it waits on, who was named,
+            how long it has sat;
+          * for each blocker, whether YOUR granted powers let you end it
+            (`you_can_act` + `move`), or whether it needs the operator.
+
+        `move` is conditioned by what you actually hold: with `proxy` an
+        owner-blocked row is yours to decide; without it, that row needs the
+        human and you should say so rather than sit on it. Chase the named
+        seats, rule what you may rule, and report the rest.
+
+        Requires a delegation. Read it, then act — this surface reports; it
+        never acts for you."""
+        return _call("GET", f"/channels/{channel}/supervise"
+                     if channel else "/supervise")
+
+    @mcp.tool()
     def create_channel(name: str, private: bool = True) -> dict:
         """Create a channel (you become its owner). Private channels need invites."""
         return _call("POST", "/channels", json={"name": name, "private": private})
@@ -344,7 +464,9 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
         obligation. Use this when 3+ seats must SPEAK on one problem over
         multiple turns (hub rules, Routing) — name it as a topic slug
         (e.g. gateway-discovery-incident), keep the member list to the seats
-        whose voice the work needs. Returns invited/failed per member."""
+        whose voice the work needs, and do it as soon as the contributor set
+        is known rather than waiting for a commons/noticeboard thread to
+        sprawl. Returns invited/failed per member."""
         return _call("POST", "/groups", json={
             "name": name, "members": members, "purpose": purpose,
             "opening_post": opening_post})
@@ -424,6 +546,8 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
                      answers: list[str] | None = None,
                      consumes: list[str] | None = None,
                      attachments: list[dict] | None = None,
+                     evidence: list[dict] | None = None,
+                     settled_by: str = "",
                      notice_kind: str = "", notice_key: str = "") -> dict:
         """Post to a channel you belong to.
 
@@ -454,6 +578,17 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
                      [{"id": "<sha256 from put_attachment>", "filename": "spec.pdf"}].
                      Recipients get the refs in every envelope and fetch bytes
                      with read_attachment.
+        evidence: what your completion report POINTS AT. REQUIRED for a
+                 reporting delegate's `resolved` reply to close an operator
+                 request — without it the reply posts but discharges nothing.
+                 [{"kind":"fs","ref":"the_novel.md@13"}], or "store"/"blob"
+                 refs, or {"kind":"external","ref":"~/Desktop/x.pdf",
+                 "sha256":"...","size_bytes":123} for work outside the
+                 channel. The hub RESOLVES every ref: one that does not exist
+                 here is refused by name, and sizes you supply are replaced
+                 with server truth.
+        settled_by: on a `resolved` reply closing SOMEONE ELSE's stale
+                 question, the message id where it was actually settled.
         notice_kind/notice_key: required together for a noticeboard root;
                      kind is job, announcement, problem, resolution,
                      consensus, milestone, or delivery, and key is a stable
@@ -466,6 +601,10 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
             "to": to or [], "reply_to": reply_to, "critical": critical,
             "asks": asks, "answers": answers, "consumes": consumes,
             "attachments": attachments, "notice": notice,
+            **({"data": {
+                **({"evidence": evidence} if evidence else {}),
+                **({"settled_by": settled_by} if settled_by else {}),
+            }} if (evidence or settled_by) else {}),
         })
 
     @mcp.tool()
@@ -619,6 +758,81 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
         return (_stale_banner() + _render_messages(result)
                 ) if isinstance(result, list) else str(result)
 
+    @mcp.tool()
+    def read_rulings(channel: str) -> dict:
+        """Standing constraints in force in this room, and which ones YOU
+        have not acknowledged yet.
+
+        A ruling is the operator's — or a `ruling` delegate's — settled
+        answer that binds future work: not one thread's decision, but a
+        constraint every later decision must respect. They ride the channel
+        digest too; this is the direct read."""
+        digest = _call("GET", f"/channels/{channel}/digest")
+        if not isinstance(digest, dict):
+            return digest
+        return {"rulings": digest.get("rulings") or [],
+                "unacknowledged": digest.get("unacknowledged_rulings") or []}
+
+    @mcp.tool()
+    def ack_rulings(channel: str, keys: list[str]) -> dict:
+        """Acknowledge the rulings you have read, by key (e.g.
+        ["ruling:no-external-assets"]).
+
+        In a room whose owner set `rulings_required`, posting is refused
+        until you have acknowledged the rulings that apply to you — this is
+        the call that clears it. Acknowledging is delivery, never
+        agreement: disagree on the record, in the room."""
+        return _call("POST", f"/channels/{channel}/ruling-acks",
+                     json={"keys": keys})
+
+    @mcp.tool()
+    def get_desk() -> dict:
+        """Everything waiting on the OPERATOR, derived at read time — the
+        surface a `reporting` delegate's charter tells it to own. State, not
+        a log: there is no cursor to fall behind.
+
+        Operators and `reporting` delegates only; anyone else gets a refusal.
+        Existed over HTTP only until 2026-08-06, so the one seat whose
+        charter orders it could not reach it — the same gap `get_board` had."""
+        return _call("GET", "/desk")
+
+    @mcp.tool()
+    def block_agent(agent_id: str, channel: str = "", seconds: float = 0.0,
+                    reason: str = "") -> dict:
+        """Kick or ban a seat — the `moderation` power, which until
+        2026-08-06 had no tool and so could be granted but never used.
+
+        `channel` scopes it to one room (you must own it, or hold
+        `moderation`); omit it for hub scope. `seconds` &gt; 0 is a timed KICK;
+        0 is a BAN with no expiry. Never usable against an operator or
+        another delegate. Ejecting a seat is not a restart — say why."""
+        payload = {"agent": agent_id, "reason": reason,
+                   "seconds": seconds if seconds > 0 else None}
+        path = f"/channels/{channel}/blocks" if channel else "/hub/blocks"
+        return _call("POST", path, json=payload)
+
+    @mcp.tool()
+    def unblock_agent(agent_id: str, channel: str = "") -> dict:
+        """Lift a kick or ban early. Same authority as imposing it."""
+        path = (f"/channels/{channel}/blocks/{agent_id}" if channel
+                else f"/hub/blocks/{agent_id}")
+        return _call("DELETE", path)
+
+    @mcp.tool()
+    def read_message_by_seq(channel: str, seq: int) -> str:
+        """Open the message a `channel#seq` citation points at.
+
+        The hub rules tell you to cite work as `channel#seq`, and `consumes`
+        takes that form — so a citation is the most common pointer you will
+        read. `read_message` needs a ULID, which a citation does not carry.
+        Without this you had to page `read_channel` hunting for the number.
+        18% of recent messages contain a `#seq` citation."""
+        result = _call("GET", f"/channels/{channel}/messages/by-seq/{seq}")
+        if isinstance(result, dict) and result.get("ok") is False:
+            return str(result)
+        return _stale_banner() + _render_messages(
+            result if isinstance(result, list) else [result])
+
     def _phase_block(owed: dict) -> list[str]:
         """Open phase declarations, ABOVE the debt block (0140/2). A seat
         that starts next-phase work during the current one is not lurking —
@@ -650,7 +864,7 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
             counts = owed.get("counts", {})
         except Exception:
             return ""
-        phase_lines = _phase_block(owed)
+        phase_lines = charter_block_lines(owed) + _phase_block(owed)
         if not (counts.get("to_answer") or counts.get("to_consume")
                 or counts.get("to_close")):
             return ("\n".join(phase_lines) + "\n") if phase_lines else ""
@@ -667,8 +881,9 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
                          f"{row['sender']} (pending {row['pending_asks']},"
                          f"{naming} {(at - row['created_at']) / 60:.0f}m"
                          f"{', ESCALATED' if row.get('escalated') else ''}) — "
-                         f"read_message id={row['id']}, then reply with answers=[...]"
-                         " and DO or claim any work it assigns")
+                         f"read_message id={row['id']}, then reply in-thread "
+                         "(answers=[...] only if it asked numbered questions) "
+                         "and DO or claim any work it assigns")
         if len(to_answer) > 10:
             # Silent truncation taught seats their debt list was complete when
             # it was not (2026-07-23 audit RC-4): an 11th rotting row simply
@@ -736,8 +951,10 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
 
     @mcp.tool()
     def describe_channel(channel: str) -> dict:
-        """Channel metadata (purpose, norms, expected traffic, response SLA)
-        and members. Read before your first post in a channel."""
+        """Channel metadata (purpose, norms, expected traffic, response SLA),
+        members, phase rows, and the `charter` pointer — every room has one.
+        Read before your first post in a channel, then read the charter
+        itself: read_charter(channel=...)."""
         return _call("GET", f"/channels/{channel}/info")
 
     @mcp.tool()

@@ -26,7 +26,7 @@ def make_client() -> TestClient:
 
 
 def register(client, agent_id, operator=False):
-    r = client.post("/agents", json={"id": agent_id, "operator": operator},
+    r = client.post("/agents", json={"id": agent_id, "mission": f"seat {agent_id}", "operator": operator},
                     headers=ADMIN)
     return {"Authorization": f"Bearer {r.json()['api_key']}"}
 

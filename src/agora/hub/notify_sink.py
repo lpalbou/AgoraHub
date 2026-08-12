@@ -37,6 +37,11 @@ def notify_line(envelope: Envelope) -> str:
     """One compact JSON line per message — the same shape `agora watch` emits,
     so existing tailers keep working unchanged. `kind` lets a tailer filter
     fs/system audit traffic without parsing titles."""
+    peer_unassigned = (
+        envelope.status.value in ("open", "blocked")
+        and not envelope.addressed
+        and not envelope.from_operator
+    )
     flags = ",".join(f for f, on in [
         ("critical", envelope.critical), ("escalated", envelope.escalated),
         ("to-me", envelope.to_me), ("reply-to-me", envelope.reply_to_me),
@@ -51,6 +56,11 @@ def notify_line(envelope: Envelope) -> str:
         # `addressed` narrowing to it — the operator naming 4 seats in prose
         # deafened the other 19 to their own operator (live, 2026-07-29).
         ("from-operator", envelope.from_operator),
+        # unassigned: a PEER open/blocked that names nobody. It stays visible
+        # at `check_inbox`, but important-only listeners must not buy a turn
+        # on work that currently has no owner. Older listeners ignore the
+        # flag and degrade toward noise, never deafness.
+        ("unassigned", peer_unassigned),
         ("retracted", envelope.retracted),
         (envelope.status.value, envelope.status.value in ("open", "blocked")),
     ] if on)

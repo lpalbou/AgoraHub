@@ -35,6 +35,12 @@ INLINE_BODY_BYTES = 1200       # below this, envelope-only delivery costs more t
 ADDRESSED_INLINE_BYTES = 4096  # replies/messages addressed to you inline up to this size
 
 MAX_ABOUT_CHARS = 500          # self-descriptions are read by every joiner: same hygiene as titles
+#: A seat's standing MISSION is a different object from a self-description:
+#: it is the operator's charge, closer to a system prompt than to a bio, and
+#: it carries process ("never decide alone", "prove it before you claim it").
+#: Measured 2026-08-06: a 3-rule delegate charge was silently cut mid-word at
+#: 500 — the seat received one and a half rules and no one was told.
+MAX_MISSION_CHARS = 4000
 DM_PREFIX = "dm:"              # reserved channel-name prefix for direct 1:1 channels
 
 # Per-channel virtual filesystem (the shared, network-accessible "book" that
@@ -71,9 +77,71 @@ NOTICE_KINDS = (
 _TEXT_CLEAN = re.compile(r"[\x00-\x1f\x7f]+")
 
 
-def sanitize_text(text: str, cap: int) -> str:
-    """Sender-authored text that others are guaranteed to read: plain, single line, capped."""
-    return _TEXT_CLEAN.sub(" ", text).strip()[:cap]
+class TextTooLong(ValueError):
+    """A write was refused because the text exceeds its cap.
+
+    THE RULE (operator, standing): no truncation, no silent fallback, no
+    silent limit stopping or disrupting a process of any kind. A cap may
+    REFUSE a write. It may never quietly deliver less than was written and
+    let the author believe it arrived.
+
+    Why this is an exception and not a slice: on 2026-08-06 an operator set
+    a three-rule mission on a delegate seat. The 500-char `about` cap cut it
+    mid-word at rule 2. The write returned 200. The seat ran for an hour
+    holding one and a half rules, and the only way anyone found out was
+    reading the stored value by hand."""
+
+    #: Mirrors HubError's shape so every boundary — HTTP, CLI, in-process —
+    #: reports the same 400 without each one re-deriving it.
+    status_code = 400
+
+    def __init__(self, field: str, length: int, cap: int) -> None:
+        self.field, self.length, self.cap = field, length, cap
+        super().__init__(
+            f"{field} is {length} characters; the cap is {cap}. Shorten it — "
+            f"the hub will not choose which {length - cap} characters to drop.")
+        self.detail = str(self)
+
+
+def sanitize_text(text: str, cap: int, *, field: str = "text") -> str:
+    """Sender-authored text that others are guaranteed to read: plain, single
+    line, capped. REFUSES over-cap input (TextTooLong); never trims it.
+
+    For deliberately shortening text for DISPLAY, use `elide` — it is a
+    different function on purpose, and it leaves a visible mark."""
+    cleaned = _TEXT_CLEAN.sub(" ", text).strip()
+    if len(cleaned) > cap:
+        raise TextTooLong(field, len(cleaned), cap)
+    return cleaned
+
+
+def sanitize_block(text: str, cap: int, *, field: str = "text") -> str:
+    """Same contract as sanitize_text, but LINE BREAKS SURVIVE.
+
+    For operator-authored text whose structure is part of its meaning — a
+    seat's mission, with numbered rules the model is meant to be able to
+    count. Control characters still go; blank runs collapse to one."""
+    lines = [_TEXT_CLEAN.sub(" ", ln).rstrip() for ln in text.split("\n")]
+    out: list[str] = []
+    for ln in lines:
+        if ln.strip() or (out and out[-1].strip()):
+            out.append(ln)
+    cleaned = "\n".join(out).strip()
+    if len(cleaned) > cap:
+        raise TextTooLong(field, len(cleaned), cap)
+    return cleaned
+
+
+def elide(text: str, limit: int, *, marker: str = "…") -> str:
+    """Shorten for DISPLAY, visibly.
+
+    The ONLY sanctioned way to shorten text in this codebase, and it is
+    named so that a reviewer can see it at the call site. Legitimate uses
+    are a preview line, a table cell, or quoting an offending value back
+    inside an error message — cases where the full record is still reachable
+    and nothing was stored short. Never use it on a write path."""
+    text = str(text)
+    return text if len(text) <= limit else text[:max(0, limit - len(marker))] + marker
 
 
 # Work-item id grammar (0093, S0 ruling): `<package>-<NNNN>` — URL-safe
@@ -245,12 +313,11 @@ class Envelope(BaseModel):
     - authority:   critical — operator-only, budgeted (truly unforgeable).
     - reply_to_me: hub-computed from a validated same-channel parent
                    (unforgeable: reply_to is checked at post time).
-    - to_me:       sender-declared addressing, but CONSTRAINED — `to` may only
-                   name members of the channel (validated at post time). It is
-                   a delivery hint, not an unforgeable importance signal; a
-                   sender can address you, but cannot thereby bypass budgets or
-                   obligation semantics. Treat `to_me` as "the sender says this
-                   is for you", not as proof of importance.
+    - to_me:       hub-computed "this is yours now" — sender `to`, pending
+                   ask-level `to`, plus hub-routed delegate duty for operator
+                   requests. It is still a delivery hint, not free priority:
+                   a sender can address you, but cannot bypass budgets or
+                   obligation semantics.
     """
 
     id: str
@@ -270,11 +337,10 @@ class Envelope(BaseModel):
     #                                      seats' debt — the room's wake rule narrows
     #                                      to them (agora-0135: 62% of commons wakes
     #                                      were addressed opens waking everyone)
-    from_operator: bool = False          # the sender is a HUMAN operator seat. Their
-    #                                      room-wide messages are never narrowed by
-    #                                      `addressed`: naming a few seats in prose
-    #                                      ("@a @b what's your status?") must not
-    #                                      deafen the rest of the room to the human.
+    from_operator: bool = False          # the sender is a HUMAN operator seat.
+    #                                      Their room-wide asks still carry special
+    #                                      authority, but named asks narrow to the
+    #                                      named seats plus any hub-routed delegate.
     reply_to_me: bool = False
     title: str = ""
     body_bytes: int = 0                  # honest size signal (hard to fake upward)
@@ -432,6 +498,39 @@ class OwedCounts(BaseModel):
     to_close: int = 0
 
 
+class CharterDebt(BaseModel):
+    """One charter this seat has NOT read at its current version (0146/2).
+
+    The whoami pointer already says this — but whoami is a session-start
+    call, so a seat that read v1 and then ran for six hours never learned v2
+    existed, and the hub-scope change is announced only in `hub-alerts`
+    (operators + reporting delegates). Carrying it on `/owed` puts it on the
+    ONE call every reception pass makes, exactly like `phases`.
+
+    Self-clearing by construction: the read records the receipt, so the row
+    disappears on the next pass and nobody is nagged twice. Never a debt that
+    escalates, never part of the wake signature (it must not manufacture a
+    wake), never a block — attention, not a gate."""
+
+    #: "hub" (the standing role model) or a channel name.
+    scope: str
+    version: int = 0
+    #: The version this seat last read; None = never read this charter.
+    your_receipt: int | None = None
+    #: The exact call that clears it — served, not guessed by the client.
+    read_with: str = "read_charter()"
+    #: True when the room sets `norms_required`: posting is already refused
+    #: until the read. Advisory rows say so; nothing here does the refusing.
+    gated: bool = False
+    #: Why this row exists. "version" (the default sense: a charter you have
+    #: never read at its current version) or "view" — 0147: your receipt is
+    #: current, but your SEAT grew since you read it (you became an owner,
+    #: or were granted a delegation), so the scoped text you were served
+    #: never contained the section that now applies to you. Same self-
+    #: clearing read, same non-blocking posture.
+    reason: str = "version"
+
+
 class CloseRow(BaseModel):
     """Asker-side hygiene (agora-0116): your own open/blocked thread is fully
     discharged (every ask answered or binary reply received) but not
@@ -461,6 +560,10 @@ class OwedReport(BaseModel):
     #: debt — a standing constraint on which work is legitimate right now,
     #: carried here because /owed is the one call every reception pass makes.
     phases: list[PhaseRow] = Field(default_factory=list)
+    #: Charters this seat is BEHIND on (0146/2) — hub scope first, then its
+    #: rooms. Same reasoning as `phases`: not a debt, a standing constraint
+    #: that only works if it is impossible to miss on the reception pass.
+    charters: list[CharterDebt] = Field(default_factory=list)
     counts: OwedCounts = Field(default_factory=OwedCounts)
     computed_at: float = 0.0
 
@@ -595,11 +698,20 @@ class WhoamiReport(BaseModel):
     id: str
     name: str = ""
     about: str = ""
+    #: The OPERATOR's standing charge for this seat: what it is FOR. Rides
+    #: whoami because that is the one call a fresh harness session makes
+    #: before it acts, and a seat that does not know its job improvises one
+    #: from the room. Read-only to the seat — see Database.set_mission.
+    mission: str = ""
     operator: bool = False
     created_at: float = 0.0
     version: str
     protocol: str
     hub_rules: dict[str, Any] = Field(default_factory=dict)
+    #: 0146 — a POINTER to the hub charter (version + this seat's receipt),
+    #: never its text. Pre-0146 hubs omit it; a client must treat an absent
+    #: or empty dict as "this hub has no charter surface", not as v0.
+    hub_charter: dict[str, Any] = Field(default_factory=dict)
     hub_state: dict[str, Any] = Field(default_factory=dict)
     delegations: list[dict[str, Any]] = Field(default_factory=list)
 
@@ -616,6 +728,16 @@ class Member(BaseModel):
     agent_id: str
     role: str = "member"  # "owner" | "member" (structural; DM channels are ownerless)
     about: str = ""       # the agent's self-description (global, shown in member lists)
+    #: The OPERATOR's standing charge for this seat — what perspective it
+    #: holds and what it is FOR. Read-only here, and read-only everywhere:
+    #: only the operator writes it. It rides the member list because the
+    #: delegate charter tells a delegate to "ask the seats holding the other
+    #: perspectives", and until 2026-08-06 there was no surface that could
+    #: resolve that phrase to a list. `about` could not serve: the seat
+    #: writes it, and one seat had already replaced "if you end a phase
+    #: having agreed with everyone, you did not do your job" with a tidy
+    #: summary of itself.
+    mission: str = ""
     joined_at: float = Field(default_factory=time.time)
 
 

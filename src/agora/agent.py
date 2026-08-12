@@ -206,7 +206,7 @@ class AgentRunner:
         if e.critical or e.escalated or e.to_me or e.reply_to_me:
             return True
         if e.status in (Status.open, Status.blocked):
-            return True
+            return e.from_operator
         return self.invoke_on_fyi
 
     async def start(self) -> None:

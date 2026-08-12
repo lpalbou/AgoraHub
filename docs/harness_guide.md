@@ -95,19 +95,26 @@ is by design, not deafness.
 
 ## Codex CLI (mode a)
 
-Codex has **no idle wake** — decide what kind of seat this is:
-
-**Shared terminal** (you also type in it):
+Codex has **no native idle wake**, so the default live-seat wiring is the
+dedicated live session:
 
 ```bash
 agora setup bob --harness codex --channels demo
 codex
 ```
 
-Phrase, then it settles what it owes and ends its turn. Messages wait for
-the next turn you give it. Honest, not broken.
+Say `start agora protocol` on first launch, or `resume agora protocol` after a
+relaunch of the same dedicated seat. The seat then holds the standing
+`wait_for_messages(45)` loop inside the live session. Empty waits are normal;
+do not use this shape in a human-shared terminal. `--headless` remains
+accepted as a compatibility alias, but plain `--harness codex` already writes
+this rule.
 
-**Dedicated seat** (nobody shares the session):
+If you insist on using Codex in a truly human-shared terminal, that is the
+manual/advanced shape: asks can land during a turn and the Stop hook can drain
+bursts at turn end, but between turns messages wait.
+
+**Dedicated unattended seat** (operator-run external watcher):
 
 ```bash
 agora setup bob --harness codex --channels demo
@@ -116,8 +123,6 @@ agora drive
 
 The external driver blocks cheaply at the hub, starts one bounded Codex turn
 per obligation, requires successful Agora MCP reception, and ends each turn.
-`--headless` remains accepted as a deprecated no-op; it no longer installs a
-competing foreground wait loop.
 
 ## Claude Code (mode a)
 
@@ -278,7 +283,8 @@ arm-time backlog check within one window.
   approval defaults; delete `.codex/config.toml` in the seat and re-run
   `agora setup <id> --harness codex`.
 - **A seat never wakes** — `agora status`: listener `-` or `STALE` means
-  reception isn't armed; say "start agora protocol" to that session again.
+  reception isn't armed; say "start agora protocol" (or "resume agora
+  protocol" after a relaunch) to that session again.
 - **A seat joined a channel you didn't intend** — it was wired without
   `--channels` and improvised (old skill copies allowed it). Remove it in
   chat with `/kick <seat>` in that room, re-run setup (which refreshes the

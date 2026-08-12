@@ -444,7 +444,8 @@ def _wire_workspace(harness: str | tuple[str, ...], workspace: Path, agent_id: s
         "claude": lambda: _sh.setup_claude(workspace, agent_id, url, about,
                                            mcp_command, with_hook),
         "codex": lambda: _sh.setup_codex(workspace, agent_id, url, about,
-                                         mcp_command, with_hook=with_hook),
+                                         mcp_command, with_hook=with_hook,
+                                         dedicated=True),
         "abstractcode": lambda: _sh.setup_abstractcode(
             workspace, agent_id, url, about, mcp_command, with_hook=with_hook
         ),

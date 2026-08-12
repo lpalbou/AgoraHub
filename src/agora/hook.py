@@ -52,6 +52,8 @@ and an unreachable hub is reported on stderr, which both harnesses surface.
 
 from __future__ import annotations
 
+from .models import elide
+
 import json
 import os
 import sys
@@ -72,6 +74,8 @@ STOP_BLOCK_FLOOR = 60.0      # a block costs a WHOLE turn, so ration it...
 STOP_BLOCK_MAX_PER_SIG = 2   # ...and stop nagging about unchanged debt
 RESEND_AFTER = 300.0         # re-send unchanged text only after this long
 HTTP_TIMEOUT = 4.0           # PostToolUse sits on the hot loop
+START_PROTOCOL_PROMPT = "start agora protocol"
+RESUME_PROTOCOL_PROMPT = "resume agora protocol"
 
 #: Framing is load-bearing. Verified 2026-07-30: text injected as a bare
 #: third-party imperative is refused by the model as a prompt-injection attempt
@@ -130,7 +134,7 @@ def _load(agent_id: str) -> dict[str, Any]:
     except (OSError, ValueError):
         pass
     return {"v": 5, "events": {}, "sig": "", "sent_at": 0.0, "blocks": 0,
-            "pt_at": 0.0}
+            "pt_at": 0.0, "armed_session_id": "", "armed_at": 0.0}
 
 
 def _save(agent_id: str, led: dict[str, Any]) -> None:
@@ -149,6 +153,148 @@ def _num(value: Any) -> float:
     return out if out == out and out not in (float("inf"), float("-inf")) else 0.0
 
 
+def _text(value: Any) -> str:
+    return value if isinstance(value, str) else ""
+
+
+def _normalized_prompt(value: Any) -> str:
+    return " ".join(_text(value).strip().lower().split())
+
+
+def _is_protocol_boot_prompt(value: Any) -> bool:
+    """Accept the real kickoff phrases, including trailing context.
+
+    Dedicated live Codex seats are routinely re-launched and the operator often
+    says "resume agora protocol", sometimes with extra instructions in the same
+    prompt. Requiring an exact string match left the session looking wired but
+    unarmed, so the stop-hook keepalive never engaged.
+    """
+    text = _normalized_prompt(value)
+    for phrase in (START_PROTOCOL_PROMPT, RESUME_PROTOCOL_PROMPT):
+        if not text.startswith(phrase):
+            continue
+        suffix = text[len(phrase):]
+        if not suffix or not suffix[0].isalnum():
+            return True
+    return False
+
+
+def _arm_dedicated_codex_session(
+    event: str,
+    payload: dict[str, Any],
+    led: dict[str, Any],
+    *,
+    cursor: bool,
+    now: float,
+) -> None:
+    """Arm exactly one Codex session after the explicit kickoff prompt."""
+    if cursor or event != "UserPromptSubmit":
+        return
+    if not _is_protocol_boot_prompt(payload.get("prompt")):
+        return
+    session_id = _text(payload.get("session_id")).strip()
+    if not session_id:
+        return
+    led["armed_session_id"] = session_id
+    led["armed_at"] = now
+
+
+def _armed_dedicated_codex_session(
+    payload: dict[str, Any],
+    led: dict[str, Any],
+    *,
+    cursor: bool,
+) -> bool:
+    if cursor:
+        return False
+    session_id = _text(payload.get("session_id")).strip()
+    armed = _text(led.get("armed_session_id")).strip()
+    return bool(session_id and armed and session_id == armed)
+
+
+def _continuable_claims(url: str, agent_id: str) -> list[dict[str, Any]]:
+    """Owned live claims from /board, capped for the keepalive hint."""
+    try:
+        board = _get(url, agent_id, "/board")
+    except Exception:
+        return []
+    if not isinstance(board, dict):
+        return []
+    rows: list[dict[str, Any]] = []
+    for row in board.get("in_progress") or []:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("owner", "")) != agent_id:
+            continue
+        rows.append({
+            "channel": str(row.get("channel", "")),
+            "task": str(row.get("task", "")),
+            "updated_at": _num(row.get("updated_at")),
+        })
+    rows.sort(key=lambda r: r.get("updated_at", 0.0), reverse=True)
+    return rows[:3]
+
+
+def _continuable_claim_hint(claims: list[dict[str, Any]]) -> str:
+    if not claims:
+        return ""
+    from .listen import _safe_channel
+
+    lines = ["You still own continuable claim work:"]
+    for row in claims:
+        chan = _safe_channel(row.get("channel", "?"))
+        task = _safe_text(row.get("task", "?"), 120)
+        lines.append(f"- {chan} / claim:{task}")
+    lines.append(
+        "If this session is meant to keep delivery moving, do one bounded "
+        "slice on that claim before you go back to waiting. If you want "
+        "unattended continuation, use `agora drive` instead of treating a "
+        "quiet inbox as completion."
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _dedicated_keepalive_text(agent_id: str, asks: list[dict],
+                              claims: list[dict[str, Any]]) -> str:
+    reminder = (
+        "This dedicated live Codex seat is armed for agora reception. "
+        "If nothing is owed and you hold no continuable claim work, call "
+        "`wait_for_messages(45)` again and keep the turn alive. Do not end "
+        "the turn because the wait came back empty."
+    )
+    if claims:
+        reminder = (
+            "This dedicated live Codex seat is armed for agora reception. "
+            "Stay reachable: after you settle what is owed, either take one "
+            "bounded slice on the continuable claim above or mark that claim "
+            "`parked`/`blocked`/`done`, then call `wait_for_messages(45)` "
+            "again and keep the turn alive. Do not end the turn because the "
+            "wait came back empty."
+        )
+    if asks:
+        return (PREFIX.format(seat=agent_id)
+                + render(asks, [], settle=True)
+                + ("\n\n" + _continuable_claim_hint(claims) if claims else "")
+                + "\n\n" + reminder)
+    return (PREFIX.format(seat=agent_id)
+            + "No owed ask is pending right now.\n"
+            + _continuable_claim_hint(claims)
+            + reminder)
+
+
+def _dedicated_keepalive_degraded_text(agent_id: str, exc: Exception) -> str:
+    problem = _safe_text(f"{type(exc).__name__}: {exc}", 220)
+    return (
+        PREFIX.format(seat=agent_id)
+        + "Hub reception is temporarily unavailable right now "
+        + f"({problem}).\n"
+        + "This dedicated live Codex seat must stay reachable anyway: do not "
+        + "end the turn because this hook could not poll `/owed` or `/inbox`. "
+        + "If tools are working, retry `check_inbox`; otherwise call "
+        + "`wait_for_messages(45)` again and keep the turn alive.\n"
+    )
+
+
 def _emit(event: str, text: str, *, cursor: bool = False) -> None:
     if cursor:
         print(json.dumps({"followup_message": text}))
@@ -159,7 +305,8 @@ def _emit(event: str, text: str, *, cursor: bool = False) -> None:
             "hookEventName": event, "additionalContext": text}}))
 
 
-def _get(url: str, agent_id: str, path: str) -> Any:
+def _get(url: str, agent_id: str, path: str,
+         *, headers: dict[str, str] | None = None) -> Any:
     import urllib.request
     key = _config.get_cached_key(url, agent_id)
     if not key:
@@ -167,27 +314,37 @@ def _get(url: str, agent_id: str, path: str) -> Any:
             f"no cached key for '{agent_id}' at {url} — run "
             f"`agora seed-key {agent_id} --url {url} --key <agora_...>`")
     from . import __version__
+    req_headers = {"Authorization": f"Bearer {key}",
+                   "X-Agora-Client": __version__,
+                   "X-Agora-Hook": "1"}
+    if headers:
+        req_headers.update(headers)
     req = urllib.request.Request(
         f"{url.rstrip('/')}{path}",
-        headers={"Authorization": f"Bearer {key}",
-                 "X-Agora-Client": __version__,
-                 "X-Agora-Hook": "1"})
+        headers=req_headers)
     with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
         return json.load(resp)
 
 
-def reception(url: str, agent_id: str) -> tuple[list[dict], list[dict], str]:
+def reception(url: str, agent_id: str,
+              *, mark_reception: bool = False) -> tuple[list[dict],
+                                                        list[dict], str]:
     """What this seat owes, split into (asks, fyi, signature).
 
     `asks` are the things a colleague or the human is BLOCKED on: debts from
     /owed, plus unread whose status is open/blocked or which the hub itself
     marked critical/escalated/reply-to-me. `fyi` is everything else unread.
 
-    The narrowing that matters: an addressed open/blocked that does NOT name
-    this seat is the named seats' debt, so it is fyi here — except from an
-    operator, whose room-wide word is never narrowed away from anyone.
+    The narrowing that matters: a PEER open/blocked that does NOT name this
+    seat is not this seat's ask, so it is fyi here. Current hubs also mark
+    peer open/blocked that name nobody as `unassigned`: visible, not wakeful.
+
+    OPERATOR open/blocked is different: it is a contribution call to the
+    room, so every seat should evaluate whether it should participate. Named
+    seats already owe it; bystanders still need to see and judge it.
     """
-    owed = _get(url, agent_id, "/owed")
+    owed_headers = {"X-Agora-Reception": "arm"} if mark_reception else None
+    owed = _get(url, agent_id, "/owed", headers=owed_headers)
     owed = owed if isinstance(owed, dict) else {}
     unread = _get(url, agent_id, "/inbox")
     unread = unread if isinstance(unread, list) else []
@@ -208,9 +365,10 @@ def reception(url: str, agent_id: str) -> tuple[list[dict], list[dict], str]:
                    or env.get("reply_to_me"))
         mine = bool(env.get("to_me"))
         demand = status in ("open", "blocked")
-        # An addressed demand naming somebody else is not this seat's ask.
-        if (demand and env.get("addressed") and not mine and not hot
-                and not env.get("from_operator")):
+        # A PEER demand that is not ours is fyi unless /owed says otherwise.
+        # Operator demand stays in asks for the whole room: every seat should
+        # evaluate whether it should contribute.
+        if demand and not mine and not hot and not env.get("from_operator"):
             demand = False
         (asks if (owned or hot or mine or demand) else fyi).append(env)
 
@@ -235,7 +393,7 @@ def _safe_text(value: str, limit: int) -> str:
                    for ch in str(value))
     text = text.replace("⟦", "[").replace("⟧", "]").replace("```", "'''")
     text = " ".join(text.split())            # collapse runs of whitespace
-    return text[:limit]
+    return elide(text, limit)
 
 
 def render(asks: list[dict], fyi: list[dict], *, settle: bool = False) -> str:
@@ -302,10 +460,13 @@ def run(event: str, agent_id: str, url: str, *, cursor: bool = False) -> int:
     # that ambiguity is what let a completely inert hook look plausible for
     # days. `agora status` reads this and says NEVER FIRED when it is absent.
     led.setdefault("events", {})[event] = now
+    _arm_dedicated_codex_session(event, payload, led, cursor=cursor, now=now)
     _save(agent_id, led)
+    armed_dedicated_codex = _armed_dedicated_codex_session(
+        payload, led, cursor=cursor)
 
     # A turn this hook itself started must not chain (Claude sets this).
-    if payload.get("stop_hook_active"):
+    if payload.get("stop_hook_active") and not armed_dedicated_codex:
         return 0
     # Cursor-only guards; absent on codex/claude payloads. An aborted or
     # already-chained turn must not breed a follow-up.
@@ -321,18 +482,31 @@ def run(event: str, agent_id: str, url: str, *, cursor: bool = False) -> int:
         return 0
 
     try:
-        asks, fyi, sig = reception(url, agent_id)
+        asks, fyi, sig = reception(
+            url, agent_id, mark_reception=armed_dedicated_codex)
     except Exception as exc:                       # noqa: BLE001 - report all
         # LOUD, never silent: both harnesses surface hook stderr, and the turn
         # still completes normally.
         print(f"agora hook {event}: reception unavailable: {exc}",
               file=sys.stderr)
+        if event == "Stop" and armed_dedicated_codex:
+            led["sent_at"] = now
+            _save(agent_id, led)
+            _emit(event, _dedicated_keepalive_degraded_text(agent_id, exc),
+                  cursor=cursor)
         return 0
 
     if not asks:
         led["sig"], led["blocks"] = "", 0
 
     if event == "Stop":
+        if armed_dedicated_codex:
+            claims = _continuable_claims(url, agent_id)
+            led["sent_at"] = now
+            _save(agent_id, led)
+            _emit(event, _dedicated_keepalive_text(agent_id, asks, claims),
+                  cursor=cursor)
+            return 0
         if not asks:
             _save(agent_id, led)
             return 0

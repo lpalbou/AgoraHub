@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
 from agora.hub.app import create_app
@@ -17,7 +18,7 @@ def make_client() -> TestClient:
 
 
 def register(client, agent_id, operator=False):
-    r = client.post("/agents", json={"id": agent_id, "operator": operator},
+    r = client.post("/agents", json={"id": agent_id, "mission": f"seat {agent_id}", "operator": operator},
                     headers=ADMIN)
     return {"Authorization": f"Bearer {r.json()['api_key']}"}
 
@@ -147,3 +148,82 @@ def test_rulings_required_gate_blocks_post_until_acked():
                      headers=flow,
                      json={"body": "hello", "status": "fyi"})
     assert ok.status_code == 200
+
+
+# -- reachability: a ruling nobody can read or ack is not a feature ----------
+#
+# 2026-08-06. `ruling:` rows had 0 uses in 30 days, and the first reading of
+# that was "delete it". That was wrong: the rows were never REACHABLE. A
+# driven seat may use only the Agora MCP tools, and there were none — no way
+# to read a ruling, no way to acknowledge one, so `rulings_required` could
+# only ever refuse a seat that had no means to clear the refusal. The
+# capability was fine; the wiring was missing.
+
+
+def test_a_seat_can_read_and_ack_rulings_through_mcp():
+    """The whole loop over the surface a driven seat actually has."""
+    import inspect
+
+    from agora.mcp import server
+
+    src = inspect.getsource(server.build_server)
+    assert "def read_rulings(" in src, "no way for a seat to READ a ruling"
+    assert "def ack_rulings(" in src, "no way for a seat to ACK a ruling"
+
+
+def test_rulings_required_is_clearable_by_the_seat_it_blocks():
+    """The refusal must name a way out the blocked seat can actually take.
+    Before the MCP tools existed this gate was a dead end: refuse, with no
+    reachable remedy."""
+    from agora.db import Database
+    from agora.hub.service import CHANNEL_META_KEY, HubError, HubService
+    from agora.models import PostMessage, Status
+
+    svc = HubService(Database(":memory:"), rate_per_minute=600.0)
+    op, _ = svc.register_agent("laurent", "L", operator=True, mission="seat laurent")
+    worker, _ = svc.register_agent("w", "W", mission="seat w")
+    svc.create_channel(op, "room", private=False)
+    svc.join_channel(worker, "room", None)
+
+    src = svc.post_message(op, "room", PostMessage(
+        body="Ruling: all art is generated in-repo.", status=Status.fyi))
+    svc.store_set(op, "room", "ruling:no-external-assets",
+                  {"text": "All art is generated in-repo; no downloads.",
+                   "scope": ["*"], "active": True,
+                   "source_message_id": src.id})
+    svc.store_set(op, "room", CHANNEL_META_KEY, {"rulings_required": True})
+
+    with pytest.raises(HubError) as e:
+        svc.post_message(worker, "room", PostMessage(body="hi", status=Status.fyi))
+    assert e.value.status_code == 409
+
+    # The seat can SEE what blocks it...
+    digest = svc.channel_digest(worker, "room")
+    assert [r["key"] for r in digest["rulings"]] == ["ruling:no-external-assets"]
+    assert [r["key"] for r in digest["unacknowledged_rulings"]] == [
+        "ruling:no-external-assets"]
+
+    # ...ack it, and proceed. That is the loop that did not exist.
+    svc.ack_rulings(worker, "room", ["ruling:no-external-assets"])
+    assert svc.post_message(worker, "room",
+                            PostMessage(body="hi", status=Status.fyi)).seq > 0
+
+
+def test_a_delegate_cannot_forge_a_ruling():
+    """A ruling binds future work, so authorship is operator-only. A
+    `ruling`-power delegate signs off WITHIN a scope; it does not mint
+    standing constraints."""
+    from agora.db import Database
+    from agora.hub.service import HubError, HubService
+
+    svc = HubService(Database(":memory:"), rate_per_minute=600.0)
+    op, _ = svc.register_agent("laurent", "L", operator=True, mission="seat laurent")
+    dele, _ = svc.register_agent("d", "D", mission="seat d")
+    svc.create_channel(op, "room", private=False)
+    svc.join_channel(dele, "room", None)
+    svc.set_delegation("d", ["ruling", "reporting"])
+
+    with pytest.raises(HubError) as e:
+        svc.store_set(dele, "room", "ruling:mine",
+                      {"text": "x", "active": True, "source_message_id": "x"})
+    assert e.value.status_code == 403

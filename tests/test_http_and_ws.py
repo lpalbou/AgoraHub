@@ -479,7 +479,10 @@ def test_presence_listing_scoped_to_shared_channels(client):
     global who-exists oracle."""
     alice = register(client, "alice")
     bob = register(client, "bob")
-    register(client, "stranger")  # shares nothing with alice
+    # Registration auto-joins #commons, so a fresh seat shares a room with
+    # everyone; the stranger must actually leave it to share nothing.
+    stranger = register(client, "stranger")
+    client.post("/channels/commons/leave", headers=stranger)
     client.post("/channels", json={"name": "design"}, headers=alice)
     invite = client.post("/channels/design/invites", json={},
                          headers=alice).json()["invite_token"]
@@ -578,9 +581,11 @@ def test_activity_stats_endpoint(client):
                 headers=alice)
     body = client.get("/stats/activity", headers=alice).json()
     assert len(body["per_minute"]) == 10 and len(body["per_bucket"]) == 6
-    assert body["totals"]["last_10m"]["total"] == 2   # post + room-opening row
+    # post + room-opening row + the seeded charter's fs audit row (0146)
+    # + the registration join announcement in #commons.
+    assert body["totals"]["last_10m"]["total"] == 4
     assert body["active_seats"] == ["alice", "hub"]
-    assert body["verdict"].startswith("active — 2 messages")
+    assert body["verdict"].startswith("active — 4 messages")
     # No room ever leaks through this surface.
     assert "design" not in str(body)
 

@@ -20,13 +20,32 @@ from agora.hub import search as sx
 
 # -- compiler -------------------------------------------------------------
 
-def test_compiler_drops_punctuation_and_caps_terms():
+def test_compiler_drops_punctuation_and_REFUSES_over_cap_queries():
+    """Punctuation-only tokens are dropped (they match every markdown
+    bullet). Over-cap terms and over-long queries are REFUSED.
+
+    NO SILENT LIMIT (operator, standing). Both caps used to apply as a
+    slice: a 300-char term searched its first 64 characters, and an 11-term
+    query searched the first 8. Both returned 200 with a confident, wrong
+    result set — and an unexpected result set is the one thing a searcher
+    blames on the corpus rather than on the query."""
     assert sx.compile_terms("delegate - UI") == ["delegate", "UI"]
-    assert sx.compile_terms("a " * 20)[:3] == ["a", "a", "a"]
-    assert len(sx.compile_terms("w1 w2 w3 w4 w5 w6 w7 w8 w9 w10")) == sx.MAX_TERMS
+    assert sx.compile_terms("w1 w2 w3 w4 w5 w6 w7 w8") == [
+        f"w{i}" for i in range(1, 9)]           # exactly MAX_TERMS is fine
+
     with pytest.raises(sx.SearchQueryError):
         sx.compile_terms("--- ::: ...")
-    with pytest.raises(sx.SearchQueryError):
+
+    with pytest.raises(sx.SearchQueryError, match="at most"):
+        sx.compile_terms("w1 w2 w3 w4 w5 w6 w7 w8 w9 w10")
+
+    # An over-long single term names itself and its length.
+    with pytest.raises(sx.SearchQueryError) as exc:
+        sx.compile_terms("y" * 100)
+    assert "100 characters" in str(exc.value)
+
+    # ...and the whole-query length gate still fires first for huge inputs.
+    with pytest.raises(sx.SearchQueryError, match="1..256"):
         sx.compile_terms("x" * 300)
 
 

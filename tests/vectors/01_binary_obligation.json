@@ -1,5 +1,5 @@
 {
-  "name": "binary open obligation: addressed seat owes until ANY reply of theirs; asker then owes consumption",
+  "name": "binary open obligation: a bare 'taking it' does not clear the addressee — a linked claim does; asker then owes consumption",
   "setup": [
     {"op": "register", "id": "alice"},
     {"op": "register", "id": "bob"},
@@ -21,6 +21,15 @@
 
     {"op": "post", "as": "bob", "channel": "room", "ref": "a",
      "body": "yes, taking it", "status": "reply", "reply_to": "$q.id"},
+
+    {"call": "owed", "as": "bob", "match": {
+      "to_answer": [{"channel": "room", "seq": "$q.seq"}],
+      "counts": {"to_answer": 1}}},
+
+    {"op": "store", "as": "bob", "channel": "room", "key": "claim:deploy",
+     "value": {"owner": "bob", "status": "in_progress",
+               "source_message_id": "$q.id",
+               "next_step": "run the deploy"}},
 
     {"call": "owed", "as": "bob", "match": {
       "to_answer": [], "counts": {"to_answer": 0}}},

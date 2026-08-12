@@ -28,10 +28,29 @@ from ..models import Presence
 
 _STALE_AFTER = 120.0    # no connection + no update for this long -> offline
 _ACTIVE_WINDOW = 600.0  # REST activity within this window -> "active"
-# Reception truth (0098): a seat's listener arms every ~250s (max-wait 240 +
-# sleep 5 + startup), so ~3.5 missed cycles with no arm = the loop is dead,
-# not merely slow. This is the line between "armed" and "DEAF".
-_RECEPTION_STALE = 900.0
+# Reception truth (0098): the line between "armed" and "DEAF". It must be
+# LONGER than the widest interval at which a healthy listener arms, or the
+# hub calls its own idle seats dead.
+#
+# THE THIRD CLOCK CONTRADICTION (live, 2026-08-03). 0098 set this to 900s
+# against a listener that armed "every ~250s (max-wait 240 + sleep 5)". The
+# adaptive idle backoff later raised that ceiling to `listen.ADAPT_CAP_DEFAULT`
+# = 1200s and this constant was never moved, so 900 < 1200: a perfectly
+# healthy idle seat is misreported stale for 300s of every 1200s cycle — 25%
+# of its life. Measured on the live 8-seat fleet minutes after every driver
+# printed `state=armed next=1200s`: `agora doctor` read "3/50 seats live",
+# at1-at5 and reviewer all "offline / reception stale 17m" while their
+# drivers were heartbeating, `fleet.collapsed: true` at live_fraction 0.08.
+# That is not a cosmetic misread — `_fleet_seat_live` and the DARK/DEAF
+# watchdogs are built on it, so the contradiction MANUFACTURES the alert
+# flood: a permanently "collapsed" fleet, and AGENT DARK for seats that are
+# listening. Same shape as the `_ACTIVE_WINDOW` < `_RECEPTION_STALE` bug this
+# module already fixed once; the invariant is now pinned by a test
+# (test_reception_stale_window_outlasts_the_listener_idle_ceiling) so the two
+# constants can never drift apart again.
+#
+# Two full missed arms at the widest cadence, plus slack for a slow turn.
+_RECEPTION_STALE = 2700.0
 
 
 class PresenceTracker:
@@ -110,8 +129,24 @@ class PresenceTracker:
         # No push connection, but recently seen doing authenticated work
         # (an MCP/REST-only tab): "active" — reachable at its next turn
         # boundary, not by push. Distinct from truly dark.
-        last_seen = self._last_seen.get(agent_id, 0.0)
-        if time.time() - last_seen <= _ACTIVE_WINDOW:
+        #
+        # RECEPTION COUNTS AS ACTIVITY (the 00:49 false DARK, 2026-08-03).
+        # `_ACTIVE_WINDOW` (600s) was shorter than `_RECEPTION_STALE` (900s),
+        # so between those two marks this method said "offline" while
+        # `reception()` said "armed" ABOUT THE SAME INSTANT — the two are
+        # written by one request (the /owed arm poll touches both clocks), so
+        # the contradiction was guaranteed, not racy. Any seat busy for more
+        # than ten minutes lands in that band: a driven seat inside one work
+        # chunk arms less often than every 600s by design. The dark watchdog
+        # believed this reading and told the operator a live, heartbeating
+        # seat was "offline — only the operator can start it", and
+        # `_escalation_rewake_suppressed` then muted that seat's re-rings for
+        # the whole invented episode. An arming listener IS reachability;
+        # that is what `armed` means.
+        last_seen = max(self._last_seen.get(agent_id, 0.0),
+                        self._last_reception.get(agent_id, 0.0))
+        if (time.time() - last_seen <= _ACTIVE_WINDOW
+                or self.reception(agent_id)[0] == "armed"):
             return Presence(agent_id=agent_id, state="active", updated_at=last_seen)
         if presence is None or time.time() - presence.updated_at > _STALE_AFTER:
             return Presence(agent_id=agent_id, state="offline", updated_at=0.0)

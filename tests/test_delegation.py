@@ -22,7 +22,7 @@ def make_client() -> TestClient:
 
 
 def register(client: TestClient, agent_id: str, operator: bool = False) -> dict[str, str]:
-    r = client.post("/agents", json={"id": agent_id, "operator": operator},
+    r = client.post("/agents", json={"id": agent_id, "mission": f"seat {agent_id}", "operator": operator},
                     headers=ADMIN)
     return {"Authorization": f"Bearer {r.json()['api_key']}"}
 
@@ -158,6 +158,20 @@ def test_grant_validation():
                       headers=agency).status_code == 403
 
 
+def test_room_scoped_grant_refuses_a_non_member():
+    client = make_client()
+    owner = register(client, "owner")
+    register(client, "lead")
+    make_channel(client, owner, "room")
+
+    r = client.put("/admin/delegation",
+                   json={"agent_id": "lead", "powers": ["reporting"],
+                         "scope": "room"},
+                   headers=ADMIN)
+    assert r.status_code == 400
+    assert "not a member of 'room'" in r.json()["detail"]
+
+
 def test_grants_are_announced_in_hub_alerts():
     client = make_client()
     register(client, "agency")
@@ -232,6 +246,34 @@ def test_delegation_grants_verifiability_not_power():
                 json={"body": "closing", "status": "resolved", "reply_to": q["id"]})
     digest = client.get("/channels/room/digest", headers=flow).json()
     assert digest["counts"]["open_questions"] == 1
+
+
+def test_supervise_without_channel_aggregates_the_delegates_rooms():
+    client = make_client()
+    boss = register(client, "boss", operator=True)
+    lead = register(client, "lead")
+    worker = register(client, "worker")
+    idle = register(client, "idle")
+    make_channel(client, boss, "alpha", lead, worker)
+    make_channel(client, boss, "beta", lead, idle)
+    grant(client, "lead", ["reporting"])
+
+    client.put("/channels/alpha/store/claim:stalled",
+               json={"value": {"owner": "worker", "status": "parked",
+                               "blocked_on": "seat", "needs_from": "lead",
+                               "needs": "review the capture path"}},
+               headers=worker)
+    client.post("/presence", headers=idle)
+
+    r = client.get("/supervise", headers=lead)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # Registration auto-joins #commons, so the delegate's aggregated rooms
+    # include it alongside the two working rooms.
+    assert set(body["rooms"]) == {"alpha", "beta", "commons"}
+    assert "beta/idle" in body["idle_but_live"]
+    assert any(b["channel"] == "alpha" and b["key"] == "claim:stalled"
+               for b in body["blocked"])
 
 
 def test_claim_owner_edge_semantics():

@@ -26,6 +26,8 @@ from . import config as _config
 DEFAULT_DEBOUNCE = 15.0
 DEFAULT_HEARTBEAT = 300.0
 _CHANNEL_CAP = 6                       # the wake line stays one short line, always
+_NOTICE_CAP = 3          # hub notices rendered per digest
+_NOTICE_CHARS = 400      # per-notice clamp (hub-authored, still bounded)
 
 # Adaptive reception (resource-efficient idle backoff): with --adaptive the
 # per-call --max-wait CEILING is chosen by the tool, not the agent, and
@@ -48,7 +50,8 @@ _DRIVER_UNOWNED_WAKE = 5                # internal: room-wide wake AND the hub
 #                                        a wake must carry work, or the seat
 #                                        manufactures a receipt to justify it).
 _IMPORTANT_FLAGS = {"to-me", "reply-to-me", "critical", "escalated"}
-_FLAG_ORDER = ("to-me", "reply-to-me", "open", "blocked", "critical", "escalated", "dm")
+_FLAG_ORDER = ("to-me", "reply-to-me", "open", "blocked", "unassigned",
+               "critical", "escalated", "dm")
 
 # The sentinel is a single-line, space/comma/'#'-delimited grammar the harness
 # monitors with a `^AGORA_WAKE` regex. A channel name is the one identifier in
@@ -206,19 +209,21 @@ def parse_line(raw: str) -> dict[str, Any] | None:
 
 def qualifies(event: dict[str, Any], agent_id: str, important_only: bool = False) -> bool:
     """Own messages never wake (hub filters; legacy files may not);
-    --important-only means OBLIGATIONS wake, fyi waits: to-me (message `to`
-    or a pending ask naming you — the hub folds both into the flag),
-    reply-to-me, critical, escalated, AND room-wide open/blocked.
+    --important-only means OBLIGATIONS wake, fyi waits: critical/escalated,
+    addressed replies, reply-to-me, and work the hub can tell is yours.
 
-    History, because this flipped twice: 0.10.x dropped bare open/blocked
-    (a nine-seat debrief showed broadcast asks in a busy channel waking
-    every seat). That narrowing was FALSIFIED in the operator's own test
-    (2026-07-14): a room-wide `/ask` woke NOBODY — dead air in the exact
-    surface every rule, doc, and skill promised would wake ("obligations,
-    not fyi chatter"). An ask that reaches no one is worse than a burst of
-    wakes the debounce already coalesces; the code now matches the taught
-    contract. Storm control stays where it belongs: debounce (one wake per
-    burst), per-ask `to` for precision, and fyi never waking anyone."""
+    Current hubs label PEER open/blocked that name nobody as `unassigned`.
+    Those lines stay visible on inbox surfaces, but important-only listeners
+    do not buy a turn on them: visibility is cheap, ownership is not.
+
+    OPERATOR open/blocked is different: it is the human asking the room for
+    work, so every seat in the channel must evaluate whether it should
+    contribute. Addressing still matters for who is already explicitly on the
+    hook, but it does not deafen the rest of the room to the operator.
+
+    Older notify lines had no `addressed`/`unassigned` metadata, so the
+    fallback stays noisy rather than deaf: a legacy bare open/blocked still
+    wakes room-wide."""
     tokens = {t for t in str(event.get("flags", "")).split(",") if t}
     # Retraction tombstones update live UIs but carry no words and no debt.
     # In particular, retracting a blocked storm must not replay that storm.
@@ -228,31 +233,39 @@ def qualifies(event: dict[str, Any], agent_id: str, important_only: bool = False
         return False
     if not important_only:
         return True
+    if str(event.get("status", "")) == "fyi":
+        return bool(tokens & {"critical", "escalated"})
     if str(event.get("status", "")) in ("open", "blocked"):
-        # Narrowed wake rule (0135, measured: 62% of commons wakes were
-        # ADDRESSED opens waking the whole room): an open/blocked that
-        # names someone is the NAMED seats' debt — it wakes them (to-me)
-        # and nobody else. An addresseeless open stays room-wide (the
-        # 2026-07-14 falsification: a broadcast ask that woke nobody was
-        # dead air). Notify lines without the `addressed` flag (older
-        # hubs) keep waking room-wide — status quo, never deafness.
-        if ("addressed" in tokens and "to-me" not in tokens
-                and "from-operator" not in tokens):
-            # from-operator is exempt: a human addressing SOME seats by name
-            # is still talking to the room. On 2026-07-29 the operator asked
-            # "how come only @agora answer? @runtime, @gateway, @memory,
-            # what's your status?" — the hub folded those 4 names into `to`,
-            # this narrowing fired, and 19 of 23 seats never woke. The
-            # narrowing exists for agent-to-agent chatter, which is what the
-            # 62%-of-commons-wakes measurement was made of.
+        if "from-operator" in tokens:
+            return True
+        # Narrowed wake rule: if the hub says this line names someone and it
+        # is not you, it is fyi here. If the hub says it is `unassigned`,
+        # keep it visible but do not wake on it. Legacy lines missing both
+        # flags keep the old room-wide behavior: noise is safer than deafness.
+        if "unassigned" in tokens and "to-me" not in tokens:
+            return bool(tokens & _IMPORTANT_FLAGS)
+        if "addressed" in tokens and "to-me" not in tokens:
             return bool(tokens & _IMPORTANT_FLAGS)
         return True
     return bool(tokens & _IMPORTANT_FLAGS)
 
 
+def _is_hub_notice(event: dict[str, Any]) -> bool:
+    """An ephemeral hub teaching notice (`_deliver_doorbell`): id `notice:…`,
+    sender `hub`, nothing stored. It carries no debt and must never wake a
+    seat by itself — but it must be READABLE when the seat wakes anyway."""
+    return (str(event.get("sender", "")) == "hub"
+            and str(event.get("id", "")).startswith("notice:"))
+
+
 def wake_line(events: list[dict[str, Any]], agent_id: str, *, preview: bool = False) -> str:
     """ONE sentinel per batch, identifiers only; peer-authored titles appear
-    only with --preview, neutralized and capped."""
+    only with --preview, neutralized and capped.
+
+    Hub NOTICES ride the batch so they can be READ, but they are not mail:
+    counting them inflated `n=` and put a phantom channel in `channels=`,
+    so the sentinel and the digest disagreed about what had traffic."""
+    events = [ev for ev in events if not _is_hub_notice(ev)]
     per_channel: dict[str, int] = {}
     flags: set[str] = set()
     for ev in events:
@@ -286,9 +299,12 @@ def wake_line(events: list[dict[str, Any]], agent_id: str, *, preview: bool = Fa
     if preview:
         title = next((str(ev.get("title") or "") for ev in events if ev.get("title")), "")
         if title:
-            from .models import sanitize_text
+            from .models import elide, sanitize_text
             from .render import _neutralize
-            clean = sanitize_text(_neutralize(title), 80).replace('"', "'")
+            # DISPLAY: a wake line is a pointer, and the full title is one
+            # read_message away. Shortened VISIBLY (elide leaves a marker) —
+            # never with the silent slice a stored field would have used.
+            clean = elide(sanitize_text(_neutralize(title), 4096), 80).replace('"', "'")
             parts.append(f'preview="{clean}"')
     return " ".join(parts)
 
@@ -385,6 +401,32 @@ def _sharpest_debt_digest_clause(owed: dict[str, Any]) -> str | None:
         if best is None or rank > best[0]:
             best = (rank, clause)
     return f"Sharpest debt: {best[1]}. " if best else None
+
+
+def _charter_digest_clause(owed_raw: dict[str, Any] | None) -> str:
+    """One clause naming the charters this seat is behind on (0146/2).
+
+    Digest text only — this never enters `wake_line` and never enters the
+    owed SIGNATURE, so a charter publication can neither ring a doorbell nor
+    re-ring one: it is only ever read on a turn that was already happening.
+    Scope names are clamped like channel names (the hub validates them, but
+    this string is shown to a model verbatim)."""
+    rows = [r for r in (owed_raw or {}).get("charters") or []
+            if isinstance(r, dict)]
+    if not rows:
+        return ""
+    named = ", ".join(f"{_safe_channel(str(r.get('scope', '?')))} v{r.get('version')}"
+                      for r in rows[:3])
+    more = f" (+{len(rows) - 3} more)" if len(rows) > 3 else ""
+    # 0147: a row can also mean "your seat grew, your scoped view is stale".
+    # "not read" would be false for those, and a false clause is a clause a
+    # seat learns to skip — so the lead states the weaker, always-true fact.
+    lead = ("your charter view is out of date for"
+            if any(r.get("reason") == "view" for r in rows[:3])
+            else "you have not read")
+    return (f" CHARTER CHANGED — {lead} {named}{more}: "
+            "check_inbox names the exact read_charter() call; do it once "
+            "this turn.")
 
 
 def _owed_wake_suffix(counts: tuple[int, int],
@@ -584,6 +626,8 @@ def once_digest(events: list[dict[str, Any]],
     so a crafted name must not smuggle newlines or instructions into it).
     The verb order is deliberate (anti-lurk): DO comes before reply, and ack
     is named last as what it is — a seen-marker that discharges nothing."""
+    notices = [ev for ev in events if _is_hub_notice(ev)]
+    events = [ev for ev in events if not _is_hub_notice(ev)]
     chans = sorted({_safe_channel(str(ev["channel"])) for ev in events})
     shown = ", ".join(chans[:_CHANNEL_CAP])
     if len(chans) > _CHANNEL_CAP:
@@ -595,17 +639,69 @@ def once_digest(events: list[dict[str, Any]],
             "each: DO or claim what is yours to do; read and use answers to "
             "your own asks; reply where a reply is owed; then ack. Ack means "
             "seen, not done.")
+    text += _charter_digest_clause(owed_raw)
+    operator_room_task = any(
+        str(ev.get("status", "")) in ("open", "blocked")
+        and (bool(ev.get("from_operator"))
+             or "from-operator" in str(ev.get("flags", "")))
+        for ev in events
+    )
     if owed and (owed[0] or owed[1]):
         text += (f" You currently owe {owed[0]} answer(s) and {owed[1]} "
                  "unconsumed answer(s) to your own asks — check_inbox lists "
                  "them; settle those before new work.")
+    elif operator_room_task:
+        text += (" This wake includes a human open/blocked task in a shared "
+                 "room: evaluate it against what you own; if you can help, "
+                 "reply once with the ONE slice you own and how you will "
+                 "contribute; if not, say nothing. NEVER take the whole "
+                 "task: every task decomposes across seats, and a solo "
+                 "full-scope build is a failure even when it works — it "
+                 "gets routed back through decomposition and adversarial "
+                 "review instead of adopted. THE PLAN COMES FIRST AND IS "
+                 "MANDATORY: no building until the room's plan is agreed "
+                 "and recorded (a plan:<slug> store row). Your first "
+                 "contribution is your PLAN PART — your slice, your "
+                 "package's constraints, what you dispute — argued in the "
+                 "focused room. Then claim your slice and build it in the "
+                 "work chunk that follows. Expect a peer to adversarially "
+                 "review your slice before the delegate reports completion "
+                 "— deliver it checkable.")
     else:
         # Never let an empty wake read as "say something". A seat that woke
         # owing nothing and posted a receipt anyway is 50% of the traffic a
         # measured fleet produced in that state (0140 field test 2).
         text += (" Nothing is owed by you: if no ask names you, ack and end "
                  "your turn WITHOUT posting — silence is the correct answer.")
+    text += _hub_notice_clause(notices)
     return text
+
+
+def _hub_notice_clause(notices: list[dict[str, Any]]) -> str:
+    """Render hub teaching notices INTO the digest the model reads.
+
+    These are authored by the hub itself, not by a peer, so unlike titles
+    they need no neutralizing fence — but they are still clamped and capped.
+    Until 2026-08-04 they reached no driven seat at all: `_deliver_doorbell`
+    says so in its own docstring ("the body reaches no model on the driven
+    lane"), and nine teaching surfaces were dead as a result — among them
+    the ring that tells a reporting delegate an operator message names
+    nobody and the dispatch is its move."""
+    if not notices:
+        return ""
+    parts = []
+    for ev in notices[:_NOTICE_CAP]:
+        # notify_line emits `preview` (a 200-char clamp), never `body` —
+        # reading `body` made this whole clause a silent no-op.
+        body = " ".join(str(ev.get("preview") or ev.get("body") or "").split())
+        body = body[:_NOTICE_CHARS]
+        if body:
+            parts.append(body)
+    if not parts:
+        return ""
+    more = (f" (+{len(notices) - _NOTICE_CAP} more)"
+            if len(notices) > _NOTICE_CAP else "")
+    return " HUB NOTICE — " + " | ".join(parts) + more
 
 
 def _deliver_wake(batch, agent_id, *, preview: bool, once: bool,
@@ -923,8 +1019,17 @@ async def run_ws_mode(url: str, key: str, agent_id: str, pid_path: Path, *,
                         nf.writelines(line + "\n" for line in lines)
             events = [json.loads(line) for line in lines]
             batch = [ev for ev in events if qualifies(ev, agent_id, important_only)]
+            # Hub NOTICES ride along; they never trigger a wake of their own
+            # (that is deliberate — teaching must not spawn a reception turn).
+            # But `qualifies` dropped them outright under --important-only,
+            # so on the driven lane they reached NOTHING: nine hub teaching
+            # surfaces — including the delegate ring for an operator message
+            # that names nobody — were writing into a void. A notice is a
+            # PASSENGER on a wake the seat was having anyway.
+            notices = [ev for ev in events if _is_hub_notice(ev)
+                       and ev not in batch]
             if batch:
-                code = _deliver_wake(batch, agent_id, preview=preview,
+                code = _deliver_wake(batch + notices, agent_id, preview=preview,
                                      once=once, hub=url,
                                      classify_driver_wake=classify_driver_wake)
                 if code is not None:

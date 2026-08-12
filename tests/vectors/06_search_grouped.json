@@ -21,7 +21,7 @@
    "call": "search", "as": "bob", "q": "kelp",
    "match": {
     "relaxed": false,
-    "channels_searched": 1,
+    "channels_searched": 2,
     "decisions": {"shown": 1, "total": 1},
     "open_threads": {"shown": 1, "total": 1},
     "work": {"shown": 0, "total": 0},

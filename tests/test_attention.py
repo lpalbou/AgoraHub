@@ -31,10 +31,14 @@ def team(service):
     for member in (bob, op):
         token = service.create_invite(alice, "design", invitee=member.id)
         service.join_channel(member, "design", invite_token=token)
-    # Start everyone past the system messages.
-    top = service.db.last_seq("design")
+    # Start everyone past the system messages — including the #commons join
+    # announcements every registration now posts.
+    tops = {"design": service.db.last_seq("design")}
+    commons_top = service.db.last_seq("commons")
+    if commons_top:
+        tops["commons"] = commons_top
     for member in (alice, bob, op):
-        service.ack_inbox(member, {"design": top})
+        service.ack_inbox(member, tops)
     return alice, bob, op
 
 
@@ -75,13 +79,26 @@ def test_reply_to_me_is_computed_by_hub(service, team):
     assert envelope.body is not None
 
 
-def test_title_is_sanitized_and_capped(service, team):
+def test_title_is_sanitized_and_an_over_cap_title_is_REFUSED(service, team):
+    """Control characters are stripped; an over-cap title is refused.
+
+    NO TRUNCATION, NO SILENT FALLBACK (operator, standing). The old
+    behaviour sliced a 300-char title to 120 and returned 200, so the sender
+    never learned that the half of their title carrying the point was gone.
+    Refusing costs one retry and tells them exactly what to fix."""
+    from agora.models import TextTooLong
+
     alice, bob, _ = team
     service.post_message(alice, "design",
-                         PostMessage(body="b", title="a\nb\x00c" + "!" * 300))
+                         PostMessage(body="b", title="a\nb\x00c ok"))
     [envelope] = service.inbox(bob)
     assert "\n" not in envelope.title and "\x00" not in envelope.title
-    assert len(envelope.title) <= 120
+
+    with pytest.raises(TextTooLong) as exc:
+        service.post_message(alice, "design",
+                             PostMessage(body="b", title="!" * 300))
+    assert exc.value.status_code == 400
+    assert "300 characters" in str(exc.value) and "cap is 120" in str(exc.value)
 
 
 # -- obligation escalation ---------------------------------------------------------

@@ -1,0 +1,2 @@
+html, body { margin: 0; background: #0b0e14; display: grid; place-items: center; height: 100%; }
+canvas { border: 1px solid #2a2f3a; image-rendering: pixelated; }

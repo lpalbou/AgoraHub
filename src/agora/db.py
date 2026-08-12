@@ -30,7 +30,10 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS agents (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL DEFAULT '',
-    about       TEXT NOT NULL DEFAULT '',
+    about       TEXT NOT NULL DEFAULT '',   -- the SEAT's own self-description
+    mission     TEXT NOT NULL DEFAULT '',   -- the OPERATOR's standing charge:
+                                  -- what this seat is FOR. The seat may read
+                                  -- it (every whoami) and may never write it
     operator    INTEGER NOT NULL DEFAULT 0,
     key_hash    TEXT NOT NULL UNIQUE,
     created_at  REAL NOT NULL,
@@ -188,15 +191,8 @@ CREATE TABLE IF NOT EXISTS charter_receipts (
     channel     TEXT NOT NULL,
     version     INTEGER NOT NULL,
     read_at     REAL NOT NULL,
+    view        TEXT,               -- which SLICE was served (0147); NULL = whole
     PRIMARY KEY (agent_id, channel)
-);
-CREATE TABLE IF NOT EXISTS ruling_receipts (
-    agent_id    TEXT NOT NULL,
-    channel     TEXT NOT NULL,
-    ruling_key  TEXT NOT NULL,
-    version     INTEGER NOT NULL,
-    read_at     REAL NOT NULL,
-    PRIMARY KEY (agent_id, channel, ruling_key)
 );
 -- The hub rules the operator serves to every agent via /whoami (single row).
 -- No row = the packaged default text (version 0) is served.
@@ -206,10 +202,38 @@ CREATE TABLE IF NOT EXISTS hub_rules (
     version     INTEGER NOT NULL,
     updated_at  REAL NOT NULL
 );
+-- The hub CHARTER (0146): the operator tier's standing "who is who" text —
+-- member / owner / delegate / operator. Same single-row + version-0-is-the-
+-- packaged-default shape as hub_rules, with one difference the rules never
+-- had: every published version is ARCHIVED below, so `agora charter history`
+-- can show what changed rather than only that something did. Receipts live
+-- in charter_receipts under the reserved channel name 'hub'.
+CREATE TABLE IF NOT EXISTS hub_charter (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    text        TEXT NOT NULL,
+    version     INTEGER NOT NULL,
+    updated_by  TEXT NOT NULL DEFAULT '',
+    updated_at  REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS hub_charter_versions (
+    version     INTEGER PRIMARY KEY,
+    text        TEXT NOT NULL,
+    updated_by  TEXT NOT NULL DEFAULT '',
+    updated_at  REAL NOT NULL
+);
 -- Delegation record (0068): the operator's delegate as verifiable hub state
 -- — who, which POWERS (ruling/operational/reporting), until when. Grants are
 -- append-only rows; the active grant for an agent is the newest unrevoked,
 -- unexpired one. Prose claims of delegation count for nothing.
+CREATE TABLE IF NOT EXISTS ruling_receipts (
+    agent_id    TEXT NOT NULL,
+    channel     TEXT NOT NULL,
+    ruling_key  TEXT NOT NULL,
+    version     INTEGER NOT NULL,
+    read_at     REAL NOT NULL,
+    PRIMARY KEY (agent_id, channel, ruling_key)
+);
+
 CREATE TABLE IF NOT EXISTS delegations (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     agent_id    TEXT NOT NULL,
@@ -249,6 +273,10 @@ CREATE TABLE IF NOT EXISTS blocks (
 -- table never prunes, so index the lookup key to keep it O(log n) rather
 -- than a growing reverse table scan (review F6).
 CREATE INDEX IF NOT EXISTS idx_blocks_scope_agent ON blocks (scope, agent_id);
+-- members is keyed (channel, agent_id), so every "what does THIS SEAT have"
+-- query scanned it: channels_of on the reception path, and (0147) the
+-- ownership probe behind every whoami's charter pointer.
+CREATE INDEX IF NOT EXISTS idx_members_agent ON members (agent_id);
 -- Reputation (0094): peer-assigned ±1 on four fixed axes, per channel.
 -- ONE live vote per (channel, target, rater, axis) — revising overwrites the
 -- row (updated_at moves), so the table IS the audit trail: who stands where
@@ -337,9 +365,17 @@ class Database:
     """All persistent state of a hub. Thread-safe via a single lock."""
 
     def __init__(self, path: str = ":memory:") -> None:
-        self._conn = sqlite3.connect(path, check_same_thread=False)
+        # Concurrent driven seats can burst several writes at once on the
+        # shared hub db (presence, inbox cursors, claims, plan files). WAL
+        # removes reader/writer blocking, but write/write conflicts still need
+        # time to drain rather than surfacing immediately as `database is
+        # locked` on an otherwise healthy fleet boot. The sqlite connect
+        # timeout and busy_timeout pragma are the writer-side backstop.
+        self._conn = sqlite3.connect(path, check_same_thread=False,
+                                     timeout=30.0)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA busy_timeout=30000")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._lock = threading.Lock()
         # Read-only pool for ms-class reads (search, agora-0132). Lazy:
@@ -377,6 +413,39 @@ class Database:
                     "ALTER TABLE agents ADD COLUMN retired_reason TEXT NOT NULL DEFAULT ''")
             if "deleted_at" not in agent_cols:
                 self._conn.execute("ALTER TABLE agents ADD COLUMN deleted_at REAL")
+            # A seat's MISSION is the operator's charge; `about` is the seat's
+            # own self-description. They were one column for exactly one hour
+            # on 2026-08-06, and in the first driven turn `rt2-critic` called
+            # set_about and replaced "disagreement is your job ... if you end a
+            # phase having agreed with everyone, you did not do your job" with
+            # a tidy summary of itself. A critic that can soften its own
+            # mandate is not adversarial by construction. Separate columns,
+            # separate authors, separate write gates.
+            if "mission" not in agent_cols:
+                self._conn.execute(
+                    "ALTER TABLE agents ADD COLUMN mission TEXT NOT NULL DEFAULT ''")
+            # Role-scoped charter views (0147): which SLICE a receipt was for.
+            # Backfilled 'full' rather than left NULL, because that is what
+            # actually happened: every read before this build served the whole
+            # document. Guessing is banned here, but this is not a guess — and
+            # the alternative would nudge the entire fleet to re-read a charter
+            # it demonstrably has already seen in full.
+            receipt_cols = {r["name"] for r in self._conn.execute(
+                "PRAGMA table_info(charter_receipts)")}
+            if "view" not in receipt_cols:
+                self._conn.execute("ALTER TABLE charter_receipts ADD COLUMN view TEXT")
+                self._conn.execute("UPDATE charter_receipts SET view = 'full'")
+            # Delegation SCOPE (2026-08-04): the channel a grant reaches.
+            # Only `proxy` consults it today. Left EMPTY on backfill, which
+            # is the safe reading for the one power that checks it — an
+            # unscoped proxy reaches nothing, so no pre-existing grant can
+            # silently acquire fleet-wide authority from a migration.
+            deleg_cols = {r["name"] for r in self._conn.execute(
+                "PRAGMA table_info(delegations)")}
+            if "scope" not in deleg_cols:
+                self._conn.execute(
+                    "ALTER TABLE delegations ADD COLUMN scope TEXT NOT NULL "
+                    "DEFAULT ''")
             # Hub search (0132): shadow corpus + FTS5. DDL is idempotent;
             # on a pre-existing hub whose corpus is nonempty but whose index
             # is empty, build it now — measured 354ms on the live corpus,
@@ -630,6 +699,20 @@ class Database:
         with self._lock:
             row = self._conn.execute("SELECT about FROM agents WHERE id = ?", (agent_id,)).fetchone()
         return row["about"] if row else ""
+
+    def set_mission(self, agent_id: str, mission: str) -> None:
+        """Write the OPERATOR's charge. Deliberately NOT reachable from any
+        seat-authenticated surface — see the migration note on this column."""
+        with self._lock:
+            self._conn.execute("UPDATE agents SET mission = ? WHERE id = ?",
+                               (mission, agent_id))
+            self._conn.commit()
+
+    def get_mission(self, agent_id: str) -> str:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT mission FROM agents WHERE id = ?", (agent_id,)).fetchone()
+        return row["mission"] if row else ""
 
     def agent_exists(self, agent_id: str) -> bool:
         with self._lock:
@@ -916,7 +999,8 @@ class Database:
         with self._lock:
             rows = self._conn.execute(
                 """
-                SELECT m.*, COALESCE(a.about, '') AS about
+                SELECT m.*, COALESCE(a.about, '') AS about,
+                       COALESCE(a.mission, '') AS mission
                 FROM members m LEFT JOIN agents a ON a.id = m.agent_id
                 WHERE m.channel = ?
                 """,
@@ -924,7 +1008,8 @@ class Database:
             ).fetchall()
         return [
             Member(channel=r["channel"], agent_id=r["agent_id"], role=r["role"],
-                   about=r["about"], joined_at=r["joined_at"])
+                   about=r["about"], mission=r["mission"],
+                   joined_at=r["joined_at"])
             for r in rows
         ]
 
@@ -939,6 +1024,19 @@ class Database:
                 "SELECT channel FROM members WHERE agent_id = ?", (agent_id,)
             ).fetchall()
         return [r["channel"] for r in rows]
+
+    def owns_any_channel(self, agent_id: str) -> bool:
+        """Does this seat own at least one live room? Ownership is a job in a
+        room, not a rank (hub charter), so this is the ONLY thing that makes
+        the charter's owner section apply to a seat — and it flips the moment
+        they create a channel or their last room is archived."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM members m JOIN channels c ON c.name = m.channel"
+                " WHERE m.agent_id = ? AND m.role = 'owner'"
+                "   AND c.archived_at IS NULL LIMIT 1", (agent_id,),
+            ).fetchone()
+        return row is not None
 
     def list_channels(self, agent_id: str,
                       include_archived: bool = False) -> list[dict[str, Any]]:
@@ -1442,6 +1540,31 @@ class Database:
                 "SELECT MAX(created_at) AS t FROM messages").fetchone()["t"]
         return {"buckets": buckets, "senders": sorted(senders),
                 "last_message_at": last_any}
+
+    def work_signals(self, since: float) -> dict[str, dict[str, float]]:
+        """Per agent, the newest thing it actually DID that the hub can see,
+        within `since`: `posted` (a chat message it authored) and `wrote` (a
+        store/fs write — claim rows, decisions, charters).
+
+        This is the "work turn vs reception turn" discriminator `agora
+        doctor` needs: a seat can poll /owed forever and look alive while
+        producing nothing, and until now no surface separated the two. Both
+        halves are cheap — messages ride idx_messages_created_at (bounded by
+        the window) and the store is small — and neither returns content:
+        timestamps only, off the read pool.
+        """
+        out: dict[str, dict[str, float]] = {}
+        with self.read_transaction() as conn:
+            for row in conn.execute(
+                    "SELECT sender, MAX(created_at) AS t FROM messages"
+                    " WHERE created_at >= ? AND kind = 'message'"
+                    " GROUP BY sender", (since,)):
+                out.setdefault(row["sender"], {})["posted"] = row["t"]
+            for row in conn.execute(
+                    "SELECT updated_by, MAX(updated_at) AS t FROM store"
+                    " WHERE updated_at >= ? GROUP BY updated_by", (since,)):
+                out.setdefault(row["updated_by"], {})["wrote"] = row["t"]
+        return out
 
     def unread_criticals(self, agent_id: str, channels: list[str]) -> list[Message]:
         """Critical messages stay pinned until the agent actually reads the body."""
@@ -2367,16 +2490,25 @@ class Database:
 
     # -- charter receipts + hub rules (governance surfaces) ----------------------
 
-    def charter_receipt_set(self, agent_id: str, channel: str, version: int) -> None:
+    def charter_receipt_set(self, agent_id: str, channel: str, version: int,
+                            view: str | None = None) -> None:
         """Record 'charter version N was delivered to this agent' — advance
-        only (a concurrent older read can never regress a fresher receipt)."""
+        only (a concurrent older read can never regress a fresher receipt).
+
+        `view` records WHICH slice was handed over (0147: role-scoped views).
+        It never changes what the receipt PROVES — delivery of version N,
+        which is what the posting gate and the reader rosters key on — it
+        answers the second question scoping creates: is the slice they were
+        served still the right slice for the seat they are now? NULL means
+        "the whole document" (channel scope, and every pre-0147 read)."""
         with self._lock:
             self._conn.execute(
-                "INSERT INTO charter_receipts (agent_id, channel, version, read_at)"
-                " VALUES (?,?,?,?)"
+                "INSERT INTO charter_receipts (agent_id, channel, version,"
+                " read_at, view) VALUES (?,?,?,?,?)"
                 " ON CONFLICT (agent_id, channel) DO UPDATE SET"
-                " version = MAX(version, excluded.version), read_at = excluded.read_at",
-                (agent_id, channel, version, time.time()),
+                " version = MAX(version, excluded.version),"
+                " read_at = excluded.read_at, view = excluded.view",
+                (agent_id, channel, version, time.time(), view),
             )
             self._conn.commit()
 
@@ -2388,31 +2520,29 @@ class Database:
             ).fetchone()
         return row["version"] if row else None
 
-    def ruling_receipt_set(self, agent_id: str, channel: str, ruling_key: str,
-                           version: int) -> None:
-        """0113: record that this seat saw ruling_key at store version N."""
-        with self._lock:
-            self._conn.execute(
-                "INSERT INTO ruling_receipts"
-                " (agent_id, channel, ruling_key, version, read_at)"
-                " VALUES (?,?,?,?,?)"
-                " ON CONFLICT (agent_id, channel, ruling_key) DO UPDATE SET"
-                " version = MAX(version, excluded.version),"
-                " read_at = excluded.read_at",
-                (agent_id, channel, ruling_key, version, time.time()),
-            )
-            self._conn.commit()
-
-    def ruling_receipt_get(self, agent_id: str, channel: str,
-                           ruling_key: str) -> int | None:
+    def charter_receipt_row(self, agent_id: str,
+                            channel: str) -> dict[str, Any] | None:
+        """The whole receipt: version, when, and which slice was served."""
         with self._lock:
             row = self._conn.execute(
-                "SELECT version FROM ruling_receipts"
-                " WHERE agent_id = ? AND channel = ? AND ruling_key = ?",
-                (agent_id, channel, ruling_key),
+                "SELECT version, read_at, view FROM charter_receipts"
+                " WHERE agent_id = ? AND channel = ?", (agent_id, channel),
             ).fetchone()
-        return row["version"] if row else None
+        return dict(row) if row else None
 
+    def charter_receipts_for(self, channel: str) -> list[dict[str, Any]]:
+        """Every receipt recorded for one charter scope, freshest first —
+        the answer to "who has read the current version?". The table has
+        carried this fact since 0060 and nothing ever read it back except
+        the posting gate (0146 audit)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT agent_id, version, read_at, view FROM charter_receipts"
+                " WHERE channel = ? ORDER BY version DESC, read_at DESC",
+                (channel,),
+            ).fetchall()
+        return [{"agent_id": r["agent_id"], "version": r["version"],
+                 "read_at": r["read_at"], "view": r["view"]} for r in rows]
     def hub_rules_get(self) -> dict[str, Any] | None:
         with self._lock:
             row = self._conn.execute(
@@ -2442,10 +2572,97 @@ class Database:
         return {"text": row["text"], "version": row["version"],
                 "updated_at": row["updated_at"]}
 
+    def hub_charter_get(self) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT text, version, updated_by, updated_at FROM hub_charter"
+                " WHERE id = 1"
+            ).fetchone()
+        if row is None:
+            return None
+        return {"text": row["text"], "version": row["version"],
+                "updated_by": row["updated_by"], "updated_at": row["updated_at"]}
+
+    def hub_charter_set(self, text: str, updated_by: str = "") -> dict[str, Any]:
+        """Publish a new hub charter version (monotonic) AND archive it, so
+        the previous text stays readable. hub_rules deliberately kept no
+        history and that made "what changed?" unanswerable — the charter
+        does not repeat the mistake."""
+        now = time.time()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO hub_charter (id, text, version, updated_by, updated_at)"
+                " VALUES (1, ?, 1, ?, ?)"
+                " ON CONFLICT (id) DO UPDATE SET"
+                " text = excluded.text, version = hub_charter.version + 1,"
+                " updated_by = excluded.updated_by, updated_at = excluded.updated_at",
+                (text, updated_by, now),
+            )
+            row = self._conn.execute(
+                "SELECT text, version, updated_by, updated_at FROM hub_charter"
+                " WHERE id = 1"
+            ).fetchone()
+            self._conn.execute(
+                "INSERT OR REPLACE INTO hub_charter_versions"
+                " (version, text, updated_by, updated_at) VALUES (?,?,?,?)",
+                (row["version"], text, updated_by, now),
+            )
+            self._conn.commit()
+        return {"text": row["text"], "version": row["version"],
+                "updated_by": row["updated_by"], "updated_at": row["updated_at"]}
+
+    def hub_charter_version(self, version: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT text, version, updated_by, updated_at"
+                " FROM hub_charter_versions WHERE version = ?", (version,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {"text": row["text"], "version": row["version"],
+                "updated_by": row["updated_by"], "updated_at": row["updated_at"]}
+
+    def hub_charter_history(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Published versions, newest first (metadata + size, not the texts)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT version, updated_by, updated_at, LENGTH(text) AS size"
+                " FROM hub_charter_versions ORDER BY version DESC LIMIT ?",
+                (max(1, min(int(limit), 500)),),
+            ).fetchall()
+        return [{"version": r["version"], "updated_by": r["updated_by"],
+                 "updated_at": r["updated_at"], "size": r["size"]} for r in rows]
+
     # -- delegation record (0068) --------------------------------------------------
 
+    def ruling_receipt_get(self, agent_id: str, channel: str,
+                           ruling_key: str) -> int | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT version FROM ruling_receipts"
+                " WHERE agent_id = ? AND channel = ? AND ruling_key = ?",
+                (agent_id, channel, ruling_key),
+            ).fetchone()
+        return row["version"] if row else None
+
+    def ruling_receipt_set(self, agent_id: str, channel: str, ruling_key: str,
+                           version: int) -> None:
+        """0113: record that this seat saw ruling_key at store version N."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO ruling_receipts"
+                " (agent_id, channel, ruling_key, version, read_at)"
+                " VALUES (?,?,?,?,?)"
+                " ON CONFLICT (agent_id, channel, ruling_key) DO UPDATE SET"
+                " version = MAX(version, excluded.version),"
+                " read_at = excluded.read_at",
+                (agent_id, channel, ruling_key, version, time.time()),
+            )
+            self._conn.commit()
+
     def delegation_set(self, agent_id: str, powers: list[str],
-                       expires_at: float, note: str) -> dict[str, Any]:
+                       expires_at: float, note: str,
+                       scope: str = "") -> dict[str, Any]:
         """Grant (or replace) an agent's delegation. Prior active grants for
         the same agent are revoked in the same transaction — one active grant
         per agent, history preserved as rows."""
@@ -2456,11 +2673,13 @@ class Database:
                 " AND revoked_at IS NULL", (now, agent_id))
             self._conn.execute(
                 "INSERT INTO delegations (agent_id, powers, granted_at,"
-                " expires_at, note) VALUES (?,?,?,?,?)",
-                (agent_id, json.dumps(sorted(powers)), now, expires_at, note))
+                " expires_at, note, scope) VALUES (?,?,?,?,?,?)",
+                (agent_id, json.dumps(sorted(powers)), now, expires_at, note,
+                 scope))
             self._conn.commit()
         return {"agent_id": agent_id, "powers": sorted(powers),
-                "granted_at": now, "expires_at": expires_at, "note": note}
+                "granted_at": now, "expires_at": expires_at, "note": note,
+                "scope": scope}
 
     def delegation_revoke(self, agent_id: str) -> bool:
         """True only when a LIVE grant was revoked: expired rows are still
@@ -2483,7 +2702,7 @@ class Database:
         now = time.time()
         with self._lock:
             rows = self._conn.execute(
-                "SELECT agent_id, powers, granted_at, expires_at, note"
+                "SELECT agent_id, powers, granted_at, expires_at, note, scope"
                 " FROM delegations WHERE revoked_at IS NULL AND expires_at > ?"
                 " ORDER BY id DESC", (now,)).fetchall()
         seen: set[str] = set()
@@ -2495,7 +2714,8 @@ class Database:
             out.append({"agent_id": r["agent_id"],
                         "powers": json.loads(r["powers"]),
                         "granted_at": r["granted_at"],
-                        "expires_at": r["expires_at"], "note": r["note"]})
+                        "expires_at": r["expires_at"], "note": r["note"],
+                        "scope": r["scope"]})
         return out
 
     # -- moderation blocks (kick/ban) -----------------------------------------------

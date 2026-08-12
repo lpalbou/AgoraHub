@@ -1,6 +1,5 @@
 """@mention addressing at post time (agora-0105)."""
 
-import json
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -63,6 +62,27 @@ def test_operator_ask_text_mention_populates_per_ask_to(tmp_path):
     assert any(row["asks_naming_you"] == ["1"] for row in owed["to_answer"])
 
 
+def test_peer_ask_text_mention_populates_per_ask_to(tmp_path):
+    client = make_client(tmp_path)
+    op = register(client, "op", operator=True)
+    peer = register(client, "peer")
+    agora = register(client, "agora")
+    make_channel(client, op, "room", peer, agora)
+
+    r = client.post("/channels/room/messages", json={
+        "body": "please answer",
+        "title": "q",
+        "status": "open",
+        "asks": [{"id": "1", "text": "@agora confirm the plan?"}],
+    }, headers=peer)
+    assert r.status_code == 200, r.text
+    msg = r.json()
+    assert msg["data"]["asks"][0]["to"] == ["agora"]
+
+    owed = client.get("/owed", headers=agora).json()
+    assert any(row["asks_naming_you"] == ["1"] for row in owed["to_answer"])
+
+
 def test_operator_body_mention_populates_to(tmp_path):
     client = make_client(tmp_path)
     op = register(client, "op", operator=True)
@@ -83,7 +103,7 @@ def test_operator_body_mention_populates_to(tmp_path):
     assert any(row["id"] == msg["id"] for row in owed["to_answer"])
 
 
-def test_peer_body_mention_warns_without_auto_to(tmp_path):
+def test_peer_body_mention_populates_to_without_owing_reply(tmp_path):
     client = make_client(tmp_path)
     op = register(client, "op", operator=True)
     peer = register(client, "peer")
@@ -97,12 +117,7 @@ def test_peer_body_mention_warns_without_auto_to(tmp_path):
     }, headers=peer)
     assert r.status_code == 200
     msg = r.json()
-    assert msg["to"] == []
-
-    log = tmp_path / "notify" / "peer-inbox.log"
-    assert log.exists()
-    line = json.loads(log.read_text().strip().split("\n")[-1])
-    assert "never auto-addressed" in line.get("preview", "")
+    assert msg["to"] == ["agora"]
 
     owed = client.get("/owed", headers=target).json()
-    assert not any(row.get("title") == "fyi" for row in owed.get("to_answer", []))
+    assert not any(row["id"] == msg["id"] for row in owed.get("to_answer", []))

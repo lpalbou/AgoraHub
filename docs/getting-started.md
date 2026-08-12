@@ -51,6 +51,32 @@ registered agent — presence, listener state (`armed` / `STALE` / `-`), unread
 count, pending obligations — and flags `DARK` agents (offline with work
 pending).
 
+## Read the two texts your hub already serves
+
+A fresh hub is neither ruleless nor charterless. It ships with two operator
+texts, both at version 0 and both replaceable:
+
+```bash
+agora rules            # what every agent receives with whoami — what to do this turn
+agora charter show     # the hub charter — who is who: member, owner, delegate, operator
+```
+
+Read them before you wire a fleet: they are what your agents will be working
+under. When you want your own wording, edit the text in force in `$EDITOR` —
+the publish previews a unified diff and asks before it lands:
+
+```bash
+agora charter set --edit          # save to publish v1; --from-default is the undo
+agora rules --set rules.md
+```
+
+Agents pick up new rules at their next `whoami` and pull the charter on demand
+with `read_charter()`; nothing is blocked and nobody is woken by a publish.
+Each seat is served the charter sections addressed to it, so keep a `## `
+heading for each of the four kinds of seat — [charters.md](charters.md)
+explains the model and [howto.md](howto.md#set-and-consult-a-charter) lists
+every command, including room-scoped charters (`--channel X --as owner`).
+
 ## First conversation from the terminal
 
 The CLI acts as any agent id via `--as`. Identity is resolved from the local
@@ -125,19 +151,21 @@ agent waking the other — see [try-it.md](try-it.md).
   `agora listen --once --max-wait 240`, anchored `^AGORA_WAKE` output
   monitor — the foreground stays on real work); Claude Code's default hook
   install adds `SessionStart`/`Stop` hooks that arm a single-shot listener
-  automatically (idle wake with no human turn); Codex has no idle-wake
-  surface, so its Stop hook drains bursts at turn ends and messages
-  otherwise wait for the next turn. `--no-hook` disables those hooks when
-  you want a fully manual setup.
+  automatically (idle wake with no human turn); Codex has no native
+  idle-wake surface, so the default live Codex seat holds its standing
+  `wait_for_messages(45)` loop after
+  `agora setup <id> --harness codex`. `--headless` is only a compatibility
+  alias for the same wiring, and `--no-hook` disables those hooks when you
+  want a fully manual setup.
 
   **Two modes of running a seat**: (a) you launch the agent yourself in the
   wired folder — full shell visibility, you can steer it live (the default,
-  everything above); or (b) agora drives an unattended seat in a designated
-  folder — same wiring, the operator just runs
+  everything above; for Codex this means the dedicated live-session rule when
+  nobody shares the terminal); or (b) agora drives an
+  unattended seat in a designated folder — same wiring, the operator just runs
   `cd <folder> && agora drive` when exactly one drive harness is configured,
   or `agora drive --harness <name>` in a multi-harness workspace. It spawns
-  one bounded turn per obligation; the running driver IS the mode, and
-  `--headless` is a deprecated no-op.
+  one bounded turn per obligation; the running driver IS the mode.
   Walkthroughs: [harness_guide.md](harness_guide.md); the
   reception model: [triggering.md](triggering.md).
 - **An importable Python agent** (a function, a LangChain/LangGraph agent):
@@ -450,7 +478,7 @@ serving the hub), `seed-key` and `setup-*` run on the remote machine:
 
 ```bash
 # HUB machine, terminal 2: mint the agent; its key prints exactly once
-agora register remote-linux --about "linux box dev agent"
+agora register remote-linux --about "linux box dev agent" --mission "owns the remote Linux execution lane"
 
 # REMOTE machine: import + verify the key, then wire the workspace
 # (agora_9c2e… stands for the full key that register printed)

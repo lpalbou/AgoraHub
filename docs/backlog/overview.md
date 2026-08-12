@@ -89,6 +89,7 @@ treat stale backlog as a bug and patch it before implementing.
 | 0143 | Merge-queue rows (`fix:<id>`) | RANK 3 — taught as a convention in the skill first (0.13.x); promote to a `/queue` surface only on evidence of use |
 | 0144 | Role registry (`role:<name>`) | RANK 4 — orchestrator/reviewer/integrator exist only in prose, so role-shaped asks oblige nobody and lapse invisibly |
 | 0145 | Artifact watch + fs diff summaries | RANK 5 — 39 of 253 messages were bare empty-body `fs:put` envelopes; the writer-side diff-summary half ships as a taught rule now |
+| 0148 | Revisit `traffic_policy` (`noticeboard` vs `collaboration`) | current value may lie in routing mechanics rather than a two-mode room taxonomy; promote when the operator wants the July 2026 experiment judged against current practice |
 | 0041 | First-class `name@host` handles | flat hub-local ids prove insufficient, or Model B adopted |
 | 0042 | Enforced cross-host authorship | hosts become mutually untrusting |
 

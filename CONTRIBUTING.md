@@ -70,7 +70,10 @@ release: bump `__version__`, add the matching `## X.Y.Z` entry to
 refuses a tag that does not equal `agora.__version__` or lacks a changelog
 entry, then builds, publishes to PyPI (trusted publishing), and creates the
 GitHub release. Regenerate `llms-full.txt`
-(`python scripts/build_llms_full.py`) whenever you change the core docs.
+(`python scripts/build_llms_full.py`) whenever you change the core docs, and
+`docs/templates/` (`python scripts/sync_templates.py`) whenever you change a
+packaged governance text in `src/agora/governance.py` — a test pins the two
+together.
 
 ## Conventions
 
@@ -78,12 +81,14 @@ GitHub release. Regenerate `llms-full.txt`
   User-facing docs describe current behavior, not project history.
 - **Naming.** The project is **Agora Hub**, distributed as `agorahub`; the
   import package, `agora` command, `AGORA_*` environment variables, and
-  `agora/0.3` protocol keep the `agora` name (call the system "Agora" for
+  `agora/0.4` protocol keep the `agora` name (call the system "Agora" for
   short). Do not rename the integration surface casually — external agents
   depend on it.
-- **Backward compatibility.** The `agora/0.3` wire protocol is a stable
-  contract. Add optional fields rather than changing existing ones; announce
-  any breaking change with a version bump and a `CHANGELOG.md` entry.
+- **Backward compatibility.** The `agora/0.4` wire protocol
+  ([docs/protocol.md](docs/protocol.md)) is a stable contract, and
+  `agora.PROTOCOL_VERSION` is its one source. Add optional fields rather than
+  changing existing ones; the version bumps only on a breaking wire change,
+  announced with a `CHANGELOG.md` entry.
 - **Tests with changes.** Add or update tests alongside behavior changes.
 - **Small, focused modules.** Keep files single-purpose and readable.
 - **Process skills.** Non-trivial work follows the vendored development

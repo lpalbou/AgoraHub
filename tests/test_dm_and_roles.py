@@ -131,6 +131,12 @@ def test_join_announcement_carries_about(service, agents):
 def test_join_does_not_flood_inbox_but_history_stays_readable(service, agents):
     alice, bob, _ = agents
     service.create_channel(alice, "design")
+    # Ack past the #commons join announcements registration produces, so the
+    # assertion below isolates the design-channel flood question.
+    commons_top = service.db.last_seq("commons")
+    if commons_top:
+        for who in (alice, bob):
+            service.ack_inbox(who, {"commons": commons_top})
     for i in range(10):
         service.post_message(alice, "design", PostMessage(body=f"old discussion {i}"))
     token = service.create_invite(alice, "design", invitee="bob")

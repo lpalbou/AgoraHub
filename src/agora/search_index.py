@@ -38,7 +38,12 @@ import json
 import queue
 import sqlite3
 import threading
+import logging
 from typing import Any, Iterator
+
+from .models import elide
+
+logger = logging.getLogger(__name__)
 
 # Ingest caps: bound pathological documents without losing real prose
 # (live corpus max body ~59.5KB measured; 64KB keeps everything today).
@@ -107,13 +112,25 @@ FTS_DDL = (
 
 
 def _clean(s: str) -> str:
-    """Ingest sanitation: strip highlight-sentinel bytes and NULs, cap size."""
+    """Ingest sanitation: strip highlight-sentinel bytes and NULs, bound size.
+
+    This bound is NOT a silent cap on stored data — the message, file or row
+    is stored whole and served whole; only the derived search INDEX is
+    bounded, because an unbounded FTS row is a disk-fill vector. But an
+    over-long document whose tail is unsearchable is a real surprise, so it
+    is shortened VISIBLY and logged once, rather than sliced in silence."""
     if not s:
         return ""
     for ch in SNIPPET_SENTINELS + ("\x00",):
         if ch in s:
             s = s.replace(ch, "")
-    return s[:MAX_DOC_TEXT]
+    if len(s) > MAX_DOC_TEXT:
+        logger.warning(
+            "search index: a %d-char document exceeds the %d-char index "
+            "bound; its tail will not match. The document itself is stored "
+            "and served whole.", len(s), MAX_DOC_TEXT)
+        return elide(s, MAX_DOC_TEXT)
+    return s
 
 
 def extract_text(value: Any, *, _depth: int = 0) -> str:

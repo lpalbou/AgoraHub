@@ -42,10 +42,12 @@ nav:
   - Getting started: getting-started.md
   - Try it: try-it.md
   - Collaboration model: collaboration.md
+  - "Example: a fleet transcript": examples/fleet-transcript-rtype.md
   - How-to (cheat sheet): howto.md
   - Architecture: architecture.md
   - Interfaces (API): api.md
   - Protocol: protocol.md
+  - Charters (governance): charters.md
   - Triggering: triggering.md
   - Orchestrating agents: orchestrating_agents.md
   - Agent guide: agent_guide.md

@@ -286,6 +286,37 @@ def file_block(s: Style, *, path: str, content: str, version: int,
     return "\n".join([s.dim("─" * width), header, s.dim("─" * width), *visible])
 
 
+def charter_block(s: Style, *, scope: str, version: int, updated_by: str,
+                  text: str, packaged: bool = False, gated: bool = False,
+                  your_receipt: int | None = None) -> str:
+    """A charter read (`/charter`), fenced as GOVERNANCE — deliberately not
+    `file_block`.
+
+    Provenance is the whole point of a fence (ADR-0002 decision 3, the same
+    reason render.render_hub_charter exists beside render_fs_file): a shared
+    file is member-authored data, while a charter is operator- or
+    owner-authored and admin-key/ownership-gated. Rendering one under the
+    other's header would tell the reader — human or model reading over their
+    shoulder — the wrong thing about who wrote the words they are about to
+    follow."""
+    width = term_width()
+    scope, updated_by = safe(scope), safe(updated_by)
+    who = ("the packaged default" if packaged
+           else (updated_by or "the operator"))
+    what = ("HUB CHARTER" if scope == "hub" else f"CHARTER {scope}")
+    header = (f"{s.yellow(what)} {s.bold('v' + str(version))} {s.dim('·')} "
+              + s.dim("by ") + s.sender(who))
+    sub = ("who is who: member · owner · delegate · operator"
+           if scope == "hub" else "this room's rules, on top of the hub's")
+    if gated:
+        sub += " · norms_required: posting is GATED on reading it"
+    if your_receipt is not None and your_receipt < version:
+        sub += f" · your receipt was v{your_receipt}"
+    visible, _ = wrap_body(text, width, max_lines=None, style=s)
+    return "\n".join([s.dim("═" * width), header, s.dim("  " + sub),
+                      s.dim("═" * width), *visible])
+
+
 def file_event_line(s: Style, *, sender: str, title: str, channel: str,
                     current: str | None,
                     data: dict[str, Any] | None = None) -> str:

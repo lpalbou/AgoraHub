@@ -36,7 +36,14 @@ def _env(sender="carol", **kw):
 
 
 def _fake(monkeypatch, asks, fyi, sig="sig1"):
-    monkeypatch.setattr(hook, "reception", lambda url, aid: (asks, fyi, sig))
+    monkeypatch.setattr(
+        hook, "reception",
+        lambda url, aid, *, mark_reception=False: (asks, fyi, sig),
+    )
+    monkeypatch.setattr(
+        hook, "_continuable_claims",
+        lambda url, aid: [],
+    )
 
 
 def _out(capsys):
@@ -101,6 +108,29 @@ def test_fyi_rides_free_turns_and_never_blocks_one(home, monkeypatch, capsys):
     assert capsys.readouterr().out == ""          # nor a mid-loop injection
 
 
+def test_reception_demotes_unassigned_peer_and_someone_elses_named_ask(monkeypatch):
+    unread = [
+        _env(id="peer", sender="carol", status="open", to_me=False,
+             addressed=False, from_operator=False),
+        _env(id="human", sender="laurent", status="open", to_me=False,
+             addressed=True, from_operator=True),
+        _env(id="mine", sender="laurent", status="open", to_me=True,
+             addressed=True, from_operator=True),
+    ]
+
+    def fake_get(url, agent_id, path, *, headers=None):
+        if path == "/owed":
+            return {"to_answer": [], "to_consume": []}
+        if path == "/inbox":
+            return unread
+        raise AssertionError(path)
+
+    monkeypatch.setattr(hook, "_get", fake_get)
+    asks, fyi, _ = hook.reception("http://h:1", "seat")
+    assert [m["id"] for m in asks] == ["human", "mine"]
+    assert {m["id"] for m in fyi} == {"peer"}
+
+
 def test_stop_is_rationed_but_not_delayed_by_ten_minutes(home, monkeypatch,
                                                          capsys):
     """A block costs a whole turn, so UNCHANGED debt stops nagging: the floor
@@ -114,6 +144,38 @@ def test_stop_is_rationed_but_not_delayed_by_ten_minutes(home, monkeypatch,
     # Second Stop within the floor: suppressed.
     assert hook.run("Stop", "seat", "http://h:1") == 0
     assert capsys.readouterr().out == ""
+
+
+def test_dedicated_keepalive_names_continuable_claims(home, monkeypatch, capsys):
+    _fake(monkeypatch, [], [])
+    monkeypatch.setattr(
+        hook, "_continuable_claims",
+        lambda url, aid: [{"channel": "commons",
+                           "task": "agora-ui-migration-lead",
+                           "updated_at": 1.0}],
+    )
+
+    monkeypatch.setattr(
+        "sys.stdin.read",
+        lambda: json.dumps({
+            "prompt": "resume agora protocol",
+            "session_id": "sess-1",
+        }),
+        raising=False,
+    )
+    assert hook.run("UserPromptSubmit", "seat", "http://h:1") == 0
+    assert capsys.readouterr().out == ""
+
+    monkeypatch.setattr(
+        "sys.stdin.read",
+        lambda: json.dumps({"session_id": "sess-1"}),
+        raising=False,
+    )
+    assert hook.run("Stop", "seat", "http://h:1") == 0
+    payload = _out(capsys)
+    assert payload["decision"] == "block"
+    assert "claim:agora-ui-migration-lead" in payload["reason"]
+    assert "`agora drive`" in payload["reason"]
 
 
 def test_escalated_debt_bypasses_the_stop_floor(home, monkeypatch, capsys):
@@ -149,9 +211,113 @@ def test_reentry_and_aborted_turn_guards(home, monkeypatch, capsys):
         assert capsys.readouterr().out == ""
 
 
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "start agora protocol",
+        "resume agora protocol",
+        "resume agora protocol and monitor the hub.",
+    ],
+)
+def test_kickoff_arms_one_codex_session_for_dedicated_keepalive(
+    home, monkeypatch, capsys, prompt
+):
+    _fake(monkeypatch, [], [])
+
+    monkeypatch.setattr(
+        "sys.stdin.read",
+        lambda: json.dumps({
+            "prompt": prompt,
+            "session_id": "sess-1",
+        }),
+        raising=False,
+    )
+    assert hook.run("UserPromptSubmit", "seat", "http://h:1") == 0
+    assert capsys.readouterr().out == ""
+    assert hook._load("seat")["armed_session_id"] == "sess-1"
+
+    monkeypatch.setattr(
+        "sys.stdin.read",
+        lambda: json.dumps({"session_id": "sess-1"}),
+        raising=False,
+    )
+    assert hook.run("Stop", "seat", "http://h:1") == 0
+    first = _out(capsys)
+    assert first["decision"] == "block"
+    assert "wait_for_messages(45)" in first["reason"]
+    assert "No owed ask is pending right now." in first["reason"]
+
+    monkeypatch.setattr(
+        "sys.stdin.read",
+        lambda: json.dumps({"session_id": "sess-1", "stop_hook_active": True}),
+        raising=False,
+    )
+    assert hook.run("Stop", "seat", "http://h:1") == 0
+    second = _out(capsys)
+    assert second["decision"] == "block"
+    assert "wait_for_messages(45)" in second["reason"]
+
+    monkeypatch.setattr(
+        "sys.stdin.read",
+        lambda: json.dumps({"session_id": "sess-2", "stop_hook_active": True}),
+        raising=False,
+    )
+    assert hook.run("Stop", "seat", "http://h:1") == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_dedicated_codex_reception_marks_the_owed_poll(home, monkeypatch):
+    calls = []
+
+    def fake_get(url, agent_id, path, *, headers=None):
+        calls.append((path, headers or {}))
+        if path == "/owed":
+            return {"to_answer": [], "to_consume": []}
+        if path == "/inbox":
+            return []
+        raise AssertionError(path)
+
+    monkeypatch.setattr(hook, "_get", fake_get)
+    monkeypatch.setattr(
+        "sys.stdin.read",
+        lambda: json.dumps({
+            "prompt": "resume agora protocol",
+            "session_id": "sess-1",
+        }),
+        raising=False,
+    )
+
+    assert hook.run("UserPromptSubmit", "seat", "http://h:1") == 0
+    assert calls[0] == ("/owed", {"X-Agora-Reception": "arm"})
+    assert calls[1] == ("/inbox", {})
+
+
+def test_unarmed_codex_does_not_mark_reception(home, monkeypatch):
+    calls = []
+
+    def fake_get(url, agent_id, path, *, headers=None):
+        calls.append((path, headers or {}))
+        if path == "/owed":
+            return {"to_answer": [], "to_consume": []}
+        if path == "/inbox":
+            return []
+        raise AssertionError(path)
+
+    monkeypatch.setattr(hook, "_get", fake_get)
+    monkeypatch.setattr(
+        "sys.stdin.read",
+        lambda: json.dumps({"prompt": "plain work", "session_id": "sess-1"}),
+        raising=False,
+    )
+
+    assert hook.run("UserPromptSubmit", "seat", "http://h:1") == 0
+    assert calls[0] == ("/owed", {})
+    assert calls[1] == ("/inbox", {})
+
+
 def test_unreachable_hub_is_loud_and_never_fails_the_turn(home, monkeypatch,
                                                           capsys):
-    def boom(url, aid):
+    def boom(url, aid, *, mark_reception=False):
         raise OSError("connection refused")
     monkeypatch.setattr(hook, "reception", boom)
     assert hook.run("Stop", "seat", "http://h:1") == 0    # turn still completes
@@ -160,11 +326,42 @@ def test_unreachable_hub_is_loud_and_never_fails_the_turn(home, monkeypatch,
     assert "reception unavailable" in captured.err        # but never silent
 
 
+def test_unreachable_hub_still_keeps_dedicated_codex_alive(home, monkeypatch,
+                                                           capsys):
+    monkeypatch.setattr(
+        "sys.stdin.read",
+        lambda: json.dumps({
+            "prompt": "start agora protocol",
+            "session_id": "sess-1",
+        }),
+        raising=False,
+    )
+    assert hook.run("UserPromptSubmit", "seat", "http://h:1") == 0
+    capsys.readouterr()
+
+    def boom(url, aid, *, mark_reception=False):
+        raise TimeoutError("owed timed out")
+
+    monkeypatch.setattr(hook, "reception", boom)
+    monkeypatch.setattr(
+        "sys.stdin.read",
+        lambda: json.dumps({"session_id": "sess-1"}),
+        raising=False,
+    )
+    assert hook.run("Stop", "seat", "http://h:1") == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["decision"] == "block"
+    assert "Hub reception is temporarily unavailable" in payload["reason"]
+    assert "wait_for_messages(45)" in payload["reason"]
+    assert "reception unavailable" in captured.err
+
+
 def test_liveness_is_stamped_before_any_network_call(home, monkeypatch):
     """`agora status` reads this to say NEVER FIRED. Written before the fetch so
     a hook that dies mid-run is still distinguishable from one that never ran —
     the exact ambiguity that let a completely inert hook look plausible."""
-    def boom(url, aid):
+    def boom(url, aid, *, mark_reception=False):
         raise OSError("down")
     monkeypatch.setattr(hook, "reception", boom)
     hook.run("PostToolUse", "seat", "http://h:1")

@@ -155,6 +155,7 @@ def test_redeem_registers_operator_false_and_joins_public_channels(client):
     key_h = {"Authorization": f"Bearer {body['api_key']}"}
     assert client.get("/whoami", headers=key_h).json()["id"] == "castor"
     channels = {c["name"]: c for c in client.get("/channels", headers=key_h).json()}
+    assert channels["commons"]["member"] is True
     assert channels["general"]["member"] is True
     assert "vault" not in channels or channels["vault"]["member"] is False
 
