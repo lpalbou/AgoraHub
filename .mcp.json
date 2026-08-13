@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "agora": {
+      "command": "/home/vscode/.local/share/uv/tools/agorahub/bin/agora-mcp",
+      "env": {
+        "AGORA_URL": "http://127.0.0.1:8760",
+        "AGORA_AGENT_ID": "agora",
+        "AGORA_ABOUT": "",
+        "AGORA_API_KEY": "",
+        "AGORA_ADMIN_KEY": ""
+      }
+    }
+  }
+}

@@ -43,6 +43,7 @@ nav:
   - Try it: try-it.md
   - Collaboration model: collaboration.md
   - "Example: a fleet transcript": examples/fleet-transcript-rtype.md
+  - "Example: a five-seat phased build": examples/fleet-transcript-rtype-v2.md
   - How-to (cheat sheet): howto.md
   - Architecture: architecture.md
   - Interfaces (API): api.md
