@@ -1068,8 +1068,12 @@ class CodexDriveAdapter(DriveAdapter):
 class ClaudeDriveAdapter(DriveAdapter):
     name = "claude"
     binary = "claude"
-    # Claude's thinking rides the model choice; there is no effort flag to map.
-    SUPPORTS = frozenset({"model", "permissions", "session"})
+    # Effort used to ride the model choice — no longer true. claude-code 2.x
+    # exposes `--effort low|medium|high|xhigh|max` per session, so the knob is
+    # expressible and must be MAPPED: leaving it out of SUPPORTS refused
+    # `--reasoning-effort` on the one harness whose own CLI accepts it.
+    SUPPORTS = frozenset({"model", "permissions", "session", "reasoning"})
+    REASONING_VOCAB = ("low", "medium", "high", "xhigh", "max")
     PERMISSION_VOCAB = ("write", "all")
     # THE MUTE SEAT (2026-08-04). This adapter shipped with no EVIDENCE and no
     # `assess_turn`, so it inherited the rc-only base and `EVIDENCE = None` —
@@ -1094,6 +1098,8 @@ class ClaudeDriveAdapter(DriveAdapter):
         cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose"]
         if self.model:
             cmd += ["--model", self.model]
+        if self.reasoning_effort:
+            cmd += ["--effort", self.reasoning_effort]
         # Bind the seat's MCP server on the COMMAND LINE, exactly as the Codex
         # adapter does with `-c mcp_servers.agora.*`. A project `.mcp.json` is
         # not enough for a driven seat: Claude treats project-scoped servers as
@@ -1115,6 +1121,9 @@ class ClaudeDriveAdapter(DriveAdapter):
         cmd += ["--allowedTools", "mcp__agora"]
         cmd += ["--permission-mode",
                 "bypassPermissions" if self.permissions == "all" else "auto"]
+        # `--harness-arg k=v` was accepted and dropped here: this adapter never
+        # called extra_argv(), so an operator passing e.g. add-dir got silence.
+        cmd += self.extra_argv()
         if session_id:
             cmd += ["--resume", session_id]
         cmd.append(prompt)

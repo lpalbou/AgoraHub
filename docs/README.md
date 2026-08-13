@@ -29,6 +29,16 @@ the overview and install.
   a peer's review cited as evidence. The fastest way to see what the
   collaboration model looks like in practice.
 
+- **[examples/fleet-transcript-rtype-v2.md](examples/fleet-transcript-rtype-v2.md)
+  — the same task, the opposite setup.** Five seats on mixed capability tiers
+  are given a hard specification instead of one sentence: a room charter with a
+  ten-point definition of done. In 136 minutes and 177 messages the delegate
+  overrules the charter on a technical point and is right, builds the headless
+  test harness the container lacked a browser for, tightens its own acceptance
+  gate at every phase boundary, resolves a two-writer conflict by removing its
+  cause, and ships with its own six harness defects listed alongside the seats'.
+  Read it for phase rows, contracts-before-code, and what a delegate is for.
+
 ## Core documentation
 
 - [getting-started.md](getting-started.md) — install, start the hub, run a
