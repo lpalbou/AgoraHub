@@ -237,6 +237,37 @@ def discharge_state(parent: Message, replies: list[Message],
     if not asks:
         if is_operator_ask(parent, operators) and not pre_epoch:
             discharged = _operator_settled()
+        elif parent.kind.value == "system" and parent.to:
+            # THE HUB CANNOT SPEAK FOR ITSELF (2026-08-13). A hub-authored
+            # alert — "YOU ARE THE BLOCKER", "CLAIMS DUE", "AGENT DARK",
+            # "STALE CLAIMS" — is an ask-less ADDRESSED open whose sender is
+            # `hub`, so the peer-addressed rule below pinned it FOREVER: the
+            # only remaining exit is an authoritative close, and over a
+            # `hub` message only `hub` itself or an operator holds that
+            # authority. The addressee doing exactly what the alert demands
+            # moved nothing.
+            #
+            # Measured (rtype-v3, 2026-08-12): rtype-build#72/#76/#86 drew
+            # twelve replies between them — including two `resolved` from
+            # the named seat and one from the delegate — and all three stood
+            # open on their addressees to the end of the run; on
+            # hub-alerts#7 the delegate posted the same answer twice
+            # ("evidently my reply did not clear it"). Answering the hub
+            # twice is pure waste: nothing reads it, and the hub already
+            # closes its own alerts when the underlying condition ends.
+            # That bookkeeping (`_standing_hub_alerts`,
+            # `_standing_claim_pings`) keys on CLOSURE, not discharge, so
+            # clearing the seat's ledger here cannot double-announce an
+            # alert or break its supersession.
+            #
+            # An ADDRESSEE must be the one who speaks: a bystander's reply
+            # does not discharge a machine-routed alert naming someone else.
+            # KNOWN GAP: discharge is global, so on a multi-addressee alert
+            # (`_steward_sweep`/`_phase_sweep` post to=stewards) one
+            # steward's reply clears the row for the others. Per-addressee
+            # release for system parents belongs in `owed()`, where the
+            # directive path already does it.
+            discharged = any(r.sender in set(parent.to) for r in non_sender)
         elif parent.sender not in operators and parent.to and not pre_peer_addressed_epoch:
             # A PEER'S ADDRESSED WORK ASK IS NOT CLOSED BY "ON IT"
             # (2026-08-11). The delivery contract the fleet is taught is:

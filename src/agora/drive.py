@@ -198,7 +198,13 @@ WORK_PROMPT = (
     "never post reception-pass, no-delta, guard-rerun, parked, or routine "
     "progress messages to a channel. If blocked, mark the claim row and send "
     "one addressed structured ask in a DM or focused group only when another "
-    "seat can act; never broadcast or repeat an unchanged blocker. Then END "
+    "seat can act; never broadcast or repeat an unchanged blocker. You do NOT "
+    "have to be blocked to ask: when you are about to write a guard, a stub, "
+    "a fallback or a TODO around a symbol ANOTHER seat owns — a function, a "
+    "key, an event, a field you are hoping exists — send that same addressed "
+    "ask instead, naming the exact symbol and the contract you need. A hedge "
+    "around a missing symbol is an unasked question that ships: the call site "
+    "never throws, so nobody learns the symbol was never built. Then END "
     "this turn — the driver "
     "re-wakes you for the next slice. Finished, blocked, or not worth "
     "continuing? Write done/blocked/parked on the row and END. Post only one "
@@ -228,6 +234,68 @@ WORK_BOOT_PROMPT = (
     "and send one addressed structured ask in a DM or focused group only "
     "when another seat can act; never broadcast or repeat an unchanged blocker. "
     "Then END. Do not wait, listen, or start watchers."
+)
+
+# The LANE PASS: the only prompt a seat that holds no row will ever see that
+# authorises speaking FIRST. Measured on the five-seat run of 2026-08-12:
+# `quality` and `product` between them answered 97 times and authored ZERO
+# asks, because WORK_PROMPT is the only prompt that authorises initiating and
+# neither seat was ever eligible for it (blocked-only row / no row at all).
+#
+# It starts "AGORA WORK CHUNK" deliberately: _prompt_kind, the abstractcode
+# lane state file and the workspace rule file all classify a driven turn by
+# that prefix, and this IS a work chunk — a different question, same lane.
+# It may also be the FIRST turn of a fresh work session (the starved seats
+# hold no work session at all), so it carries the boot orientation itself:
+# without that, the lane would skip WORK_BOOT_PROMPT and then persist an
+# unbooted session for every later chunk on it.
+#
+# The whole design is the SPEAK/SILENCE cut. Silence is the default and is
+# stated as complete; speech is authorised only for a gap the seat can NAME,
+# because "name the artifact" is the one test that a status line, an offer of
+# help and an agreement all fail. That cut is what keeps this from re-opening
+# the ceremony the empty-pass rule closed (0140 field test 2: 50% ceremony on
+# turns woken owing nothing).
+INITIATIVE_PROMPT = (
+    "AGORA WORK CHUNK — LANE PASS. Agora MCP is REQUIRED: use only Agora MCP "
+    "tools for Agora communication, never the `agora` CLI or direct HTTP. If "
+    "this work session is new to you, call whoami first (heed the hub rules) "
+    "and read_charter() once. "
+    "Nothing is owed and you hold no live claim row, so nothing here is "
+    "assigned. This turn exists for ONE reason: a seat that can SEE a problem "
+    "in its own lane must have a way to say so, and every other prompt you "
+    "get tells you to be quiet when nothing names you. Your standing rule "
+    "that an empty inbox never authorises UNRELATED new claim work still "
+    "holds exactly as written: the only thing you may open here is work in "
+    "your OWN lane that no live row covers. Do NOT check the inbox — "
+    "reception is the driver's job between chunks. "
+    "Look at what this seat is FOR and then at the actual shared artifact — "
+    "the workspace tree, the plan, the contract and phase rows in the channel "
+    "store — not at the conversation. Then answer ONE question: can you NAME "
+    "a specific gap in your lane? A symbol that is called and never defined, "
+    "a key or event one seat emits and no seat handles, a contract two seats "
+    "read differently, a spec point with no owner, an interface your own work "
+    "will need that does not exist yet, a defect your lane is the one "
+    "qualified to catch. Name means name: the file, the symbol, the row, the "
+    "spec point. Check the store rows once (store_list, or channel_digest) "
+    "before you speak: if a live row already owns it, it is not your gap. "
+    "IF YOU CAN NAME ONE: do exactly one of these, once, then END. Either "
+    "send ONE addressed structured ask (asks=..., to=the seat that owns it) "
+    "in the room where that work lives — or open ONE `claim:<slug>` row with "
+    "store_set (owner, status, next_step) and do a first real slice of it "
+    "now. If the work is more than this one slice, leave the row NON-TERMINAL "
+    "with a next_step naming what comes next — write done only when it "
+    "actually is. Prefer the claim when the work is yours to do; prefer the "
+    "ask when the answer is another seat's to give. Either way the driver "
+    "picks the row up and keeps you working from the next pass on. "
+    "IF YOU CANNOT: END THE TURN WITHOUT POSTING ANYTHING. That is the "
+    "expected outcome here and it costs the room nothing. "
+    "These are NOT nameable gaps: 'I am available', 'I could help with X', a "
+    "status line, a summary of what other seats did, an agreement, a re-raise "
+    "of anything you already raised, or a question whose answer would not "
+    "change what somebody builds. If what you are about to send would not "
+    "survive the question 'which line of which file does this change?', it is "
+    "ceremony — do not send it."
 )
 
 #: Prepended to a DELEGATE's work chunk. Its job is the room, not the code.
@@ -324,6 +392,12 @@ WORK_STRIKES = 3                    # receipt-less chunks per claim VERSION
 #                                     before the chain parks (a NEW receipt =
 #                                     a version bump = the reset; identical
 #                                     rewrites are heartbeats, not progress)
+DRIVE_INITIATIVE_COOLDOWN = 900.0   # minimum gap between LANE PASSES for a
+#                                     live seat that holds no continuable row
+#                                     (Driver._initiative_step). Long on
+#                                     purpose: this lane exists to unstarve a
+#                                     silent seat, not to give it a second
+#                                     work loop.
 WORK_STRIKE_TTL = 3600.0            # struck-out rows re-enter selection after
 #                                     this. Strikes used to last the process
 #                                     lifetime, and the only seat that would
@@ -1065,6 +1139,29 @@ class CodexDriveAdapter(DriveAdapter):
         return TurnEvidence(ok=True, tools=tuple(successful))
 
 
+def _skill_text() -> str:
+    """The packaged `agora-channels` SKILL.md body — agora's OTHER half.
+
+    Read from the PACKAGE, not from the harness's installed copy under
+    `~/.claude/skills/`: `install_skill` writes these same bytes there, but a
+    driven seat must not go norm-blind because `agora setup` was last run for
+    a different harness on this machine. The YAML frontmatter is the harness's
+    discovery metadata, not instruction, so it is stripped and replaced by one
+    line naming what follows. Never raises: a seat that has agora's MCP half
+    and not its skill half is degraded, not broken.
+    """
+    try:
+        from importlib import resources
+        raw = (resources.files("agora.skill") / "SKILL.md").read_text()
+    except Exception:
+        return ""
+    if raw.startswith("---\n"):
+        raw = raw.split("---", 2)[-1]
+    return ("The agora collaboration protocol — the `agora-channels` skill, "
+            "the half of agora that is not the MCP tools — is in force for "
+            "this seat:\n\n" + raw.strip())
+
+
 class ClaudeDriveAdapter(DriveAdapter):
     name = "claude"
     binary = "claude"
@@ -1121,6 +1218,26 @@ class ClaudeDriveAdapter(DriveAdapter):
         cmd += ["--allowedTools", "mcp__agora"]
         cmd += ["--permission-mode",
                 "bypassPermissions" if self.permissions == "all" else "auto"]
+        # THE MISSING HALF (2026-08-13). agora is MCP + SKILL, and this
+        # adapter shipped only the MCP half: measured across two 5-seat runs,
+        # 0 skill loads in 4,585 tool calls. `claude` has no --skill flag, and
+        # a leading `/agora-channels` in the PROMPT does load it (verified
+        # live under exactly these flags) — but a prompt load lands in the
+        # TRANSCRIPT, which makes it either per-turn (402 turns x ~7.3k
+        # tokens, cumulative inside one session: the 80-turn seat would end up
+        # carrying 80 copies) or once-per-session and then EATEN BY
+        # COMPACTION — 60 compactions were recorded across those same runs,
+        # and three of ten seats compacted more than once every two turns
+        # (12/11, 14/20, 10/17), so a boot-only load dies first exactly where
+        # the norms are needed most. The system prompt is the one surface
+        # compaction cannot reach and `--resume` re-sends every turn: ~7.3k
+        # tokens on a CACHED prefix, ~5% of the 721M cache-read tokens those
+        # runs already spent, ZERO transcript budget (it never brings the next
+        # compaction closer), and no dependency on `agora setup` having
+        # installed the skill on this machine.
+        skill = _skill_text()
+        if skill:
+            cmd += ["--append-system-prompt", skill]
         # `--harness-arg k=v` was accepted and dropped here: this adapter never
         # called extra_argv(), so an operator passing e.g. add-dir got silence.
         cmd += self.extra_argv()
@@ -1325,7 +1442,13 @@ class AbstractCodeDriveAdapter(DriveAdapter):
                   "transcript keeps growing")
 
     def _state_file(self, prompt: str) -> Path:
-        lane = "work" if prompt.startswith("AGORA WORK CHUNK") else "reception"
+        # Containment, not prefix (0151). A DELEGATE's chunk arrives as
+        # `SUPERVISE_PROMPT + WORK_PROMPT`, and the prefix test filed it under
+        # the RECEPTION state file: two lanes sharing one AbstractCode memory,
+        # and `rotate_session("work")` flushing a file the work lane was not
+        # using. The adapter contract hands this method a prompt and nothing
+        # else, so the marker inside the prompt is the signal available here.
+        lane = "work" if "AGORA WORK CHUNK" in prompt else "reception"
         base = _config.home() / (
             f"drive-{self.mcp.agent_id}.abstractcode.{lane}.state.json"
         )
@@ -2248,6 +2371,15 @@ class Driver:
         # `spawn` is injectable so the loop is unit-testable without a real
         # harness process: spawn(prompt, session_id) -> (new_session_id|None, ok).
         self._spawn = spawn or self._spawn_turn
+        # THE LANE THIS TURN IS RUNNING IN, DECLARED BY ITS CALLER (0151).
+        # `_prompt_kind` can only guess it from the prompt text, and a
+        # DELEGATE's work chunk is `SUPERVISE_PROMPT + WORK_PROMPT` — after
+        # that prepend the guess said "boot", so the chunk was graded against
+        # the RECEPTION contract and failed for not calling `check_inbox`, a
+        # call a work chunk has no reason to make. Set around the spawn like
+        # `_reception_debt_before` rather than passed through `_spawn`, so the
+        # injectable two-argument spawn signature the tests use is unchanged.
+        self._turn_kind: str | None = None
         # Debt verification asks the HUB what is still owed after a turn, so
         # it is only meaningful when the turn really talked to one. Explicit
         # rather than inferred from the spawn identity, so an end-to-end
@@ -2625,11 +2757,19 @@ class Driver:
 
     @staticmethod
     def _prompt_kind(prompt: str) -> str:
+        """GUESS the lane from the prompt text. Fallback only — a feature is
+        free to prepend to a prompt (SUPERVISE_PROMPT does), and then this
+        lies. `_kind_of_turn` prefers what the caller declared."""
         if prompt.startswith("AGORA WAKE"):
             return "wake"
-        if prompt.startswith("AGORA WORK CHUNK"):
+        if "AGORA WORK CHUNK" in prompt:
             return "work"
         return "boot"
+
+    def _kind_of_turn(self, prompt: str) -> str:
+        """The lane this turn is in: DECLARED by the caller that spawned it,
+        falling back to the prompt guess for callers that have only a prompt."""
+        return self._turn_kind or self._prompt_kind(prompt)
 
     def _log_lines(self, lines: list[str]) -> None:
         """Best-effort JSONL append: recording must NEVER break a turn.
@@ -2798,6 +2938,13 @@ class Driver:
                           if i not in linked_sources
                           and before.ref_of(i) not in linked_sources]
         unresolved_structured: list[str] = []
+        # Message ids on which the per-ask narrowing below proved NO pending
+        # ask names this seat. `to_answer` and its `pending_asks` are
+        # MESSAGE-GLOBAL, so the `unanswered` diff above cannot tell "I owe
+        # this" from "someone else still owes this" — see
+        # `_message_pending_asks`, which already draws that line for the
+        # structured check and was simply never applied to the row.
+        per_ask_released: set[str] = set()
         for channel, seq, message_id, original_pending in before.structured:
             pending = self._message_pending_asks(channel, seq, message_id)
             if pending is None:
@@ -2813,6 +2960,19 @@ class Driver:
                 if (message_id not in linked_sources
                         and f"{channel}#{seq}" not in linked_sources):
                     unresolved_structured.append(message_id)
+            else:
+                # NO ASK ON THIS MESSAGE NAMES ME ANY MORE, so the surviving
+                # `to_answer` row is other seats' remaining debt — which is
+                # what the envelope itself tells the seat
+                # (`asks_naming_you=[]`). Failing the turn on it scored a seat
+                # for the SLOWEST of its peers: the shape is a delegate's
+                # fan-out, one message carrying one addressed ask per seat.
+                # An UNREADABLE row (`pending is None`) takes the fails-open
+                # `continue` above and is deliberately NOT released here: a
+                # hub blip must never manufacture a pass.
+                per_ask_released.add(message_id)
+        if per_ask_released:
+            unanswered = [i for i in unanswered if i not in per_ask_released]
         if not unanswered and not unresolved_structured:
             return evidence
         parts = []
@@ -2871,7 +3031,7 @@ class Driver:
     def _spawn_turn(self, prompt: str, session_id: str | None):
         """Run ONE headless harness turn. Returns (session_id, ok)."""
         cmd = self._adapter.build_command(prompt, session_id)
-        kind = self._prompt_kind(prompt)
+        kind = self._kind_of_turn(prompt)
         t0 = time.time()
         # turn_start BEFORE the spawn: a wedged turn still shows it began.
         self._log_event(event="turn_start", ts=round(t0, 3),
@@ -3084,6 +3244,8 @@ class Driver:
             return False
         sid = self.reception_session_id
         prompt = WAKE_PROMPT if sid else BOOT_PROMPT
+        # Declare the lane (0151); cleared in the finally below.
+        self._turn_kind = "wake" if sid else "boot"
         verify_debt = self.verify_reception_debt
         debt_before = self._reception_debt() if verify_debt else None
         self._reception_debt_verification_required = verify_debt
@@ -3097,11 +3259,12 @@ class Driver:
             # single-threaded loop, and its 600s cap is not always honoured
             # (measured: one ran 3052s on 2026-08-01) — 51 minutes in which
             # nothing said the seat was still in there.
-            with self._long_turn_notice(self._prompt_kind(prompt)):
+            with self._long_turn_notice(self._kind_of_turn(prompt)):
                 new_sid, ok = self._spawn(prompt, sid)
         finally:
             self._reception_debt_before = None
             self._reception_debt_verification_required = False
+            self._turn_kind = None
         self._last_turn_ok = ok
         if not ok:
             # A CONFIGURATION error can never succeed, so retrying it is pure
@@ -3130,6 +3293,31 @@ class Driver:
             # escalation band flip, or the next work chunk moves it.
             if self._last_turn_stage in _SEMANTIC_STAGES:
                 self._clear_backoff()
+                # ADOPT THE SESSION THIS TURN JUST CREATED (0150). The turn
+                # RAN, called its tools and did real work; only its CONTENT
+                # was judged. Returning here without persisting `new_sid`
+                # threw that resumable thread away, and because the prompt
+                # selector above is `WAKE_PROMPT if sid else BOOT_PROMPT`, a
+                # seat whose FIRST turn is semantically failed never acquires
+                # a session AT ALL: every later wake is another cold boot
+                # with no memory of the last one.
+                # Guarded on `new_sid`: it is None only when nothing parsed
+                # and there was no session to fall back on, and assigning
+                # that would discard a live thread on a content verdict —
+                # exactly what the transport block below refuses to do.
+                if new_sid:
+                    self.reception_session_id = new_sid
+                    self._write_session(self._reception_session_path, new_sid)
+                    self._reception_turns_on_session += 1
+                    if self._reception_turns_on_session >= self.session_rotate:
+                        # An adopted turn counts toward --session-rotate like
+                        # any other: a seat failing semantically in a loop
+                        # must still rotate rather than ride one session
+                        # forever.
+                        self._adapter.rotate_session()
+                        self.reception_session_id = None
+                        self._write_session(self._reception_session_path, None)
+                        self._reception_turns_on_session = 0
                 return True
             # `mcp-use` and `mcp-call` say the same thing in the adapters'
             # voice: the turn REACHED the hub and its calls were judged. They
@@ -3455,14 +3643,83 @@ class Driver:
                             if now - t < TURN_BUDGET_WINDOW]
         return now
 
-    def run_work_turn(self) -> bool:
+    #: When this seat last took a LANE PASS. A class attribute so the lane
+    #: needs no constructor change; the first instance write shadows it.
+    _last_initiative: float = 0.0
+
+    def _initiative_step(self) -> bool:
+        """ONE lane pass for a LIVE seat that holds no continuable row.
+
+        Measured on the five-seat run of 2026-08-12: `quality` marked its only
+        claim row `blocked` at 18:07 and, for the remaining two hours, armed
+        81 times with reason=no-continuable-work and took ZERO work chunks;
+        `product` opened no row at all and took zero in twenty turns. Neither
+        was idle — they replied 56 and 41 times — and between them they
+        authored ZERO structured asks, because WORK_PROMPT is the only prompt
+        that authorises speaking first and neither seat was ever eligible for
+        it. A blocked row is correctly NOT continuable (chaining on a declared
+        blocker spins); the defect is that it also made the SEAT dead.
+
+        Called from the top of the loop pass, NOT from the rc=0 idle path:
+        those two seats reached an idle timeout zero times in three hours
+        (armed -> wake -> armed -> wake, never a boundary), so an idle-only
+        lane would have fired exactly never.
+
+        Four mechanical bounds, so this cannot become the ceremony lane the
+        empty-pass rule closed: a COMPLETED store walk (never invent work off
+        a hub blip), traffic that actually reached this seat since the last
+        pass (a dead room buys zero passes), the cooldown, and the shared
+        hourly work budget. The real bound is the fifth: INITIATIVE_PROMPT,
+        whose default outcome is silence with no receipt of any kind.
+
+        NOT for a delegate. run_work_turn prepends SUPERVISE_PROMPT ("the work
+        itself belongs to the seats; you are not the one building") and this
+        prompt says "open a claim row and do a first real slice" — the exact
+        contradiction the SUPERVISE branch was added to delete. A delegate
+        holding no row is already told to supervise; it needs no lane.
+        """
+        if self._pending_wake or self._backoff_retry_after() > 0:
+            return False
+        if not self._scan_ok:
+            return False
+        now = self._prune_work_times()
+        if now - self._last_initiative < DRIVE_INITIATIVE_COOLDOWN:
+            return False
+        if not self._turn_times or max(self._turn_times) <= self._last_initiative:
+            return False
+        if len(self._work_times) >= self.work_budget:
+            return False
+        if self._is_delegate_seat():
+            return False
+        debt = self._reception_debt()
+        if debt is None or debt.to_answer:
+            # LAST, after every free gate, so the /owed GET is paid at most
+            # once per loop pass and only by a seat that is otherwise ready.
+            # The lane is for a seat that owes NOTHING: an unread answer
+            # outranks a thought, and an unreadable /owed is never read as 0.
+            return False
+        self._last_initiative = now
+        self._state("chunk", reason="initiative-lane")
+        return self.run_work_turn(prompt_override=INITIATIVE_PROMPT)
+
+    def run_work_turn(self, *, prompt_override: str | None = None) -> bool:
         """Spawn ONE bounded work chunk (WORK_PROMPT, --work-timeout cap).
 
         Uses a work-only session, and a failing chunk never touches reception:
         its only bound is the per-version strike ledger in _chain_step.
+        `prompt_override` swaps the contract for the same lane, session,
+        budget and timeout — the lane pass is a work chunk asking a different
+        question, not a second engine. It replaces WORK_BOOT_PROMPT as well,
+        which is why INITIATIVE_PROMPT carries the boot orientation itself.
         """
         sid = self.work_session_id
-        prompt = WORK_PROMPT if sid else WORK_BOOT_PROMPT
+        prompt = prompt_override or (WORK_PROMPT if sid else WORK_BOOT_PROMPT)
+        # Declare the lane BEFORE the delegate prepend below (0151): after
+        # `SUPERVISE_PROMPT + prompt` no prefix test can recover it, and the
+        # four sites that tried produced `kind=boot` for every chunk the
+        # delegate ran — the seat coordinating the fleet was the only one
+        # whose work lane was invisible in its own flight recorder.
+        self._turn_kind = "work"
         # A DELEGATE SUPERVISES; IT DOES NOT TAKE THE SEATS' WORK.
         #
         # Operator, 2026-08-07: "the delegate is helping others to do their
@@ -3490,6 +3747,7 @@ class Driver:
                 new_sid, ok = self._spawn(prompt, sid)
         finally:
             self._turn_timeout = self.reception_timeout
+            self._turn_kind = None
         if not ok:
             # A chunk that NEVER REACHED THE HUB is the same fact as a
             # reception turn that never reached it — the same binary against
@@ -3506,6 +3764,26 @@ class Driver:
             if self._last_turn_stage in _TRANSPORT_STAGES:
                 self._note_failure(self._last_turn_stage or "harness",
                                    self._last_turn_detail)
+            # SEMANTIC verdict: the chunk RAN and left a resumable thread, so
+            # adopt it on exactly the terms a successful chunk gets, rotation
+            # included (0150). The drop below used to be UNCONDITIONAL, so the
+            # most common verdict on this lane — `mcp-use` for a chunk that
+            # moved the workspace and touched no Agora tool, which the branch
+            # above deliberately excuses from backoff — still cost the chunk
+            # the thread it had just built and paid a full WORK_BOOT_PROMPT
+            # re-orientation on the next slice. Narrowed to the SEMANTIC set
+            # rather than "not transport": `harness-config` is in neither set
+            # and keeps its existing drop.
+            if self._last_turn_stage in _SEMANTIC_STAGES and new_sid:
+                self.work_session_id = new_sid
+                self._write_session(self._work_session_path, new_sid)
+                self._work_turns_on_session += 1
+                if self._work_turns_on_session >= self.session_rotate:
+                    self._adapter.rotate_session("work")
+                    self.work_session_id = None
+                    self._write_session(self._work_session_path, None)
+                    self._work_turns_on_session = 0
+                return True
             # A failed resume: drop the session once and boot fresh next time.
             if self.work_session_id:
                 self.work_session_id = None
@@ -3742,6 +4020,19 @@ class Driver:
                 snap = self._continuation_snapshot()
                 if self._scan_ok:
                     self._has_work = snap is not None
+                # THE INITIATIVE LANE. A seat whose only row is `blocked`, or
+                # which never opened one, is work-chunk ineligible forever, so
+                # reception is the only prompt it will ever see — and
+                # reception ends "END THE TURN WITHOUT POSTING ANYTHING".
+                # Two of five seats spent the whole 2026-08-12 run in exactly
+                # that state and authored zero asks between them. Placed HERE
+                # rather than on the rc=0 path because those seats never
+                # reached an idle boundary at all. `continue` re-enters the
+                # pass: if the lane opened a claim row, the very next scan
+                # sees it and the ordinary chain takes over.
+                if snap is None and self._initiative_step():
+                    driven += 1
+                    continue
                 # source=auto: notify-file tail when the hub is local (0
                 # sockets), websocket otherwise — hard-coding "file" made
                 # remote seats deaf. signal_passthrough: SIGTERM/SIGINT must

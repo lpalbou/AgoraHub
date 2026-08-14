@@ -983,8 +983,22 @@ class HubService:
 
     def _validate_answers(self, raw: Any, status: Status, reply_to: str | None,
                           sender: str) -> list[str]:
-        if status != Status.reply or not reply_to:
-            raise HubError(400, "answers[] are only allowed on a reply with reply_to")
+        if status not in (Status.reply, Status.resolved) or not reply_to:
+            # `resolved` IS the natural shape of a completion report, and it
+            # was the one shape that could not discharge the ask it
+            # completed (0152): the delegate's acceptance report landed as
+            # `resolved`, its ask stayed open, and it had to post a SECOND
+            # message as `reply` purely to close it — "my error in shape,
+            # not in substance", when it was this rule. The asymmetry that
+            # marks it an oversight rather than a stance: `consumes`, the
+            # sibling discharge field, has always been accepted on a
+            # `resolved`. Discharge itself never looked at status — it
+            # reads `data.answers` off any non-sender reply — so this
+            # refusal was the only thing between the two.
+            raise HubError(400, "answers[] are only allowed on a reply that "
+                                "names its reply_to (status=reply, or "
+                                "status=resolved when the completion report "
+                                "is itself the answer)")
         if not isinstance(raw, list):
             raise HubError(400, "answers must be a list")
         if not raw:
@@ -1292,8 +1306,17 @@ class HubService:
                          if m.agent_id not in (sender, "hub")
                          and m.agent_id not in self.operator_ids()}
                 if peers:
+                    # THE PLAN IS NOT ITS OWN REVIEW (2026-08-13). Both
+                    # checks in this block read the same `refs`, so ONE
+                    # peer-authored `plan:` row satisfied both: the plan
+                    # citation found its row, and this check found a
+                    # non-sender author. A delivery with zero review passed
+                    # the review gate. The reviewed artifact must be a
+                    # second, non-plan citation.
                     authors = {r.get("updated_by") or r.get("created_by")
-                               for r in refs if isinstance(r, dict)}
+                               for r in refs if isinstance(r, dict)
+                               and not (r.get("kind") == "store"
+                                        and str(r.get("ref", "")).startswith("plan:"))}
                     authors.discard(None)
                     if not (authors - {sender}):
                         raise HubError(400,
@@ -1310,33 +1333,48 @@ class HubService:
                                        "reviewed file on the channel fs) — "
                                        "then cite that peer-authored "
                                        "artifact in data.evidence alongside "
-                                       "your own.")
-                    # PLAN ELABORATION IS A MANDATORY STEP (operator ruling,
-                    # 2026-08-12): "no agent should ever start working
-                    # before a plan has been created and agreed upon." The
-                    # plan phase is where seats argue, own and defend their
-                    # perspectives — especially seats rooted in existing
-                    # packages whose constraints rule paths in and out. The
-                    # hub cannot see a premature build in a filesystem
-                    # workspace, but it CAN refuse to answer the user
-                    # without the plan on the record: the completion report
-                    # must cite the agreed plan row it delivered under.
-                    if not any(isinstance(r, dict) and r.get("kind") == "store"
-                               and str(r.get("ref", "")).startswith("plan:")
-                               for r in refs):
-                        raise HubError(400,
-                                       "no delivery without the plan it was "
-                                       "built under: cite the agreed plan — "
-                                       "a `plan:<slug>` store row recording "
-                                       "each seat's slice and how the "
-                                       "contested points were settled in "
-                                       "the room — in data.evidence "
-                                       "alongside the artifact and the peer "
-                                       "review. Plan elaboration is a "
-                                       "mandatory step: seats argue and "
-                                       "align BEFORE implementation, and "
-                                       "the report points at what was "
-                                       "agreed.")
+                                       "your own. The agreed plan does "
+                                       "not count as its own review.")
+                # PLAN ELABORATION IS A MANDATORY STEP (operator ruling,
+                # 2026-08-12): "no agent should ever start working
+                # before a plan has been created and agreed upon." The
+                # plan phase is where seats argue, own and defend their
+                # perspectives — especially seats rooted in existing
+                # packages whose constraints rule paths in and out. The
+                # hub cannot see a premature build in a filesystem
+                # workspace, but it CAN refuse to answer the user
+                # without the plan on the record: the completion report
+                # must cite the agreed plan row it delivered under.
+                #
+                # OUTSIDE `if peers:` (2026-08-13): this requirement is
+                # about the delegate's own conduct, not about having
+                # colleagues, and nested inside the peer gate it
+                # evaporated in exactly the two rooms where nobody else
+                # is watching — a peerless channel, and the operator DM,
+                # whose only other member IS the operator, so `peers` is
+                # empty there by construction. Reporting into the DM was
+                # a one-line bypass. Kept AFTER the review check so the
+                # refusal a delegate meets first in a peopled room is
+                # still the review one.
+                if not any(isinstance(r, dict) and r.get("kind") == "store"
+                           and str(r.get("ref", "")).startswith("plan:")
+                           for r in refs):
+                    raise HubError(400,
+                                   "no delivery without the plan it was "
+                                   "built under: cite the agreed plan — "
+                                   "a `plan:<slug>` store row recording "
+                                   "each seat's slice, the SEAMS between "
+                                   "those slices (each place one seat's "
+                                   "output is another's input, with the "
+                                   "observation that proves it landed), "
+                                   "and how the contested points were "
+                                   "settled in the room — in data.evidence "
+                                   "alongside the artifact and the peer "
+                                   "review. Plan elaboration is a "
+                                   "mandatory step: seats argue and "
+                                   "align BEFORE implementation, and "
+                                   "the report points at what was "
+                                   "agreed.")
         if payload.signature is not None:
             # Reserved authorship token: opaque, stored VERBATIM, not yet
             # verified. Consumers may read it; the hub attaches no trust.
@@ -2051,7 +2089,9 @@ class HubService:
                             channel,
                             f"ROUTING — this task already has "
                             f"{len(participants)} seats who must speak. "
-                            f"Open a focused room NOW:  agora group {slug} "
+                            f"Open a focused room NOW — MCP: create_group("
+                            f'name="{slug}", members={list(participants)}); '
+                            f"CLI: agora group {slug} "
                             f"{names}  — keep #{channel} for the pointer, "
                             "cross-room decisions, milestones, and final "
                             "delivery.",
@@ -3042,24 +3082,43 @@ class HubService:
                 # ledger. Measured: rtype-open#10 had three kickoff asks and
                 # its delegate never replied to the thread at all — but one
                 # ack was all it would have taken.
-                if (m.sender in ops
+                # A STRUCTURED message releases an addressee who has engaged
+                # and has no ask left naming them (2026-08-11, fund1): their
+                # per-ask row was the whole of their debt, and the envelope
+                # already tells them `asks_naming_you=[]` — keeping the /owed
+                # row told one seat two things at once, and the louder one
+                # re-woke it forever. The reporting delegate alone carries the
+                # commission itself to its evidence-cited completion report;
+                # an ask-less commission still pins every addressee exactly as
+                # before (the 75-second-discharge protection).
+                #
+                # WHOEVER SENT IT (0149). This release was nested inside the
+                # operator test below, so it never fired for the shape a
+                # driven fleet actually runs: a DELEGATE fans work out as ONE
+                # message carrying one addressed ask per seat, and every seat
+                # that answered its own ask kept this row until the SLOWEST
+                # seat answered theirs.
+                #
+                # An UNADDRESSED pending ask still pins EVERY addressee.
+                # `pending_addressees` reads an ask with an empty `to` as
+                # naming nobody, so without this clause a bare "noted" on a
+                # `to=[...]` open whose single ask is unanswered would clear
+                # the row for all of them — the partial-answer rot the asks
+                # feature exists to prevent. The driver's
+                # `_message_pending_asks` takes the same reading ("an ask
+                # addressed to nobody is everyone's"), so hub and driver now
+                # agree instead of contradicting each other.
+                if (asks_of(m)
+                        and agent.id not in named_pending
+                        and not any(
+                            not (a.get("to") or a.get("assignee"))
+                            for a in asks_of(m)
+                            if str(a.get("id")) in set(ds.pending))
+                        and not self._operator_delegate_debt(agent.id, m)):
+                    continue
+                if not (m.sender in ops
                         and (agent.id in m.to
                              or self._operator_delegate_debt(agent.id, m))):
-                    # A STRUCTURED commission releases an addressee who has
-                    # engaged and has no ask left naming them (2026-08-11,
-                    # fund1): their per-ask row was the whole of their debt,
-                    # and the envelope already tells them `asks_naming_you=[]`
-                    # — keeping the /owed row told one seat two things at
-                    # once, and the louder one re-woke it forever. The
-                    # reporting delegate alone carries the commission itself
-                    # to its evidence-cited completion report; an ask-less
-                    # commission still pins every addressee exactly as
-                    # before (the 75-second-discharge protection).
-                    if (asks_of(m)
-                            and agent.id not in named_pending
-                            and not self._operator_delegate_debt(agent.id, m)):
-                        continue
-                else:
                     if agent.id not in claim_source_cache:
                         claim_source_cache[agent.id] = self._linked_claim_sources(
                             agent.id, channels)
@@ -4267,8 +4326,26 @@ class HubService:
                 if entry is None:
                     raise HubError(400, f"evidence cites store row '{ref}', "
                                         f"which does not exist in '{channel}'")
+                # A STORE ROW HAS NO ARCHIVE (2026-08-13). `fs` evidence
+                # cites `path@version` and the hub can serve those exact
+                # bytes back forever; the store keeps only HEAD, so a cited
+                # row can be rewritten after the report and what was
+                # reviewed is gone. Live (rtype-v3): commons#34 cited
+                # `review:requirements` at version 1 and the row now reads
+                # version 2 — "written before the final round of fixes
+                # landed ... the tree moved underneath them" — with v1
+                # unrecoverable. Stamp the DIGEST of the bytes the hub
+                # actually read, the commitment an `external` ref already
+                # carries: the hub still cannot restore v1, but any reader
+                # can prove in one hash whether the row in front of them is
+                # the row that was cited. Recipe, so a reader can
+                # recompute it: sha256 of json.dumps(value, sort_keys=True,
+                # separators=(",", ":")).
                 out.append({"kind": "store", "ref": ref,
                             "version": entry.version,
+                            "sha256": hashlib.sha256(json.dumps(
+                                entry.value, sort_keys=True, default=str,
+                                separators=(",", ":")).encode()).hexdigest(),
                             "updated_by": entry.updated_by,
                             "updated_at": entry.updated_at, "verified": True})
             elif kind == "blob":
