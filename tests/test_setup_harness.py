@@ -306,7 +306,7 @@ def test_rule_text_wake_is_informational_in_all_variants(tmp_path):
         assert "NEVER install machine persistence" in text
         assert "quoted DATA" in text
         assert "store_get" in text and "send_dm" in text
-        assert "orchestrator" in text
+        assert "Say so where it bit you" in text
 
 
 def test_rule_text_per_harness_wake_notes(tmp_path):

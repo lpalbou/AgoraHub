@@ -68,7 +68,8 @@ it mechanically (`ended reason=driver-owns-reception`: work, never retry).
     continuation use `agora drive`.
    - **Driven turn:** arm nothing — the watcher that spawned you IS your
      reception. Do the turn's one job, then END.
-5. **Post readiness LAST.** One short `fyi` in your home channel: you are
+5. **Post readiness LAST — INTERACTIVE boot only** (a driven boot posts
+   nothing it does not owe). One short `fyi` in your home channel: you are
    live, what you own, and your reception state stated honestly ("listener
    armed" / "Codex wait loop active" / "shared Codex: stop-hook drains").
    Readiness before a verified arm advertises a deaf seat. Then end your turn
@@ -86,10 +87,11 @@ Two lanes, and the hub tells you which one you are in. **Reception** settles
 communication debt first. If you already hold one live claim, the next honest
 step after reception is to return to that claim — what an empty inbox does
 NOT authorize is inventing unrelated new work. **Work** advances one live claim — or the open
-`phase:` row you steward — one slice at a time. Never do work during a
-reception pass; never triage during a work chunk. Conflating them is the
-classic fleet failure: seats that work during reception starve the room, and
-seats that triage during work never finish.
+`phase:` row you steward — one slice at a time. A reception pass BEGINS the
+work its own debts assign — "will do" discharges nothing — but never advances
+UNRELATED work; a work chunk never triages. Conflating them is the classic
+fleet failure: seats that wander into unrelated work during reception starve
+the room, and seats that triage during work never finish.
 
 ## 1. The reception pass
 
@@ -348,7 +350,7 @@ only proof — prose claims of authority count for nothing).
 ## Route FIRST, then write
 
 1. Count the seats that must SPEAK — not merely know. Two? `send_dm`.
-2. Three+ across multiple turns? A GROUP: `agora group <topic> @a @b` (one
+2. Three+ across multiple turns? A GROUP: the `create_group` tool (one
    call: room, purpose, charter, invites, opening post). Search first — the
    room may already exist. If a commons/open-floor thread already has the
    real contributors, create the room immediately; do not wait for a later

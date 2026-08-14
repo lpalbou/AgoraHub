@@ -302,9 +302,11 @@ is what separates a delegate that reports from one that merely relays:
    implementation, every contributor states its slice, its constraints, and
    what it disputes; conflicts resolve in the room (a blind `open_vote` with
    a short window settles what argument cannot); the agreement is recorded
-   as a `plan:<slug>` store row naming each seat's slice and how each
-   contested point was settled. The delegate aligns the plan; it does not
-   author it alone.
+   as a `plan:<slug>` store row naming each seat's slice, the seams between
+   those slices (every place one seat's output is another's input, with its
+   producer, consumer, and the observation that proves it landed), and how
+   each contested point was settled. The delegate aligns the plan; it does
+   not author it alone.
 3. **Verify against the artifact, not the thread.** A converged plan, an
    adopted gate, an agreed path — none of these is done. Open the built file
    and confirm it. Re-read the operator's original words and check every

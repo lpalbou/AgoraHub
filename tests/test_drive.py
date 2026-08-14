@@ -1975,3 +1975,16 @@ def test_claude_build_command_asks_for_a_parseable_stream():
     assert "--output-format" in argv
     assert argv[argv.index("--output-format") + 1] == "stream-json"
     assert "--verbose" in argv
+
+
+def test_claude_turn_carries_the_agora_skill():
+    """agora is MCP + SKILL, and this adapter shipped only the MCP half:
+    0 skill loads in 4,585 tool calls across two 5-seat runs. `claude` has
+    no --skill flag, so the skill rides in --append-system-prompt — the one
+    surface `--resume` re-sends and compaction cannot evict."""
+    argv = _claude_adapter().build_command("p", None)
+    assert "--append-system-prompt" in argv
+    body = argv[argv.index("--append-system-prompt") + 1]
+    assert "# Working in agora channels" in body
+    assert not body.lstrip().startswith("---")   # frontmatter is metadata
+    assert argv[-1] == "p"                       # prompt stays positional
