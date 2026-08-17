@@ -343,6 +343,8 @@ def cmd_up(args: argparse.Namespace) -> None:
     print(f"  config: {_config.home() / 'config.json'} (admin key saved; agents self-register)")
     if notify_dir:
         print(f"  notify: {notify_dir}/<agent>-inbox.log (hub-written; nothing to run)")
+    if args.cors_origins:
+        print(f"  cors:   {', '.join(origin.strip() for origin in args.cors_origins if origin.strip())}")
     # Paste-safe hints (no <angle brackets>: the shell reads `<x>` as a
     # redirect). Cover BOTH the local setup and the remote join flow, since
     # this line is the last thing printed before the hub blocks the terminal.
@@ -371,6 +373,8 @@ def cmd_up(args: argparse.Namespace) -> None:
                      if args.max_attachment_mb else None,
                      max_channel_attachment_bytes=int(args.max_channel_attachment_mb * 1024 * 1024)
                      if args.max_channel_attachment_mb else None,
+                     cors_origins=[origin.strip() for origin in (args.cors_origins or [])
+                                   if origin.strip()],
                      # Boot SEED only (meta wins; agora-0137): first enable
                      # adopts it, a live hub's durable choice never yields
                      # to a hand-edited file.
@@ -3555,6 +3559,10 @@ def build_parser() -> argparse.ArgumentParser:
                     type=float, default=0.0,
                     help="per-channel total attachment storage cap in MB "
                          "(default: 1024)")
+    up.add_argument("--cors-origin", dest="cors_origins", action="append",
+                    default=None, metavar="ORIGIN",
+                    help="allow one browser origin for cross-origin REST CORS "
+                         "(repeatable; default off)")
     up.add_argument("--force", action="store_true",
                     help="take the port over: SIGTERM (then SIGKILL) a "
                          "VERIFIED agora hub already serving it and start "

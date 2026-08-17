@@ -74,6 +74,49 @@ def test_rest_roundtrip(client):
                       headers=eve).status_code == 403
 
 
+def test_cors_preflight_allows_configured_origin_and_headers():
+    app = create_app(
+        db_path=":memory:",
+        admin_key=ADMIN_KEY,
+        rate_per_minute=600.0,
+        cors_origins=["http://static.local"],
+    )
+    client = TestClient(app)
+    response = client.options(
+        "/inbox",
+        headers={
+            "Origin": "http://static.local",
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "authorization, content-type, x-agora-client",
+        },
+    )
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://static.local"
+    allow_headers = {
+        header.strip().lower()
+        for header in response.headers["access-control-allow-headers"].split(",")
+    }
+    assert {"authorization", "content-type", "x-agora-client"} <= allow_headers
+    allow_methods = {
+        method.strip().upper()
+        for method in response.headers["access-control-allow-methods"].split(",")
+    }
+    assert "GET" in allow_methods
+
+
+def test_cors_marks_allowed_origin_on_actual_response():
+    app = create_app(
+        db_path=":memory:",
+        admin_key=ADMIN_KEY,
+        rate_per_minute=600.0,
+        cors_origins=["http://static.local"],
+    )
+    client = TestClient(app)
+    response = client.get("/healthz", headers={"Origin": "http://static.local"})
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://static.local"
+
+
 def test_websocket_fanout_and_backlog(client):
     alice = register(client, "alice")
     bob = register(client, "bob")
