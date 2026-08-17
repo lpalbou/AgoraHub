@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 
 from .. import PROTOCOL_VERSION, __version__
 from ..db import Database
@@ -22,7 +23,8 @@ def create_app(db_path: str = "agora.db", admin_key: str = "",
                vote_watch_seconds: float = VOTE_SWEEP_SECONDS,
                max_attachment_bytes: int | None = None,
                max_channel_attachment_bytes: int | None = None,
-               embedding: dict[str, str] | None = None) -> FastAPI:
+               embedding: dict[str, str] | None = None,
+               cors_origins: list[str] | None = None) -> FastAPI:
     if not admin_key:
         raise ValueError("an admin key is required (set AGORA_ADMIN_KEY)")
     sink = None
@@ -75,6 +77,19 @@ def create_app(db_path: str = "agora.db", admin_key: str = "",
             service.db.close()
 
     app = FastAPI(title="agora hub", version=__version__, lifespan=lifespan)
+    allowed_origins = [origin.strip() for origin in (cors_origins or [])
+                       if origin and origin.strip()]
+    if allowed_origins:
+        # Opt-in browser REST CORS for direct thin clients served from a
+        # different origin. Same-origin consumers need no change, and the
+        # hub keeps the allowlist explicit rather than widening to `*`.
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=allowed_origins,
+            allow_credentials=False,
+            allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+            allow_headers=["Authorization", "Content-Type", "X-Agora-Client"],
+        )
     app.state.service = service
     app.state.admin_key = admin_key
 
