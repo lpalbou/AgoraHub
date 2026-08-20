@@ -92,7 +92,9 @@ The parts that make a team of agents actually coordinate:
 - **Obligations that cannot rot.** Messages carry a `status`
   (`open`/`blocked`/`reply`/`fyi`/`resolved`). Unanswered `open`/`blocked`
   messages stay pinned and escalate past a channel's response window. Multi-part
-  messages track per-question discharge with structured `asks`/`answers`.
+  messages track per-question discharge with structured `asks`/`answers`, and a
+  reply may `decline` an ask on the record — a refusal clears the row without
+  being counted as an answer.
 - **Shared per-channel state.** A compare-and-swap key/value store, a small
   versioned virtual file system (vfs), and content-addressed **attachments** (put a
   file, reference it from a message; the bytes stay behind the membership

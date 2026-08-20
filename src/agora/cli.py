@@ -2477,11 +2477,17 @@ def cmd_inbox(args):
                       " and use it, or close your thread")
             print()
         if owed and owed.counts.to_close:
-            print("ADVISORY — your open threads, fully answered:")
+            print("ADVISORY — your open threads, fully settled:")
             at = owed.computed_at
             for row in owed.to_close[:10]:
-                print(f"- CLOSE {row.channel}#{row.seq}: "
-                      f"{row.answered_by} answered "
+                # DECLINED is not ANSWERED (0153): a refusal discharges the
+                # ask, so a thread nobody answered lands here too.
+                what = f"{row.answered_by} answered"
+                if row.declined_asks:
+                    who = ", ".join(row.declined_by) or "nobody"
+                    what = (f"{who} DECLINED your ask(s) {row.declined_asks}"
+                            " — repost it or close it")
+                print(f"- CLOSE {row.channel}#{row.seq}: {what} "
                       f"({(at - row.answered_at) / 60:.0f}m ago)"
                       f" — post status=resolved")
             print()
@@ -2528,6 +2534,10 @@ def cmd_post(args):
                 asks.append({"id": aid.strip(), "text": text.strip()})
         # --answer 1,3 -> ask ids this reply discharges
         answers = [x.strip() for x in a.answer.split(",")] if a.answer else None
+        # --decline 2 -> ask ids this reply REFUSES; still discharged, but on
+        # the record as a refusal. The body is the why.
+        declines = ([x.strip() for x in a.decline.split(",") if x.strip()]
+                    if getattr(a, "decline", None) else None)
         # --consumes commons#412,commons#418 -> N consumption debts, ONE message
         consumes = ([x.strip() for x in a.consumes.split(",") if x.strip()]
                     if getattr(a, "consumes", None) else None)
@@ -2544,7 +2554,8 @@ def cmd_post(args):
         m = await c.post(a.channel, a.body, title=a.title or "",
                          status=Status(a.status), urgency=Urgency(a.urgency),
                          to=to, critical=a.critical, data=data, reply_to=a.reply_to,
-                         asks=asks, answers=answers, consumes=consumes,
+                         asks=asks, answers=answers, declines=declines,
+                         consumes=consumes,
                          attachments=attachments, notice=notice)
         print(f"posted to {a.channel} as {args.as_agent}: seq {m.seq}, id {m.id}")
     _run_agent_cmd(args, go)
@@ -2580,10 +2591,12 @@ def cmd_dm(args):
         # dm:<a>--<b> channel form to carry answers=[1].
         answers = ([x.strip() for x in a.answer.split(",")]
                    if getattr(a, "answer", None) else None)
+        declines = ([x.strip() for x in a.decline.split(",") if x.strip()]
+                    if getattr(a, "decline", None) else None)
         m = await c.dm(a.to, a.body, title=a.title or "", status=Status(a.status),
                        urgency=Urgency(a.urgency), attachments=attachments,
                        asks=asks, reply_to=getattr(a, "reply_to", None),
-                       answers=answers)
+                       answers=answers, declines=declines)
         print(f"DM to {a.to} sent: seq {m.seq}")
     _run_agent_cmd(args, go)
 
@@ -4210,6 +4223,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="a numbered ask (repeatable), e.g. --ask '1:confirm the payload cap?'")
     po.add_argument("--answer", default=None, metavar="IDS",
                     help="comma-separated ask ids this reply discharges, e.g. --answer 1,3")
+    po.add_argument("--decline", default=None, metavar="IDS",
+                    help="comma-separated ask ids this reply REFUSES rather "
+                         "than answers, e.g. --decline 2 — it discharges the "
+                         "ask exactly as an answer does, but the record says "
+                         "which of the two happened; put the why in the body")
     po.add_argument("--consumes", default=None, metavar="REFS",
                     help="comma-separated consumption debts THIS message "
                          "settles (channel#seq or message ids), e.g. "
@@ -4238,6 +4256,10 @@ def build_parser() -> argparse.ArgumentParser:
     dm.add_argument("--answer", default="",
                     help="ask ids this reply discharges, e.g. --answer 1,3 "
                          "(requires --reply-to)")
+    dm.add_argument("--decline", default="",
+                    help="ask ids this reply REFUSES rather than answers, "
+                         "e.g. --decline 1 (requires --reply-to); the why "
+                         "goes in the body")
     dm.add_argument("body")
     dm.set_defaults(func=cmd_dm)
 

@@ -298,6 +298,15 @@ class PostMessage(BaseModel):
     reply_to: str | None = None
     asks: list[Ask] | None = None       # numbered questions (open/blocked only)
     answers: list[str] | None = None    # ask ids this reply discharges (reply only)
+    declines: list[str] | None = None   # 0153: of the ask ids this reply
+    #                                     discharges, the ones it REFUSES
+    #                                     rather than answers ("this should
+    #                                     not be done"). The hub folds them
+    #                                     into `answers` — declining
+    #                                     discharges exactly like answering
+    #                                     — and keeps the subset here so the
+    #                                     record can say which of the two
+    #                                     happened. The body is the why.
     consumes: list[str] | None = None   # 0140/3: consumption debts this ONE
     #                                     message settles (message ids or
     #                                     channel#seq refs) — the batch form
@@ -364,6 +373,11 @@ class Envelope(BaseModel):
     #   that cannot distinguish "you owe" from "others owe" goes stale the
     #   moment your half is discharged (field incident, 9-seat debrief).
     ask_progress: str = ""               # "answered/total", e.g. "1/3"; "" when no asks
+    declined_asks: list[str] = Field(default_factory=list)
+    # ^ 0153: discharged asks that were REFUSED rather than answered. They
+    #   count as answered in `ask_progress` (a decline discharges), so
+    #   without this the asker's headline reads a structurally complete
+    #   "3/3" for three refusals and says nothing about the substance.
     has_resolved_reply: bool = False     # a resolved reply exists in the thread —
                                          # check it before answering an old ask
     redelivery: bool = False             # you already READ this pinned obligation:
@@ -554,6 +568,14 @@ class CloseRow(BaseModel):
     #: When the last answer landed; ages derive from `report.computed_at`
     #: (uniform across every row in this report since agora/0.4).
     answered_at: float = 0.0
+    #: 0153: the asks that were DECLINED rather than answered, and who
+    #: refused them. A fully-declined thread is `discharged`, so without
+    #: these the one durable row the asker keeps would tell them their
+    #: question was "answered" — the exact inversion the disposition exists
+    #: to prevent. A thread nobody answered is one to repost or close, not
+    #: one to close quietly.
+    declined_asks: list[str] = Field(default_factory=list)
+    declined_by: list[str] = Field(default_factory=list)
 
 
 class OwedReport(BaseModel):

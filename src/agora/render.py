@@ -149,6 +149,10 @@ def render_messages(messages: list[dict[str, Any]]) -> str:
             "asks": _asks_field(m.data),
             "answers": ", ".join(str(a) for a in (m.data or {}).get("answers", [])
                                  ) if isinstance((m.data or {}).get("answers"), list) else "",
+            # The refused subset of `answers` (0153) — without it a reader
+            # cannot tell an answer from a refusal except by reading prose.
+            "declines": ", ".join(str(a) for a in (m.data or {}).get("declines", [])
+                                  ) if isinstance((m.data or {}).get("declines"), list) else "",
             "attachments": _attachments_field((m.data or {}).get("attachments"),
                                               m.channel),
         }
@@ -168,6 +172,10 @@ def render_envelopes(rows: list[dict[str, Any]]) -> str:
         if e.ask_progress:
             asks_field = e.ask_progress + (f" open:{','.join(e.pending_asks)}"
                                            if e.pending_asks else " (all answered)")
+            if e.declined_asks:
+                # "all answered" is a lie when some of them were refused.
+                asks_field = asks_field.replace(" (all answered)", "")
+                asks_field += f" DECLINED:{','.join(e.declined_asks)}"
             if e.your_pending_asks:
                 # WHOSE debt remains, machine-answered (nine-seat debrief):
                 # without this, seats re-read ask text every wake to learn a

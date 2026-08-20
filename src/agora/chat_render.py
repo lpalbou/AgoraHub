@@ -121,17 +121,21 @@ def ask_ref(ref: str, ask_id: str) -> str:
 
 
 def ask_lines(s: Style, asks: list[dict[str, Any]],
-              pending: list[str] | None, ref: str, width: int) -> list[str]:
+              pending: list[str] | None, ref: str, width: int,
+              declined: list[str] | None = None) -> list[str]:
     """Render a message's asks — each an individually answerable obligation
     item, one bounded line each (protocol caps: 20 asks, short text).
 
     `pending` is the list of still-unanswered ids when the caller knows it
     (live envelopes carry it; deliberate reads fetch it from the digest),
     or None when unknown (plain history rows) — state marks never guess:
-    ○ = pending (yellow, it is owed work), ✓ = answered (dim), · = unknown.
+    ○ = pending (yellow, it is owed work), ✓ = answered (dim),
+    ✗ = declined (0153 — discharged by refusal, which is NOT an answer),
+    · = unknown.
     The trailing hint prints the exact '/reply REF:ID' that answers the
     first open ask, so discharging never requires reading protocol docs."""
     open_ids = None if pending is None else {str(p) for p in pending}
+    refused = {str(d) for d in (declined or [])}
     lines: list[str] = []
     hint_id = None
     for a in asks:
@@ -142,6 +146,8 @@ def ask_lines(s: Style, asks: list[dict[str, Any]],
             mark, style = "·", None
         elif aid in open_ids:
             mark, style = "○", s.yellow
+        elif aid in refused:
+            mark, style = "✗", s.dim
         else:
             mark, style = "✓", s.dim
         if hint_id is None and (open_ids is None or aid in open_ids):
@@ -180,7 +186,8 @@ def message_block(s: Style, *, sender: str, seq: int, status: str,
                   me: str = "", channel: str = "", show_channel: bool = False,
                   max_lines: int | None = BODY_MAX_LINES,
                   asks: list[dict[str, Any]] | None = None,
-                  pending_asks: list[str] | None = None) -> str:
+                  pending_asks: list[str] | None = None,
+                  declined_asks: list[str] | None = None) -> str:
     """One message, one layout — used for history, live traffic, and reads.
 
     `show_channel=True` means the block renders away from its home room
@@ -227,7 +234,8 @@ def message_block(s: Style, *, sender: str, seq: int, status: str,
     elif body_bytes:
         lines.append(s.dim(f"  ({body_bytes} bytes — /read {ref})"))
     if asks:
-        lines.extend(ask_lines(s, asks, pending_asks, ref, width))
+        lines.extend(ask_lines(s, asks, pending_asks, ref, width,
+                               declined=declined_asks))
     return "\n".join(lines)
 
 

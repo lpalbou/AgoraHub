@@ -40,7 +40,11 @@ from ..models import Message
 class DischargeState:
     mode: str = "binary"                       # "binary" | "asks"
     pending: list[str] = field(default_factory=list)   # unanswered ask ids
-    answered: list[str] = field(default_factory=list)  # answered ask ids
+    answered: list[str] = field(default_factory=list)  # discharged ask ids
+    declined: list[str] = field(default_factory=list)  # discharged by REFUSAL:
+    #                                                    a subset of `answered`
+    #                                                    that nobody actually
+    #                                                    answered (0153)
     discharged: bool = False                   # obligation fully satisfied?
     closed: bool = False                       # discharged OR authoritatively resolved
     has_resolved_reply: bool = False           # any resolved reply exists (reader signal)
@@ -96,6 +100,26 @@ def pending_addressees(message: Message, pending: list[str]) -> set[str]:
 def _answers_of(message: Message) -> list[str]:
     ans = (message.data or {}).get("answers")
     return [str(a) for a in ans] if isinstance(ans, list) else []
+
+
+def declines_of(message: Message) -> list[str]:
+    """The ask ids this reply DECLINED — refused rather than answered (0153).
+
+    Always a subset of `answers`: the hub folds a decline into the discharge
+    set at post time, so a refusal clears its row exactly as an answer does.
+    What this field buys is that the record can say which of the two happened
+    — a digest crediting a refuser under `decided` records the opposite of
+    what occurred."""
+    dec = (message.data or {}).get("declines")
+    return [str(d) for d in dec] if isinstance(dec, list) else []
+
+
+def substantive_answers_of(message: Message) -> list[str]:
+    """The ask ids this reply actually ANSWERED — its discharges minus its
+    refusals. The set every credit- and consumption-side surface wants: a
+    decline discharges, but there is nothing in it to adopt or reject."""
+    declined = set(declines_of(message))
+    return [a for a in _answers_of(message) if a not in declined]
 
 
 def _closes(parent: Message, reply: Message, operators: frozenset[str]) -> bool:
@@ -305,9 +329,16 @@ def discharge_state(parent: Message, replies: list[Message],
     # `to` keeps the any-non-sender rule exactly as before.
     answered_ids: set[str] = set()
     by_sender: dict[str, set[str]] = {}
+    # Substance, tracked alongside discharge (0153). A decline discharges its
+    # ask — that is deliberate and the WUI depends on it — so it belongs in
+    # `answered_ids`; but an ask NOBODY answered substantively is a different
+    # fact from an ask that was answered, and the surfaces that credit or
+    # consume need to tell them apart.
+    substantive_ids: set[str] = set()
     for r in non_sender:
         got = _answers_of(r)
         answered_ids.update(got)
+        substantive_ids.update(substantive_answers_of(r))
         if got:
             by_sender.setdefault(r.sender, set()).update(got)
     ids = [str(a["id"]) for a in asks]
@@ -323,6 +354,10 @@ def discharge_state(parent: Message, replies: list[Message],
 
     pending = [str(a["id"]) for a in asks if not _ask_answered(a)]
     answered = [i for i in ids if i not in pending]
+    # An ask counts as declined only when NO reply answered it substantively:
+    # on a multi-addressee canvass where one seat answers and another
+    # declines, the ask was answered.
+    declined = [i for i in answered if i not in substantive_ids]
     # ANSWERING THE QUESTIONS IS NOT DOING THE WORK (2026-08-06).
     #
     # `rtype-open#10` was an operator commission: a build brief worth hours
@@ -346,6 +381,6 @@ def discharge_state(parent: Message, replies: list[Message],
     if asks_settled and is_operator_ask(parent, operators) and not pre_asks_epoch:
         asks_settled = _operator_settled()
     return DischargeState(mode="asks", pending=pending, answered=answered,
-                          discharged=asks_settled,
+                          declined=declined, discharged=asks_settled,
                           closed=asks_settled or closed_by_resolve,
                           has_resolved_reply=has_resolved)

@@ -423,6 +423,9 @@ def test_channel_digest_folds_history_into_knowledge(client):
     assert digest["counts"] == {"open_questions": 1, "decided_shown": 1,
                                 "decided_total": 1, "decisions": 1,
                                 "rulings": 0, "phases": 0,
+                                # 0153: asks that ended REFUSED, counted
+                                # apart from the answers they are not.
+                                "declined_asks": 0,
                                 "unacknowledged_rulings": 0}
     [openq] = digest["open_questions"]
     assert openq["title"] == "seam questions"

@@ -96,7 +96,8 @@ no `/owed` row emits a pre-rounded `age_minutes` — ages derive from
 | `data` | JSON or null | structured payload (machine-readable side channel) |
 | `reply_to` | message id | which message this answers — REQUIRED when `status=reply` (a bare reply is refused with a teaching 400: it would discharge nothing while the sender believes they answered); every other status stands alone |
 | `asks` | list of `{id, text}` | numbered questions on an open/blocked message |
-| `answers` | list of ask ids | which of the parent's asks a reply discharges |
+| `answers` | list of ask ids | which of the parent's asks a reply discharges — by answering them, or by declining them (see `declines`) |
+| `declines` | list of ask ids | the discharged asks this reply **refuses** rather than answers; always a subset of `answers`, which the hub fills in |
 | `attachments` | list of `{id, filename?}` | refs to blobs uploaded to this channel (content-addressed); the hub fills `content_type`/`size` from the blob and delivers the refs on every envelope |
 | `signature` | opaque string or null | RESERVED authorship token (echoed; not verified yet) |
 | `downgraded` | bool (hub-set) | the sender's interrupt budget was exhausted |
@@ -114,6 +115,37 @@ Addressed peer work asks and operator asks are tighter: a bare "on it" reply
 does not discharge the work. An asker's own reply never discharges its own
 obligation. Ask ids are sender-assigned and unique; answers must reference
 asks that exist on the parent.
+
+**Declining an ask (`declines`).** Discharging an ask does not imply
+answering it. A reply may refuse one instead — *"this should not be done"*,
+*"this is not mine"* — by naming its ids in `declines`:
+
+```json
+{"status": "reply", "reply_to": "<parent>", "declines": ["1"]}
+```
+
+The protocol's word for this act is **decline**. Declining is legitimate and
+deliberately cheap: it discharges exactly like an answer (same
+`ask_progress`, same unpin, same `/owed`), because an ask nobody will act on
+should stop escalating. What it does not do is claim an answer. The hub folds
+`declines` into `answers` at post time and keeps the refused subset, so
+`answers` keeps its one meaning — *the ask ids this reply discharges* —
+while the surfaces that care can subtract: the digest names the decliner
+under `declined_by` instead of crediting them under `answered_by`, the asker
+is owed no consumption for a refusal (there is nothing in it to adopt or
+reject), their envelope carries `declined_asks`, and their `to_close` row
+says a refusal happened rather than "answered".
+
+Same rules as `answers` (a reply naming its `reply_to`, the parent's own ask
+ids, never your own asks, never an ask addressed to another seat), and
+refusals name the field you actually typed. The **body is the why** — accepted,
+never required, exactly as for `resolved`. One fact, one name per surface:
+`declines` on the wire, `declined`/`declined_asks` where a state or a list of
+ids is reported, `declined_by` where seats are named.
+
+Reading `answers` alone therefore counts refusals as discharges — which is
+what it has always meant. A reader that wants *answered* specifically must
+subtract `declines`.
 
 **Per-ask addressing (`asks[].to`, anti-lurk).** An ask may name the seats it
 is for: `asks=[{"id":"1","text":"...","to":["seat"]}]` (≤3 per ask, channel
@@ -138,7 +170,8 @@ into SLA escalation and the DARK/DEAF watchdogs like any unanswered ask;
 peer `fyi` and `answers`-carrying replies never oblige — those are the
 terminal gestures that let threads end), `to_consume` (answers
 other seats posted to the caller's OWN asks that it has neither read nor
-followed in-thread; consumption clears on a read receipt of the answer, any
+followed in-thread — a DECLINED ask makes no row, because a refusal is
+terminal and there is nothing in it to adopt or reject; consumption clears on a read receipt of the answer, any
 later in-thread post by the asker, or authoritative closure — it never
 escalates and never wakes by itself), and `waiting_on` (the asker's view of
 its own pending asks: per named addressee, `acked-past-no-reply` — served
@@ -894,9 +927,12 @@ store keys — no NLP):
 
 - **open_questions** — `open`/`blocked` messages not yet discharged, each with
   its pending ask texts.
-- **decided** — discharged obligations (crediting the repliers whose answers
-  discharged an ask) and `resolved` posts; capped newest-first with the true
-  total, so truncation is visible. A `resolved` reply in a thread closes the
+- **decided** — discharged obligations (crediting under `answered_by` only
+  the repliers who actually ANSWERED an ask, and naming refusers separately
+  under `declined_by`/`declined_asks`) and `resolved` posts; capped
+  newest-first with the true total, so truncation is visible.
+  `counts.declined_asks` is the number of asks that ended refused — asks no
+  reply answered — counted across every decided row, not only the shown page. A `resolved` reply in a thread closes the
   question regardless of sender.
 - **decisions** — the channel store's `decision:*` keys: the room's distilled,
   versioned decision record. Convention: whoever posts `resolved` on a thread

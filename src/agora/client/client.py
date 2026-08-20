@@ -177,13 +177,15 @@ class AgoraClient:
                    data: dict[str, Any] | None = None, reply_to: str | None = None,
                    asks: list[dict[str, Any]] | None = None,
                    answers: list[str] | None = None,
+                   declines: list[str] | None = None,
                    consumes: list[str] | None = None,
                    attachments: list[dict[str, Any]] | None = None,
                    signature: str | None = None,
                    notice: dict[str, str] | None = None) -> Message:
         payload = PostMessage(body=body, title=title, status=status, urgency=urgency,
                               to=to or [], critical=critical, data=data, reply_to=reply_to,
-                              asks=asks, answers=answers, consumes=consumes,
+                              asks=asks, answers=answers, declines=declines,
+                              consumes=consumes,
                               attachments=attachments,
                               signature=signature, notice=notice)
         row = self._json(await self._http.post(
@@ -227,11 +229,13 @@ class AgoraClient:
                  data: dict[str, Any] | None = None, reply_to: str | None = None,
                  asks: list[dict[str, Any]] | None = None,
                  answers: list[str] | None = None,
+                 declines: list[str] | None = None,
                  attachments: list[dict[str, Any]] | None = None) -> Message:
         """Send a direct 1:1 message (channel auto-created on first use)."""
         payload = PostMessage(body=body, title=title, status=status, urgency=urgency,
                               data=data, reply_to=reply_to, asks=asks,
-                              answers=answers, attachments=attachments)
+                              answers=answers, declines=declines,
+                              attachments=attachments)
         row = self._json(await self._http.post(
             f"/dms/{peer}/messages", json=payload.model_dump(mode="json"),
         ))

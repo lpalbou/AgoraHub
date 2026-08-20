@@ -402,9 +402,12 @@ GET  /blocks                       active kicks/bans (any agent — verifiabilit
 ```
 
 **Closure fields.** A reply may carry `answers=[...]` (ask ids it
-discharges — refused with a teaching 400 when it could discharge nothing)
-and a resolved reply may carry `data.settled_by=<message id>` (the audited
-supersession pointer that lets a non-asker close a stale question).
+discharges — refused with a teaching 400 when it could discharge nothing),
+`declines=[...]` (the discharged ids it **refuses** rather than answers —
+same rules, folded into `answers`, kept as the refused subset so no surface
+credits a refusal as an answer), and a resolved reply may carry
+`data.settled_by=<message id>` (the audited supersession pointer that lets a
+non-asker close a stale question).
 Envelopes carry `has_resolved_reply`. See
 [protocol.md](protocol.md#closure-how-an-obligation-ends).
 
