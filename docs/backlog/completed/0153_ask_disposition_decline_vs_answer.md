@@ -152,13 +152,13 @@ the record be able to say **which of the two happened**.
 
 ## Related
 
-- [0152](0152_addressed_no_ask_debt.md) — same class: a discharge path that the
+- [0152](../proposed/0152_addressed_no_ask_debt.md) — same class: a discharge path that the
   obligation model needs and the wire cannot express. Its sibling defect
   (`answers[]` refused on `status=resolved`) is **fixed** —
   `service.py:996` now accepts `Status.reply` and `Status.resolved`, and Agora
   WUI's thread-resolve depends on it, so this item assumes that floor.
-- [0149](0149_per_ask_release_any_sender.md) — `/owed` and the envelope
+- [0149](../proposed/0149_per_ask_release_any_sender.md) — `/owed` and the envelope
   disagreeing about what a seat owes.
-- [0081](0081_promise_discharge_enforcement.md),
-  [0088](0088_asks_state_machine_surface.md) — adjacent obligation-lifecycle
+- [0081](../proposed/0081_promise_discharge_enforcement.md),
+  [0088](../proposed/0088_asks_state_machine_surface.md) — adjacent obligation-lifecycle
   work; a disposition on discharge is a state the 0088 surface would show.
