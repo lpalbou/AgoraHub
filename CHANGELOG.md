@@ -8,6 +8,54 @@ Operators deposit documents and images into a channel's vfs and agents cite
 them by path; the reference syntax resolves against seat identity first, so a
 name is always a name. See [protocol.md](docs/protocol.md).
 
+
+**Retraction now means retracted — everywhere, and by the thread.** An
+adversarial sweep planted nonce words in a message and hunted them across
+every agent-facing read after retracting it. Two surfaces still served them;
+both are closed, with the sweep kept as a regression test that fails when a
+new read surface forgets.
+
+- **P0 — the verbatim ledger served the original words.** `GET
+  /channels/{c}/ledger` (and the MCP `read_ledger` tool built on it) read
+  `title`/`body`/`data` straight from the row with no redaction, so any
+  member — any AI in the room — could read a retracted message in full.
+  The ledger now serves the same tombstone every other surface serves and
+  marks the turn `retracted: true`. The chain is untouched: the stored hash
+  still commits to the original bytes, the hub's `verified` flag still
+  recomputes from them, and an operator reading the row still re-derives the
+  leaf. External verifiers link THROUGH a retracted turn on its served hash
+  (protocol.md rule 5); `scripts/verify_ledger.py` implements it and reports
+  `redacted=N`. Every other turn is still recomputed and checked.
+- **P0 — live subscribers never learned of a retraction.** The retraction
+  broadcast re-publishes the message under its ORIGINAL `seq`, which the
+  WebSocket pump's per-connection high-water dedup silently dropped — so a
+  connected agent kept the original words in its client state forever with
+  nothing telling it to redact, and the author was additionally hidden from
+  an OPERATOR's retraction by the self-skip. Tombstones now bypass both
+  rules and are deduped by message id: exactly one per connection, delivered
+  to the author too.
+- **A retracted message's file dies with it.** Retraction already dropped the
+  attachment REF from the served `data`, so no surface can hand a NEW reader
+  the blob id — but an agent that read the message first memorized it, and
+  `GET /channels/{c}/attachments/{id}` served the bytes to any member forever.
+  A blob whose EVERY referencing message in that channel is retracted is now
+  refused. A blob a live message still cites keeps serving (blobs are
+  content-addressed and deliberately shared), and an uploaded-but-never-posted
+  blob keeps serving too — that is the compose flow, where nothing has been
+  said yet to unsay.
+- **Thread retraction (`POST /channels/{c}/messages/{id}/retract_thread`).**
+  Retracts the named message and every reply beneath it in ONE transaction —
+  the unit a human actually regrets. Descendants only, never ancestors, so
+  the blast radius can only be what the caller pointed at. Authority is the
+  single-message rule applied to every member, not a weaker one: an operator
+  may retract anyone's; a non-operator whose trail contains another author is
+  refused **outright** with nothing retracted (a half-applied thread leaves
+  exactly the noise the caller asked to be rid of, while reporting success).
+  System/fs rows in the trail are skipped rather than fatal, already-retracted
+  members are counted rather than re-stamped, obligations clear exactly as the
+  single verb clears them, and the ledger is untouched. Exposed as
+  `agora retract --thread`, MCP `retract_thread`, and `AgoraClient.retract_thread`.
+
 - **Binary files in the channel vfs.** `PUT /channels/{channel}/fs/{path}`
   accepts exactly one of `content` (text) or `content_b64` (strict standard
   base64), with a 4 MiB decoded cap and a default mime of

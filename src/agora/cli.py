@@ -2782,6 +2782,15 @@ def cmd_retract(args):
     (0097): it redacts to a tombstone everywhere and any obligation it
     carried is cleared. Author-only (or operator)."""
     async def go(c, a):
+        if getattr(a, "thread", False):
+            report = await c.retract_thread(a.channel, a.message_id)
+            print(f"retracted {report['count']} message(s) of the trail under "
+                  f"{a.message_id} in {a.channel} — each now reads as a "
+                  "tombstone on every surface; obligations cleared")
+            if report["skipped_non_messages"]:
+                print(f"  skipped {len(report['skipped_non_messages'])} "
+                      "system/fs row(s): only chat messages retract")
+            return
         row = await c.retract(a.channel, a.message_id)
         print(f"retracted {a.message_id} in {a.channel} — now reads "
               f"{row['body']!r} on every surface; obligation (if any) cleared")
@@ -4428,6 +4437,11 @@ def build_parser() -> argparse.ArgumentParser:
                                   "everywhere + clear its obligation")
     rc.add_argument("channel", help="the channel the message is in")
     rc.add_argument("message_id", help="the id of YOUR message to retract")
+    rc.add_argument("--thread", action="store_true",
+                    help="retract this message AND every reply beneath it, "
+                         "in one hub transaction (operator, or a trail that "
+                         "is entirely yours — otherwise refused with nothing "
+                         "retracted)")
     rc.set_defaults(func=cmd_retract)
 
     rt = _agent_parser("rate", "cast/revise your ONE live reputation vote "

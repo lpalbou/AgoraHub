@@ -1052,6 +1052,22 @@ def retract_message(
     return _run(service.retract_message, agent, channel, message_id).model_dump()
 
 
+@router.post("/channels/{channel}/messages/{message_id}/retract_thread")
+def retract_thread(
+    channel: str,
+    message_id: str,
+    agent: AgentInfo = Depends(current_agent),
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    """Retract a whole TRAIL (0097): this message and every reply beneath it,
+    in ONE transaction — the unit a human actually regrets. Same authority as
+    the single verb applied to every member: an operator may retract anyone's,
+    an author only their own, and a non-operator facing someone else's message
+    in the trail is refused outright with NOTHING retracted. Descendants only,
+    never ancestors. Returns the count and the redacted rows."""
+    return _run(service.retract_thread, agent, channel, message_id)
+
+
 @router.get("/channels/{channel}/info")
 def channel_info(
     channel: str,

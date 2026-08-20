@@ -2766,6 +2766,62 @@ class HubService:
         self._wake(redacted)
         return redacted
 
+    def retract_thread(self, agent: AgentInfo, channel: str,
+                       message_id: str) -> dict[str, Any]:
+        """Retract a WHOLE TRAIL (0097): the named message and every reply
+        beneath it, in one transaction. The single-message verb could already
+        do this one call at a time; a thread is the unit a human actually
+        regrets, and N calls is N chances to stop halfway — leaving some of
+        the words readable, some obligations alive, and no record that the
+        caller meant the whole thing to go.
+
+        Authority is the SINGLE-message rule applied to every member of the
+        trail, not a new weaker one: an operator may retract anyone's, an
+        author only their own. A non-operator whose trail contains someone
+        else's message is REFUSED OUTRIGHT (403) and nothing is retracted —
+        partial application would leave exactly the noise they asked to be
+        rid of while telling them it was handled. Their own solo threads
+        still go in one call.
+
+        Scope is the named message and its DESCENDANTS, never its ancestors:
+        the blast radius can only be what the caller pointed at (from a root
+        row that is the whole thread; from a mid-thread reply, that branch).
+        System/fs rows inside the trail are SKIPPED, not fatal — the single
+        verb refuses them, and one join notice must not veto a retraction.
+        Already-retracted members are counted, not re-stamped. Idempotent;
+        the ledger is untouched (presentation, never a chain rewrite)."""
+        self.require_membership(channel, agent.id)
+        trail = self.db.thread_messages(channel, message_id)
+        if not trail:
+            raise HubError(404, f"message '{message_id}' not found in '{channel}'")
+        others = sorted({m.sender for m in trail
+                         if m.sender != agent.id and m.kind == Kind.message})
+        if others and not agent.operator:
+            raise HubError(403,
+                           "only the author (or an operator) can retract a "
+                           f"message — this trail has {len(others)} other "
+                           f"author(s) ({', '.join(others)}), so NOTHING was "
+                           "retracted. Retract your own messages one by one, "
+                           "or ask an operator to retract the thread.")
+        targets = [m for m in trail if m.kind == Kind.message]
+        skipped = [m.id for m in trail if m.kind != Kind.message]
+        already = [m.id for m in targets if m.retracted]
+        self.db.retract_messages([m.id for m in targets], agent.id)
+        # One transaction above, then one tombstone per message on the wire:
+        # every existing consumer (CLI, MCP, web client) already knows how to
+        # redact a message in place from its id, and inventing a thread frame
+        # would leave each of them silently ignoring it until it shipped.
+        redacted = []
+        for message in targets:
+            row = self.db.get_message(message.id)
+            redacted.append(row)
+            self._wake(row)
+        return {"channel": channel, "root": message_id,
+                "count": len(redacted),
+                "already_retracted": already,
+                "skipped_non_messages": skipped,
+                "messages": [r.model_dump() for r in redacted]}
+
     # -- inbox (cursor-based unread across all my channels) --------------------------
 
     def inbox(self, agent: AgentInfo, *, limit_per_channel: int = 100) -> list[Envelope]:
@@ -4283,6 +4339,19 @@ class HubService:
         found = self.db.blob_get(channel, blob_id)
         if found is None:
             raise HubError(404, f"no attachment {blob_id[:12]}… in '{channel}'")
+        # Retraction reaches the FILE too (0097). Dropping the ref from the
+        # served `data` stops any surface from handing a new reader the id,
+        # but an agent that read the message before the retraction memorized
+        # it, and the bytes sat behind a plain membership gate. A blob whose
+        # EVERY referencing message is retracted is therefore refused. A blob
+        # still cited by a live message keeps serving (blobs are
+        # content-addressed and deliberately shared), and an uploaded-but-
+        # never-posted blob keeps serving too — that is the compose flow,
+        # where the uploader has not said anything yet to unsay.
+        refs, retracted = self.db.blob_reference_state(channel, blob_id)
+        if refs and refs == retracted:
+            raise HubError(404, f"no attachment {blob_id[:12]}… in '{channel}' "
+                                "— every message carrying it was retracted")
         return found
 
     #: Evidence refs a completion report may cite. Capped like attachments.

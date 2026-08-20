@@ -284,6 +284,15 @@ class AgoraClient:
         return self._json(await self._http.post(
             f"/channels/{channel}/messages/{message_id}/retract"))
 
+    async def retract_thread(self, channel: str, message_id: str) -> dict[str, Any]:
+        """Retract a message AND every reply beneath it (0097), in one hub
+        transaction. Same authority as `retract` applied to each member: an
+        operator may retract anyone's, an author only their own — a
+        non-operator facing another author in the trail is refused with
+        nothing retracted."""
+        return self._json(await self._http.post(
+            f"/channels/{channel}/messages/{message_id}/retract_thread"))
+
     async def rate(self, channel: str, target: str, axis: str, value: int,
                    note: str = "") -> dict[str, Any]:
         """Cast/revise your one live reputation vote (0094): axis in

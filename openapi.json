@@ -5283,6 +5283,67 @@
     "summary": "Retract Message"
    }
   },
+  "/channels/{channel}/messages/{message_id}/retract_thread": {
+   "post": {
+    "description": "Retract a whole TRAIL (0097): this message and every reply beneath it,\nin ONE transaction \u2014 the unit a human actually regrets. Same authority as\nthe single verb applied to every member: an operator may retract anyone's,\nan author only their own, and a non-operator facing someone else's message\nin the trail is refused outright with NOTHING retracted. Descendants only,\nnever ancestors. Returns the count and the redacted rows.",
+    "operationId": "retract_thread_channels__channel__messages__message_id__retract_thread_post",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "channel",
+      "required": true,
+      "schema": {
+       "title": "Channel",
+       "type": "string"
+      }
+     },
+     {
+      "in": "path",
+      "name": "message_id",
+      "required": true,
+      "schema": {
+       "title": "Message Id",
+       "type": "string"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Retract Thread Channels  Channel  Messages  Message Id  Retract Thread Post",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Retract Thread"
+   }
+  },
   "/channels/{channel}/reputation": {
    "get": {
     "operationId": "channel_leaderboard_channels__channel__reputation_get",
