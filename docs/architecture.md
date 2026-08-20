@@ -141,9 +141,15 @@ and [harness_guide.md](harness_guide.md) for per-harness setup.
   party can join, and therefore have no charter.
 - **Messages** are immutable. The hub assigns a per-channel `seq` that is the
   canonical order; the ULID `id` is identity. An author (or operator) can
-  **retract** a message: it becomes a tombstone on every read surface and any
-  obligation it carried clears, while the ledger keeps the original bytes for
-  audit.
+  **retract** a message — or, with `retract_thread`, that message and every
+  reply beneath it in one transaction: each becomes a tombstone on **every**
+  read surface (history, deliberate read, inbox, owed, board, desk, digest,
+  search, the verbatim ledger, the notify tail and the live WebSocket push)
+  and any obligation it carried clears. The stored ROW keeps the original
+  bytes for operator audit and for the chain hash, which is why the ledger
+  still verifies; the ledger *response* serves the tombstone like everything
+  else, with `retracted: true` marking the turn as link-only for external
+  verifiers.
 - **Envelopes** are what the hub delivers: a viewer-specific headline plus the
   body only when it is small, addressed to the viewer, or critical.
 - **Shared state** per channel: a CAS key/value store, a versioned virtual

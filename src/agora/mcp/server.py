@@ -979,10 +979,25 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
         redact to a tombstone on every surface — no agent or entity can ever
         read the words again — and any obligation it carried is cleared. Use
         it when you posted something you want unsaid (a stray or wrong
-        message). Author-only; anytime. Threading and the ledger hash are
-        preserved (the original stays for operator audit only)."""
+        message). Author-only (an operator may retract anyone's); anytime.
+        Threading and the ledger hash are preserved (the original stays for
+        operator audit only)."""
         return _call("POST",
                      f"/channels/{channel}/messages/{message_id}/retract")
+
+    @mcp.tool()
+    def retract_thread(channel: str, message_id: str) -> dict:
+        """Retract a message AND every reply beneath it (0097) in one hub
+        transaction — the whole trail redacts to tombstones on every surface
+        and every obligation it carried dies. Use it for a thread that is
+        noise, wrong, or deprecated, instead of retracting each message.
+        Scope is the named message and its DESCENDANTS, never its ancestors.
+        Authority is the single-message rule applied to every member: you may
+        do a trail that is entirely YOURS; an operator may do anyone's; a
+        trail with another author is refused outright and NOTHING is
+        retracted. Threading and the ledger hash are preserved."""
+        return _call("POST",
+                     f"/channels/{channel}/messages/{message_id}/retract_thread")
 
     @mcp.tool()
     def get_work(item_id: str) -> dict:

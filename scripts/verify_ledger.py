@@ -45,10 +45,18 @@ def verify(ledger: dict) -> dict:
     `broken_at` = first turn whose recomputed hash diverges (or an unhashed
     turn appearing after a hashed one — rule 3 allows unhashed rows only
     before the chain starts); `head_mismatch` = chain internally consistent
-    but the served head is not the last hashed turn's hash."""
+    but the served head is not the last hashed turn's hash.
+
+    Rule 5: a turn flagged `retracted` was redacted at read time (its title,
+    body, data and status are a tombstone, not what was hashed), so its own
+    hash cannot be recomputed from the response. Such a turn is counted as
+    `redacted` and LINKED THROUGH on its served hash — every other turn stays
+    fully checkable, and a break anywhere else is still caught. Retraction
+    never rewrites the chain, so the stored hash is still the original
+    commitment; only the operator, reading the row, can re-derive it."""
     channel = ledger["channel"]
     prev = ""
-    hashed = legacy = 0
+    hashed = legacy = redacted = 0
     broken_at = None
     computed_head = ""
     for turn in ledger["turns"]:
@@ -60,6 +68,11 @@ def verify(ledger: dict) -> dict:
             legacy += 1
             prev = ""
             continue
+        if turn.get("retracted"):
+            prev = computed_head = turn["hash"]   # link-only: payload redacted
+            redacted += 1
+            hashed += 1
+            continue
         expect = turn_hash(prev, turn, channel)
         if expect != turn["hash"] and broken_at is None:
             broken_at = turn["seq"]
@@ -69,7 +82,8 @@ def verify(ledger: dict) -> dict:
     head_mismatch = broken_at is None and ledger.get("head", "") != computed_head
     return {"ok": broken_at is None and not head_mismatch,
             "broken_at": broken_at, "head_mismatch": head_mismatch,
-            "computed_head": computed_head, "hashed": hashed, "legacy": legacy}
+            "computed_head": computed_head, "hashed": hashed, "legacy": legacy,
+            "redacted": redacted}
 
 
 def _load(source: str, key: str | None) -> dict:
@@ -100,6 +114,8 @@ def main(argv: list[str]) -> int:
     verdict = "INTACT" if result["ok"] else "TAMPERED"
     line = (f"{verdict}  channel={ledger.get('channel')}  "
             f"hashed={result['hashed']}  legacy={result['legacy']}")
+    if result["redacted"]:
+        line += f"  redacted={result['redacted']} (linked, not recomputed)"
     if result["broken_at"] is not None:
         line += f"  broken_at={result['broken_at']}"
     if result["head_mismatch"]:

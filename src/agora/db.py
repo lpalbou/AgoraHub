@@ -361,6 +361,17 @@ class JoinTokenRefused(Exception):
         self.detail = detail
 
 
+def _tombstone(retracted_by: str) -> tuple[str, str, None, str]:
+    """The ONE presentation of a retracted message (0097): blank title, a
+    named tombstone body, no data (asks/answers/attachments are dropped —
+    nothing consumable survives), and status downgraded to `fyi` so it
+    obliges nobody. Every read surface that can serve a retracted row —
+    `_row_to_message` for the message APIs, `channel_ledger` for the
+    verbatim — renders it from here, so no surface can drift into serving
+    the words while another serves the stone."""
+    return "", f"[retracted by {retracted_by}]", None, "fyi"
+
+
 class Database:
     """All persistent state of a hub. Thread-safe via a single lock."""
 
@@ -1335,24 +1346,47 @@ class Database:
         included), so a third party can recompute the chain from this response
         alone — see docs/protocol.md "Verbatim ledger" for the byte-exact
         canonicalization and scripts/verify_ledger.py for a standalone,
-        stdlib-only verifier written from that text."""
+        stdlib-only verifier written from that text.
+
+        RETRACTED turns are the one exception, and they are marked as such
+        (`retracted: true`): the ledger is a READ SURFACE like any other, so
+        it serves the same tombstone `_row_to_message` serves — otherwise a
+        retraction that redacted every message API would still hand the words
+        to any member who asked for the verbatim (the words were reachable
+        here until 0097's sweep). The chain is untouched: the stored `hash`
+        still commits to the ORIGINAL bytes, so the hub's own `verified` (and
+        an operator reading the row) still detect tampering; an external
+        verifier links THROUGH a retracted turn on its served hash instead of
+        recomputing that one leaf. Presentation, never a chain rewrite."""
         with self._lock:
             rows = self._conn.execute(
                 "SELECT id, seq, sender, kind, status, urgency, critical, downgraded,"
-                " to_agents, title, body, data, reply_to, created_at, hash"
+                " to_agents, title, body, data, reply_to, created_at, hash,"
+                " retracted_at, retracted_by"
                 " FROM messages WHERE channel = ? ORDER BY seq", (channel,)
             ).fetchall()
         entries = []
         for r in rows:
+            title, body = r["title"], r["body"]
+            data = json.loads(r["data"]) if r["data"] else None
+            status = r["status"]
+            retracted = r["retracted_at"] is not None
+            if retracted:
+                title, body, data, status = _tombstone(
+                    r["retracted_by"] or r["sender"])
             entries.append({
                 "seq": r["seq"], "id": r["id"], "sender": r["sender"], "kind": r["kind"],
-                "status": r["status"], "urgency": r["urgency"],
+                "status": status, "urgency": r["urgency"],
                 # 0/1 ints, exactly as they enter the canonical payload.
                 "critical": r["critical"], "downgraded": r["downgraded"],
                 "to": json.loads(r["to_agents"]) if r["to_agents"] else [],
-                "title": r["title"], "body": r["body"],
-                "data": json.loads(r["data"]) if r["data"] else None,
+                "title": title, "body": body,
+                "data": data,
                 "reply_to": r["reply_to"], "created_at": r["created_at"], "hash": r["hash"],
+                # The flag IS the verification contract: a turn carrying it
+                # is link-only (its payload was redacted, so its own hash is
+                # not recomputable); every other turn stays fully checkable.
+                "retracted": retracted,
             })
         # The head is the last HASHED turn's hash (protocol.md rule 4) — not
         # the last row's. They differ only when a trailing row has been
@@ -1421,26 +1455,75 @@ class Database:
         operator audit and for the ledger hash (which commits to the
         original — retraction is presentation, not a chain rewrite).
         Idempotent; first retractor's identity/time stick."""
+        self.retract_messages([message_id], by)
+
+    def retract_messages(self, message_ids: list[str], by: str) -> None:
+        """Retract MANY messages in ONE transaction (0097 thread retraction).
+        A thread is retracted all-or-nothing: a crash or a lock error halfway
+        through a per-message loop would leave a trail with some words still
+        readable and no record of the intent, which is exactly the state the
+        caller asked not to exist. Same semantics as the single form for each
+        id — idempotent, first retractor sticks, FTS doc purged with the
+        write, dedupe key released."""
+        if not message_ids:
+            return
+        now = time.time()
         with self._lock:
-            self._conn.execute(
-                "UPDATE messages SET retracted_at = COALESCE(retracted_at, ?), "
-                "retracted_by = COALESCE(retracted_by, ?) WHERE id = ?",
-                (time.time(), by, message_id))
-            # Search purge (0132), same transaction: match-then-redact is
-            # forbidden — the FTS row must die WITH the retraction, or the
-            # match itself becomes an oracle for the retracted words.
-            row = self._conn.execute(
-                "SELECT channel FROM messages WHERE id = ?", (message_id,)).fetchone()
-            if row is not None:
-                _si.del_doc(self._conn, "message", row["channel"], message_id)
-            # A retracted notice releases its idempotency key (storm review):
-            # the event identity outlives one wrong posting of it — retract,
-            # correct, repost under the SAME key must work, or a typo burns
-            # the key forever and the 409 teaches nothing recoverable.
-            self._conn.execute(
-                "DELETE FROM message_dedupe WHERE message_id = ?",
-                (message_id,))
+            for message_id in message_ids:
+                self._conn.execute(
+                    "UPDATE messages SET retracted_at = COALESCE(retracted_at, ?), "
+                    "retracted_by = COALESCE(retracted_by, ?) WHERE id = ?",
+                    (now, by, message_id))
+                # Search purge (0132), same transaction: match-then-redact is
+                # forbidden — the FTS row must die WITH the retraction, or the
+                # match itself becomes an oracle for the retracted words.
+                row = self._conn.execute(
+                    "SELECT channel FROM messages WHERE id = ?", (message_id,)).fetchone()
+                if row is not None:
+                    _si.del_doc(self._conn, "message", row["channel"], message_id)
+                # A retracted notice releases its idempotency key (storm review):
+                # the event identity outlives one wrong posting of it — retract,
+                # correct, repost under the SAME key must work, or a typo burns
+                # the key forever and the 409 teaches nothing recoverable.
+                self._conn.execute(
+                    "DELETE FROM message_dedupe WHERE message_id = ?",
+                    (message_id,))
             self._conn.commit()
+
+    def thread_messages(self, channel: str, root_id: str,
+                        *, limit: int = 2000) -> list[Message]:
+        """The named message plus every transitive reply beneath it, in seq
+        order — the TRAIL a thread retraction covers (0097). Read RAW
+        (redact=False) so an already-retracted member is still recognizable
+        by its true sender, and so authorship stays checkable.
+
+        Walked from the DB, never from a client's loaded window: a trail whose
+        root sits above the window, or whose replies sit below it, is exactly
+        the case a client-side loop retracts halfway. Cross-channel `reply_to`
+        is never followed (membership is THE isolation boundary), a visited
+        set makes a cycle impossible to loop on, and `limit` bounds the walk."""
+        with self._lock:
+            root = self._conn.execute(
+                "SELECT * FROM messages WHERE id = ? AND channel = ?",
+                (root_id, channel)).fetchone()
+            if root is None:
+                return []
+            found = {root_id: root}
+            frontier = [root_id]
+            while frontier and len(found) < limit:
+                chunk, frontier = frontier[:400], frontier[400:]
+                marks = ",".join("?" * len(chunk))
+                rows = self._conn.execute(
+                    f"SELECT * FROM messages WHERE channel = ? "
+                    f"AND reply_to IN ({marks}) ORDER BY seq",
+                    (channel, *chunk)).fetchall()
+                for r in rows:
+                    if r["id"] in found:
+                        continue          # cycle or diamond: visit once
+                    found[r["id"]] = r
+                    frontier.append(r["id"])
+        return [self._row_to_message(r, redact=False)
+                for r in sorted(found.values(), key=lambda r: r["seq"])]
 
     def last_seq(self, channel: str) -> int:
         with self._lock:
@@ -1465,10 +1548,7 @@ class Database:
         # is for the ledger's hash verification ONLY (it commits to the
         # original bytes + original status, preserved for operator audit).
         if retracted_at is not None and redact:
-            title = ""
-            body = f"[retracted by {retracted_by or r['sender']}]"
-            data = None  # drop asks/answers/attachments: nothing consumable
-            status = "fyi"
+            title, body, data, status = _tombstone(retracted_by or r["sender"])
         return Message(
             id=r["id"], channel=r["channel"], seq=r["seq"], sender=r["sender"],
             kind=r["kind"], status=status, urgency=r["urgency"],
@@ -1985,6 +2065,23 @@ class Database:
         meta = {k: row[k] for k in ("channel", "id", "filename", "content_type",
                                     "size", "created_by", "created_at")}
         return meta, row["bytes"]
+
+    def blob_reference_state(self, channel: str, blob_id: str) -> tuple[int, int]:
+        """(referencing messages, of which retracted) for one channel blob.
+
+        Retraction drops the attachment REF from the message's served `data`,
+        so no surface can hand a new reader the blob id — but an agent that
+        read the message BEFORE the retraction memorized it, and the bytes
+        are still behind a plain membership gate. This is what lets the
+        service refuse a blob whose every referencing message has been
+        retracted, without touching a blob some LIVE message still cites
+        (blobs are content-addressed and deliberately shared)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT retracted_at FROM messages WHERE channel = ?"
+                " AND data IS NOT NULL AND instr(data, ?) > 0",
+                (channel, blob_id)).fetchall()
+        return len(rows), sum(1 for r in rows if r["retracted_at"] is not None)
 
     # -- work-id activity index (0093): the stitch between hub and files ---------
 

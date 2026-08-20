@@ -100,6 +100,14 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         # twice — dedup here so the wire carries one envelope per message
         # (audit M1). Seq is per-channel monotonic and puts are loop-ordered.
         sent: dict[str, int] = {}
+        # Tombstones already pushed on THIS wire (0097 live redaction). A
+        # retraction re-publishes the message under its ORIGINAL seq, so the
+        # high-water rule below would swallow it and the subscriber would sit
+        # on the original words forever with nothing telling it to redact —
+        # and the self-skip would hide an OPERATOR's retraction from the very
+        # seat that wrote the words. Tombstones therefore bypass both rules
+        # and are deduped by message id instead: exactly one per connection.
+        tombstoned: set[str] = set()
         while True:
             payload = await queue.get()
             if payload.get("type") == "hub-blocked":
@@ -113,10 +121,15 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 # Fan-out carries the raw message; the envelope is computed
                 # here because it is viewer-specific (to_me, inlining, ...).
                 message = Message(**payload["message"])
-                if message.sender == agent.id:
-                    continue
-                if message.seq <= sent.get(message.channel, 0):
-                    continue
+                if message.retracted:
+                    if message.id in tombstoned:
+                        continue
+                    tombstoned.add(message.id)
+                else:
+                    if message.sender == agent.id:
+                        continue
+                    if message.seq <= sent.get(message.channel, 0):
+                        continue
                 # Membership at DELIVERY time: channel subscriptions are only
                 # checked at subscribe time, so without this an agent that
                 # left a channel would keep receiving its live pushes for the
@@ -124,7 +137,8 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 # boundary).
                 if not service.db.is_member(message.channel, agent.id):
                     continue
-                sent[message.channel] = message.seq
+                sent[message.channel] = max(sent.get(message.channel, 0),
+                                            message.seq)
                 envelope = service.envelope_for(agent.id, message)
                 payload = {"type": "envelope", "envelope": envelope.model_dump()}
             await websocket.send_text(json.dumps(payload))

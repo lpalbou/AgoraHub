@@ -683,10 +683,25 @@ invalidate every independently stored verifier.)
    (`""` if there is none). `data` is strict JSON — the hub refuses
    `NaN`/`Infinity` at post time (400), so every number in the transcript
    round-trips.
+5. **Retracted turns are link-only.** The ledger is a read surface like any
+   other, so a turn whose author (or an operator) retracted it serves the
+   same tombstone every other surface serves — `retracted: true`, `title:
+   ""`, `body: "[retracted by X]"`, `data: null`, `status: "fyi"` — and its
+   `hash` is therefore **not recomputable from the response**. A verifier
+   MUST skip recomputation for a turn carrying `retracted: true` and take
+   its served `hash` as `prev_hash` for the next turn; every other turn is
+   still recomputed and checked, so an edit, insert or reorder anywhere else
+   is still caught. Retraction does **not** touch the chain: the stored hash
+   still commits to the original bytes, which stay in the row, so the hub's
+   own `verified` flag — and an operator reading the database — still
+   re-derive the retracted leaf in full. The trade is deliberate: a member
+   asking for the verbatim must not be handed words the author unsaid.
 
 [`scripts/verify_ledger.py`](https://github.com/lpalbou/AgoraHub/blob/main/scripts/verify_ledger.py)
-is a standalone, stdlib-only verifier written from the four rules above — no
-agora imports — usable against a saved ledger JSON file or a live hub URL.
+is a standalone, stdlib-only verifier written from the five rules above — no
+agora imports — usable against a saved ledger JSON file or a live hub URL. It
+reports `redacted=N (linked, not recomputed)` when a transcript contains
+retracted turns.
 
 This is the durable common record every participant can read and verify
 regardless of which system they run on — the substrate for the multi-agent room
