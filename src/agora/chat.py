@@ -180,6 +180,9 @@ plain text          post to the current channel (status=fyi, no obligation)
                     into the referenced message's channel)
 /reply REF:N TEXT   formally answer ask N of that message (727:1 or 727:1,2
                     — the asks a block lists and the 'asks N/M' badge counts)
+/decline REF:N WHY  refuse ask N on the record: it clears the row exactly as
+                    an answer does, but says you did NOT answer it — the
+                    digest credits nobody and the asker keeps a row saying so
 /critical TEXT      operator broadcast: pins in every inbox until read
 /dm PEER TEXT       private 1:1 message (fyi — for an OWED answer, open the
                     dm and /ask). /dm PEER opens the conversation;
@@ -328,7 +331,8 @@ class ChatApp:
             show_channel=env.channel != self.current,
             # data (and so the ask texts) is inlined per delivery policy;
             # pending_asks always travels, so state marks are exact here.
-            asks=asks_from(env.data), pending_asks=env.pending_asks))
+            asks=asks_from(env.data), pending_asks=env.pending_asks,
+            declined_asks=env.declined_asks))
 
     def show_message_row(self, m: Any, *,
                          max_lines: int | None = BODY_MAX_LINES,
@@ -1024,39 +1028,64 @@ class ChatApp:
                 if m.id == mid else None
             self.show_message_row(m, max_lines=None, pending_asks=pending)
 
-    async def cmd_reply(self, arg: str) -> None:
+    async def cmd_reply(self, arg: str, *, decline: bool = False) -> None:
         """The reply posts into the referenced message's channel — answering
         a DM or a foreign-room critical must not require /switch-ing first
         (and must never land in the wrong room: seqs repeat across channels).
         'REF:N' (e.g. 727:1, or 727:1,2) formally answers those ask ids, the
         thing the 'asks N/M' badge counts — a plain reply on an ask-carrying
-        message is visible but discharges nothing."""
+        message is visible but discharges nothing.
+
+        `decline=True` is the same gesture with the opposite substance
+        (0153): it discharges the named asks as a REFUSAL — "this should not
+        be done", "this is not mine" — so the digest does not credit it as an
+        answer and the asker is not asked to consume it. The text is the why."""
+        verb = "decline" if decline else "reply"
         ref, _, text = arg.partition(" ")
         if not (ref and text.strip()):
-            self._print("usage: /reply SEQ|ID TEXT — REF:N answers ask N "
-                        "(727:1), SEQ@CHANNEL works from another room")
+            if decline:
+                self._print("usage: /decline SEQ|ID:N WHY — names the ask ids "
+                            "you refuse (727:1); SEQ@CHANNEL works from "
+                            "another room")
+            else:
+                self._print("usage: /reply SEQ|ID TEXT — REF:N answers ask N "
+                            "(727:1), SEQ@CHANNEL works from another room")
             return
         located = await self._locate(ref)
         if located is None:
             return
         channel, mid, ask_ids = located
+        if decline and not ask_ids:
+            # There is nothing to refuse on a message with no named ask: a
+            # bare "no" is a reply, and saying so beats posting a decline
+            # that declines nothing.
+            self._print("/decline needs the ask ids you are refusing, e.g. "
+                        "/decline 727:1 WHY — use /reply for a message that "
+                        "carries no asks")
+            return
         try:
             await self.client.post(channel, text.strip(), title=derive_title(text),
                                    status=Status.reply, reply_to=mid,
-                                   answers=ask_ids or None)
+                                   answers=None if decline else (ask_ids or None),
+                                   declines=ask_ids if decline else None)
         except Exception as exc:
-            self._print(self.style.red(f"reply failed: {exc}"))
+            self._print(self.style.red(f"{verb} failed: {exc}"))
             return
         # Confirm what was formally discharged and where it landed — a reply
         # into another room produces no local echo, and an answered ask is
         # otherwise only visible in the badge/digest.
         note = ""
         if ask_ids:
-            note = f" — answers ask [{', '.join(ask_ids)}]"
+            note = (f" — {'DECLINES' if decline else 'answers'} ask "
+                    f"[{', '.join(ask_ids)}]")
         if channel != self.current:
-            self._print(self.style.dim(f"(reply sent to {channel}{note})"))
+            self._print(self.style.dim(f"({verb} sent to {channel}{note})"))
         elif note:
-            self._print(self.style.dim(f"(reply sent{note})"))
+            self._print(self.style.dim(f"({verb} sent{note})"))
+
+    async def cmd_decline(self, arg: str) -> None:
+        """Refuse an ask on the record — see cmd_reply."""
+        await self.cmd_reply(arg, decline=True)
 
     async def cmd_post(self, text: str, *, status: Status = Status.fyi,
                        critical: bool = False) -> None:
@@ -1648,6 +1677,7 @@ class ChatApp:
             "ask": lambda: self.cmd_post(arg, status=Status.open),
             "critical": lambda: self.cmd_post(arg, critical=True),
             "reply": lambda: self.cmd_reply(arg),
+            "decline": lambda: self.cmd_decline(arg),
             "channels": self.cmd_channels, "ls": self.cmd_channels,
             "dm": lambda: self.cmd_dm(arg),
             "dms": self.cmd_dms,

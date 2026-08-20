@@ -209,6 +209,20 @@
       "title": "Channel",
       "type": "string"
      },
+     "declined_asks": {
+      "items": {
+       "type": "string"
+      },
+      "title": "Declined Asks",
+      "type": "array"
+     },
+     "declined_by": {
+      "items": {
+       "type": "string"
+      },
+      "title": "Declined By",
+      "type": "array"
+     },
      "id": {
       "title": "Id",
       "type": "string"
@@ -465,6 +479,13 @@
        }
       ],
       "title": "Data"
+     },
+     "declined_asks": {
+      "items": {
+       "type": "string"
+      },
+      "title": "Declined Asks",
+      "type": "array"
      },
      "downgraded": {
       "default": false,
@@ -1298,6 +1319,20 @@
        }
       ],
       "title": "Data"
+     },
+     "declines": {
+      "anyOf": [
+       {
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Declines"
      },
      "notice": {
       "anyOf": [

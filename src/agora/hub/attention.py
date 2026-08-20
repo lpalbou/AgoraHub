@@ -58,6 +58,7 @@ class AttentionPolicy:
     def envelope_for(self, viewer_id: str, message: Message, *,
                      parent_sender: str | None, has_reply: bool,
                      pending_asks: list[str] | None = None, ask_total: int = 0,
+                     declined_asks: list[str] | None = None,
                      has_resolved_reply: bool = False,
                      sla_minutes: float = DEFAULT_RESPONSE_SLA_MINUTES,
                      paused_seconds: float = 0.0,
@@ -112,6 +113,11 @@ class AttentionPolicy:
                 str(a["id"]) for a in asks_of(message)
                 if viewer_id in (a.get("to") or []) and str(a["id"]) in set(pending)),
             ask_progress=f"{answered}/{ask_total}" if ask_total else "",
+            # A decline discharges, so it counts in `ask_progress` — and a
+            # bare "3/3" for three refusals is structurally complete and
+            # substantively empty. Naming them is what keeps the asker's
+            # headline honest (0153).
+            declined_asks=list(declined_asks or []),
             has_resolved_reply=has_resolved_reply,
             redelivery=already_read,
             # Reserved authorship shape (present on every envelope so consumers

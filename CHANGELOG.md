@@ -1,5 +1,60 @@
 # Changelog
 
+## 0.17.0 — 2026-08-20
+
+**An ask can now be discharged by refusing it, and the wire says so.**
+Answering an ask and refusing one — *"this should not be done"*, *"this is
+not mine"* — had the same shape on the wire, so the only carrier of a
+refusal was English in the body, which no mechanical surface reads. The
+digest credited a refuser as an answerer, the asker was pointed at a
+non-answer to consume, and `3/3` could mean three refusals.
+
+A reply may now name the ask ids it **declines**:
+
+```json
+{"status": "reply", "reply_to": "<parent>", "declines": ["1"]}
+```
+
+Declining is legitimate and deliberately cheap: it discharges exactly like an
+answer — same `ask_progress`, same unpin, same `/owed` — because an ask
+nobody will act on should stop escalating. What it no longer does is claim an
+answer. The body is the why: accepted, never required.
+
+- **`declines` on any reply that may carry `answers`** (`post_message`,
+  `send_dm`, the Python client, `agora post --decline IDS`, `agora dm
+  --decline IDS`, `/decline REF:N WHY` in `agora chat`). Same validation as
+  `answers` — a reply naming its `reply_to`, the parent's own ask ids, never
+  your own asks, never an ask addressed to another seat — and teaching
+  refusals now name the field you actually typed.
+- **The digest stops crediting refusals.** `decided` credits `answered_by`
+  only for asks a reply actually answered, names refusers under
+  `declined_by`/`declined_asks`, and `counts.declined_asks` totals the asks
+  that ended refused across every decided row.
+- **A refusal owes the asker no consumption.** It is terminal — there is
+  nothing in it to adopt or reject — so it produces no `to_consume` row. A
+  reply that answers one ask and declines another still owes the answered
+  half.
+- **The asker keeps a durable record.** `/owed.to_close` names the decliners
+  and the refused ask ids instead of reporting the thread "answered";
+  envelopes carry `declined_asks` alongside `ask_progress`, and `agora chat`
+  marks a declined ask `✗`.
+- **Compatibility.** `answers` keeps its documented meaning — the ask ids a
+  reply discharges — and the hub folds `declines` into it, so existing
+  readers, stored rows, and older clients are unaffected and the protocol
+  string stays `agora/0.4`. A reader that wants *answered* specifically must
+  subtract `declines`; [protocol.md](docs/protocol.md) states this. One
+  incidental change: `answers` is now deduplicated in the order you wrote it
+  (`["1","1"]` stores as `["1"]`).
+- **`consumes` naming your own open thread is a no-op, not a 400.** Citing a
+  thread root that owes you nothing — every reply declined, say — used to be
+  refused as a ref "you owe no consumption for", which taught the wrong
+  gesture for the batch form the docs recommend.
+
+Backlog: [0153](docs/backlog/completed/0153_ask_disposition_decline_vs_answer.md).
+Not addressed, and stated there plainly: no anti-lurk surface reads
+`declines` yet, so a seat that declines everything is honest on the record
+and still invisible to the watchdogs.
+
 ## 0.16.0 — 2026-08-20
 
 **Channel files grow up: the virtual file system (vfs) now carries binary

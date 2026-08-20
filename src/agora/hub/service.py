@@ -110,8 +110,10 @@ from .obligations import (
     ask_addressees,
     asks_of,
     closed_authoritatively,
+    declines_of,
     discharge_state,
     pending_addressees,
+    substantive_answers_of,
 )
 from .presence import PresenceTracker
 from .ratelimit import RateLimiter
@@ -991,8 +993,70 @@ class HubService:
             norm.append(entry)
         return norm
 
+    def _validate_discharge(self, answers: Any, declines: Any, status: Status,
+                            reply_to: str | None,
+                            sender: str) -> tuple[list[str], list[str]]:
+        """Validate the ask ids a reply DISCHARGES, and which of them it refuses.
+
+        `answers` and `declines` are the same act with different substance, so
+        they are validated as ONE set and stored as one: `answers` keeps its
+        documented meaning — the ask ids this reply discharges — and carries
+        the union, while `declines` records the refused subset (0153).
+
+        A refusal was previously indistinguishable from an answer on the wire:
+        the only carrier was English in the body, which no mechanical surface
+        reads, so the digest credited a refuser under `decided` and the asker
+        was pointed at a non-answer to consume. Folding declines INTO answers
+        (rather than making discharge read a second field) is what keeps this
+        additive: discharge, unpin, `/owed` and every already-persisted row
+        behave exactly as before, and the surfaces that care subtract.
+        """
+        declined = self._id_list(declines, "declines") if declines is not None else []
+        answered = self._id_list(answers, "answers") if answers is not None else []
+        # Order-preserving union: what the sender listed as answers first,
+        # then the refusals they did not also list.
+        union = answered + [d for d in declined if d not in answered]
+        # A field is named in the refusal only when it is the one at fault:
+        # a seat that typed `declines=["9"]` must not be taught about
+        # `answers`.
+        label = "declines" if declined and not answered else "answers"
+        validated = self._validate_answers(union, status, reply_to, sender,
+                                           label=label, declined=set(declined))
+        return validated, [d for d in validated if d in set(declined)]
+
+    @staticmethod
+    def _id_list(raw: Any, field: str) -> list[str]:
+        """A discharge field is a non-empty list of ask ids, deduped in the
+        order the sender wrote them."""
+        if not isinstance(raw, list):
+            raise HubError(400, f"{field} must be a list")
+        if not raw:
+            raise HubError(400, f"{field}=[] is empty — drop the field, or name "
+                                "the ask ids you are discharging")
+        out: list[str] = []
+        for x in raw:
+            if str(x) not in out:
+                out.append(str(x))
+        return out
+
+    @staticmethod
+    def _name_fields(ids: list[str], declined: set[str], label: str) -> str:
+        """Name the field the sender actually TYPED each bad id in. A teaching
+        refusal that points at `answers` when the id came from `declines`
+        teaches the wrong gesture — which is the failure this validator
+        exists to prevent."""
+        from_declines = [i for i in ids if i in declined]
+        from_answers = [i for i in ids if i not in declined]
+        parts = []
+        if from_answers:
+            parts.append(f"{label}: {elide(str(from_answers), 200)}")
+        if from_declines:
+            parts.append(f"declines: {elide(str(from_declines), 200)}")
+        return ", ".join(parts)
+
     def _validate_answers(self, raw: Any, status: Status, reply_to: str | None,
-                          sender: str) -> list[str]:
+                          sender: str, label: str = "answers",
+                          declined: set[str] | None = None) -> list[str]:
         if status not in (Status.reply, Status.resolved) or not reply_to:
             # `resolved` IS the natural shape of a completion report, and it
             # was the one shape that could not discharge the ask it
@@ -1005,14 +1069,14 @@ class HubService:
             # `resolved`. Discharge itself never looked at status — it
             # reads `data.answers` off any non-sender reply — so this
             # refusal was the only thing between the two.
-            raise HubError(400, "answers[] are only allowed on a reply that "
+            raise HubError(400, f"{label}[] are only allowed on a reply that "
                                 "names its reply_to (status=reply, or "
                                 "status=resolved when the completion report "
                                 "is itself the answer)")
         if not isinstance(raw, list):
-            raise HubError(400, "answers must be a list")
+            raise HubError(400, f"{label} must be a list")
         if not raw:
-            raise HubError(400, "answers=[] is empty — drop the field, or name "
+            raise HubError(400, f"{label}=[] is empty — drop the field, or name "
                                 "the ask ids you are discharging")
         answered = [str(x) for x in raw]
         parent = self.db.get_message(reply_to)
@@ -1028,14 +1092,17 @@ class HubService:
                                     "it everywhere); to answer, wait for others")
             if not asks_of(parent):
                 raise HubError(400, "the message you replied to carries no asks — "
-                                    "answers=[] discharges nothing here; reply to "
-                                    "the message that carries the asks, or drop "
-                                    "answers")
+                                    f"{label}=[] discharges nothing here; reply "
+                                    "to the message that carries the asks, or "
+                                    f"drop {label}")
         parent_ids = {str(a["id"]) for a in asks_of(parent)} if parent else set()
         if parent_ids:
             unknown = [a for a in answered if a not in parent_ids]
             if unknown:
-                raise HubError(400, f"answers reference unknown ask ids: {unknown}")
+                raise HubError(400, "unknown ask ids — the message you "
+                                    "replied to carries no such ask ("
+                                    + self._name_fields(unknown, declined or set(),
+                                                        label) + ")")
             by_id = {str(a["id"]): a for a in asks_of(parent)}
             foreign = []
             for aid in answered:
@@ -1055,9 +1122,10 @@ class HubService:
             if foreign:
                 raise HubError(
                     400,
-                    "you may not answer ask ids not addressed to you: "
-                    f"{foreign} — let the named seat answer, or reply "
-                    "without answers if you are only adding context",
+                    "you may not discharge ask ids not addressed to you ("
+                    + self._name_fields(foreign, declined or set(), label)
+                    + ") — let the named seat answer or decline it, or reply "
+                      "without those ids if you are only adding context",
                 )
         return answered
 
@@ -1122,6 +1190,21 @@ class HubService:
                     else by_root.get(found.id, []) if found is not None
                     else [])
             if not hits:
+                # YOUR OWN THREAD WITH NOTHING OUTSTANDING IS A NO-OP, NOT AN
+                # ERROR (0153). A thread whose every reply DECLINED owes you
+                # no consumption — a refusal is terminal — so citing its root
+                # resolved to zero rows and hit the loud refusal below, which
+                # would teach "you owe no consumption for your own thread"
+                # for the one gesture the docs recommend ("I read the
+                # thread"). No existence oracle: the ref resolves to a
+                # message this sender wrote, and only their OWN open thread
+                # qualifies — someone else's debt stays un-settleable, and so
+                # does a reply of theirs that never carried consumption.
+                if (found is not None and found.sender == agent.id
+                        and found.status in (Status.open, Status.blocked)):
+                    if found.id not in stored:
+                        stored.append(found.id)
+                    continue
                 unknown.append(elide(ref, 80))
                 continue
             # Deduped: the same debt cited twice (as its seq and as its id,
@@ -1153,6 +1236,11 @@ class HubService:
         - `answers` list the ask ids a reply discharges; only on a `reply` that
           names its `reply_to`, whose parent must carry those asks and must not
           be the poster's own message (teaching refusals, ADR-0003).
+        - `declines` name the discharged asks the reply REFUSES rather than
+          answers (0153). They are folded into `answers` — a decline
+          discharges exactly like an answer — and kept as the refused subset,
+          so the digest, `/owed` and the asker's envelope can tell the two
+          apart. The body is the why; it is never required.
         - `settled_by` on a resolved reply is the supersession pointer that lets
           a non-asker close someone else's stale question: it must name a real
           message in THIS channel (audited closure, never a bare claim).
@@ -1166,6 +1254,8 @@ class HubService:
             data["asks"] = [a.model_dump(exclude_none=True) for a in payload.asks]
         if payload.answers is not None:
             data["answers"] = [str(x) for x in payload.answers]
+        if payload.declines is not None:
+            data["declines"] = [str(x) for x in payload.declines]
         if payload.consumes is not None:
             data["consumes"] = [str(x) for x in payload.consumes]
         if payload.attachments is not None:
@@ -1176,9 +1266,17 @@ class HubService:
         if "asks" in data:
             data["asks"] = self._validate_asks(data["asks"], payload.status,
                                                sender=sender, channel=channel)
-        if "answers" in data:
-            data["answers"] = self._validate_answers(data["answers"], payload.status,
-                                                     payload.reply_to, sender)
+        if "answers" in data or "declines" in data:
+            answers, declines = self._validate_discharge(
+                data.get("answers"), data.get("declines"), payload.status,
+                payload.reply_to, sender)
+            data["answers"] = answers
+            # Only a real refusal leaves a `declines` key: an empty one would
+            # make every plain answer carry a field saying nothing.
+            if declines:
+                data["declines"] = declines
+            else:
+                data.pop("declines", None)
         if "attachments" in data:
             # Refs are validated against THIS channel's blob store and
             # normalized from server truth (0091) — whether they arrived via
@@ -2499,7 +2597,9 @@ class HubService:
 
         - open_questions: open/blocked messages not yet discharged, with their
           pending ask texts (asks/answers make Q->A pairs mechanical).
-        - decided: discharged obligations (who answered) and `resolved` posts.
+        - decided: discharged obligations (who answered — and, separately, who
+          DECLINED: a refusal discharges but is not an answer) and `resolved`
+          posts.
         - decisions: the channel store's `decision:*` keys — the room's
           distilled, versioned decision record (written by convention when a
           thread resolves).
@@ -2539,19 +2639,43 @@ class HubService:
                         r.status == Status.resolved and r.sender == m.sender
                         for r in replies))
                     if state.closed:
+                        declined_by: list[str] = []
                         if asks_of(m):
                             # Credit only repliers who actually answered an ask
-                            # (a "bump" reply must not be listed, review M2).
+                            # (a "bump" reply must not be listed, review M2) —
+                            # and a REFUSAL IS NOT AN ANSWER (0153). A seat
+                            # that declines every ask aimed at it used to
+                            # accrue the same `decided` credit as one that
+                            # answered them, which is the digest recording
+                            # the opposite of what happened.
                             ask_ids = {str(a["id"]) for a in asks_of(m)}
                             answered_by = sorted({
                                 r.sender for r in replies
-                                if r.sender != m.sender and ask_ids
-                                & {str(x) for x in (r.data or {}).get("answers", []) or []}
+                                if r.sender != m.sender
+                                and ask_ids & set(substantive_answers_of(r))
+                            })
+                            declined_by = sorted({
+                                r.sender for r in replies
+                                if r.sender != m.sender
+                                and ask_ids & set(declines_of(r))
                             })
                         else:
                             answered_by = sorted({r.sender for r in replies
                                                   if r.sender != m.sender})
                         decided.append({**brief, "answered_by": answered_by,
+                                        # Present only when something WAS
+                                        # declined: a row of empty fields
+                                        # teaches a reader nothing. Keyed on
+                                        # EITHER signal — on a canvass where
+                                        # one named seat answers and another
+                                        # refuses, the ask reads answered
+                                        # (`state.declined` is empty) and
+                                        # gating on that alone erased the
+                                        # refusal from the room's memory.
+                                        **({"declined_by": declined_by,
+                                            "declined_asks": state.declined}
+                                           if (declined_by or state.declined)
+                                           else {}),
                                         **({"self_resolved": True}
                                            if self_resolved else {})})
                     else:
@@ -2589,6 +2713,9 @@ class HubService:
         # matters), but `decided` grows forever: cap it newest-first and keep
         # the total so truncation is visible (review M1).
         decided_total = len(decided)
+        # Counted over ALL decided rows, before the cap: a decline that falls
+        # off the shown page is still a decline the room made.
+        declined_total = sum(len(d.get("declined_asks") or []) for d in decided)
         decided = sorted(decided, key=lambda d: d["seq"], reverse=True)[:50]
         # Phases lead the digest by construction (0140/2): the digest is the
         # "returning after a gap" surface, and the question a returning seat
@@ -2606,6 +2733,8 @@ class HubService:
             "decisions": decisions,
             "counts": {"open_questions": len(open_questions),
                        "decided_shown": len(decided), "decided_total": decided_total,
+                       # Visible rather than folded into credit (0153).
+                       "declined_asks": declined_total,
                        "decisions": len(decisions), "rulings": len(rulings),
                        "phases": len(phases),
                        "unacknowledged_rulings": len(unacked)},
@@ -2622,6 +2751,7 @@ class HubService:
         # escalation. A partial answer keeps it escalating with its pending
         # asks visible; has_resolved_reply travels so a reader is never cold.
         closed, pending, total, has_resolved = False, [], 0, False
+        declined: list[str] = []
         already_read = False
         owes_reply = False
         if message.status in (Status.open, Status.blocked):
@@ -2634,6 +2764,7 @@ class HubService:
             # resolved question must not keep waving its unanswered ask ids.
             pending = [] if closed else state.pending
             total = state.total
+            declined = state.declined
             has_resolved = state.has_resolved_reply
             # Only the pinned class can re-deliver; a read receipt turns its
             # re-surfaces headline-only (redelivery=true, body withheld).
@@ -2652,6 +2783,7 @@ class HubService:
             viewer_id, message,
             parent_sender=parent.sender if parent else None,
             has_reply=closed, pending_asks=pending, ask_total=total,
+            declined_asks=declined,
             has_resolved_reply=has_resolved, owes_reply=owes_reply,
             sla_minutes=sla_minutes if sla_minutes is not None
             else self.channel_sla(message.channel),
@@ -3072,9 +3204,11 @@ class HubService:
           asker, or on authoritative closure. Never escalates, never wakes
           by itself: it surfaces here, in check_inbox, and on the board.
         - `to_close` (0116): the agent's OWN open/blocked threads that are
-          fully discharged (every ask answered, or a binary reply received)
-          but not authoritatively closed — advisory hygiene only; never
-          wakes or escalates. Surfaces after to_answer/to_consume.
+          fully discharged (every ask answered or DECLINED, or a binary reply
+          received) but not authoritatively closed — advisory hygiene only;
+          never wakes or escalates. Surfaces after to_answer/to_consume.
+          A row naming `declined_asks` is the asker's durable record that
+          nobody answered: repost it or close it, but do not read it as done.
         """
         channels = self.db.channels_of(agent.id)
         ops = self.operator_ids()
@@ -3230,9 +3364,14 @@ class HubService:
             for r in replies:
                 if r.sender == agent.id:
                     continue
-                answers = (r.data or {}).get("answers") or []
+                # A REFUSAL IS TERMINAL (0153): there is nothing in it to
+                # adopt or reject, so a decline owes the asker no consumption
+                # — pointing them at it would be asking them to consume a
+                # non-answer. A reply that answers one ask and declines
+                # another still owes consumption for the half it answered.
+                answers = substantive_answers_of(r)
                 if structured and not answers:
-                    continue  # commentary, not an answer to a numbered ask
+                    continue  # commentary or a refusal, not an answer
                 consumed = (self.db.has_read(r.id, agent.id)
                             or any(x.sender == agent.id and x.seq > r.seq
                                    for x in replies))
@@ -3310,10 +3449,18 @@ class HubService:
             age_since = now - last.created_at
             if age_since < TO_CLOSE_MIN_AGE_SECONDS:
                 continue
+            # A DISCHARGED THREAD IS NOT NECESSARILY AN ANSWERED ONE (0153).
+            # A fully-declined thread discharges, so this row — the asker's
+            # ONLY durable pointer once a refusal owes them no consumption —
+            # would otherwise report their refused question as "answered".
+            ask_ids = {str(a["id"]) for a in asks_of(m)}
+            declined_by = sorted({r.sender for r in non_sender
+                                  if ask_ids & set(declines_of(r))})
             to_close.append(CloseRow(
                 channel=m.channel, id=m.id, seq=m.seq,
                 title=m.title, answered_by=last.sender,
                 answered_at=last.created_at,
+                declined_asks=ds.declined, declined_by=declined_by,
             ))
         # Open phases across the agent's rooms (0140/2). Not a debt: a
         # standing constraint on WHICH work is legitimate now. It rides
@@ -6180,7 +6327,7 @@ class HubService:
                     # rendered by the hub itself (fact lines for the
                     # operator), so there is no second party to drift from.
                     "age_minutes": round((now - o.created_at) / 60, 1),
-                    "one_action": "answer it (or decline on the record)",
+                    "one_action": "answer it (or decline it: declines=[ids])",
                 })
             for channel in self.db.channels_of(op):
                 prefix = f"{self._QUEUE_PREFIX}{op}:"

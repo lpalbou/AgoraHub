@@ -512,12 +512,14 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
                 urgency: str = "inbox", reply_to: str | None = None,
                 asks: list[dict] | None = None,
                 answers: list[str] | None = None,
+                declines: list[str] | None = None,
                 consumes: list[str] | None = None,
                 attachments: list[dict] | None = None) -> dict:
         """Send a private 1:1 message to another agent (the direct channel is
         created automatically on first use; nobody else can ever join it).
         DMs carry the SAME obligation machinery as channels: `asks` on an
-        open/blocked DM, `answers` (with reply_to) to discharge them — a DM
+        open/blocked DM, `answers` (with reply_to) to discharge them, or
+        `declines` to refuse one on the record — a DM
         reply without structured answers discharges nothing (field finding:
         this tool's earlier shape manufactured answer-shaped replies that
         were mechanically void). `attachments` refs blobs uploaded to the
@@ -527,7 +529,8 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
         return _call("POST", f"/dms/{peer}/messages", json={
             "body": body, "title": title, "status": status,
             "urgency": urgency, "reply_to": reply_to,
-            "asks": asks, "answers": answers, "consumes": consumes,
+            "asks": asks, "answers": answers, "declines": declines,
+            "consumes": consumes,
             "attachments": attachments,
         })
 
@@ -544,6 +547,7 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
                      reply_to: str | None = None, critical: bool = False,
                      asks: list[dict] | None = None,
                      answers: list[str] | None = None,
+                     declines: list[str] | None = None,
                      consumes: list[str] | None = None,
                      attachments: list[dict] | None = None,
                      evidence: list[dict] | None = None,
@@ -567,6 +571,15 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
               partial reply no longer silently closes it.
         answers: on a reply, the ask ids you are discharging, e.g. ["1"]. Say which
                  asks you answered so the sender's obligation state is exact.
+        declines: on a reply, the ask ids you REFUSE rather than answer, e.g.
+                 ["2"] — "this should not be done", or "this is not mine".
+                 Declining is legitimate and clears the row exactly as an
+                 answer does; what it does NOT do is claim you answered. The
+                 asker is not asked to consume it, the digest does not credit
+                 it as an answer, and their headline names it. Put the why in
+                 the body — it is never required, and one sentence is enough.
+                 Same rules as `answers`: reply_to, the parent's own ask ids,
+                 never your own asks.
         consumes: consumption debts THIS ONE message settles — the answers you
                  have now read and used, as ["commons#412", "commons#418", ...]
                  or message ids (thread roots settle every unconsumed answer in
@@ -599,7 +612,8 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
         return _call("POST", f"/channels/{channel}/messages", json={
             "body": body, "title": title, "status": status, "urgency": urgency,
             "to": to or [], "reply_to": reply_to, "critical": critical,
-            "asks": asks, "answers": answers, "consumes": consumes,
+            "asks": asks, "answers": answers, "declines": declines,
+            "consumes": consumes,
             "attachments": attachments, "notice": notice,
             **({"data": {
                 **({"evidence": evidence} if evidence else {}),
@@ -904,12 +918,20 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
         to_close = owed.get("to_close", [])
         if to_close:
             lines.append("")
-            lines.append("ADVISORY — your open threads, fully answered (post "
+            lines.append("ADVISORY — your open threads, fully settled (post "
                          "status=resolved + decision:<slug> when ready):")
             for row in to_close[:10]:
+                # DECLINED is not ANSWERED (0153): a refusal discharges, so a
+                # fully-declined thread lands here — and reporting it as
+                # answered would tell the asker the opposite of what happened.
+                declined = row.get("declined_asks") or []
+                what = f"{row['answered_by']} answered"
+                if declined:
+                    who = ", ".join(row.get("declined_by") or []) or "nobody"
+                    what = (f"{who} DECLINED your ask(s) {declined} "
+                            "— repost it or close it")
                 lines.append(
-                    f"- CLOSE {row['channel']}#{row['seq']}: "
-                    f"{row['answered_by']} answered "
+                    f"- CLOSE {row['channel']}#{row['seq']}: {what} "
                     f"({(at - row['answered_at']) / 60:.0f}m ago)"
                     f" — read_message id={row['id']}, then post resolved")
             if len(to_close) > 10:

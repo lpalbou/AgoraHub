@@ -29,7 +29,7 @@ put_attachment -> id, post attachments=[{"id":id}]. `channel/`: owner+operator.
   operator always; peers unless answering YOUR OWN message. Rots + escalates
   like an ask. Settle OPERATOR debts before peer courtesy; end threads fyi/resolved.
 - An ask naming you is YOURS: answer it AND do or claim its work —
-  silence shows as acked_unanswered. Not yours? Decline on the record.
+  silence shows as acked_unanswered. Not yours? Decline it: declines=[ids].
 - Someone answered YOUR ask? USE it — adopt/reject on the record or close the
   thread; ack clears none of these debts. BATCH them: consumes=[refs] (<=32
   ids or channel#seq; a thread root takes the whole thread) in ONE message.
