@@ -1,11 +1,13 @@
 """@mention addressing at post time (agora-0105)."""
 
+import json
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from agora.hub.app import create_app
-from agora.mentions import body_for_mention_scan, parse_mentions
+from agora.mentions import (body_for_mention_scan, parse_mention_candidates,
+                            parse_mentions, resolve_mentions)
 
 ADMIN_KEY = "test-admin"
 
@@ -40,6 +42,148 @@ def test_parse_mentions_skips_nonce_fenced_quotes():
     )
     assert parse_mentions(body) == ["agora"]
     assert "@ghost" not in body_for_mention_scan(body)
+
+
+def notify_lines(tmp_path: Path, agent_id: str) -> list[dict]:
+    p = tmp_path / "notify" / f"{agent_id}-inbox.log"
+    if not p.exists():
+        return []
+    return [json.loads(line) for line in p.read_text().splitlines() if line]
+
+
+# -- vfs references vs mentions: seat-identity precedence (operator ruling) ----
+# @folder/file.md and @channel:folder/file.md are vfs references, but a token
+# that exactly matches a REGISTERED seat id is a mention, always. The parser
+# reports shape; the hub decides against the registry.
+
+
+def test_parse_mention_candidates_reports_shape():
+    assert parse_mention_candidates(
+        "see @plans/q3.md and @laurent: hi and @flow") == [
+        ("plans", True), ("laurent", True), ("flow", False)]
+    # One plain occurrence anywhere clears the flag: the author demonstrably
+    # meant the seat.
+    assert parse_mention_candidates("@plans/q3.md then @plans") == [
+        ("plans", False)]
+
+
+def test_parse_mentions_is_the_registry_free_safe_subset():
+    # Text-only callers have no registry, so path-like tokens are dropped:
+    # a vfs reference can never mint a seat out of text alone.
+    assert parse_mentions("roadmap lives in @plans/q3.md now") == []
+    assert parse_mentions("logo at @agora-wui-work:assets/logo.png") == []
+
+
+def test_mention_adjacent_to_vfs_reference_still_counts():
+    assert parse_mentions("@laurent see @plans/q3.md") == ["laurent"]
+
+
+def test_punctuation_after_mention_does_not_eat_it():
+    # Only '/' and ':' mark the path shape.
+    assert parse_mentions("ship it @seat, thanks") == ["seat"]
+    assert parse_mentions("ship it @seat") == ["seat"]
+    # '.' is legal inside a mention token, so a sentence-final dot is
+    # consumed into the match (pre-existing regex behavior, unchanged):
+    # the token still parses rather than being read as a vfs ref.
+    assert parse_mentions("ship it @seat. next") == ["seat."]
+
+
+def test_quoted_block_exclusion_still_holds_around_vfs_refs():
+    body = (
+        "⟦AGORA:xy:quote⟧@ghost said read @plans/q3.md"
+        "⟦/AGORA:xy⟧ @agora please check @plans/q3.md"
+    )
+    assert parse_mentions(body) == ["agora"]
+
+
+def test_resolve_mentions_seat_identity_precedence():
+    body = "see @plans/q3.md and @laurent: hi and @ghost"
+    # No seat registered: path-like tokens vanish silently; plain ones
+    # keep their long-standing outsider warning.
+    assert resolve_mentions(body, set(), set()) == ([], ["ghost"])
+    # A registered seat wins over the path reading, in or out of the room.
+    assert resolve_mentions(body, {"laurent", "plans"},
+                            {"laurent", "plans"}) == (
+        ["plans", "laurent"], ["ghost"])
+    assert resolve_mentions(body, {"laurent"}, {"laurent", "plans"}) == (
+        ["laurent"], ["plans", "ghost"])
+
+
+def test_colon_or_slash_after_registered_handle_still_obliges(tmp_path):
+    # The regression the operator caught: '@laurent: please review' is
+    # colon-after-handle prose, not a vfs reference — laurent is registered,
+    # so the seat wins.
+    client = make_client(tmp_path)
+    op = register(client, "op", operator=True)
+    laurent = register(client, "laurent")
+    make_channel(client, op, "room", laurent)
+
+    for body in ("@laurent: please review this", "@laurent/ done"):
+        r = client.post("/channels/room/messages", json={
+            "body": body, "title": "review", "status": "open"}, headers=op)
+        assert r.status_code == 200, r.text
+        msg = r.json()
+        assert msg["to"] == ["laurent"], body
+        owed = client.get("/owed", headers=laurent).json()
+        assert any(row["id"] == msg["id"] for row in owed["to_answer"]), body
+
+
+def test_vfs_ref_with_no_registered_seat_is_silent(tmp_path):
+    # No seat 'plans' or 'chan' exists: nothing is mentioned, nothing is
+    # obliged, and the sender gets NO outsider doorbell — path tokens must
+    # not generate 'names no seat' noise.
+    client = make_client(tmp_path)
+    op = register(client, "op", operator=True)
+    other = register(client, "other")
+    make_channel(client, op, "room", other)
+
+    r = client.post("/channels/room/messages", json={
+        "body": "roadmap in @plans/q3.md, logo at @chan:assets/x.png",
+        "title": "directive", "status": "open"}, headers=op)
+    assert r.status_code == 200, r.text
+    assert not r.json()["to"]
+    warned = [line for line in notify_lines(tmp_path, "op")
+              if "you wrote" in str(line.get("preview", ""))]
+    assert warned == []
+
+
+def test_registered_seat_wins_over_vfs_reference(tmp_path):
+    # Seat-identity precedence, pinned as DELIBERATE: a path-shaped token
+    # whose id exactly matches a registered seat is a mention — so a channel
+    # named like a seat cannot be @-referenced cross-channel; rename the
+    # channel or reference the file from inside it.
+    client = make_client(tmp_path)
+    op = register(client, "op", operator=True)
+    plans = register(client, "plans")
+    make_channel(client, op, "room", plans)
+
+    r = client.post("/channels/room/messages", json={
+        "body": "the roadmap is in @plans/q3.md — read before Friday",
+        "title": "directive", "status": "open"}, headers=op)
+    assert r.status_code == 200, r.text
+    msg = r.json()
+    assert msg["to"] == ["plans"]
+    owed = client.get("/owed", headers=plans).json()
+    assert any(row["id"] == msg["id"] for row in owed["to_answer"])
+
+
+def test_registered_nonmember_in_path_shape_still_warns(tmp_path):
+    # Outsider-mention warnings must keep firing for REAL seats, even when
+    # the token is path-shaped: the registry, not room membership, decides.
+    client = make_client(tmp_path)
+    op = register(client, "op", operator=True)
+    other = register(client, "other")
+    register(client, "plans")            # registered, NOT in the room
+    make_channel(client, op, "room", other)
+
+    r = client.post("/channels/room/messages", json={
+        "body": "see @plans/q3.md", "title": "fyi", "status": "fyi"},
+        headers=op)
+    assert r.status_code == 200, r.text
+    assert not r.json()["to"]
+    warned = [line for line in notify_lines(tmp_path, "op")
+              if "you wrote @plans" in str(line.get("preview", ""))]
+    assert warned
 
 
 def test_operator_ask_text_mention_populates_per_ask_to(tmp_path):

@@ -155,7 +155,7 @@ rebuild); records preserved here.
 | v0.5.2 | `agora watch` liveness | `--pidfile` + `watch_ended` marker (dead-watcher vs quiet-channel) |
 | v0.5.1 | Structured asks/answers (P3) | per-ask discharge; 3 independent testers; 2 write-path gaps fixed |
 | v0.5.1 | Authorship reservation (P4) | reserved `signature`/`verified_by` + channel `authorship_required` (unenforced) |
-| v0.5.0 | Per-channel virtual filesystem | `fs/<path>` on the store, CAS, tombstone-monotonic (ABA fix), audit trail, mirror |
+| v0.5.0 | Per-channel virtual file system (vfs) | `fs/<path>` on the store, CAS, tombstone-monotonic (ABA fix), audit trail, mirror |
 | v0.4.7 | Remote-readiness core | connect-time catch-up, paginated backlog, `https→wss`+header auth, `/healthz`, WAL checkpoint |
 | v0.4.6 | Mirror resilient to state-file loss | recovers highest written seq per `<channel>.md` |
 | v0.4.5 | `agora watch` catch-up sweep | gap-free reconnect (found by the gateway agent) |

@@ -33,7 +33,7 @@ from .setup_harness import SUPPORTED_HARNESSES
 from . import db_locate as _db_locate
 from .agent_id import validate_agent_id
 from .governance import CHARTER_PATH as _CHARTER_PATH
-from .models import NOTICE_KINDS
+from .models import MAX_FS_BINARY_BYTES, NOTICE_KINDS
 
 
 def _resolve_mcp_command() -> str:
@@ -2104,9 +2104,10 @@ def cmd_ledger(args):
 
 
 def cmd_fs(args):
-    """Consult and edit a channel's shared virtual filesystem — the network-
-    accessible 'book' that lets agents on different machines share an editable
-    workspace without a shared disk. Sub-verbs: ls / read / write / rm / hist."""
+    """Consult and edit a channel's shared virtual file system (vfs) — the
+    network-accessible 'book' that lets agents on different machines share an
+    editable workspace without a shared disk. Sub-verbs: ls / read / write /
+    rm / hist."""
     async def go(c, a):
         if a.fs_action != "ls" and not a.path:
             raise SystemExit(f"'agora fs {a.fs_action}' requires a path argument")
@@ -2116,14 +2117,68 @@ def cmd_fs(args):
                 print(f"{f['version']:>4}  {f['updated_by']:<12}  {f['path']}"
                       + (f"  — {desc}" if desc else ""))
         elif a.fs_action == "read":
-            print((await c.fs_read(a.channel, a.path,
-                                   version=a.version))["content"])
+            import base64
+            row = await c.fs_read(a.channel, a.path, version=a.version)
+            if row.get("encoding") == "base64":
+                data = base64.b64decode(row.get("content_b64") or "")
+                label = (f"{a.path} v{row['version']} "
+                         f"({row.get('mime') or 'application/octet-stream'}, "
+                         f"{len(data)} bytes)")
+                if a.out:
+                    Path(a.out).write_bytes(data)
+                    print(f"read {label} -> {a.out}")
+                elif sys.stdout.isatty():
+                    raise SystemExit(f"{label} is binary — refusing to dump "
+                                     f"raw bytes to a terminal; re-run with "
+                                     f"--out FILE (or pipe the output)")
+                else:
+                    sys.stdout.buffer.write(data)
+                    print(f"read {label}", file=sys.stderr)
+            elif a.out:
+                Path(a.out).write_text(row["content"], encoding="utf-8")
+                print(f"read {a.path} v{row['version']} -> {a.out}")
+            else:
+                print(row["content"])
         elif a.fs_action == "write":
-            content = sys.stdin.read() if a.file == "-" else Path(a.file).read_text()
-            r = await c.fs_write(a.channel, a.path, content,
-                                 expect_version=a.expect_version,
-                                 description=a.describe or "")
-            print(f"wrote {a.path} -> version {r['version']} ({r['size_bytes']} bytes)")
+            import base64
+            import io
+            import mimetypes
+            data = (sys.stdin.buffer.read() if a.file == "-"
+                    else Path(a.file).read_bytes())
+            binary = a.binary
+            if not binary:
+                try:
+                    data.decode("utf-8")
+                except UnicodeDecodeError:
+                    binary = True
+            if binary:
+                # Client-side cap preflight (the hub's own constant): the refusal
+                # arrives before megabytes of base64 travel.
+                if len(data) > MAX_FS_BINARY_BYTES:
+                    raise SystemExit(
+                        f"'{a.file}' is {len(data)} bytes — exceeds the "
+                        f"{MAX_FS_BINARY_BYTES // (1024 * 1024)} MiB "
+                        f"fs cap; attach it to a message instead "
+                        f"(`agora attachment put`)")
+                mime = (mimetypes.guess_type(a.path)[0]
+                        or (None if a.file == "-"
+                            else mimetypes.guess_type(a.file)[0])
+                        or "application/octet-stream")
+                r = await c.fs_write(a.channel, a.path,
+                                     content_b64=base64.b64encode(data).decode("ascii"),
+                                     mime=mime, expect_version=a.expect_version,
+                                     description=a.describe or "")
+                print(f"wrote {a.path} -> version {r['version']} "
+                      f"({r['size_bytes']} bytes, {mime})")
+            else:
+                # Decode the bytes already in hand — the very bytes the
+                # text/binary sniff validated as UTF-8 — with universal
+                # newlines. One read, one encoding; no locale drift.
+                content = io.TextIOWrapper(io.BytesIO(data), encoding="utf-8").read()
+                r = await c.fs_write(a.channel, a.path, content,
+                                     expect_version=a.expect_version,
+                                     description=a.describe or "")
+                print(f"wrote {a.path} -> version {r['version']} ({r['size_bytes']} bytes)")
         elif a.fs_action == "rm":
             r = await c.fs_delete(a.channel, a.path, expect_version=a.expect_version)
             print(f"deleted {a.path}" if r["deleted"] else f"{a.path} did not exist")
@@ -2903,7 +2958,7 @@ def cmd_mirror(args):
         state[channel] = max(m.seq for m in messages)
 
     async def mirror_files(client, channels):
-        # Snapshot each channel's virtual filesystem into a SEPARATE tree
+        # Snapshot each channel's virtual file system (vfs) into a SEPARATE tree
         # (files/<channel>/<path>) so the maintainer/git can read the shared
         # workspace. Kept apart from the append-only message mirror and from any
         # authored thread files, so a file watcher never mistakes a mirrored
@@ -4181,12 +4236,18 @@ def build_parser() -> argparse.ArgumentParser:
     ak.add_argument("--channel", required=True); ak.add_argument("--seq", type=int, required=True)
     ak.set_defaults(func=cmd_ack)
 
-    fs = _agent_parser("fs", "channel virtual filesystem: ls/read/write/rm/hist")
+    fs = _agent_parser("fs", "channel virtual file system (vfs): ls/read/write/rm/hist")
     fs.add_argument("--channel", required=True)
     fs.add_argument("fs_action", choices=["ls", "read", "write", "rm", "hist"])
     fs.add_argument("path", nargs="?", default=None, help="file path (omit for ls)")
     fs.add_argument("--prefix", default=None, help="ls: only paths under this prefix")
     fs.add_argument("--file", default="-", help="write: read content from this file ('-' = stdin)")
+    fs.add_argument("--binary", action="store_true",
+                    help="write: force base64 upload even when the bytes "
+                         "decode as utf-8 (non-utf-8 input goes base64 on its own)")
+    fs.add_argument("--out", default=None,
+                    help="read: write the (decoded) content to this file "
+                         "instead of stdout (required for binary on a terminal)")
     fs.add_argument("--expect-version", dest="expect_version", type=int, default=None,
                     help="CAS guard: expected current version (0 = must not exist)")
     fs.add_argument("--version", type=int, default=None,

@@ -43,7 +43,7 @@ MAX_ABOUT_CHARS = 500          # self-descriptions are read by every joiner: sam
 MAX_MISSION_CHARS = 4000
 DM_PREFIX = "dm:"              # reserved channel-name prefix for direct 1:1 channels
 
-# Per-channel virtual filesystem (the shared, network-accessible "book" that
+# Per-channel virtual file system (vfs — the shared, network-accessible "book" that
 # lets remote agents on different machines share an editable workspace without
 # a shared disk). Files live as reserved-prefix keys in the channel store, so
 # they inherit membership, CAS versioning, and durability; every mutation also
@@ -52,6 +52,10 @@ FS_PREFIX = "fs/"              # reserved store-key prefix for file paths
 MAX_FS_PATH_CHARS = 512        # path length cap
 # File content reuses MAX_STORE_VALUE_BYTES (256 KiB): text/markdown workspace
 # artifacts (plans, contracts, AGENTS-style registries), not a blob store.
+# Binary fs entries (operator-deposited images/PDFs that agents reference by
+# fs path) ride the same store rows base64-encoded; this cap applies to the
+# DECODED bytes, so the stored JSON row is ~4/3 of it.
+MAX_FS_BINARY_BYTES = 4 * 1024 * 1024
 
 # Message attachments (0091): channel-scoped, content-addressed blobs
 # referenced from messages. Bytes never ride envelopes — refs do.
@@ -193,7 +197,7 @@ class Kind(str, Enum):
 
 
 class FsFile(BaseModel):
-    """One file in a channel's virtual filesystem. `content` is the editable
+    """One file in a channel's virtual file system (vfs). `content` is the editable
     text body; `version` powers compare-and-swap edits (0 = "must not exist");
     `description` is the writer's one-line statement of what the file IS —
     the field that makes a file listing a table of contents, not a path dump."""
@@ -206,6 +210,12 @@ class FsFile(BaseModel):
     version: int = 0
     updated_by: str = ""
     updated_at: float = 0.0
+    # Binary entries: the bytes ride `content_b64` (standard base64) and
+    # `encoding` == "base64" marks them; `content` stays present-but-empty so
+    # pre-binary clients keep a well-typed (if blank) field to render.
+    # `size_bytes` is always the DECODED byte count, consistent with text.
+    content_b64: str | None = None
+    encoding: str | None = None
 
 
 class Message(BaseModel):

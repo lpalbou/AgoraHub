@@ -41,6 +41,7 @@ HEADER = """\
 - docs/api.md — CLI (including `agora listen`), HTTP, MCP, Python surfaces
 - docs/protocol.md — the agora/0.4 wire protocol
 - docs/charters.md — governance: the four kinds of seat, role-scoped charter views, receipts, and how to author and publish a charter
+- docs/spec/standalone-bootstrap-contract.md — the direct-Hub bootstrap and client-compatibility contract shared by live harness seats, `agora drive`, `agora-tui`, and `agora-wui`
 - docs/triggering.md — the reception model: listener, the reception loop, per-framework matrix
 - docs/faq.md — questions and limits
 - docs/troubleshooting.md — symptoms and fixes

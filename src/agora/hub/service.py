@@ -8,6 +8,7 @@ is defined exactly once and is directly unit-testable without a server.
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
@@ -57,6 +58,7 @@ from ..models import (
     MAX_FILENAME_CHARS,
     MAX_SIGNATURE_CHARS,
     MAX_DATA_BYTES,
+    MAX_FS_BINARY_BYTES,
     MAX_FS_PATH_CHARS,
     MAX_STORE_VALUE_BYTES,
     NOTICE_KINDS,
@@ -229,6 +231,14 @@ def _derived_description(head: str) -> str:
         if line:
             return line
     return ""
+
+
+def _b64_decoded_size(b64: str) -> int:
+    """DECODED byte count of a strict standard-base64 string, computed from
+    its length (no decode): reads and listings report a binary file's size in
+    real bytes, exactly as text entries report theirs."""
+    pad = 2 if b64.endswith("==") else 1 if b64.endswith("=") else 0
+    return len(b64) * 3 // 4 - pad
 
 
 class HubError(Exception):
@@ -2167,7 +2177,15 @@ class HubService:
         if channel.startswith(DM_PREFIX):
             return payload, ctx
         members = {m.agent_id for m in self.db.list_members(channel)}
-        in_room, ctx.outsiders = resolve_mentions(payload.body, members)
+        # Seat-identity precedence (operator ruling): a token that exactly
+        # matches a registered seat id is a mention even written @seat/... or
+        # @seat:...; a path-like token matching no registered seat is a vfs
+        # reference — no mention, no obligation, no outsider warning. The
+        # registry (not room membership) decides, so outsider warnings keep
+        # firing for real seats named from the wrong room.
+        registered = set(self.db.list_agent_ids())
+        in_room, ctx.outsiders = resolve_mentions(payload.body, members,
+                                                  registered)
         if in_room:
             merged = list(payload.to or [])
             for seat in in_room:
@@ -2179,7 +2197,8 @@ class HubService:
             new_asks = []
             asks_changed = False
             for ask in payload.asks:
-                in_ask, out_ask = resolve_mentions(ask.text, members)
+                in_ask, out_ask = resolve_mentions(ask.text, members,
+                                                   registered)
                 for o in out_ask:
                     if o not in ctx.outsiders:
                         ctx.outsiders.append(o)
@@ -3070,7 +3089,8 @@ class HubService:
                 # `to` or as reporting delegate). There is no "other seat"
                 # to carry the remainder of a binary commission, so your
                 # planning ack must not silence it: only operator engagement
-                # or your own `resolved` completion report clears it
+                # or, for the reporting delegate, an evidence-cited
+                # `resolved` completion report clears it
                 # (2026-08-04; the delegate's 62-second ack erased the novel
                 # commission from its own ledger and nothing chased the
                 # 17.5h stall that followed).
@@ -3192,6 +3212,14 @@ class HubService:
                 # dispatches correctly must not lose its monitoring surface
                 # for choosing envelope addressing over per-ask addressing.
                 for seat in (a.get("to") or m.to or []):
+                    if seat == agent.id:
+                        # NOBODY WAITS ON THEMSELVES. Same root cause as the
+                        # board's pending-on-me hole: message-level `to` is
+                        # the one self-address the post gate still allows, so
+                        # the `or m.to` fallback above could name the asker.
+                        # The author's duty on their own thread is CLOSURE,
+                        # served as the separate `to_close` class.
+                        continue
                     if seat in repliers:
                         continue
                     key = (seat, m.channel)
@@ -3338,7 +3366,7 @@ class HubService:
         if key.startswith(FS_PREFIX):
             # File keys are owned by the VFS API so every mutation is validated
             # and emits an audit event; a raw store_set would bypass both.
-            raise HubError(403, f"'{key}' is a virtual-filesystem path: use the fs_* API")
+            raise HubError(403, f"'{key}' is a virtual file system (vfs) path: use the fs_* API")
         if key.startswith(RESERVED_STORE_PREFIX):
             # The OPERATOR is always able to write channel metadata. Ownership
             # is the delegation mechanism, not a wall above the human: a
@@ -4157,7 +4185,7 @@ class HubService:
         rows.sort(key=lambda r: -r["updated_at"])
         return rows
 
-    # -- per-channel virtual filesystem ------------------------------------------
+    # -- per-channel virtual file system (vfs) -----------------------------------
     #
     # A channel's files live as reserved `fs/<path>` keys in its store, so they
     # inherit membership gating, CAS versioning and durability for free. Every
@@ -4428,28 +4456,56 @@ class HubService:
         raise HubError(403, f"'{RESERVED_FS_PREFIX}...' files are channel-owned: "
                             "writable by the channel owner and the operator only")
 
-    def fs_write(self, agent: AgentInfo, channel: str, path: str, content: str,
-                 mime: str = "text/markdown", expect_version: int | None = None,
-                 description: str = "") -> FsFile:
+    def fs_write(self, agent: AgentInfo, channel: str, path: str,
+                 content: str | None = None, mime: str = "text/markdown",
+                 expect_version: int | None = None, description: str = "",
+                 content_b64: str | None = None) -> FsFile:
         """Create or edit a file (compare-and-swap via `expect_version`; 0 means
-        'must not exist yet'). `description` is the writer's one-line statement
-        of what the file is, shown in listings; sanitized and capped like a
-        title. Returns the new FsFile with its bumped version."""
+        'must not exist yet'). Exactly one of `content` (text) or `content_b64`
+        (strict standard base64 — the binary deposit path for images/PDFs) must
+        be provided. `description` is the writer's one-line statement of what
+        the file is, shown in listings; sanitized and capped like a title.
+        Returns the new FsFile with its bumped version."""
         self.require_membership(channel, agent.id)
         self._require_unpaused(agent, channel)
         self._require_not_archived(channel)
         norm = self._normalize_fs_path(path)
         if norm.startswith(RESERVED_FS_PREFIX):
             self._require_channel_authority(channel, agent)
-        if not isinstance(content, str):
-            raise HubError(400, "fs content must be text")
-        size = len(content.encode())
-        if size > MAX_STORE_VALUE_BYTES:
-            raise HubError(413, f"fs file exceeds {MAX_STORE_VALUE_BYTES} bytes")
+        if (content is None) == (content_b64 is None):
+            raise HubError(400, "provide exactly one of content or content_b64")
+        if content_b64 is not None:
+            # The charter is a governance TEXT surface (read receipts, debt,
+            # advisories all quote it) — never a blob, even for the owner.
+            if norm == CHARTER_PATH:
+                raise HubError(400, "charter must be text")
+            try:
+                raw = base64.b64decode(content_b64, validate=True)
+            except (ValueError, TypeError):  # binascii.Error is a ValueError
+                raise HubError(400, "content_b64 is not valid base64")
+            size = len(raw)  # caps, audits and listings speak DECODED bytes
+            if size > MAX_FS_BINARY_BYTES:
+                raise HubError(413, f"fs file exceeds {MAX_FS_BINARY_BYTES} bytes")
+            # The pydantic default delivers an omitted mime as "text/markdown";
+            # for bytes that DEFAULT flips to octet-stream. (An explicit
+            # text/markdown alongside content_b64 is indistinguishable from
+            # the default and is overridden the same way — a deliberate cost:
+            # base64-transported bytes are not markdown.)
+            if mime == "text/markdown":
+                mime = "application/octet-stream"
+        else:
+            if not isinstance(content, str):
+                raise HubError(400, "fs content must be text")
+            size = len(content.encode())
+            if size > MAX_STORE_VALUE_BYTES:
+                raise HubError(413, f"fs file exceeds {MAX_STORE_VALUE_BYTES} bytes")
         # sanitize_text also strips control chars (ESC/BEL survive str.split —
         # they would otherwise reach the operator's terminal; security M1).
         description = sanitize_text(str(description or ""), 200, field="description")
-        value = {"content": content, "mime": mime}
+        if content_b64 is not None:
+            value: dict[str, Any] = {"content_b64": content_b64, "mime": mime}
+        else:
+            value = {"content": content, "mime": mime}
         if description:
             value["description"] = description
         entry = self.db.fs_put(channel, FS_PREFIX + norm, value, agent.id, expect_version)
@@ -4473,7 +4529,10 @@ class HubService:
             except Exception:
                 logging.getLogger("agora.hub.charter").exception(
                     "charter advisory failed (write succeeded)")
-        return FsFile(path=norm, content=content, mime=mime, description=description,
+        return FsFile(path=norm, content=content if content is not None else "",
+                      content_b64=content_b64,
+                      encoding="base64" if content_b64 is not None else None,
+                      mime=mime, description=description,
                       size_bytes=size, version=entry.version,
                       updated_by=entry.updated_by, updated_at=entry.updated_at)
 
@@ -4502,6 +4561,16 @@ class HubService:
                 # deliberately record nothing.
                 self.db.charter_receipt_set(agent.id, channel, row["version"])
         value = row["value"] if isinstance(row["value"], dict) else {}
+        b64 = value.get("content_b64")
+        if isinstance(b64, str):
+            # Binary entry: bytes ride `content_b64`; `content` stays present
+            # but EMPTY (never the base64) so pre-binary clients degrade to a
+            # blank body instead of a wall of base64.
+            return FsFile(path=norm, content="", content_b64=b64, encoding="base64",
+                          mime=value.get("mime", "application/octet-stream"),
+                          description=value.get("description", ""),
+                          size_bytes=_b64_decoded_size(b64), version=row["version"],
+                          updated_by=row["updated_by"], updated_at=row["updated_at"])
         content = value.get("content", "")
         return FsFile(path=norm, content=content, mime=value.get("mime", "text/markdown"),
                       description=value.get("description", ""),
@@ -4515,14 +4584,26 @@ class HubService:
         line, so old files are never blank. Tombstoned files excluded."""
         self.require_membership(channel, agent.id)
         rows = self.db.fs_keys_live(channel, FS_PREFIX + prefix)
-        return [
-            {"path": r["key"][len(FS_PREFIX):], "version": r["version"],
-             "updated_by": r["updated_by"], "updated_at": r["updated_at"],
-             "size": r["size"],
-             "description": r["description"] or _derived_description(r["head"]),
-             "described": bool(r["description"])}
-            for r in rows
-        ]
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            item = {"path": r["key"][len(FS_PREFIX):], "version": r["version"],
+                    "updated_by": r["updated_by"], "updated_at": r["updated_at"],
+                    "size": r["size"],
+                    "description": r["description"] or _derived_description(r["head"]),
+                    "described": bool(r["description"])}
+            if not r["head"] and not r["size"]:
+                # Ambiguous under the listing SQL (which extracts `$.content`
+                # only): an empty text file, or a binary entry whose bytes live
+                # in `content_b64`. One head fetch resolves it; binary rows
+                # gain the encoding marker and their DECODED byte size.
+                head_row = self.db.fs_get(channel, r["key"])
+                value = (head_row or {}).get("value")
+                b64 = value.get("content_b64") if isinstance(value, dict) else None
+                if isinstance(b64, str):
+                    item["encoding"] = "base64"
+                    item["size"] = _b64_decoded_size(b64)
+            out.append(item)
+        return out
 
     def fs_delete(self, agent: AgentInfo, channel: str, path: str,
                   expect_version: int | None = None) -> bool:
@@ -5864,6 +5945,23 @@ class HubService:
                 for m in page:
                     if m.kind != Kind.message or m.status not in (Status.open, Status.blocked):
                         continue
+                    if m.sender == agent.id:
+                        # AN AUTHOR IS NEVER THEIR OWN ADDRESSEE. Every other
+                        # obligation surface excludes own messages by sender
+                        # (`inbox`'s cursor sweep, `unread_criticals`,
+                        # `obligation_candidates`, `_is_addressed_debt`,
+                        # `owed.to_answer`) — this one tested only `to`, and
+                        # message-level `to` is the ONE self-address the post
+                        # gate still allows (`_validate_asks` already refuses
+                        # a self `to`/`assignee`). So `to=["me"]` put the
+                        # author's own open thread under PENDING ON YOU while
+                        # /inbox and /owed both said it owed nobody: one fact,
+                        # three answers, and the loudest one reached the
+                        # driver's turn context. The author's real duty on
+                        # their own thread is CLOSURE, which /owed serves as
+                        # `to_close` — a separate, labelled class, never a
+                        # row that reads as someone else's ask.
+                        continue
                     state = self._discharge(m, self.db.replies_to(m.id))
                     if state.closed:
                         continue
@@ -5880,12 +5978,13 @@ class HubService:
                            "escalated": age > sla_s}
                     if agent.id in m.to or agent.id in assignees:
                         pending_on_me.append(row)
-                    elif channel.startswith(DM_PREFIX) and m.sender != agent.id:
+                    elif channel.startswith(DM_PREFIX):
                         # A DM has an implicit audience of one: an open DM
                         # question is pending on the peer, never a "proposal"
-                        # (review LOW-4).
+                        # (review LOW-4). (The author's own DM question is
+                        # already gone: own messages are skipped above.)
                         pending_on_me.append(row)
-                    elif not m.to and not assignees and m.sender != agent.id:
+                    elif not m.to and not assignees:
                         proposals.append(row)
             decision_slugs = set()
             claims: list[tuple[str, Any, Any]] = []

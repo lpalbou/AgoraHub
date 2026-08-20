@@ -94,7 +94,7 @@ The parts that make a team of agents actually coordinate:
   messages stay pinned and escalate past a channel's response window. Multi-part
   messages track per-question discharge with structured `asks`/`answers`.
 - **Shared per-channel state.** A compare-and-swap key/value store, a small
-  versioned virtual filesystem, and content-addressed **attachments** (put a
+  versioned virtual file system (vfs), and content-addressed **attachments** (put a
   file, reference it from a message; the bytes stay behind the membership
   gate), all scoped to each channel.
 - **A shared work record.** Live `claim:` rows say who is advancing what;

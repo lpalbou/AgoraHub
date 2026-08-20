@@ -351,16 +351,22 @@ def reception(url: str, agent_id: str,
 
     asks: list[dict] = []
     fyi: list[dict] = []
-    debt_ids = set()
-    for row in owed.get("to_answer", []) + owed.get("to_consume", []):
+    answer_ids: set[str] = set()
+    consume_ids: set[str] = set()
+    for row in owed.get("to_answer", []):
         if isinstance(row, dict):
-            debt_ids.add(str(row.get("id") or row.get("answer_id") or ""))
+            answer_ids.add(str(row.get("id") or ""))
+    for row in owed.get("to_consume", []):
+        if isinstance(row, dict):
+            consume_ids.add(str(row.get("answer_id") or row.get("id") or ""))
 
     for env in unread:
         if not isinstance(env, dict) or str(env.get("sender", "")) == agent_id:
             continue
+        env_id = str(env.get("id", ""))
         status = str(env.get("status", ""))
-        owned = str(env.get("id", "")) in debt_ids
+        to_answer = env_id in answer_ids
+        to_consume = env_id in consume_ids
         hot = bool(env.get("critical") or env.get("escalated")
                    or env.get("reply_to_me"))
         mine = bool(env.get("to_me"))
@@ -370,9 +376,21 @@ def reception(url: str, agent_id: str,
         # evaluate whether it should contribute.
         if demand and not mine and not hot and not env.get("from_operator"):
             demand = False
-        (asks if (owned or hot or mine or demand) else fyi).append(env)
+        if to_answer or to_consume or hot or mine or demand:
+            item = dict(env)
+            if to_answer or demand:
+                item["_hook_action"] = "ask"
+            elif to_consume:
+                item["_hook_action"] = "consume"
+            elif status == "reply" and (env.get("reply_to_me") or mine):
+                item["_hook_action"] = "reply"
+            else:
+                item["_hook_action"] = "read"
+            asks.append(item)
+        else:
+            fyi.append(env)
 
-    ids = sorted({str(e.get("id", "")) for e in asks} | debt_ids)
+    ids = sorted({str(e.get("id", "")) for e in asks} | answer_ids | consume_ids)
     signature = ",".join(i for i in ids if i)
     return asks, fyi, signature
 
@@ -402,6 +420,25 @@ def render(asks: list[dict], fyi: list[dict], *, settle: bool = False) -> str:
     smuggle a newline nor arrive unreadable."""
     from .listen import _safe_channel
 
+    def _item_action(msg: dict) -> str:
+        action = str(msg.get("_hook_action", ""))
+        if action in {"ask", "consume", "reply", "read"}:
+            return action
+        status = str(msg.get("status", ""))
+        if status in ("open", "blocked"):
+            return "ask"
+        if status == "reply" and bool(msg.get("reply_to_me")):
+            return "reply"
+        return "read"
+
+    def _label(msg: dict) -> str:
+        return {
+            "ask": "ASK",
+            "consume": "USE",
+            "reply": "REPLY",
+            "read": "READ",
+        }[_item_action(msg)]
+
     lines: list[str] = []
     for msg in asks[:10]:
         chan = _safe_channel(str(msg.get("channel", "?")))
@@ -410,24 +447,67 @@ def render(asks: list[dict], fyi: list[dict], *, settle: bool = False) -> str:
             (" ESCALATED", msg.get("escalated")),
             (" CRITICAL", msg.get("critical"))) if on)
         title = _safe_text(msg.get("title") or "", 160)
-        lines.append(f'- ASK {chan}#{msg.get("seq")} from {sender}{marks}'
+        lines.append(f'- {_label(msg)} {chan}#{msg.get("seq")} from {sender}{marks}'
                      + (f': "{title}"' if title else ""))
         body = msg.get("body")
         if body:
             lines.append("    " + _safe_text(body, 600))
     if len(asks) > 10:
-        lines.append(f"- ...and {len(asks) - 10} more ask(s)")
+        action_set = {_item_action(msg) for msg in asks}
+        if len(action_set) > 1:
+            suffix = "item(s)"
+        elif action_set == {"consume"}:
+            suffix = "answer(s)"
+        elif action_set == {"reply"}:
+            suffix = "reply item(s)"
+        elif action_set == {"read"}:
+            suffix = "read item(s)"
+        else:
+            suffix = "ask(s)"
+        lines.append(f"- ...and {len(asks) - 10} more {suffix}")
     if fyi:
         chans = sorted({_safe_channel(str(m.get("channel", "?"))) for m in fyi})
         lines.append(f"- {len(fyi)} fyi in {', '.join(chans[:6])} "
                      "(no reply owed; read when convenient)")
     if asks:
-        tail = ("A colleague or the human is waiting on the ask(s) above: "
-                "answer them, or claim the work they assign, then ack. Ack "
-                "means seen, never done.")
+        action_set = {_item_action(msg) for msg in asks}
+        if action_set == {"ask"}:
+            tail = ("A colleague or the human is waiting on the ask(s) above: "
+                    "answer them, or claim the work they assign, then ack. Ack "
+                    "means seen, never done.")
+        elif action_set == {"consume"}:
+            tail = ("Someone answered you above: read and use those answer(s) "
+                    "on the record before you ack. Ack means seen, never done.")
+        elif action_set == {"reply"}:
+            tail = ("A colleague replied above: read it, use it if it answers "
+                    "your own ask, and reply only if it actually creates a real "
+                    "new debt; then ack. Ack means seen, never done.")
+        elif action_set == {"read"}:
+            tail = ("Important addressed traffic is above: read it, act if it "
+                    "changes your work, then ack. Ack means seen, never done.")
+        else:
+            tail = ("Settle the item(s) above before you move on: answer real "
+                    "ask(s) or claim the work they assign, use answer(s) to your "
+                    "own asks, read replies, and only answer back where a real "
+                    "new debt exists; then ack. Ack means seen, never done.")
         if settle:
-            tail = ("Settle the ask(s) above before you finish this turn — "
-                    "answer, claim, or say plainly why you cannot. ") + tail
+            if action_set == {"ask"}:
+                prefix = ("Settle the ask(s) above before you finish this turn — "
+                          "answer, claim, or say plainly why you cannot. ")
+            elif action_set == {"consume"}:
+                prefix = ("Settle the answer(s) above before you finish this "
+                          "turn — use them on the record or close the thread. ")
+            elif action_set == {"reply"}:
+                prefix = ("Settle the reply-to-you item(s) above before you "
+                          "finish this turn — read them, and answer only if they "
+                          "actually create a real new debt. ")
+            elif action_set == {"read"}:
+                prefix = ("Read the addressed item(s) above before you finish "
+                          "this turn if they affect your current work. ")
+            else:
+                prefix = ("Settle the item(s) above before you finish this "
+                          "turn. ")
+            tail = prefix + tail
     else:
         tail = "Nothing is owed; fold this into what you are already doing."
     return "\n".join(lines) + "\n" + tail

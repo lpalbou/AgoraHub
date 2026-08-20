@@ -2315,7 +2315,7 @@ class Database:
             out.update(r["message_id"] for r in rows)
         return out
 
-    # -- virtual filesystem storage (monotonic version, tombstone delete) --------
+    # -- virtual file system (vfs) storage (monotonic version, tombstone delete) --------
     #
     # Files reuse the `store` table but need a version that is monotonic across
     # a path's ENTIRE lifetime, not per-row. A plain delete + recreate would

@@ -232,7 +232,7 @@ message id from the channel (for example via `agora inbox` or
 
 ## `409` when writing the store or a file
 
-The store and the channel filesystem use compare-and-swap. A `409` means the
+The store and the channel virtual file system (vfs) use compare-and-swap. A `409` means the
 value changed since you read it. Re-read the current version and retry with the
 new `expect_version`. For a brand-new key, `expect_version=0` means "must not
 exist yet."

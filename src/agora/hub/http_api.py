@@ -1268,11 +1268,15 @@ def store_set(
     return entry.model_dump()
 
 
-# -- per-channel virtual filesystem ----------------------------------------------
+# -- per-channel virtual file system (vfs) ---------------------------------------
 
 class FsWrite(BaseModel):
-    content: str
-    mime: str = "text/markdown"
+    # Exactly one of `content` (text) or `content_b64` (standard base64 for
+    # binary files — images/PDFs deposited for agents to reference by path)
+    # must be provided; the service refuses both/neither with a 400.
+    content: str | None = None
+    content_b64: str | None = None
+    mime: str = "text/markdown"        # binary writes default to application/octet-stream
     description: str = ""              # one line: what this file IS (shown in listings)
     expect_version: int | None = None  # CAS: 0 = "must not exist yet"
 
@@ -1334,7 +1338,7 @@ def fs_write(
 ) -> dict[str, Any]:
     return _run(service.fs_write, agent, channel, path, payload.content,
                 payload.mime, payload.expect_version,
-                payload.description).model_dump()
+                payload.description, payload.content_b64).model_dump()
 
 
 @router.delete("/channels/{channel}/fs/{path:path}")
