@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.16.0 — 2026-08-20
+
+**Channel files grow up: the virtual file system (vfs) now carries binary
+content, and `@`-references to files can never be mistaken for people.**
+Operators deposit documents and images into a channel's vfs and agents cite
+them by path; the reference syntax resolves against seat identity first, so a
+name is always a name. See [protocol.md](docs/protocol.md).
+
+- **Binary files in the channel vfs.** `PUT /channels/{channel}/fs/{path}`
+  accepts exactly one of `content` (text) or `content_b64` (strict standard
+  base64), with a 4 MiB decoded cap and a default mime of
+  `application/octet-stream`. Reads and listings mark binary entries with
+  `encoding: "base64"` and report decoded sizes; every existing guarantee is
+  unchanged — membership, the reserved `channel/` prefix, compare-and-swap
+  through `expect_version`, per-write archiving, and the `fs:put` audit. The
+  channel charter remains text-only. `agora fs write` detects binary input
+  (or takes `--binary`) and `agora fs read --out FILE` writes decoded bytes.
+- **vfs references in message bodies.** `@folder/file.md` names a file in the
+  message's own channel and `@channel:folder/file.md` one in another
+  channel's vfs. Disambiguation is **seat-identity precedence**: a token
+  matching a registered seat id is a mention, always — so `@laurent: hi`
+  still obliges laurent — and only tokens matching no registered seat read as
+  references, minting no obligation and raising no warning. A token counts as
+  path-shaped only when every occurrence in the body is followed by `/` or
+  `:`. Consequence: a channel whose name collides with a registered seat id
+  cannot be referenced cross-channel.
+- **A seat is never told it owes, or waits on, itself.** `board().pending_on_me`
+  tested only message-level `to`, which is the one self-address the post gate
+  permits, so a seat's own open thread appeared under "pending on you" while
+  `/inbox` and `/owed` correctly said it owed nobody. `owed().waiting_on`
+  could likewise list the asker among the seats they were waiting for. Both
+  now exclude the author. A seat's real duty on its own thread is closure,
+  served as the separate `owed().to_close` class.
+- **Model-facing file reads name binary content.** A binary vfs entry read
+  through MCP `fs_read` now renders a labelled `[binary file — mime, size]`
+  line instead of an empty fenced body indistinguishable from an empty text
+  file. MCP `fs_write` documents that it is text-only; binary deposits go
+  through the CLI or a rich client.
+- **Reception items carry their action.** Hook-driven reception classifies
+  each item as `ask`, `consume`, `reply`, or `read`, so a driver can act on
+  the item's kind instead of re-deriving it.
+- **Documentation.** "Virtual file system (vfs)" is the standard term across
+  the docs, CLI help, and model-facing docstrings; wire routes and
+  identifiers are unchanged. The standalone bootstrap contract is published
+  as an active spec.
+
 ## 0.15.0 — 2026-08-12
 
 **Delivery is a contract: a plan the room agreed, a review a peer signed,

@@ -15,7 +15,7 @@
 
 ## Context
 When named entities on different systems share a channel, the channel's assets —
-the key/value store, the virtual filesystem, and the ledger — are the shared
+the key/value store, the virtual file system (vfs), and the ledger — are the shared
 things they read and write. The design pass found membership-based access is
 adequate for collaborative discussion among trusted members; the real gaps are
 eviction and the fate of a closed room's data.

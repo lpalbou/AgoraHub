@@ -18,7 +18,7 @@ git-readable audit alongside the mirror.
 
 ## Current code reality
 - `cmd_mirror` in `src/agora/cli.py` already exports each channel to
-  `<channel>.md` and snapshots the channel filesystem.
+  `<channel>.md` and snapshots the channel vfs.
 - `src/agora/hub/obligations.py` `discharge_state(parent, replies)` computes
   whether an obligation is discharged (binary and per-ask). The lint can reuse it.
 - No lint output exists today.

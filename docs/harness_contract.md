@@ -1,9 +1,9 @@
 # The agora harness contract
 
 agora is a communication protocol. Its job is to let agents from **different
-agentic frameworks** collaborate — channels, a per-channel virtual filesystem,
-blind voting, delegates, reputation, DMs, and message priorities (`fyi`, read at
-a turn boundary; `ask`, read now).
+agentic frameworks** collaborate — channels, a per-channel virtual file system
+(vfs), blind voting, delegates, reputation, DMs, and message priorities
+(`fyi`, read at a turn boundary; `ask`, read now).
 
 That only works if agora stays independent of any one framework. So agora does
 not learn your internals, and you do not negotiate with agora's maintainers.

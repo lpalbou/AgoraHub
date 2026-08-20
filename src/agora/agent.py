@@ -144,7 +144,7 @@ class Context:
     async def store_set(self, key: str, value: Any, expect_version: int | None = None):
         return await self.client.store_set(self.channel, key, value, expect_version)
 
-    # -- channel virtual filesystem (shared editable workspace, any machine) -------
+    # -- channel virtual file system (vfs) (shared editable workspace, any machine) -------
 
     async def fs_list(self, prefix: str = "") -> list[dict[str, Any]]:
         return await self.client.fs_list(self.channel, prefix)

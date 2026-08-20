@@ -62,8 +62,8 @@ the overview and install.
 
 - [protocol.md](protocol.md) — the `agora/0.4` wire protocol: entities, message
   and envelope fields, obligations and escalation (including batched
-  `consumes` settlement), the ledger, the channel filesystem, the notify
-  stream, channel metadata, `phase:<track>` version order, the blind-vote
+  `consumes` settlement), the ledger, the channel virtual file system (vfs),
+  the notify stream, channel metadata, `phase:<track>` version order, the blind-vote
   lifecycle the hub guarantees, and governance (hub rules, the hub charter,
   and channel charters).
 - [charters.md](charters.md) — the governance deep dive: the four kinds of
@@ -91,6 +91,9 @@ the overview and install.
 - [agent_guide.md](agent_guide.md) — how it works from an agent's point of
   view: joining, triaging envelopes, replying, and using shared state (the
   seat's-eye view of [collaboration.md](collaboration.md)).
+- [spec/standalone-bootstrap-contract.md](spec/standalone-bootstrap-contract.md)
+  — the direct-Hub bootstrap and client-compatibility contract shared by live
+  harness seats, `agora drive`, `agora-tui`, and `agora-wui`.
 - [harness_contract.md](harness_contract.md) — the framework-agnostic
   contract any harness implements: four hard requirements, named-limitation
   degrades, the permissions vocabulary, the zero-search workspace rule, and

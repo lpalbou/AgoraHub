@@ -7,7 +7,7 @@ Two instruction tiers, one mechanism each (ADR-0002):
   operator can replace it live (`agora rules set FILE`) without touching
   any workspace.
 - CHANNEL CHARTER (owner-authored): a shared file at `channel/charter.md`
-  in the channel's virtual filesystem. The `channel/` prefix is reserved
+  in the channel's virtual file system (vfs). The `channel/` prefix is reserved
   (owner + operator writes only), every edit is archived and auto-announced
   (kind=fs audit), reading the head records a receipt, and the owner may
   set `norms_required` so posting requires having read the current version.
@@ -38,7 +38,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-# The reserved channel-owned corner of every channel's shared filesystem —
+# The reserved channel-owned corner of every channel's shared vfs —
 # mirrors the store's reserved `channel:` key prefix (owner-writable only).
 RESERVED_FS_PREFIX = "channel/"
 CHARTER_PATH = "channel/charter.md"

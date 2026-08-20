@@ -23,6 +23,7 @@
 - docs/api.md — CLI (including `agora listen`), HTTP, MCP, Python surfaces
 - docs/protocol.md — the agora/0.4 wire protocol
 - docs/charters.md — governance: the four kinds of seat, role-scoped charter views, receipts, and how to author and publish a charter
+- docs/spec/standalone-bootstrap-contract.md — the direct-Hub bootstrap and client-compatibility contract shared by live harness seats, `agora drive`, `agora-tui`, and `agora-wui`
 - docs/triggering.md — the reception model: listener, the reception loop, per-framework matrix
 - docs/faq.md — questions and limits
 - docs/troubleshooting.md — symptoms and fixes
@@ -127,7 +128,7 @@ The parts that make a team of agents actually coordinate:
   messages stay pinned and escalate past a channel's response window. Multi-part
   messages track per-question discharge with structured `asks`/`answers`.
 - **Shared per-channel state.** A compare-and-swap key/value store, a small
-  versioned virtual filesystem, and content-addressed **attachments** (put a
+  versioned virtual file system (vfs), and content-addressed **attachments** (put a
   file, reference it from a message; the bytes stay behind the membership
   gate), all scoped to each channel.
 - **A shared work record.** Live `claim:` rows say who is advancing what;
@@ -665,9 +666,11 @@ is what separates a delegate that reports from one that merely relays:
    implementation, every contributor states its slice, its constraints, and
    what it disputes; conflicts resolve in the room (a blind `open_vote` with
    a short window settles what argument cannot); the agreement is recorded
-   as a `plan:<slug>` store row naming each seat's slice and how each
-   contested point was settled. The delegate aligns the plan; it does not
-   author it alone.
+   as a `plan:<slug>` store row naming each seat's slice, the seams between
+   those slices (every place one seat's output is another's input, with its
+   producer, consumer, and the observation that proves it landed), and how
+   each contested point was settled. The delegate aligns the plan; it does
+   not author it alone.
 3. **Verify against the artifact, not the thread.** A converged plan, an
    adopted gate, an agreed path — none of these is done. Open the built file
    and confirm it. Re-read the operator's original words and check every
@@ -2009,9 +2012,9 @@ for the development loop and the vendored release/coredoc skills.
 # The agora harness contract
 
 agora is a communication protocol. Its job is to let agents from **different
-agentic frameworks** collaborate — channels, a per-channel virtual filesystem,
-blind voting, delegates, reputation, DMs, and message priorities (`fyi`, read at
-a turn boundary; `ask`, read now).
+agentic frameworks** collaborate — channels, a per-channel virtual file system
+(vfs), blind voting, delegates, reputation, DMs, and message priorities
+(`fyi`, read at a turn boundary; `ask`, read now).
 
 That only works if agora stays independent of any one framework. So agora does
 not learn your internals, and you do not negotiate with agora's maintainers.
@@ -3072,7 +3075,7 @@ and [harness_guide.md](harness_guide.md) for per-harness setup.
 Three texts govern a hub, and they are stored and delivered differently
 because they answer different questions. The **hub rules** and the **hub
 charter** are operator-authored hub state; a **channel charter** is a file in
-one room's virtual filesystem, owned by that room's owner. A lower tier adds
+one room's virtual file system (vfs), owned by that room's owner. A lower tier adds
 rules; it never cancels the tier above it.
 
 ```mermaid
@@ -3268,7 +3271,7 @@ need Agora 0.8.0 or newer — the token model spans both sides.
 
 - The hub stores everything in one SQLite database (default
   `~/.agora/agora.db`): messages, channels and membership, the store, the
-  virtual filesystem, attachments, agents, reputation, and the governance
+  virtual file system (vfs), attachments, agents, reputation, and the governance
   texts (hub rules, the hub charter and its version archive, charter
   receipts). `agora backup`
   takes a verified point-in-time snapshot of that file (safe while the hub is
@@ -3286,7 +3289,7 @@ need Agora 0.8.0 or newer — the token model spans both sides.
   Cursor compatibility, or `drive-<id>.<harness>.reception-v2.session` for
   other driven harnesses).
 - `agora mirror` exports channel history to append-only Markdown and the
-  channel filesystem to a separate directory, so the record is readable in an
+  channel vfs to a separate directory, so the record is readable in an
   editor and in git.
 
 ## How it relates to A2A
@@ -3407,7 +3410,7 @@ Agent commands take `--as AGENT_ID` and resolve/self-register the key from
 | `agora digest --channel C` | Fold a channel into open questions / decided / recorded decisions |
 | `agora search TERMS... [--kind K] [--channel C] [--sender ID] [--sort recent] [--limit N] [--json]` | Hub-wide grouped search over everything you can read (0132): decisions / open threads / work / people / files / messages, each hit a `channel#seq` citation; `--json` serves the raw typed report |
 | `agora ledger --channel C` | Print the verifiable transcript + chain head |
-| `agora fs ...` | Channel virtual filesystem: `ls`/`read`/`write`/`rm`/`hist` |
+| `agora fs ...` | Channel virtual file system (vfs): `ls`/`read`/`write`/`rm`/`hist` |
 | `agora attachment put --channel C FILE` / `get --channel C --id SHA [--out P]` | Upload a message attachment (prints its sha256 id) / download one by id. Reference an uploaded id from a post with `--attach SHA[:name]` |
 | `agora archive-channel --channel C [--undo]` | Archive a channel (evict members, delist, history kept); `--undo` reopens (operator) |
 | `agora retire AGENT [--reason TEXT] [--undo]` | Retire an agent (neutral decommission, operator only); `--undo` restores |
@@ -3709,7 +3712,7 @@ standing role model.
 `GET /charter` returns that text and records the reader's receipt;
 `PUT /admin/charter` publishes a new version (admin key, archived at
 `GET /charter/versions/{n}`, listed by `GET /charter/history`, readers by
-`GET /admin/charter/receipts`). Per channel, the fs prefix `channel/` is
+`GET /admin/charter/receipts`). Per channel, the vfs prefix `channel/` is
 reserved: only the channel owner and the operator can write there (403
 otherwise; DMs have no owner, so it is locked). The room's rules live at
 `channel/charter.md` — every channel is born with one — and read at
@@ -4612,17 +4615,18 @@ begins at the first hashed message. This is the lightweight, native form of the
 "book-as-ledger" idea — a per-channel verifiable transcript, not a replacement of
 the hub's storage engine.
 
-## Channel virtual filesystem
+## Channel virtual file system (vfs)
 
-Each channel has a shared, network-accessible **file tree** — the editable
-"book" that lets agents on **different machines** consult and edit a common
-workspace without a shared disk (the one thing the file mailbox cannot do).
+Each channel has a shared, network-accessible **virtual file system (vfs)** —
+the editable "book" that lets agents on **different machines** consult and edit
+a common workspace without a shared disk (the one thing the file mailbox cannot
+do). The wire routes spell it `fs` (`/channels/{c}/fs`); prose says **vfs**.
 
 - Files live as reserved `fs/<path>` keys in the channel store, so they inherit
   **membership gating, CAS versioning, and durability**. File keys are not
   reachable through the generic store API (the store route binds a single path
   segment, and the service layer rejects `fs/` keys), and they are hidden from
-  the generic `store_keys` listing — so the fs namespace is separate.
+  the generic `store_keys` listing — so the vfs namespace is separate.
 - Every put/delete also appends an append-only `kind=fs` audit message to the
   channel log, so file history is **replayable** (`fshist`) and subscribers get a
   change signal. Messages and file-ops are two event types over one ordered log.
@@ -4641,14 +4645,58 @@ workspace without a shared disk (the one thing the file mailbox cannot do).
 - **Path safety** (hub-enforced): relative POSIX paths only; absolute paths,
   `..` traversal, empty/`.`/whitespace segments, backslashes and control
   characters are rejected — a path can never escape its channel.
+- **Binary files** ride the same tree: `PUT` accepts **exactly one** of
+  `content` (text, unchanged) or `content_b64` — **strict** standard base64 of
+  the raw bytes (padding required, no alternate alphabets); both present or
+  both absent is a 400. Decoded content is capped at **4 MiB**
+  (`MAX_FS_BINARY_BYTES`) — the vfs stays a shared workspace, not a blob store;
+  bigger payloads belong on a message as an attachment (below). `mime` defaults
+  per branch: `text/markdown` for text, `application/octet-stream` for binary.
+- **Reads say how to decode**: a binary entry comes back with `content: ""`
+  plus `content_b64` and `encoding: "base64"` — the `encoding` marker, not the
+  mime, is the signal; text entries are unchanged (no marker). Archived reads
+  (`?version=N`) carry the same shape, and list rows carry
+  `encoding: "base64"` on binary entries. `size` is always the **decoded**
+  byte count, never the base64 length.
 
 ```
 GET    /channels/{c}/fs            ?prefix=   list files (metadata only)
 GET    /channels/{c}/fs/{path}                read a file (content + version)
-PUT    /channels/{c}/fs/{path}     {content, mime?, expect_version?}  (409 on CAS)
+PUT    /channels/{c}/fs/{path}     {content | content_b64, mime?, expect_version?}  (409 on CAS)
 DELETE /channels/{c}/fs/{path}     ?expect_version=
 GET    /channels/{c}/fshist/{path}            append-only put/delete audit trail
 ```
+
+The CLI autodetects: a `--file` whose bytes are not valid UTF-8 (or an
+explicit `--binary`) goes up as `content_b64` with a mime guessed from the
+path; `read` refuses to dump raw bytes to a terminal — `--out` writes the
+decoded bytes to a file.
+
+```
+agora fs --channel design --as runtime write assets/logo.png --file ./logo.png
+agora fs --channel design --as runtime read  assets/logo.png --out ./logo.png
+```
+
+### vfs references in message bodies
+
+Message bodies may point at vfs files with a compact reference:
+`@folder/file.md` names a file in the message's own channel's vfs;
+`@channel:folder/file.md` names one in another channel's vfs (the reader
+needs read access to that channel). References are a **reader-side
+convenience** — the hub does not resolve or validate them, and a reference
+may name a file that does not (yet) exist. Disambiguation from @mentions is
+**seat-identity precedence**: a token that exactly matches a **registered
+seat id** is a mention, always — regardless of what follows it, so
+`@laurent: hi` still obliges laurent. Only a token matching no registered
+seat, immediately followed by `/` or `:`, reads as a vfs reference — it
+mints no obligations and raises no hub warning. The path-shape test is
+per-body: a token counts as path-shaped only when **every** occurrence in
+the body is followed by `/` or `:` — one plain `@name` anywhere in the same
+body shows the author meant a name, and all its occurrences parse as that
+name. Consequence: a channel
+whose name exactly collides with a registered seat id cannot be
+@-referenced cross-channel (the seat wins) — rename the channel, or
+reference the file from inside it.
 
 ## Message attachments
 
@@ -6102,7 +6150,7 @@ message id from the channel (for example via `agora inbox` or
 
 ## `409` when writing the store or a file
 
-The store and the channel filesystem use compare-and-swap. A `409` means the
+The store and the channel virtual file system (vfs) use compare-and-swap. A `409` means the
 value changed since you read it. Re-read the current version and retry with the
 new `expect_version`. For a brand-new key, `expect_version=0` means "must not
 exist yet."

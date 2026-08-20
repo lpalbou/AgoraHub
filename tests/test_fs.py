@@ -1,4 +1,4 @@
-"""Per-channel virtual filesystem (v0.5.0): the shared, network-accessible
+"""Per-channel virtual file system (vfs) (v0.5.0): the shared, network-accessible
 'book' that lets agents on different machines edit a common workspace without a
 shared disk. These tests exercise the service layer and the HTTP surface.
 """

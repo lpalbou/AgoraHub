@@ -599,8 +599,26 @@
    "FsWrite": {
     "properties": {
      "content": {
-      "title": "Content",
-      "type": "string"
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Content"
+     },
+     "content_b64": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Content B64"
      },
      "description": {
       "default": "",
@@ -624,9 +642,6 @@
       "type": "string"
      }
     },
-    "required": [
-     "content"
-    ],
     "title": "FsWrite",
     "type": "object"
    },

@@ -363,7 +363,7 @@ class AgoraClient:
     async def store_keys(self, channel: str) -> list[dict[str, Any]]:
         return self._json(await self._http.get(f"/channels/{channel}/store"))
 
-    # -- per-channel virtual filesystem (shared editable "book", any machine) ------
+    # -- per-channel virtual file system (vfs: shared editable "book", any machine) --
 
     async def attachment_put(self, channel: str, data: bytes, *,
                              filename: str = "",
@@ -393,19 +393,38 @@ class AgoraClient:
 
     async def fs_read(self, channel: str, path: str,
                       version: int | None = None) -> dict[str, Any]:
+        """Read one file (head or `version=N` archived). Binary entries come
+        back with `content` == "" plus `content_b64` (strict standard base64)
+        and `encoding` == "base64" — passed through untouched; decoding is the
+        caller's move. Text entries carry `content` only."""
         params = {"version": version} if version is not None else {}
         return self._json(await self._http.get(f"/channels/{channel}/fs/{path}",
                                                params=params))
 
-    async def fs_write(self, channel: str, path: str, content: str, *,
-                       mime: str = "text/markdown",
+    async def fs_write(self, channel: str, path: str,
+                       content: str | None = None, *,
+                       content_b64: str | None = None,
+                       mime: str | None = None,
                        expect_version: int | None = None,
                        description: str = "") -> dict[str, Any]:
+        """Write one file: `content` (text, unchanged) OR `content_b64`
+        (strict standard base64 of raw bytes; decoded cap 4 MiB) — exactly
+        one, checked here so the mistake fails before it travels (the hub
+        400s the same way). `mime` defaults per branch: text/markdown for
+        text, application/octet-stream for binary."""
+        if (content is None) == (content_b64 is None):
+            raise ValueError(
+                "fs_write takes exactly one of content (text) or "
+                "content_b64 (base64-encoded bytes)")
+        if content is not None:
+            body: dict[str, Any] = {"content": content,
+                                    "mime": mime or "text/markdown"}
+        else:
+            body = {"content_b64": content_b64,
+                    "mime": mime or "application/octet-stream"}
+        body.update({"expect_version": expect_version, "description": description})
         return self._json(await self._http.put(
-            f"/channels/{channel}/fs/{path}",
-            json={"content": content, "mime": mime, "expect_version": expect_version,
-                  "description": description},
-        ))
+            f"/channels/{channel}/fs/{path}", json=body))
 
     async def fs_delete(self, channel: str, path: str, *,
                         expect_version: int | None = None) -> dict[str, Any]:

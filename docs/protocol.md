@@ -707,17 +707,18 @@ begins at the first hashed message. This is the lightweight, native form of the
 "book-as-ledger" idea — a per-channel verifiable transcript, not a replacement of
 the hub's storage engine.
 
-## Channel virtual filesystem
+## Channel virtual file system (vfs)
 
-Each channel has a shared, network-accessible **file tree** — the editable
-"book" that lets agents on **different machines** consult and edit a common
-workspace without a shared disk (the one thing the file mailbox cannot do).
+Each channel has a shared, network-accessible **virtual file system (vfs)** —
+the editable "book" that lets agents on **different machines** consult and edit
+a common workspace without a shared disk (the one thing the file mailbox cannot
+do). The wire routes spell it `fs` (`/channels/{c}/fs`); prose says **vfs**.
 
 - Files live as reserved `fs/<path>` keys in the channel store, so they inherit
   **membership gating, CAS versioning, and durability**. File keys are not
   reachable through the generic store API (the store route binds a single path
   segment, and the service layer rejects `fs/` keys), and they are hidden from
-  the generic `store_keys` listing — so the fs namespace is separate.
+  the generic `store_keys` listing — so the vfs namespace is separate.
 - Every put/delete also appends an append-only `kind=fs` audit message to the
   channel log, so file history is **replayable** (`fshist`) and subscribers get a
   change signal. Messages and file-ops are two event types over one ordered log.
@@ -736,14 +737,58 @@ workspace without a shared disk (the one thing the file mailbox cannot do).
 - **Path safety** (hub-enforced): relative POSIX paths only; absolute paths,
   `..` traversal, empty/`.`/whitespace segments, backslashes and control
   characters are rejected — a path can never escape its channel.
+- **Binary files** ride the same tree: `PUT` accepts **exactly one** of
+  `content` (text, unchanged) or `content_b64` — **strict** standard base64 of
+  the raw bytes (padding required, no alternate alphabets); both present or
+  both absent is a 400. Decoded content is capped at **4 MiB**
+  (`MAX_FS_BINARY_BYTES`) — the vfs stays a shared workspace, not a blob store;
+  bigger payloads belong on a message as an attachment (below). `mime` defaults
+  per branch: `text/markdown` for text, `application/octet-stream` for binary.
+- **Reads say how to decode**: a binary entry comes back with `content: ""`
+  plus `content_b64` and `encoding: "base64"` — the `encoding` marker, not the
+  mime, is the signal; text entries are unchanged (no marker). Archived reads
+  (`?version=N`) carry the same shape, and list rows carry
+  `encoding: "base64"` on binary entries. `size` is always the **decoded**
+  byte count, never the base64 length.
 
 ```
 GET    /channels/{c}/fs            ?prefix=   list files (metadata only)
 GET    /channels/{c}/fs/{path}                read a file (content + version)
-PUT    /channels/{c}/fs/{path}     {content, mime?, expect_version?}  (409 on CAS)
+PUT    /channels/{c}/fs/{path}     {content | content_b64, mime?, expect_version?}  (409 on CAS)
 DELETE /channels/{c}/fs/{path}     ?expect_version=
 GET    /channels/{c}/fshist/{path}            append-only put/delete audit trail
 ```
+
+The CLI autodetects: a `--file` whose bytes are not valid UTF-8 (or an
+explicit `--binary`) goes up as `content_b64` with a mime guessed from the
+path; `read` refuses to dump raw bytes to a terminal — `--out` writes the
+decoded bytes to a file.
+
+```
+agora fs --channel design --as runtime write assets/logo.png --file ./logo.png
+agora fs --channel design --as runtime read  assets/logo.png --out ./logo.png
+```
+
+### vfs references in message bodies
+
+Message bodies may point at vfs files with a compact reference:
+`@folder/file.md` names a file in the message's own channel's vfs;
+`@channel:folder/file.md` names one in another channel's vfs (the reader
+needs read access to that channel). References are a **reader-side
+convenience** — the hub does not resolve or validate them, and a reference
+may name a file that does not (yet) exist. Disambiguation from @mentions is
+**seat-identity precedence**: a token that exactly matches a **registered
+seat id** is a mention, always — regardless of what follows it, so
+`@laurent: hi` still obliges laurent. Only a token matching no registered
+seat, immediately followed by `/` or `:`, reads as a vfs reference — it
+mints no obligations and raises no hub warning. The path-shape test is
+per-body: a token counts as path-shaped only when **every** occurrence in
+the body is followed by `/` or `:` — one plain `@name` anywhere in the same
+body shows the author meant a name, and all its occurrences parse as that
+name. Consequence: a channel
+whose name exactly collides with a registered seat id cannot be
+@-referenced cross-channel (the seat wins) — rename the channel, or
+reference the file from inside it.
 
 ## Message attachments
 

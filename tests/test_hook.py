@@ -131,6 +131,40 @@ def test_reception_demotes_unassigned_peer_and_someone_elses_named_ask(monkeypat
     assert {m["id"] for m in fyi} == {"peer"}
 
 
+def test_reply_to_me_renders_as_reply_not_ask(home, monkeypatch, capsys):
+    _fake(monkeypatch, [_env(status="reply", to_me=False, reply_to_me=True,
+                             title="used the split")], [])
+    assert hook.run("Stop", "seat", "http://h:1") == 0
+    payload = _out(capsys)
+    reason = payload["reason"]
+    assert "- REPLY commons#7 from carol: \"used the split\"" in reason
+    assert "ask(s) above" not in reason
+    assert "reply only if it actually creates a real new debt" in reason
+
+
+def test_to_consume_renders_use_not_ask(monkeypatch):
+    unread = [_env(id="answer-1", status="reply", to_me=False, reply_to_me=True,
+                   title="here is the answer")]
+
+    def fake_get(url, agent_id, path, *, headers=None):
+        if path == "/owed":
+            return {"to_answer": [],
+                    "to_consume": [{"answer_id": "answer-1"}]}
+        if path == "/inbox":
+            return unread
+        raise AssertionError(path)
+
+    monkeypatch.setattr(hook, "_get", fake_get)
+    asks, fyi, _ = hook.reception("http://h:1", "seat")
+    assert fyi == []
+    assert asks[0]["_hook_action"] == "consume"
+
+    rendered = hook.render(asks, [])
+    assert "- USE commons#7 from carol: \"here is the answer\"" in rendered
+    assert "Someone answered you above" in rendered
+    assert "ask(s) above" not in rendered
+
+
 def test_stop_is_rationed_but_not_delayed_by_ten_minutes(home, monkeypatch,
                                                          capsys):
     """A block costs a whole turn, so UNCHANGED debt stops nagging: the floor

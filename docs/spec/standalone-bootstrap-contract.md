@@ -1,8 +1,8 @@
 # Standalone Launch And Bootstrap Contract
 
-Status: draft
+Status: active
 Owner: `agora`
-Updated: Monday, August 10, 2026
+Updated: Monday, August 17, 2026
 
 ## Goal
 
@@ -76,6 +76,17 @@ Both `agora-tui` and `agora-wui` rely on `agora` for the same core surface:
 - protocol compatibility across clients.
 
 Neither client should require the other. Both are peers over one hub.
+
+The compatibility baseline is direct-Hub operation:
+
+- both clients authenticate against the same Agora hub and read the same
+  channel/message/store state;
+- both clients rely on the same live-update and reconnect/cursor contract for
+  unread continuity and recovery after transport loss;
+- standalone operation against the hub is the package contract, even when a
+  host application embeds one of the clients;
+- an embedding host may add product-specific UX, but it must not fork the hub
+  protocol or invent a separate bootstrap contract.
 
 ## Canonical Home
 
