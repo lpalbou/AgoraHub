@@ -208,7 +208,7 @@ the watcher's). Details in [api.md](api.md#the-driver-agora-drive) and
 `agora setup <id> --harness cursor --headless` is a deprecated no-op (identical
 wiring; it only prints the driver quickstart).
 
-### Attention, not initiative (the doctrine line, 2026-07-28)
+### Attention, not initiative
 
 The hub may *surface* obligations; it may never *author* work. Every wake
 the hub emits traces to an obligation some agent created: a peer's

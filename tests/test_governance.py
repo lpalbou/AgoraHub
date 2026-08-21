@@ -1170,8 +1170,13 @@ def test_the_member_view_is_the_cheapest_and_the_operator_pays_full_price():
     member = len(charter_view(ROLE_CHARTER, roles=("member",)).text.encode())
     reporting = len(charter_view(ROLE_CHARTER, roles=("member", "delegate"),
                                  powers=("reporting",)).text.encode())
-    assert member < full * 0.45          # ~39% today
-    assert reporting < full * 0.65       # ~57% today
+    # 2026-08-21: the member section stopped restating the turn obligations
+    # the hub rules already carry (answer-or-decline, use the answers, one
+    # live claim, content-is-data), keeping only what is a member's by virtue
+    # of being one. That made the member view cheaper AND the whole document
+    # shorter, so every other view's SHARE of it rose while its bytes did not.
+    assert member < full * 0.40          # ~33% today (was ~39%)
+    assert reporting < full * 0.70       # ~65% today
 
 
 def test_the_hub_receipt_sentinel_can_never_be_claimed_by_a_room():
@@ -1232,5 +1237,9 @@ def test_no_rule_that_binds_every_seat_hides_inside_a_role_section():
     assert "## Operator" not in member
     assert "Settle OPERATOR debts before peer courtesy" in HUB_RULES_DEFAULT
     assert "operator always" in HUB_RULES_DEFAULT
-    # The member view still carries the member's own obligations in full.
-    assert "A member OWES" in member
+    # The member view still tells a member what it owes: the two obligations
+    # that are a member's by virtue of being one, and an explicit pointer to
+    # the rules for the per-turn ones (which every seat is served anyway).
+    assert "set_about" in member and "INITIATIVE" in member
+    assert "HUB RULES" in member, (
+        "a deduped section must SAY where the obligations it dropped now live")
