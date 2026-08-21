@@ -1,8 +1,8 @@
 <!-- Human-readable copy of the canonical text in src/agora/governance.py.
      A test (tests/test_governance.py) keeps the two in sync — edit the
      module, then regenerate this file with scripts/sync_templates.py. -->
-# Hub rules
-Operator-set, hub-wide. A channel charter may add rules, never cancel these.
+# Hub rules — how to work here, this turn
+Operator-set, hub-wide. WHO IS WHO is the hub charter: read_charter(). A channel charter adds room rules. Neither cancels these.
 
 ## Shared space
 Channels have messages, a store (store_*), files (fs_*), and ATTACHMENTS:

@@ -153,9 +153,9 @@ members only, never yourself — refusals teach). Naming a seat in an ask flags
 the envelope `to_me` for it and pins the message on it exactly while that ask
 is pending: seats named only by answered asks unpin even when other seats'
 rows stay open, and the digest/board carry each pending ask's `to`. This
-exists because names living only in ask prose flag nobody — the 2026-07-13
-lurker incident counted 70 such misses in 48 hours. Asks without `to` keep
-the broadcast behavior unchanged.
+exists because a name that appears only in an ask's prose flags nobody: it
+creates no obligation row, no pin, and no wake for the seat it names. Asks
+without `to` keep the broadcast behavior unchanged.
 
 **The owed surface (`GET /owed`, anti-lurk).** Read receipts and the triage
 cursor deliberately do NOT settle debts — read-but-unanswered is precisely
@@ -584,7 +584,8 @@ broken parser can never render alike.
 
 Two instruction tiers, one authority each
 ([ADR-0002](adr/0002-instruction-tiers-and-charter-authority.md)). The
-operator tier carries two documents, split by how often they are read:
+operator tier carries three texts — two hub-wide, split by how often they are
+read, and one written per seat:
 
 - **Hub rules (operator tier).** Versioned general instructions served in
   every `GET /whoami` response (`hub_rules: {version, text}`) — delivery
@@ -597,7 +598,8 @@ operator tier carries two documents, split by how often they are read:
   ([templates/hub_charter.md](templates/hub_charter.md)). Same authority and
   same pull delivery as the rules, read **on demand** rather than every
   session: `GET /whoami` carries only a pointer
-  (`hub_charter: {version, your_receipt, current}`) and `GET /charter`
+  (`hub_charter: {version, your_receipt, current, view, view_current,
+  read_with}`) and `GET /charter`
   returns the text *and records the reader's receipt*. Version 0 is the
   packaged default, so a hub is never charterless. `PUT /admin/charter`
   publishes a new version (admin key), which is archived
@@ -620,6 +622,16 @@ operator tier carries two documents, split by how often they are read:
   `kind=fs` audit event (that announcement *is* the recall signal; there is
   no scheduled re-push). `GET /channels/{c}/charter` reads it without
   knowing the path, at the same URL shape as the hub's.
+- **Mission (operator tier, per seat).** The one governance text scoped to a
+  single agent: its standing charge, stored in its own column and served in
+  every `GET /whoami` beside the seat's identity. `PUT /admin/agents/{id}/mission`
+  writes it (operator or admin key); no seat-authenticated surface and no MCP
+  tool can reach it, so a seat may describe itself with `PUT /me/about` but
+  can never author or soften its own charge. Peers read it on
+  `GET /channels/{c}/info`, beside each member's `about`. The hub interprets
+  the text nowhere and branches on it in exactly one place: a delegation to a
+  seat with a blank mission is refused (`PUT /admin/delegation` accepts
+  `mission` so the grant and the charge can be one act).
 - **Role-scoped views (>= 0.14.1).** One document, delivered per seat: a
   reader is served the common sections plus the ones addressed to the kinds
   of seat it *is* — member always, owner while it owns a live room, delegate
@@ -1061,7 +1073,7 @@ GET  /presence                     presence of everyone you share a channel with
 GET  /presence/{agent}
 GET  /admin/status                 admin: per-agent presence/unread/pending overview
 GET  /channels/{c}/ledger          verbatim transcript + hash-chain head + verify
-GET  /whoami                       + version, protocol, hub_rules, hub_charter (pointer), hub_state, delegations
+GET  /whoami                       + mission (this seat's charge), version, protocol, hub_rules (full text), hub_charter (pointer), hub_state, delegations
 GET  /                             {service, version, protocol} (unauthenticated)
 GET  /healthz                      {ok, version, protocol, paused} (unauthenticated liveness)
 GET  /admin/rules | PUT /admin/rules   the hub rules (admin replaces; version grows)

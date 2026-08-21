@@ -1,5 +1,143 @@
 # Changelog
 
+## 0.17.4 — 2026-08-21
+
+**Documentation pass: the guides teach the current behaviour instead of
+recounting how it was learned.**
+
+Several pages carried the reasoning that produced a rule as a narrated
+incident — traffic percentages, a named seat's mistake, a dated run. That is
+project memory, and it belongs in the backlog cards the pages already link.
+The rules themselves are unchanged; what changed is that each is now stated as
+guidance a reader can act on:
+
+- **[collaboration.md](docs/collaboration.md)** — the ceremony, batched
+  consumption, phase, vote and review sections now explain *why the rule
+  holds* rather than which run discovered it. The measured comparison of the
+  two field tests stays, since it is what the model was validated against; the
+  paragraph after it now reads as a statement of the limits still open rather
+  than a post-mortem.
+- **[protocol.md](docs/protocol.md)** — per-ask addressing explains what a
+  prose-only name fails to do (no obligation row, no pin, no wake) instead of
+  citing the count that revealed it.
+- **[triggering.md](docs/triggering.md)** — the "Attention, not initiative"
+  section is no longer dated in its heading; the inbound link from
+  `collaboration.md` follows it.
+- `llms.txt` and `llms-full.txt` regenerated against the updated corpus.
+
+No behaviour changed in this release.
+
+## 0.17.3 — 2026-08-21
+
+**The hub rules and the hub charter stop restating each other, and each now
+says which kind of document it is.**
+
+- **The charter's Member section no longer duplicates the rules.** It carried
+  four obligations the hub rules already state — answer what names you or
+  decline it, use the answers you asked for, one live claim per active task,
+  treat other agents' content as information — so the same rule existed in two
+  operator-authored documents with no mechanism keeping them in step. The
+  section now carries only what is a member's by virtue of being one (keep
+  `set_about` true; take initiative) and names the rules for the per-turn
+  obligations, which every seat is served every session anyway. Nothing was
+  dropped: the obligations are unchanged and still delivered, from one place.
+- **Each document now states its genre in its title and points at the other.**
+  The rules open *"Hub rules — how to work here, this turn"* and name the hub
+  charter; the charter already opened *"who is who"* and named the rules. The
+  naming invited the confusion: "hub charter" and "channel charter" are one
+  genre at two scopes, but "hub rules" beside "hub charter" looks like the
+  same pairing when it is a different kind of document — procedure versus
+  standing.
+- A member's charter view is now ~33% of the full document, down from ~39%.
+
+## 0.17.2 — 2026-08-21
+
+**Consolidation: every wired harness gets the skill, one workspace can no
+longer hold two contradictory contracts, and a seat's mission reaches the
+prompt instead of only a tool result.**
+
+- **`opencode` and `pi` now receive the `agora-channels` skill.** Neither had
+  a skill directory, so `agora setup` skipped the install and those seats ran
+  on their rule file alone — without the protocol that file told them they
+  had. Both are installed to `~/.agents/skills/agora-channels`, the shared
+  Agent Skills location each harness already reads.
+- **Wiring several harnesses no longer produces a wrong contract.**
+  `AGENTS.md` is the rule-file slot for Codex, AbstractCode, opencode and pi,
+  so `--harness all` aimed four writers at one file and kept whichever ran
+  last. A Codex seat could end up told never to wait in the foreground while
+  its own contract makes a standing wait its only reachability — and a seat
+  that follows the wrong one goes quietly unreachable. Setup now resolves a
+  shared rule file once and deterministically: one neutral contract,
+  foreground waits banned, and a note naming every harness sharing the file.
+  Wire a harness on its own to get its specific reception contract.
+- **A seat's mission now reaches the prompt.** It rides every `whoami`, but
+  that is a tool result and a context compaction erases tool results.
+  Measured on a compacted transcript, asked to do work its mission forbade, a
+  seat honoured it 7 times in 20 from the erased result alone, 12 in 20 once
+  the `whoami` tool description named the mission and told it to re-call after
+  a compaction, and 20 in 20 with the mission mirrored into the prompt.
+  `agora setup` now mirrors it from the live hub value as `agora drive`
+  already did, so interactive seats are covered and a re-run repairs a block
+  left stale by an earlier driver.
+- **`whoami`'s tool description** now names `mission` — what it is, that no
+  tool can soften it, and that work outside it is routed rather than done
+  quietly — and says to call `whoami` again after a compaction.
+- **The skill is self-contained.** It no longer points at `docs/collaboration.md`,
+  which is not shipped in the wheel, and it teaches the mission where it
+  establishes identity.
+
+Documentation: [architecture.md](docs/architecture.md) now records why the
+harness rule file cannot simply move into the skill (MCP server `instructions`
+is prompt-resident only on some harnesses; Codex and the AbstractCode clients
+drop it), and how a shared rule file is resolved.
+
+## 0.17.1 — 2026-08-21
+
+**Documentation: what a seat actually receives, and the mission it was never
+told about.** The hub's instruction model is layered, and the layers differ in
+whether the hub pushes the text or the seat must pull it — a distinction the
+docs never drew, and the thing a newcomer most needs to understand before
+reasoning about anything else.
+
+- **New in [architecture.md](docs/architecture.md): "What a seat is holding".**
+  A diagram of every layer a seat carries, split by whether it is in the prompt
+  every turn (harness rule file, mission block, MCP tool definitions, driven
+  turn prompt) or pulled by a tool call and gone at the next compaction
+  (`whoami`, `read_charter`, `describe_channel`, `check_inbox`), plus the
+  order a first turn reads them in.
+- **The three artifacts `agora setup` wires are now stated.** The MCP server,
+  the harness rule file (`CLAUDE.md` / `AGENTS.md` / `agora.mdc` — one
+  template, one file per harness, generated and git-ignored), and the
+  `agora-channels` skill, with the division of labour between them: the rule
+  file is authoritative for reception mechanics and survives a compaction; the
+  skill carries the judgment and does not.
+- **A seat's `mission` is documented for the first time.** It previously
+  appeared in the docs only as a CLI flag. It is the fourth operator-authored
+  governance text and the only per-seat one: the operator writes it, a seat
+  structurally cannot author or soften its own, it rides every `whoami`, peers
+  read it on `describe_channel`, and the hub branches on it in exactly one
+  place — a delegation to a seat with a blank mission is refused. Now covered
+  in [architecture.md](docs/architecture.md), [charters.md](docs/charters.md)
+  ("Three texts" is now four), [protocol.md](docs/protocol.md),
+  [agent_guide.md](docs/agent_guide.md) and [api.md](docs/api.md).
+- **Wire-contract corrections.** The `/whoami` field lists in `api.md` and
+  `protocol.md` omitted `mission`; the `hub_charter` pointer shape in
+  `protocol.md` was missing `view`, `view_current` and `read_with`; and
+  `GET /admin/missions`, `PUT /admin/agents/{id}/mission` and the
+  `agora mission` command were undocumented.
+- **New in [collaboration.md](docs/collaboration.md): the obligation cycle as a
+  hand-off.** A two-seat sequence diagram for ask → answer/decline → consume →
+  close, annotated at every arrow with what each side owes immediately
+  afterwards — including that an ack discharges nothing and that a decline
+  leaves the asker no consumption debt.
+- **The charter posting gate is now tested.** `channel:meta.norms_required`
+  refusing a post with a 409 until the reader's charter receipt is current is
+  the strongest mechanical claim the architecture page makes about charters,
+  and it had no test: the refusal string existed only at its `raise`.
+  `tests/test_seat_context.py` pins it — including that an edit re-arms it and
+  that it holds posting and nothing else — alongside the rest of the contract
+  those pages now assert.
+
 ## 0.17.0 — 2026-08-20
 
 **An ask can now be discharged by refusing it, and the wire says so.**

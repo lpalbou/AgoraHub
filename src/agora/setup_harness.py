@@ -400,6 +400,115 @@ _RULE_FILE = {
 }
 
 
+def shared_rule_file_harnesses(harnesses: "list[str] | tuple[str, ...]") -> dict[str, list[str]]:
+    """Rule-file path -> the selected harnesses that all write it.
+
+    `AGENTS.md` is the rule-file slot for codex, abstractcode, abstractcode-tui,
+    opencode and pi, so any selection naming more than one of them has several
+    writers aimed at one file (see `_RULE_FILE`)."""
+    out: dict[str, list[str]] = {}
+    for h in harnesses:
+        rel = _RULE_FILE.get(h)
+        if rel is not None:
+            out.setdefault(str(rel), []).append(h)
+    return {path: hs for path, hs in out.items() if len(hs) > 1}
+
+
+def reconcile_shared_rule_file(workspace: Path, agent_id: str,
+                               harnesses: "list[str] | tuple[str, ...]") -> list[str]:
+    """LAST WRITER WINS IS NOT A CONTRACT (2026-08-21).
+
+    `agora setup <id> --harness all` runs the per-harness writers in selection
+    order, and four of them (`codex`, `abstractcode`, `opencode`, `pi`) target
+    the SAME `AGENTS.md`. `upsert_marked_section` replaces the managed block
+    wholesale, so the file ends up holding whichever harness happened to run
+    last — measured: `pi`. A Codex seat in that workspace then reads pi's
+    "no idle wake, END your turn" while its own contract is a standing
+    `wait_for_messages(45)` loop as its ONLY reachability. The two are exact
+    opposites and the failure is silent: the seat ends its turn and goes deaf.
+
+    One file cannot hold two contradictory wake contracts, and a model cannot
+    be asked to pick — models identify with their vendor, not their harness,
+    so a Claude model inside opencode would choose the Claude clause. So the
+    file is rewritten ONCE, deterministically, with the SAFE intersection: the
+    foreground-wait BAN (never "hold the loop", which is the clause that can
+    make a seat deaf when it is wrong), and a wake note naming every harness
+    sharing the file so the reader knows what this workspace actually is.
+
+    A seat that needs the dedicated Codex loop must be wired alone
+    (`agora setup <id> --harness codex`) — the shape that gets it right by
+    construction. Returns one advisory line per reconciled file.
+    """
+    notes: list[str] = []
+    for rel, shared in sorted(shared_rule_file_harnesses(harnesses).items()):
+        path = Path(workspace) / rel
+        if not path.exists():
+            continue
+        listed = ", ".join(sorted(shared))   # order-independent by construction
+        wake = (f"This workspace is wired for several harnesses that share this "
+                f"file ({listed}). None of them is assumed to have a native idle "
+                "wake here: call check_inbox at the start of each turn, and use "
+                "`agora drive` for unattended continuation. To get a "
+                "harness-specific reception contract, wire that harness alone.")
+        upsert_marked_section(path, rule_text(agent_id, wake=wake, arming="",
+                                              wait_policy=_WAIT_BAN_MANUAL))
+        notes.append(f"{rel}: shared by {listed} — wrote one neutral contract "
+                     "(foreground waits banned). Wire a harness alone for its "
+                     "own reception contract.")
+    return notes
+
+
+def mirror_mission_from_hub(workspace: Path, harnesses: "list[str] | tuple[str, ...]",
+                            url: str, agent_id: str) -> list[str]:
+    """Mirror the seat's LIVE mission into every wired rule file, at setup.
+
+    THE MISSION MUST REACH THE PROMPT, NOT ONLY A TOOL RESULT (2026-08-21).
+    `whoami` serves the mission, so a seat plainly "has" it — and that framing
+    hid the defect. Everything `whoami` returns is a tool RESULT, and a
+    context compaction erases tool results while leaving the system prompt
+    intact. Measured with gpt-5.4-mini at N=20, on a compacted transcript,
+    asked to do work its mission forbids:
+
+        mission only in the erased whoami result ....  7/20 honoured it
+        + whoami docstring naming it and the rule .... 12/20
+        mission mirrored into the system prompt ..... 20/20
+
+    Until now the mirror ran from `agora drive` alone, so an INTERACTIVE seat
+    never got one — and a workspace where the driver ran once kept a FROZEN
+    copy under a heading that calls it unsoftenable, which is worse than none.
+    Setup now writes it too, from the live hub value, so both lanes carry the
+    current text and a re-run repairs a stale block.
+
+    Best-effort by design: a hub that cannot be reached must never fail a
+    setup. Returns one advisory line per outcome."""
+    from . import config as _config
+
+    api_key = _config.get_cached_key(url, agent_id)
+    if not api_key:
+        return []
+    try:
+        import httpx
+        me = httpx.get(f"{url}/whoami", timeout=5.0,
+                       headers={"Authorization": f"Bearer {api_key}"}).json()
+    except Exception:
+        return []
+    mission = str(me.get("mission") or "").strip()
+    notes: list[str] = []
+    written: set[str] = set()
+    for harness in harnesses:
+        path = write_mission_block(workspace, harness, mission)
+        if path is not None and str(path) not in written:
+            written.add(str(path))
+            notes.append(f"mission mirrored into {path.name} ({len(mission)} chars)"
+                         if mission else
+                         f"no mission set — cleared the stale block in {path.name}")
+    if not mission:
+        notes.append(f"this seat has no standing mission, so every session "
+                     f"invents its own role. Set one: `agora mission set "
+                     f"{agent_id} '<what this seat is FOR>'`")
+    return notes
+
+
 def write_mission_block(workspace: Path, harness: str, mission: str) -> Path | None:
     """Mirror a seat's standing MISSION into its harness rule file.
 
@@ -930,6 +1039,16 @@ _SKILL_DIRS = {
     "codex": Path(".codex") / "skills" / "agora-channels",
     "abstractcode": Path(".abstract") / "skills" / "agora-channels",
     "abstractcode-tui": Path(".abstract") / "skills" / "agora-channels",
+    # `~/.agents/skills/` is the SHARED Agent Skills location both of these
+    # read, verified in the harnesses themselves rather than assumed: opencode
+    # auto-loads external skills from `~/.claude/skills/` and
+    # `~/.agents/skills/`, and pi's own skills documentation lists
+    # `~/.pi/agent/skills/` and `~/.agents/skills/`. Until 0.17.2 neither had
+    # an entry here, so `install_skill` returned its degrade line and those two
+    # seats ran on the harness rule file alone — the protocol they were told
+    # they had was never installed.
+    "opencode": Path(".agents") / "skills" / "agora-channels",
+    "pi": Path(".agents") / "skills" / "agora-channels",
 }
 
 

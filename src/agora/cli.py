@@ -824,7 +824,8 @@ def cmd_setup(args: argparse.Namespace) -> None:
     footprints into this workspace. Back-compat shapes remain:
     `agora setup <harness> <id>` and `agora setup-<harness> <id>`."""
     from .setup_harness import (install_skill, preflight_workspace_harnesses,
-                                write_workspace_seat)
+                                mirror_mission_from_hub,
+                                reconcile_shared_rule_file, write_workspace_seat)
 
     agent_id, selection, legacy = _resolve_setup_request(args)
     if getattr(args, "deprecated_alias", None):
@@ -869,6 +870,15 @@ def cmd_setup(args: argparse.Namespace) -> None:
                       bootstrap_cli=vendor_bootstrap and harness in ("claude", "codex"))
         for harness in harnesses
     ]
+    # One rule file, several selected harnesses: rewrite it once, safely,
+    # instead of leaving whichever writer ran last in charge (see
+    # setup_harness.reconcile_shared_rule_file).
+    shared_notes = reconcile_shared_rule_file(workspace, agent_id, harnesses)
+    # The mission belongs in the PROMPT, not only in a whoami result a
+    # compaction erases (measured 7/20 vs 20/20). Mirrored here from the live
+    # hub so an interactive seat gets one too, and a re-run repairs a stale
+    # block left behind by an old `agora drive`.
+    shared_notes += mirror_mission_from_hub(workspace, harnesses, url, agent_id)
     default_drive = harnesses[0] if len(harnesses) == 1 else None
     seat_record = write_workspace_seat(
         workspace, agent_id=agent_id, url=url, about=about,
@@ -893,6 +903,9 @@ def cmd_setup(args: argparse.Namespace) -> None:
             indent = "    " if line.startswith("  ") else "  "
             print(indent + line.lstrip())
         issues.extend(report.issues)
+
+    for note in shared_notes:
+        print(f"  note: {note}")
 
     channel_issues = _setup_join_channels(args, agent_id=agent_id)
     issues.extend(channel_issues)
