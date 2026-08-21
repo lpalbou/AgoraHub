@@ -206,7 +206,9 @@ class AgentRunner:
         if e.critical or e.escalated or e.to_me or e.reply_to_me:
             return True
         if e.status in (Status.open, Status.blocked):
-            return e.from_operator
+            # Addressed to someone else: not ours. Names nobody: the room's,
+            # so act on it — same rule as `listen.qualifies` and the hook.
+            return e.from_operator or not e.addressed
         return self.invoke_on_fyi
 
     async def start(self) -> None:

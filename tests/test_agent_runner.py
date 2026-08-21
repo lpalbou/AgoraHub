@@ -48,8 +48,10 @@ def test_default_should_invoke_respects_attention_model():
     r = _runner()
     d = r._default_should_invoke
     assert d(_env(status=Status.fyi)) is False        # plain broadcast: skip
-    assert d(_env(status=Status.open)) is False        # peer broadcast: visible only
-    assert d(_env(status=Status.blocked)) is False
+    assert d(_env(status=Status.open)) is True         # the room's question: act
+    assert d(_env(status=Status.blocked)) is True
+    # Addressed to another seat: theirs, not ours.
+    assert d(_env(status=Status.open, addressed=True)) is False
     assert d(_env(status=Status.open, from_operator=True)) is True
     assert d(_env(status=Status.open, addressed=True, from_operator=True)) is True
     assert d(_env(to_me=True)) is True                 # addressed: act

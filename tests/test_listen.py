@@ -130,10 +130,13 @@ def test_minimal_legacy_event_flows_through_pipeline():
     # degrade toward noise, never deafness.
     ("", "open", True),
     ("", "blocked", True),
-    # Current-hub peer broadcasts are labelled unassigned: visible, not
-    # wakeful, until someone actually owns them.
-    ("unassigned", "open", False),
-    ("unassigned", "blocked", False),
+    # A question put to the ROOM names nobody (`unassigned`) — it wakes every
+    # member, peer-authored or not. Waking is not obliging: /owed stays empty
+    # and the driver pays for it out of the BROADCAST fuse, not the debt lane.
+    # This rule has flipped four times (f82e6b4, debdf45, 58a558a, f3d465e);
+    # a fifth flip needs an ADR and a CHANGELOG line, not a quiet edit.
+    ("unassigned", "open", True),
+    ("unassigned", "blocked", True),
     ("to-me", "open", True),          # addressed (to= or a pending ask): wake
     ("addressed", "open", False),     # somebody else's ask
     ("addressed,from-operator", "open", True),   # human task: whole room evaluates
@@ -165,11 +168,15 @@ def test_native_driver_gets_explicit_broadcast_wake_classification(capsys):
 
 def test_an_unowned_wake_on_a_seat_that_owes_nothing_is_its_own_class(
         capsys, monkeypatch):
-    """0140: a wake must carry work. A room-wide batch that names nobody,
-    on a seat the hub says owes NOTHING, is mail that obliges nothing — the
-    driver must be able to tell it apart from a room-wide open that DOES
-    oblige every member, because the second one is real debt and the first
-    one buys a turn whose only possible output is ceremony."""
+    """0140 said a wake must carry work; a room-wide DEMAND carries some.
+
+    An open/blocked put to the room is a question the seat may be able to
+    answer, so it buys a turn — but a BROADCAST one, priced by
+    `--broadcast-turn-budget`, never a debt turn (/owed stays empty and the
+    hub mints no row). The noop lane survives only for a batch carrying no
+    demand at all; under `--important-only` nothing else reaches this
+    branch, so retiring `_DRIVER_UNOWNED_WAKE` with the `wake-noop` handler
+    in drive.py is a follow-up, deliberately not folded into this fix."""
     from agora.listen import (_DRIVER_BROADCAST_WAKE, _DRIVER_UNOWNED_WAKE,
                               _deliver_wake)
 
@@ -178,9 +185,15 @@ def test_an_unowned_wake_on_a_seat_that_owes_nothing_is_its_own_class(
                         lambda hub, aid: (owed["counts"], None, {}))
     broadcast = [_event(status="blocked", flags="blocked")]
     addressed = [_event(status="open", flags="to-me,addressed")]
-    assert _deliver_wake(broadcast, "bob", preview=False, once=True,
+    quiet = [_event(status="fyi", flags="")]
+    # No demand anywhere in the batch and nothing owed: still a noop.
+    assert _deliver_wake(quiet, "bob", preview=False, once=True,
                          hub="http://h:1",
                          classify_driver_wake=True) == _DRIVER_UNOWNED_WAKE
+    # A room-wide demand on a zero-owed seat: a fused broadcast turn.
+    assert _deliver_wake(broadcast, "bob", preview=False, once=True,
+                         hub="http://h:1",
+                         classify_driver_wake=True) == _DRIVER_BROADCAST_WAKE
     # Same batch, but the hub says this seat owes something: still a turn.
     owed["counts"] = (1, 0)
     assert _deliver_wake(broadcast, "bob", preview=False, once=True,

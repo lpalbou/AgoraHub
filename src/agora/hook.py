@@ -371,10 +371,14 @@ def reception(url: str, agent_id: str,
                    or env.get("reply_to_me"))
         mine = bool(env.get("to_me"))
         demand = status in ("open", "blocked")
-        # A PEER demand that is not ours is fyi unless /owed says otherwise.
-        # Operator demand stays in asks for the whole room: every seat should
-        # evaluate whether it should contribute.
-        if demand and not mine and not hot and not env.get("from_operator"):
+        # A peer demand ADDRESSED to someone else is fyi unless /owed says
+        # otherwise. A demand that names NOBODY belongs to the room, so it
+        # stays in asks — the same rule `qualifies` applies to wakes, and
+        # these two surfaces must never disagree. Operator demand stays in
+        # asks either way. Legacy envelopes carry no `addressed` field and
+        # keep the room-wide reading.
+        if (demand and not mine and not hot
+                and not env.get("from_operator") and env.get("addressed")):
             demand = False
         if to_answer or to_consume or hot or mine or demand:
             item = dict(env)

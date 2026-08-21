@@ -80,6 +80,34 @@ def test_narrowing_never_silences_escalation_or_criticals():
     assert qualifies(critical, "me", important_only=True)
 
 
+def test_an_unaddressed_open_wakes_every_member_end_to_end(tmp_path):
+    """The pure-function tests above all hand-write their flags, so every one
+    of them kept passing while the real hub stamped `unassigned` and the real
+    listener went deaf to it (0.15.0 → 2026-08-21: a human's room-wide roll
+    call in #commons woke none of four driven seats). This test posts through
+    the hub and reads the notify line the hub actually wrote."""
+    client = make_client(tmp_path)
+    poster = register(client, "asker")          # a PEER, not an operator
+    member = register(client, "seat1")
+    make_public_channel(client, poster, "room", member)
+    client.post("/channels/room/messages",
+                json={"body": "who owns the parser?", "status": "open",
+                      "title": "roll call"}, headers=poster)
+
+    lines = [l for l in _notify_lines(tmp_path, "seat1")
+             if l.get("sender") == "asker"]
+    assert lines, "the post never reached the member's notify file"
+    assert "unassigned" in str(lines[0].get("flags", "")), (
+        "the hub stopped labelling addresseeless opens — update this test "
+        "with the new flag rather than deleting the coverage")
+    assert qualifies(lines[0], "seat1", important_only=True), (
+        "an addresseeless peer open woke NO member of the room")
+    # …and it still obliges nobody: this is a WAKE change, not an obligation
+    # change. /owed staying empty is what keeps it a question, not a debt.
+    owed = client.get("/owed", headers=member).json()
+    assert not owed["to_answer"], "a room-wide open minted a debt row"
+
+
 def test_old_hubs_without_the_flag_keep_room_wide_wakes():
     # Degradation direction is status quo noise, never deafness.
     legacy = _event(flags="open")   # no `addressed` flag served

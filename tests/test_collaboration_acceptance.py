@@ -523,10 +523,10 @@ def test_routing_an_unaddressed_peer_broadcast_obliges_nobody(team: Fleet):
     require(any(e["id"] == shout["id"] for e in fleet.notify("checker")),
             "ROUTING/an-unaddressed-open-is-still-visible",
             "an addresseeless open vanished from the room entirely", fleet.arc)
-    require(not any(e["id"] == shout["id"] for e in fleet.woke("checker")),
-            "ROUTING/an-unaddressed-open-does-not-buy-a-turn",
-            "an addresseeless peer open still wakes checker — room chatter "
-            "became wakeful work again", fleet.arc)
+    require(any(e["id"] == shout["id"] for e in fleet.woke("checker")),
+            "ROUTING/an-unaddressed-open-reaches-the-room",
+            "an addresseeless peer open woke nobody — a question put to the "
+            "room that no member can hear is dead air (2026-07-14)", fleet.arc)
 
 
 # ===========================================================================
