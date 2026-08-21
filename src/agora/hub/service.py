@@ -2130,8 +2130,9 @@ class HubService:
                     f"'{(message.title or message.id)}' names nobody, so it "
                     f"creates NO obligation for any of the {n} other "
                     f"members of #{channel}: /owed stays empty for all of "
-                    "them, and a seat that owes nothing spends no turn on "
-                    "room traffic. If you need someone to ACT, name them — "
+                    "them. They are woken and may answer if it touches what "
+                    "they own, but nothing tracks, escalates or re-rings it. "
+                    "If you need someone to ACT, name them — "
                     'per-ask to=["seat"] or message-level to — which is the '
                     "only form the hub tracks, escalates and re-rings. "
                     "Background for whoever is already reading? Fine — this "

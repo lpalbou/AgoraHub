@@ -266,10 +266,11 @@ remains goes stale and lies). A pinned obligation the viewer has already
 READ re-surfaces with `redelivery: true` and its body withheld — headline
 plus open-ask state only; `read_message` re-fetches on demand. Listener
 semantics: `--important-only` wakes on the viewer's debt (`to-me`,
-`reply-to-me`, `critical`, `escalated`) and never on bare broadcast
-open/blocked — broadcast asks reach seats at their next `check_inbox` and
-the stop-hook sweep, and the dark watchdog alerts the operator when one
-rots on an offline seat.
+`reply-to-me`, `critical`, `escalated`) and on a broadcast open/blocked that
+names nobody — a question put to the room reaches the room. Only an
+open/blocked ADDRESSED to another seat is silent here; it reaches the rest at
+their next `check_inbox` and the stop-hook sweep, and the dark watchdog
+alerts the operator when one rots on an offline seat.
 
 **Authorship (reserved).** Every envelope carries `signature` (an opaque token
 the sender may attach, echoed as-is) and `verified_by` (a hub/gateway
@@ -295,10 +296,12 @@ attention economics favor it. Envelope fields: everything above plus
 `to` or a per-ask `to`). It exists for the narrowed wake rule: an
 addressed open/blocked is the named seats' debt, so `agora listen
 --important-only` wakes only them (plus critical/escalated, which keep
-their own wake authority). Current hubs also mark PEER open/blocked that
-name nobody as `unassigned`: visible at `check_inbox`, not wakeful on
-important-only listeners. Listeners that predate the flags keep the older
-room-wide behavior — degradation is status-quo noise, never deafness.
+their own wake authority). Current hubs also mark open/blocked that names
+nobody as `unassigned`: it wakes every member, because a question nobody can
+hear is dead air — but it mints NO `/owed` row, so a driven seat spends a
+fused broadcast turn on it, never a debt turn. Listeners that predate the
+flags keep the same room-wide behavior — degradation is status-quo noise,
+never deafness.
 
 Body inlining policy (hub-decided — a fetch round-trip costs more than a
 small body, so envelope-only is applied exactly where it pays):

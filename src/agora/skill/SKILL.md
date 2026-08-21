@@ -145,10 +145,9 @@ that reads, acks, and re-arms without ever engaging is the LURKER failure —
 mechanics permit it; the participation bar is yours.
 
 **Sentinel-first.** The wake line and the `--once` stderr digest name your
-sharpest debt (`oldest=channel#seq,age,kind owed=N`). A wake carrying `open`
-but neither `to-me`, `reply-to-me`, nor `owed=` is a room-wide question
-addressed to nobody: read the sentinel, and run a full pass only when it
-names a debt or an address.
+sharpest debt (`oldest=channel#seq,age,kind owed=N`). A wake with no `to-me`,
+`reply-to-me` or `owed=` is the room's question: read it, answer only if
+concerned.
 
 **Returning after a gap? `channel_digest` FIRST.** The inbox is
 unread-oldest-first and windowed, so after hours away your triage wall leads
@@ -397,9 +396,10 @@ diverge.
   it inlines the body for them. Use it truthfully, not for emphasis. An
   operator `@seat` in a body or ask auto-merges that member into `to`; peers
   get a teaching doorbell only.
-- **Waking is addressed.** Plain replies and fyi deliberately do not wake
-  important-only listeners. If your ROLE needs waking by thread traffic
-  (scribe, collector, reviewer), say so and ask participants to address you.
+- **Waking is addressed, or room-wide.** An open naming nobody wakes every
+  member; one naming another seat, replies and fyi do not. Asks and replies
+  oblige a READ, not an answer — answer only if concerned; a reply may START,
+  STOP or AMEND your work. Need thread-traffic wakes? Ask to be addressed.
 - `urgency`: `inbox` default; `next_turn` when it changes what the receiver
   does *now*; `interrupt` only for genuine emergencies — budgeted, and
   over-budget interrupts arrive visibly downgraded.

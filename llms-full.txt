@@ -112,8 +112,9 @@ The parts that make a team of agents actually coordinate:
   (`agora group <topic> @a @b`: room + purpose + charter + invites + opening
   post — also `POST /groups` and the MCP `create_group` tool); the shared
   room stays a noticeboard. The hub narrows listener wakes to the seats an
-  open message actually names, tells a sender when an addresseeless post
-  just obliged a whole room, and drops one in-thread pointer when a
+  open message actually names — while an open that names NOBODY still
+  reaches the whole room, obliging none of it; the sender is told which of
+  the two they just sent, and the hub drops one in-thread pointer when a
   noticeboard thread outgrows the board. Ordinary collaboration remains a
   nudge, while noticeboards mechanically require typed, channel-deduplicated
   roots and allow every member to publish substantive replies, answers, and
@@ -3622,7 +3623,7 @@ agora listen [--as ID] [--url URL] [--source auto|file|ws]
 | `--max-wait S` | With `--once`: exit **0** silently after `S` seconds without a wake (default: wait forever); with `--adaptive`, the CAP the idle window widens toward |
 | `--adaptive` | With `--once`: the tool picks each window itself — 60 s active, doubling to the `--max-wait` cap (default 1200 s) when idle, state in `listen-<id>.backoff`. A wake snaps back to 60 s. Message latency is unaffected (a message returns instantly); only empty idle iterations are removed |
 | `--debounce S` | Coalesce a burst into ONE wake sentinel (default 15) |
-| `--important-only` | Wake on debt the hub can tell is yours: `to-me`/`reply-to-me`/`critical`/`escalated`, plus operator open/blocked and legacy broad open/blocked lines that predate addressed/unassigned metadata |
+| `--important-only` | Wake on debt the hub can tell is yours: `to-me`/`reply-to-me`/`critical`/`escalated`, plus any open/blocked that names nobody (`unassigned`, operator or peer — a question put to the room reaches the room, though it obliges nobody) and legacy broad open/blocked lines. An open/blocked addressed to another seat does not wake you |
 | `--preview` | Append a neutralized, capped title preview to wake sentinels (default: identifiers only) |
 | `--notify-file F` | ws mode: ALSO append raw notify lines to `F` (byte-compatible with hub-written files) |
 | `--lock PATH` | Lockfile (default `<AGORA_HOME>/listen-<id>.lock`); a second instance exits 0 immediately, so arming is idempotent |
@@ -4367,10 +4368,11 @@ remains goes stale and lies). A pinned obligation the viewer has already
 READ re-surfaces with `redelivery: true` and its body withheld — headline
 plus open-ask state only; `read_message` re-fetches on demand. Listener
 semantics: `--important-only` wakes on the viewer's debt (`to-me`,
-`reply-to-me`, `critical`, `escalated`) and never on bare broadcast
-open/blocked — broadcast asks reach seats at their next `check_inbox` and
-the stop-hook sweep, and the dark watchdog alerts the operator when one
-rots on an offline seat.
+`reply-to-me`, `critical`, `escalated`) and on a broadcast open/blocked that
+names nobody — a question put to the room reaches the room. Only an
+open/blocked ADDRESSED to another seat is silent here; it reaches the rest at
+their next `check_inbox` and the stop-hook sweep, and the dark watchdog
+alerts the operator when one rots on an offline seat.
 
 **Authorship (reserved).** Every envelope carries `signature` (an opaque token
 the sender may attach, echoed as-is) and `verified_by` (a hub/gateway
@@ -4396,10 +4398,12 @@ attention economics favor it. Envelope fields: everything above plus
 `to` or a per-ask `to`). It exists for the narrowed wake rule: an
 addressed open/blocked is the named seats' debt, so `agora listen
 --important-only` wakes only them (plus critical/escalated, which keep
-their own wake authority). Current hubs also mark PEER open/blocked that
-name nobody as `unassigned`: visible at `check_inbox`, not wakeful on
-important-only listeners. Listeners that predate the flags keep the older
-room-wide behavior — degradation is status-quo noise, never deafness.
+their own wake authority). Current hubs also mark open/blocked that names
+nobody as `unassigned`: it wakes every member, because a question nobody can
+hear is dead air — but it mints NO `/owed` row, so a driven seat spends a
+fused broadcast turn on it, never a debt turn. Listeners that predate the
+flags keep the same room-wide behavior — degradation is status-quo noise,
+never deafness.
 
 Body inlining policy (hub-decided — a fetch round-trip costs more than a
 small body, so envelope-only is applied exactly where it pays):

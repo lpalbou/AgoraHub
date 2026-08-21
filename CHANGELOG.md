@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.17.5 — 2026-08-21
+
+**A question put to the room reaches the room again: `unassigned` open/blocked
+wakes every member.**
+
+Field-falsified on a live hub: a human posted `status=open` to `#commons` with
+no `to` and no asks, and none of four driven seats woke. The hub had done its
+job — the line reached all ten inbox logs flagged `unassigned,open` — and
+`qualifies()` then dropped it before any classifier could see it.
+
+This rule has now flipped four times (`f82e6b4` deaf, `debdf45` wake,
+`58a558a` addressed-only, `f3d465e` deaf). The last flip shipped inside a
+117-file release with no CHANGELOG line, no backlog card and no ADR, and it
+narrowed exactly the case `0135`'s completed card had carved out in terms —
+*"addresseeless opens stay room-wide (2026-07-14 falsification honored)"*.
+This entry exists so a fifth flip has to argue with something.
+
+- **`listen.qualifies`** no longer swallows `unassigned` open/blocked. The
+  ADDRESSED narrowing is untouched: an open naming another seat is still
+  silent for everyone else (0135's measured 62%-of-commons-wakes fix).
+- **Waking is not obliging.** `/owed` still mints no row for an addresseeless
+  open — deliberately unchanged, since per-member debt rows are the
+  obligation inflation `0133`/`4e3441e` removed. The wake is priced instead:
+  `_deliver_wake` grades a room-wide demand `_DRIVER_BROADCAST_WAKE`, so
+  `agora drive` spends a fused `--broadcast-turn-budget` turn on it, never a
+  debt turn. That fuse — not listener deafness — is what the wake-storm work
+  built to price room traffic, and the 0.15.0 narrowing had made it
+  unreachable for the one case it was written for.
+- **The digest stopped contradicting the wake.** A seat woken by a peer's
+  room-wide question was being told *"Nothing is owed by you… silence is the
+  correct answer."* It now gets a peer-scoped instruction: answer only where
+  it touches what you own, otherwise ack and end the turn. Lighter than the
+  operator branch on purpose — no plan row is mandated for peer traffic.
+- **The other two reception lanes move in lockstep** — the Claude stop-hook
+  (`hook.reception`) and the Python `AgentRunner` applied the same
+  operator-only carve-out, so a room-wide ask was demoted to fyi there too.
+- **Regression coverage that would have caught it.** The existing unit tests
+  all hand-wrote their flags and kept passing while the real hub stamped
+  `unassigned`; the new test posts through the hub and reads the notify line
+  the hub actually wrote, then asserts `/owed` stays empty — pinning both
+  halves (it wakes, it obliges nobody).
+
+Known gap, unfixed here and worth its own change: `from-operator` — the
+carve-out that was supposed to keep a human's room-wide ask audible through
+the narrowing — is unreachable for any CLI-provisioned fleet. `agora register`
+never sends `operator`, though `POST /agents` has always accepted it, and
+nothing in the tree can set the bit on an existing seat.
+
 ## 0.17.4 — 2026-08-21
 
 **Documentation pass: the guides teach the current behaviour instead of

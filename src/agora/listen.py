@@ -212,14 +212,23 @@ def qualifies(event: dict[str, Any], agent_id: str, important_only: bool = False
     --important-only means OBLIGATIONS wake, fyi waits: critical/escalated,
     addressed replies, reply-to-me, and work the hub can tell is yours.
 
-    Current hubs label PEER open/blocked that name nobody as `unassigned`.
-    Those lines stay visible on inbox surfaces, but important-only listeners
-    do not buy a turn on them: visibility is cheap, ownership is not.
+    A room-wide open/blocked that names NOBODY (`unassigned`) wakes every
+    member, peer-authored or not. It is a question put to the room, and a
+    room that cannot hear it is dead air — the 2026-07-14 falsification, and
+    0135's completed card carved this case out of the narrowing in terms
+    ("addresseeless opens stay room-wide"). This has now flipped four times
+    (f82e6b4 deaf, debdf45 wake, 58a558a addressed-only, f3d465e deaf); do
+    not flip it a fifth without an ADR and a CHANGELOG line.
 
-    OPERATOR open/blocked is different: it is the human asking the room for
-    work, so every seat in the channel must evaluate whether it should
-    contribute. Addressing still matters for who is already explicitly on the
-    hook, but it does not deafen the rest of the room to the operator.
+    Waking is not obliging. The hub's ledger mints ZERO /owed rows for such a
+    message (service.py, `_owed`) and that stays true: `_deliver_wake` grades
+    the batch `_DRIVER_BROADCAST_WAKE`, so a driven seat spends a fused
+    broadcast turn on it, never a debt turn. That fuse — not listener
+    deafness — is what the wake-storm work built to price room traffic.
+
+    ADDRESSED open/blocked is the narrowing that stays: if the hub says this
+    line names someone and it is not you, it is fyi here (0135, measured: 62%
+    of commons wakes were addressed opens waking the whole room).
 
     Older notify lines had no `addressed`/`unassigned` metadata, so the
     fallback stays noisy rather than deaf: a legacy bare open/blocked still
@@ -239,11 +248,9 @@ def qualifies(event: dict[str, Any], agent_id: str, important_only: bool = False
         if "from-operator" in tokens:
             return True
         # Narrowed wake rule: if the hub says this line names someone and it
-        # is not you, it is fyi here. If the hub says it is `unassigned`,
-        # keep it visible but do not wake on it. Legacy lines missing both
-        # flags keep the old room-wide behavior: noise is safer than deafness.
-        if "unassigned" in tokens and "to-me" not in tokens:
-            return bool(tokens & _IMPORTANT_FLAGS)
+        # is not you, it is fyi here. `unassigned` names nobody, so it names
+        # the ROOM and falls through to the room-wide wake below. Legacy
+        # lines missing both flags keep that same behavior.
         if "addressed" in tokens and "to-me" not in tokens:
             return bool(tokens & _IMPORTANT_FLAGS)
         return True
@@ -646,6 +653,11 @@ def once_digest(events: list[dict[str, Any]],
              or "from-operator" in str(ev.get("flags", "")))
         for ev in events
     )
+    # A room-wide question from a PEER wakes too (`qualifies`), and the wake
+    # is worth nothing if the digest then tells the seat to stay silent.
+    room_task = any(
+        str(ev.get("status", "")) in ("open", "blocked") for ev in events
+    )
     if owed and (owed[0] or owed[1]):
         text += (f" You currently owe {owed[0]} answer(s) and {owed[1]} "
                  "unconsumed answer(s) to your own asks — check_inbox lists "
@@ -667,6 +679,16 @@ def once_digest(events: list[dict[str, Any]],
                  "work chunk that follows. Expect a peer to adversarially "
                  "review your slice before the delegate reports completion "
                  "— deliver it checkable.")
+    elif room_task:
+        # Lighter than the operator branch on purpose: no plan row is
+        # mandated for peer room traffic. The seat still needs a reason to
+        # have woken, or it manufactures one (0140: 50% ceremony).
+        text += (" This wake includes an open/blocked question put to the "
+                 "room that names nobody: what you owe it is a READ, not an "
+                 "answer, and it mints no /owed row. Answer only if you are "
+                 "concerned — one reply naming the slice you own — else ack "
+                 "and end your turn. A receipt that only proves you woke is "
+                 "the failure mode here.")
     else:
         # Never let an empty wake read as "say something". A seat that woke
         # owing nothing and posted a receipt anyway is 50% of the traffic a
@@ -732,18 +754,24 @@ def _deliver_wake(batch, agent_id, *, preview: bool, once: bool,
             if not (flags & _IMPORTANT_FLAGS):
                 # Two grades of unowned wake, and the driver pays differently
                 # for each. `owed` is the hub's own answer to "does this seat
-                # hold work?"; zero owed with no to-me flag is agent-to-agent
-                # room traffic that obliges this seat nothing, so a turn on
-                # it can only produce ceremony (measured: 50% of such turns).
+                # hold work?"; zero owed with no to-me flag is room traffic
+                # that obliges this seat nothing, so a turn on it can only
+                # produce ceremony (measured: 50% of such turns).
                 #
-                # TWO exemptions keep it honest. `from-operator`: a HUMAN
-                # talking to the room always buys a turn — the 2026-07-14
-                # falsification (a room-wide operator /ask that woke NOBODY)
-                # is the exact dead air this must never recreate, and it is
-                # the same carve-out `qualifies` already makes. Unreadable
-                # /owed (None): absence of an answer is never read as zero.
+                # THREE exemptions keep it honest. A DEMAND — any open or
+                # blocked in the batch — is a question put to the room: it
+                # buys a turn, but a BROADCAST one, priced by the fuse the
+                # wake-storm work built (`--broadcast-turn-budget`), never a
+                # debt turn. Waking is not obliging: /owed stays empty and
+                # the hub still mints no row. `from-operator`: a HUMAN
+                # talking to the room, the 2026-07-14 dead air this must
+                # never recreate. Unreadable /owed (None): absence of an
+                # answer is never read as zero.
+                demand = any(str(event.get("status", "")) in ("open", "blocked")
+                             for event in batch)
                 if (owed is not None and not (owed[0] or owed[1])
-                        and "from-operator" not in flags):
+                        and "from-operator" not in flags
+                        and not demand):
                     return _DRIVER_UNOWNED_WAKE
                 return _DRIVER_BROADCAST_WAKE
         return 2

@@ -108,10 +108,15 @@ def test_fyi_rides_free_turns_and_never_blocks_one(home, monkeypatch, capsys):
     assert capsys.readouterr().out == ""          # nor a mid-loop injection
 
 
-def test_reception_demotes_unassigned_peer_and_someone_elses_named_ask(monkeypatch):
+def test_reception_keeps_the_rooms_ask_and_demotes_someone_elses_named_ask(monkeypatch):
+    """A peer open that names NOBODY is the room's question: it stays in
+    asks, exactly as `listen.qualifies` wakes on it. A peer open addressed to
+    another seat is that seat's, so it is fyi here."""
     unread = [
         _env(id="peer", sender="carol", status="open", to_me=False,
              addressed=False, from_operator=False),
+        _env(id="other", sender="carol", status="open", to_me=False,
+             addressed=True, from_operator=False),
         _env(id="human", sender="laurent", status="open", to_me=False,
              addressed=True, from_operator=True),
         _env(id="mine", sender="laurent", status="open", to_me=True,
@@ -127,8 +132,8 @@ def test_reception_demotes_unassigned_peer_and_someone_elses_named_ask(monkeypat
 
     monkeypatch.setattr(hook, "_get", fake_get)
     asks, fyi, _ = hook.reception("http://h:1", "seat")
-    assert [m["id"] for m in asks] == ["human", "mine"]
-    assert {m["id"] for m in fyi} == {"peer"}
+    assert [m["id"] for m in asks] == ["peer", "human", "mine"]
+    assert {m["id"] for m in fyi} == {"other"}
 
 
 def test_reply_to_me_renders_as_reply_not_ask(home, monkeypatch, capsys):

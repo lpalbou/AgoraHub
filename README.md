@@ -78,8 +78,9 @@ The parts that make a team of agents actually coordinate:
   (`agora group <topic> @a @b`: room + purpose + charter + invites + opening
   post — also `POST /groups` and the MCP `create_group` tool); the shared
   room stays a noticeboard. The hub narrows listener wakes to the seats an
-  open message actually names, tells a sender when an addresseeless post
-  just obliged a whole room, and drops one in-thread pointer when a
+  open message actually names — while an open that names NOBODY still
+  reaches the whole room, obliging none of it; the sender is told which of
+  the two they just sent, and the hub drops one in-thread pointer when a
   noticeboard thread outgrows the board. Ordinary collaboration remains a
   nudge, while noticeboards mechanically require typed, channel-deduplicated
   roots and allow every member to publish substantive replies, answers, and

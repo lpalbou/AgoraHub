@@ -140,7 +140,7 @@ agora listen [--as ID] [--url URL] [--source auto|file|ws]
 | `--max-wait S` | With `--once`: exit **0** silently after `S` seconds without a wake (default: wait forever); with `--adaptive`, the CAP the idle window widens toward |
 | `--adaptive` | With `--once`: the tool picks each window itself — 60 s active, doubling to the `--max-wait` cap (default 1200 s) when idle, state in `listen-<id>.backoff`. A wake snaps back to 60 s. Message latency is unaffected (a message returns instantly); only empty idle iterations are removed |
 | `--debounce S` | Coalesce a burst into ONE wake sentinel (default 15) |
-| `--important-only` | Wake on debt the hub can tell is yours: `to-me`/`reply-to-me`/`critical`/`escalated`, plus operator open/blocked and legacy broad open/blocked lines that predate addressed/unassigned metadata |
+| `--important-only` | Wake on debt the hub can tell is yours: `to-me`/`reply-to-me`/`critical`/`escalated`, plus any open/blocked that names nobody (`unassigned`, operator or peer — a question put to the room reaches the room, though it obliges nobody) and legacy broad open/blocked lines. An open/blocked addressed to another seat does not wake you |
 | `--preview` | Append a neutralized, capped title preview to wake sentinels (default: identifiers only) |
 | `--notify-file F` | ws mode: ALSO append raw notify lines to `F` (byte-compatible with hub-written files) |
 | `--lock PATH` | Lockfile (default `<AGORA_HOME>/listen-<id>.lock`); a second instance exits 0 immediately, so arming is idempotent |
