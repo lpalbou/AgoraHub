@@ -12,7 +12,7 @@ treat stale backlog as a bug and patch it before implementing.
 
 ## Counts
 
-- Planned: 7 (5 standalone + 2 in the federation track)
+- Planned: 8 (6 standalone + 2 in the federation track)
 - Proposed: the standalone files + 3 in the federation-alternatives track.
   2026-08-01: 0141-0145 added — the collaboration-model gap set, written by
   the pass that produced `docs/collaboration.md` and ranked in its §8.
@@ -61,6 +61,7 @@ treat stale backlog as a bug and patch it before implementing.
 | 0024 | Import history as `fyi` + original timestamps | migration/hub | promoted 2026-07-09; migration replayed 187 msgs as live obligations |
 | 0030 | Federated named-agent identity + security (Model A) | identity/security | owner-remove, key rotate/revoke, locked-down registration, `@host`=metadata; needs topology ADR — 0089 shipped the local retire half |
 | 0031 | Cross-system asset management | assets/channels | owner eviction, closed-room retention/purge |
+| 0154 | The collaboration graph (seats, ties, realtime model) | hub/clients | concept + data structure only; every edge is derivable from state the hub already stores, so the work is a served viewer-scoped snapshot + WS deltas, not new writes |
 
 ## Proposed items
 
