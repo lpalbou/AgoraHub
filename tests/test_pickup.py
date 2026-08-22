@@ -228,16 +228,17 @@ def test_a_seat_can_have_replied_and_the_ask_still_be_open_on_the_other_seat():
     # thing a single verdict would have to get wrong for one of them.
     assert row(client, alice, q["seq"])["pending_asks"] == ["1"]
 
-    # `still_owes` reports the HUB's verdict faithfully, and that verdict is
-    # currently the same for both seats — including bob, who answered.
-    # That is not this row lying; it is `pending_addressees` naming every
-    # seat on a pending ask regardless of who already answered it, which
-    # contradicts its own docstring ("a seat whose canvass row was answered
-    # stops being pinned"). Open, reported, NOT quietly fixed here: see
-    # claim:answered-seat-stays-pinned-on-a-shared-ask. When it is fixed
-    # this assertion flips, deliberately.
-    assert got["bob"]["still_owes"] is True
-    assert got["carol"]["still_owes"] is True
+    # FLIPPED 2026-08-22, as this comment said it would be. It used to assert
+    # `bob -> True`, pinning the defect: `pending_addressees` named every seat
+    # on a pending ask regardless of who had answered it, contradicting its
+    # own docstring. Left as a deliberate tripwire on the 19th and fixed only
+    # after agora-tui hit it in the wild (agora-and-wui#190) — a row escalating
+    # against a seat that had answered in full.
+    #
+    # The two facts now stand apart, which is the whole point of a per-seat
+    # ladder: the ASK is open (carol has not answered), and BOB DOES NOT OWE IT.
+    assert got["bob"]["still_owes"] is False     # answered his share, released
+    assert got["carol"]["still_owes"] is True    # the seat actually holding it
 
 
 def test_a_bare_reply_to_a_peers_ask_less_open_does_not_release_the_seat():
@@ -484,3 +485,47 @@ def test_a_broadcast_nobody_is_addressed_on_pushes_nothing():
         client.post("/inbox/ack", json={"cursors": {"room": news["seq"]}},
                     headers=bob)
         assert pickups(drain(ws, client, alice)) == []
+
+
+def test_the_answering_seats_own_inbox_stops_pinning_it_the_wild_case():
+    """agora-and-wui#190, from the side that actually cost a turn.
+
+    The pickup row above is what the ASKER sees. What agora-tui hit was the
+    other surface: their OWN `check_inbox` kept listing #178 as an ask naming
+    them, after they had answered it with `answers=["3"]`, because their
+    co-addressee had answered the same ask in prose and the ask stayed open.
+    A true-looking overdue that was false, heading for an escalation against
+    the one seat that had done the work.
+
+    Asserted on the answering seat's inbox rather than on the asker's row,
+    because that is where the damage was and the two are different code paths
+    (`envelope_for` -> `AttentionPolicy` vs the pickup join).
+    """
+    client = make_client()
+    alice, bob, carol = (register(client, "alice"), register(client, "bob"),
+                         register(client, "carol"))
+    make_channel(client, alice, "room", bob, carol)
+
+    q = post(client, alice, body="both of you", title="q", status="open",
+             asks=[{"id": "1", "text": "which?", "to": ["bob", "carol"]}])
+    post(client, bob, body="mine is done", title="answer", status="reply",
+         reply_to=q["id"], answers=["1"])
+
+    def envelope(seat: dict[str, str]) -> dict:
+        got = client.get("/inbox", headers=seat).json()
+        rows = [e for e in got if e["seq"] == q["seq"]]
+        assert rows, "the ask should still be on both inboxes — it is OPEN"
+        return rows[0]
+
+    # bob answered: the ask is still open and still visible to him, but it is
+    # no longer addressed AT him. Visibility and debt are different things.
+    assert envelope(bob)["to_me"] is False
+    # carol has not: hers is unchanged, which is what proves the release above
+    # is scoped to the SEAT and is not a blanket un-pinning of the ask.
+    assert envelope(carol)["to_me"] is True
+    # And the ask itself is untouched by either — the release is a pin scope,
+    # never a discharge. If this ever goes empty for bob the fix has started
+    # answering asks on his behalf, which is a far worse bug than the one it
+    # replaced.
+    assert envelope(bob)["pending_asks"] == ["1"]
+    assert envelope(carol)["pending_asks"] == ["1"]

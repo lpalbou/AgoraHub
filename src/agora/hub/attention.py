@@ -59,6 +59,11 @@ class AttentionPolicy:
                      parent: Message | None, has_reply: bool,
                      pending_asks: list[str] | None = None, ask_total: int = 0,
                      declined_asks: list[str] | None = None,
+                     #: {seat: [ask ids it discharged]} — see
+                     #: obligations.pending_addressees. Without it a seat that
+                     #: answered its share of a multi-addressee ask keeps a
+                     #: to_me pin it has already earned its way out of.
+                     answered_by: dict[str, list[str]] | None = None,
                      has_resolved_reply: bool = False,
                      sla_minutes: float = DEFAULT_RESPONSE_SLA_MINUTES,
                      paused_seconds: float = 0.0,
@@ -77,7 +82,7 @@ class AttentionPolicy:
         # PENDING — the nine-seat debrief showed a to-you flag that outlives
         # the viewer's own discharged ask lies ("you owe" vs "others owe"),
         # and seats re-verified their own discharges for hours because of it.
-        yours = pending_addressees(message, pending)
+        yours = pending_addressees(message, pending, answered_by or {})
         to_me = viewer_id in message.to or viewer_id in yours
         reply_to_me = parent.sender == viewer_id if parent else False
         body_bytes = len(message.body.encode())

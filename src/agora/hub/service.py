@@ -3165,6 +3165,10 @@ class HubService:
         # asks visible; has_resolved_reply travels so a reader is never cold.
         closed, pending, total, has_resolved = False, [], 0, False
         declined: list[str] = []
+        # Per-seat discharge, so the pin scope can ask "has THIS viewer
+        # answered?" rather than inferring it from the ask's own state —
+        # the two come apart on a multi-addressee ask (agora-and-wui#190).
+        answered_by: dict[str, list[str]] = {}
         already_read = False
         owes_reply = False
         if message.status in (Status.open, Status.blocked):
@@ -3178,6 +3182,7 @@ class HubService:
             pending = [] if closed else state.pending
             total = state.total
             declined = state.declined
+            answered_by = state.answered_by
             has_resolved = state.has_resolved_reply
             # Only the pinned class can re-deliver; a read receipt turns its
             # re-surfaces headline-only (redelivery=true, body withheld).
@@ -3196,7 +3201,7 @@ class HubService:
             viewer_id, message,
             parent=parent,
             has_reply=closed, pending_asks=pending, ask_total=total,
-            declined_asks=declined,
+            declined_asks=declined, answered_by=answered_by,
             has_resolved_reply=has_resolved, owes_reply=owes_reply,
             sla_minutes=sla_minutes if sla_minutes is not None
             else self.channel_sla(message.channel),
@@ -3717,7 +3722,7 @@ class HubService:
                 if any(r.sender == agent.id for r in replies):
                     continue
                 if (agent.id in named and agent.id not in message.to
-                        and agent.id not in pending_addressees(message, ds.pending)):
+                        and agent.id not in pending_addressees(message, ds.pending, ds.answered_by)):
                     # Ask-scoped pin (0077): a seat named ONLY by asks stops
                     # being pinned once every ask naming it is answered — its
                     # canvass row is done even while other rows stay open.
@@ -3834,7 +3839,7 @@ class HubService:
         report."""
         if not asks_of(m):
             return False              # ask-less: only a real settlement clears
-        if agent_id in pending_addressees(m, ds.pending):
+        if agent_id in pending_addressees(m, ds.pending, ds.answered_by):
             return False              # a pending ask still names them
         pending = set(ds.pending)
         if any(not (a.get("to") or a.get("assignee"))
@@ -4013,7 +4018,7 @@ class HubService:
             # and the louder one (an escalating /owed row that the watchdogs
             # read) named it in AGENT DARK for a discharged ask. Deleted:
             # per-ask scoping is the rule everywhere else on this path.
-            named_pending = pending_addressees(m, ds.pending)
+            named_pending = pending_addressees(m, ds.pending, ds.answered_by)
             if not (agent.id in m.to
                     or agent.id in named_pending
                     # An operator's open/blocked that names nobody still
@@ -7220,7 +7225,7 @@ class HubService:
                     # a seat named by a still-pending ask has this row
                     # pending ON IT, not floating as a proposal.
                     assignees = {a.get("assignee") for a in asks_of(m)} - {None}
-                    assignees |= pending_addressees(m, state.pending)
+                    assignees |= pending_addressees(m, state.pending, state.answered_by)
                     age = now - m.created_at - self.paused_seconds_since(m.created_at)
                     row = {"channel": channel, "seq": m.seq, "id": m.id,
                            "sender": m.sender, "q": m.title or elide(m.body, 120),

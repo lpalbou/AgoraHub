@@ -48,6 +48,14 @@ class DischargeState:
     discharged: bool = False                   # obligation fully satisfied?
     closed: bool = False                       # discharged OR authoritatively resolved
     has_resolved_reply: bool = False           # any resolved reply exists (reader signal)
+    #: WHO discharged WHICH ask id — `{seat: [ask ids]}`, replies only.
+    #: Computed all along inside `discharge_state` and thrown away, which is
+    #: precisely why a seat that answered its share of a MULTI-ADDRESSEE ask
+    #: stayed pinned: `pending` is a property of the ask, and the pin scope
+    #: needs a property of the seat. Kept so `pending_addressees` can ask the
+    #: only question that matters to it — "has THIS seat answered?" — instead
+    #: of inferring it from a set that cannot carry the answer.
+    answered_by: dict[str, list[str]] = field(default_factory=dict)
 
     @property
     def total(self) -> int:
@@ -83,17 +91,46 @@ def ask_addressees(message: Message) -> set[str]:
     return out
 
 
-def pending_addressees(message: Message, pending: list[str]) -> set[str]:
-    """Seats named by an ask that is still UNANSWERED — the per-ask pin scope:
-    a seat whose canvass row was answered stops being pinned even while other
-    rows stay open."""
+def pending_addressees(message: Message, pending: list[str],
+                       answered_by: dict[str, list[str]]) -> set[str]:
+    """Seats still on the hook — named by an unanswered ask AND not yet having
+    answered it themselves.
+
+    THE BUG THIS SIGNATURE EXISTS TO CLOSE (agora-and-wui#190, 2026-08-22).
+    This function used to take only `pending`, so it pinned every seat named
+    by any still-open ask. Its docstring already claimed the opposite — *"a
+    seat whose canvass row was answered stops being pinned even while other
+    rows stay open"* — and so did `discharge_state`'s own comment. Two places
+    described the intended behaviour and neither implemented it.
+
+    It only bites on a MULTI-ADDRESSEE ask, which is why it survived: with one
+    named seat, "the ask is pending" and "this seat has not answered" are the
+    same fact. With two, they come apart the moment one answers, because
+    `_ask_answered` requires ALL named seats. agora-tui answered ask 3 of #178
+    with `answers=["3"]`, agora-wui answered the same ask in prose, and the
+    ask stayed correctly pending on agora-wui while agora-tui — who had
+    discharged in full — kept the pin and was heading for an escalation.
+
+    `answered_by` is REQUIRED, not optional with a permissive default. A
+    default would let a call site that forgets it keep the old behaviour
+    silently, and a silent wrong pin is exactly what took three days to
+    notice. Pass `DischargeState.answered_by`; there is nowhere else to get
+    it, which is the point.
+
+    An `assignee` is pinned by the same rule — it is a named seat like any
+    other, and one that answered its own assignment is done.
+    """
     pend = set(pending)
     out: set[str] = set()
     for a in asks_of(message):
-        if str(a.get("id")) in pend:
-            out.update(str(x) for x in (a.get("to") or []))
-            if a.get("assignee"):
-                out.add(str(a["assignee"]))
+        aid = str(a.get("id"))
+        if aid not in pend:
+            continue
+        named = {str(x) for x in (a.get("to") or [])}
+        if a.get("assignee"):
+            named.add(str(a["assignee"]))
+        out.update(seat for seat in named
+                   if aid not in answered_by.get(seat, ()))
     return out
 
 
@@ -450,4 +487,6 @@ def discharge_state(parent: Message, replies: list[Message],
     return DischargeState(mode="asks", pending=pending, answered=answered,
                           declined=declined, discharged=asks_settled,
                           closed=asks_settled or closed_by_resolve,
-                          has_resolved_reply=has_resolved)
+                          has_resolved_reply=has_resolved,
+                          answered_by={s: sorted(ids)
+                                       for s, ids in by_sender.items()})
