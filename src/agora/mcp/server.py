@@ -983,15 +983,45 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
         at = float(owed.get("computed_at") or time.time())
         to_answer = owed.get("to_answer", [])
         for row in to_answer[:10]:
-            naming = (f" asks naming you: {row['asks_naming_you']}"
-                      if row.get("asks_naming_you") else "")
-            lines.append(f"- ANSWER {row['channel']}#{row['seq']} from "
-                         f"{row['sender']} (pending {row['pending_asks']},"
-                         f"{naming} {(at - row['created_at']) / 60:.0f}m"
-                         f"{', ESCALATED' if row.get('escalated') else ''}) — "
-                         f"read_message id={row['id']}, then reply in-thread "
-                         "(answers=[...] only if it asked numbered questions) "
-                         "and DO or claim any work it assigns")
+            mine = row.get("asks_naming_you") or []
+            pending = row.get("pending_asks") or []
+            age = (f" {(at - row['created_at']) / 60:.0f}m"
+                   f"{', ESCALATED' if row.get('escalated') else ''}")
+            if pending and not mine:
+                # NEVER NAME AN EXIT THIS HUB REFUSES (2026-08-23). This line
+                # used to read `ANSWER … (pending ['1']) … answers=[...]` on a
+                # row whose asks belong to ANOTHER seat — and
+                # `_validate_answers` then refuses that seat's `answers` AND
+                # its `declines` with "you may not discharge ask ids not
+                # addressed to you". Both exits named, both refused, and the
+                # one that works — any plain reply, the 2026-08-11 structured
+                # release — went unmentioned.
+                #
+                # Reproduced independently by two seats on one message inside
+                # a few minutes (agora-wui at agora-and-wui#244, agora at
+                # thread-shape-and-panels#32), each losing a turn to it.
+                #
+                # The row DATA was already right: `owed()` scopes
+                # `asks_naming_you` per-ask and reports `reason=names_you`.
+                # This is agora-and-wui#117 surviving one layer out — fixed in
+                # the data, still wrong in the TEXT — which is why fixing the
+                # data did not fix the experience. A renderer that holds the
+                # distinction and does not use it is the whole defect.
+                lines.append(f"- REPLY {row['channel']}#{row['seq']} from "
+                             f"{row['sender']} (it names you;{age}) — "
+                             f"read_message id={row['id']}, then reply "
+                             "in-thread: ANY reply of yours clears this row. "
+                             f"Its pending asks {pending} are ANOTHER seat's — "
+                             "the hub will refuse your answers/declines on "
+                             "them. DO or claim any work it assigns")
+            else:
+                naming = f" asks naming you: {mine}" if mine else ""
+                lines.append(f"- ANSWER {row['channel']}#{row['seq']} from "
+                             f"{row['sender']} (pending {pending},"
+                             f"{naming}{age}) — "
+                             f"read_message id={row['id']}, then reply in-thread "
+                             "(answers=[...] only if it asked numbered questions) "
+                             "and DO or claim any work it assigns")
         if len(to_answer) > 10:
             # Silent truncation taught seats their debt list was complete when
             # it was not (2026-07-23 audit RC-4): an 11th rotting row simply

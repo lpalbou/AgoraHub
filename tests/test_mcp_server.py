@@ -115,13 +115,22 @@ def _call_tool(mcp, name: str, args: dict):
     return decoded[0] if len(decoded) == 1 else decoded
 
 
+def _key_of(url: str, agent_id: str) -> str:
+    """The api key handed back when that agent was registered in this test."""
+    return _KEYS[agent_id]
+
+
+_KEYS: dict[str, str] = {}
+
+
 def _make_agent(url: str, agent_id: str, operator: bool = False) -> str:
     import httpx
 
     r = httpx.post(f"{url}/agents", json={"id": agent_id, "operator": operator},
                    headers={"Authorization": "Bearer k"}, timeout=5)
     assert r.status_code == 200, r.text
-    return r.json()["api_key"]
+    _KEYS[agent_id] = r.json()["api_key"]
+    return _KEYS[agent_id]
 
 
 @pytest.fixture()
@@ -199,3 +208,92 @@ def test_stop_spawn_records_intent_only(hub, monkeypatch):
     out = _call_tool(mcp, "stop_spawn", {"spawn_id": spawn_id})
     assert out["stop_requested_at"] is not None
     assert out["state"] == "running"      # only the runner ends a process
+
+
+# -- the OWED block must never name an exit the hub refuses -------------------
+
+def _owed_text(mcp) -> str:
+    """The rendered inbox, which is where the defect lived — the row DATA was
+    already correct."""
+    import asyncio
+    out = asyncio.run(mcp.call_tool("check_inbox", {}))
+    # FastMCP hands some tools back as (content, structured); take the
+    # content side and keep only the pieces that carry rendered text.
+    if isinstance(out, tuple):
+        out = out[0]
+    parts = out if isinstance(out, list) else [out]
+    return "\n".join(getattr(p, "text", "") for p in parts)
+
+
+def test_owed_line_for_another_seats_ask_names_the_exit_that_works(hub, monkeypatch):
+    """agora-and-wui#244 + thread-shape-and-panels#32: two seats, one message,
+    a lost turn each.
+
+    A message whose `to` names bob, carrying an ask addressed to carol, gave
+    bob `ANSWER … (pending ['1']) … answers=[...]` — and the hub then refused
+    bob's `answers` AND `declines` ("you may not discharge ask ids not
+    addressed to you"). Both named exits refused; the one that works — any
+    plain reply — unmentioned.
+    """
+    import httpx
+
+    admin = {"Authorization": "Bearer k"}
+    alice = _make_agent(hub, "alice")
+    bob_key = _make_agent(hub, "bob")
+    _make_agent(hub, "carol")
+    a = {"Authorization": f"Bearer {alice}"}
+    b = {"Authorization": f"Bearer {bob_key}"}
+    httpx.post(f"{hub}/channels", json={"name": "room", "private": False},
+               headers=a, timeout=5)
+    httpx.post(f"{hub}/channels/room/join", json={}, headers=b, timeout=5)
+    httpx.post(f"{hub}/channels/room/join", json={},
+               headers={"Authorization": f"Bearer {_key_of(hub,'carol')}"},
+               timeout=5)
+
+    r = httpx.post(f"{hub}/channels/room/messages",
+                   json={"body": "park note", "title": "parked",
+                         "status": "blocked", "to": ["bob", "carol"],
+                         "asks": [{"id": "1", "text": "ping when green?",
+                                   "to": ["carol"]}]},
+                   headers=a, timeout=5)
+    assert r.status_code == 200, r.text
+    seq = r.json()["seq"]
+
+    mcp = _server_against(hub, monkeypatch, bob_key)
+    text = _owed_text(mcp)
+
+    # The exit that works is named...
+    assert f"REPLY room#{seq}" in text
+    assert "ANY reply of yours clears this row" in text
+    # ...the ids are marked as somebody else's...
+    assert "ANOTHER seat's" in text
+    # ...and neither refused exit is offered.
+    assert f"ANSWER room#{seq}" not in text
+    assert "answers=[...]" not in text.split(f"room#{seq}")[1].split("\n")[0]
+
+
+def test_a_row_whose_asks_DO_name_you_still_says_ANSWER(hub, monkeypatch):
+    """The other direction, and it is why the fix keys on the ask's own `to`
+    rather than on whether asks exist. Delete the branch and this stays green;
+    invert the condition and it goes red — so the pair pins the distinction,
+    not just the new sentence."""
+    import httpx
+
+    alice = _make_agent(hub, "alice")
+    bob_key = _make_agent(hub, "bob")
+    a = {"Authorization": f"Bearer {alice}"}
+    b = {"Authorization": f"Bearer {bob_key}"}
+    httpx.post(f"{hub}/channels", json={"name": "room", "private": False},
+               headers=a, timeout=5)
+    httpx.post(f"{hub}/channels/room/join", json={}, headers=b, timeout=5)
+
+    r = httpx.post(f"{hub}/channels/room/messages",
+                   json={"body": "yours", "title": "q", "status": "open",
+                         "asks": [{"id": "1", "text": "a?", "to": ["bob"]}]},
+                   headers=a, timeout=5)
+    seq = r.json()["seq"]
+
+    text = _owed_text(_server_against(hub, monkeypatch, bob_key))
+    assert f"ANSWER room#{seq}" in text
+    assert "asks naming you: ['1']" in text
+    assert f"REPLY room#{seq}" not in text
