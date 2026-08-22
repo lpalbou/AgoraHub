@@ -352,13 +352,34 @@ def list_machines(
     agent: AgentInfo = Depends(operator_or_admin),
     service: HubService = Depends(get_service),
 ) -> list[dict[str, Any]]:
-    """Which machines can host a seat, and which seat speaks for each. Any
-    authenticated seat may read it: a client cannot honestly render "no runner
-    available on <machine>" without being able to ask. An EMPTY list is the
-    true answer, and the one both clients agreed to render as an instruction
-    rather than hide."""
-    runners = service.list_machine_runners()
-    return [{"machine": m, "runner": r} for m, r in sorted(runners.items())]
+    """Which machines can host a seat, which seat speaks for each, and what
+    each can actually run. Any authenticated seat may read it: a client cannot
+    honestly render "no runner available on <machine>" without being able to
+    ask. An EMPTY list is the true answer, and the one both clients agreed to
+    render as an instruction rather than hide.
+
+    `harnesses` is the RUNNER's announced set, never a hub-side enum: the
+    machine that would have to run the thing is the one that says what it can
+    run. `announced_at` is null until a runner has started at least once, which
+    is a different fact from "an empty list" and clients should say so."""
+    return service.list_machines()
+
+
+class HarnessAnnouncement(BaseModel):
+    harnesses: list[str] = []
+
+
+@router.post("/machines/{machine}/announce")
+def announce_harnesses(
+    machine: str,
+    payload: HarnessAnnouncement,
+    agent: AgentInfo = Depends(current_agent),
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    """A runner declares what it can actually run here. Only the seat an admin
+    named as this machine's runner may call it — otherwise any member could
+    write the list every client's dropdown reads."""
+    return _run(service.announce_harnesses, agent, machine, payload.harnesses)
 
 
 @router.get("/spawns")

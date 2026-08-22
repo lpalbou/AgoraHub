@@ -820,6 +820,10 @@ class HubService:
     #: this machine" — and it answers NOBODY until an admin says otherwise.
     MACHINE_RUNNER_PREFIX = "spawn_runner:"
 
+    #: meta-key prefix for a runner's ANNOUNCED harness set — the only source
+    #: any client's dropdown or completion may read.
+    MACHINE_HARNESS_PREFIX = "spawn_harnesses:"
+
     #: A spawned seat's join token is redeemed by a runner that is already
     #: holding the row: minutes, not the 24h a human onboarding gets.
     SPAWN_TOKEN_TTL = 900.0
@@ -864,6 +868,48 @@ class HubService:
 
     def list_machine_runners(self) -> dict[str, str]:
         return self.db.meta_list_prefix(self.MACHINE_RUNNER_PREFIX)
+
+    def announce_harnesses(self, agent: AgentInfo, machine: str,
+                           harnesses: list[str]) -> dict[str, Any]:
+        """The runner says what it can actually run. There is deliberately no
+        hub-side harness enum to validate against: every new harness would
+        then need a hub release, and the hub cannot know what is installed on
+        someone else's machine anyway. Names are stored as sent and every
+        client renders an unrecognised one VERBATIM."""
+        machine = self._require_runner(agent, machine)
+        names = sorted({h.strip() for h in harnesses
+                        if isinstance(h, str) and h.strip()})
+        if len(names) > 32 or any(len(n) > MAX_SPAWN_HARNESS_CHARS
+                                  for n in names):
+            raise HubError(400, "harness names must be at most "
+                                f"{MAX_SPAWN_HARNESS_CHARS} characters, at "
+                                "most 32 of them")
+        self.db.meta_set(self.MACHINE_HARNESS_PREFIX + machine,
+                         json.dumps({"harnesses": names, "at": time.time()}))
+        return {"machine": machine, "harnesses": names}
+
+    def machine_harnesses(self, machine: str) -> dict[str, Any]:
+        raw = self.db.meta_get(self.MACHINE_HARNESS_PREFIX + machine)
+        if not raw:
+            return {"harnesses": [], "announced_at": None}
+        try:
+            row = json.loads(raw)
+        except ValueError:
+            return {"harnesses": [], "announced_at": None}
+        return {"harnesses": list(row.get("harnesses") or []),
+                "announced_at": row.get("at")}
+
+    def list_machines(self) -> list[dict[str, Any]]:
+        """Every machine an operator can route to, with what it can run.
+
+        `announced_at: null` means no runner has ever started there — a
+        different fact from "a runner is up and can run nothing", and the
+        clients render them differently."""
+        out = []
+        for machine, runner in sorted(self.list_machine_runners().items()):
+            out.append({"machine": machine, "runner": runner,
+                        **self.machine_harnesses(machine)})
+        return out
 
     def _require_runner(self, agent: AgentInfo, machine: str) -> str:
         machine = self._validate_machine(machine)

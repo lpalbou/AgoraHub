@@ -3287,6 +3287,15 @@ def _driver_state(home: Path, agent_id: str) -> str:
     return "STALE"
 
 
+def cmd_runner(args: argparse.Namespace) -> None:
+    """The machine's own loop. Everything about it — the root it may write in,
+    the harnesses it accepts, the seat cap, whether a human approves each
+    spawn — is decided by the flags typed HERE, never by the request. It dies
+    with this shell: no launchd, no systemd, no login item. See runner.py."""
+    from .runner import main as run_runner
+    raise SystemExit(run_runner(args))
+
+
 def cmd_drive(args: argparse.Namespace) -> None:
     """The external resume-driver for a dedicated seat: block cheaply in
     `agora listen --once --important-only`, and on an obligation wake spawn
@@ -4276,6 +4285,16 @@ def build_parser() -> argparse.ArgumentParser:
     dr.add_argument("--max-turns", dest="max_turns", type=int, default=None,
                     help=argparse.SUPPRESS)   # harness/testing bound
     dr.set_defaults(func=cmd_drive)
+
+    rn = sub.add_parser("runner",
+                        help="human-started, session-bound loop that turns "
+                             "'a seat is wanted' into a seat ON THIS MACHINE: "
+                             "pulls spawn requests, applies its own local "
+                             "gates, joins and drives. The hub never starts "
+                             "anything; this does")
+    from . import runner as _runner
+    _runner.add_arguments(rn)
+    rn.set_defaults(func=cmd_runner)
 
     # --- agent-facing verbs (identity via --as) ---
     def _agent_parser(name, help_):

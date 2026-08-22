@@ -516,10 +516,43 @@ def test_stop_is_the_operators_act_and_leaves_the_state_alone(wire):
                      headers=runner).json()["state"] == "stopped"
 
 
-def test_spawn_rows_are_not_a_member_view(wire):
+def test_the_member_boundary_on_every_spawn_surface(wire):
+    """PINNED in BOTH directions, and the closed half is the one that matters.
+
+    @agora-tui asked (#215 ask 2) for a test that a plain member can read
+    `GET /machines`, because that openness is carried by the ABSENCE of the
+    `if not agent.operator` line its siblings have, under a dependency named
+    `operator_or_admin` that does not in fact require an operator — so the
+    diff that breaks it looks like tidying.
+
+    @agora-wui corrected the ask (#216, amended by #217) and was right: an
+    openness-only test **goes green on a build where every hand-written
+    operator check was deleted**. Authorization here is one line per handler,
+    repeated across thirteen of them. The open half protects an empty state;
+    the closed half is the difference between a spawn queue and an
+    unauthenticated stop button on the operator's fleet.
+
+    So: one test, whole matrix. Deleting an operator check in either
+    direction reddens it.
+    """
     member = _register(wire, "nosy")
-    _request_row(wire)
+    spawn_id = _request_row(wire)
+
+    # OPEN to any authenticated seat — both clients' honest empty state.
+    assert wire.get("/machines", headers=member).status_code == 200
+
+    # CLOSED to a plain member, every one of them.
     assert wire.get("/spawns", headers=member).status_code == 403
+    assert wire.get(f"/spawns/{spawn_id}", headers=member).status_code == 403
+    assert wire.post(f"/spawns/{spawn_id}/stop",
+                     headers=member).status_code == 403
+
+    # And open to the operator, so the closed half cannot be satisfied by a
+    # route that refuses everyone.
+    op = _register(wire, "boss", operator=True)
+    assert wire.get("/spawns", headers=op).status_code == 200
+    assert wire.get(f"/spawns/{spawn_id}", headers=op).status_code == 200
+    assert wire.post(f"/spawns/{spawn_id}/stop", headers=op).status_code == 200
 
 
 def test_a_taken_seat_id_is_refused_at_request_time(wire):
@@ -555,3 +588,89 @@ def test_an_absolute_folder_is_refused_at_the_service_door(wire):
                                      seat_id="scribe", harness="claude",
                                      folder="/etc")
     assert exc.value.status_code == 400
+
+
+# -- the announced harness set (agora-tui #215 ask 1) -------------------------
+
+def test_a_runner_announces_what_it_can_run_and_clients_read_it(wire):
+    runner = _register(wire, "runner-mbp")
+    wire.put("/admin/machines/local/runner", json={"agent_id": "runner-mbp"},
+             headers=_admin())
+
+    # Before any runner has started: named, but silent. That is a DIFFERENT
+    # fact from "a runner is up and can run nothing", and both clients render
+    # them differently — so the hub must distinguish them.
+    row = wire.get("/machines", headers=_admin()).json()[0]
+    assert row == {"machine": "local", "runner": "runner-mbp",
+                   "harnesses": [], "announced_at": None}
+
+    wire.post("/machines/local/announce",
+              json={"harnesses": ["claude", "codex"]}, headers=runner)
+    row = wire.get("/machines", headers=_admin()).json()[0]
+    assert row["harnesses"] == ["claude", "codex"]
+    assert row["announced_at"] is not None
+
+
+def test_a_plain_member_can_read_the_machines_list(wire):
+    """PINNED, at @agora-tui's request (#215 ask 2).
+
+    Both clients' honest empty state — "no runner available on <machine>",
+    disabled rather than hidden — depends on a non-operator seat being able to
+    ask. Today that openness is carried by the ABSENCE of the `if not
+    agent.operator` line its three sibling routes each have, under a
+    dependency named `operator_or_admin` that does not in fact require an
+    operator. So the diff that breaks it looks like tidying up an
+    inconsistency, and without this test nothing would go red.
+    """
+    member = _register(wire, "nobody")
+    runner = _register(wire, "runner-mbp")
+    wire.put("/admin/machines/local/runner", json={"agent_id": "runner-mbp"},
+             headers=_admin())
+    wire.post("/machines/local/announce", json={"harnesses": ["claude"]},
+              headers=runner)
+
+    r = wire.get("/machines", headers=member)
+    assert r.status_code == 200, r.text
+    assert r.json()[0]["harnesses"] == ["claude"]
+
+
+def test_an_empty_registry_is_an_empty_list_not_an_error(wire):
+    """The other half of the same contract: a client must be able to tell a
+    correctly-empty registry from a hub that does not serve this at all. 200
+    with [] is the first; a 404 is the second."""
+    member = _register(wire, "nobody")
+    r = wire.get("/machines", headers=member)
+    assert r.status_code == 200
+    assert r.json() == []
+
+
+def test_only_the_named_runner_may_announce(wire):
+    _register(wire, "runner-mbp")
+    liar = _register(wire, "liar")
+    wire.put("/admin/machines/local/runner", json={"agent_id": "runner-mbp"},
+             headers=_admin())
+    r = wire.post("/machines/local/announce", json={"harnesses": ["evil"]},
+                  headers=liar)
+    assert r.status_code == 403
+    assert wire.get("/machines", headers=_admin()).json()[0]["harnesses"] == []
+
+
+def test_announcing_for_a_machine_with_no_runner_is_refused(wire):
+    someone = _register(wire, "someone")
+    r = wire.post("/machines/ghost-box/announce", json={"harnesses": ["claude"]},
+                  headers=someone)
+    assert r.status_code == 403
+    assert "no runner is registered" in r.json()["detail"]
+
+
+def test_an_unrecognised_harness_name_is_stored_verbatim(wire):
+    """No hub-side harness enum, deliberately: the hub cannot know what is
+    installed on someone else's machine, and an enum here would make every new
+    harness a hub release. The clients render an unknown name verbatim."""
+    runner = _register(wire, "runner-mbp")
+    wire.put("/admin/machines/local/runner", json={"agent_id": "runner-mbp"},
+             headers=_admin())
+    wire.post("/machines/local/announce",
+              json={"harnesses": ["some-future-harness"]}, headers=runner)
+    assert wire.get("/machines", headers=_admin()).json()[0]["harnesses"] == \
+        ["some-future-harness"]

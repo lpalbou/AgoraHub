@@ -742,6 +742,20 @@
     "title": "HTTPValidationError",
     "type": "object"
    },
+   "HarnessAnnouncement": {
+    "properties": {
+     "harnesses": {
+      "default": [],
+      "items": {
+       "type": "string"
+      },
+      "title": "Harnesses",
+      "type": "array"
+     }
+    },
+    "title": "HarnessAnnouncement",
+    "type": "object"
+   },
    "ImposeBlock": {
     "properties": {
      "agent": {
@@ -7581,7 +7595,7 @@
   },
   "/machines": {
    "get": {
-    "description": "Which machines can host a seat, and which seat speaks for each. Any\nauthenticated seat may read it: a client cannot honestly render \"no runner\navailable on <machine>\" without being able to ask. An EMPTY list is the\ntrue answer, and the one both clients agreed to render as an instruction\nrather than hide.",
+    "description": "Which machines can host a seat, which seat speaks for each, and what\neach can actually run. Any authenticated seat may read it: a client cannot\nhonestly render \"no runner available on <machine>\" without being able to\nask. An EMPTY list is the true answer, and the one both clients agreed to\nrender as an instruction rather than hide.\n\n`harnesses` is the RUNNER's announced set, never a hub-side enum: the\nmachine that would have to run the thing is the one that says what it can\nrun. `announced_at` is null until a runner has started at least once, which\nis a different fact from \"an empty list\" and clients should say so.",
     "operationId": "list_machines_machines_get",
     "parameters": [
      {
@@ -7623,6 +7637,68 @@
      }
     },
     "summary": "List Machines"
+   }
+  },
+  "/machines/{machine}/announce": {
+   "post": {
+    "description": "A runner declares what it can actually run here. Only the seat an admin\nnamed as this machine's runner may call it \u2014 otherwise any member could\nwrite the list every client's dropdown reads.",
+    "operationId": "announce_harnesses_machines__machine__announce_post",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "machine",
+      "required": true,
+      "schema": {
+       "title": "Machine",
+       "type": "string"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/HarnessAnnouncement"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Announce Harnesses Machines  Machine  Announce Post",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Announce Harnesses"
    }
   },
   "/me/about": {
