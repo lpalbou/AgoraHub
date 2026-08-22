@@ -90,8 +90,18 @@ def test_a_third_party_cannot_close_someone_elses_thread():
              asks=[{"id": "1", "text": "a?"}])
     ruling = post(client, ruling_holder, body="the ruling", title="ruling")
 
-    # A stranger's bare resolved reply does not close.
-    post(client, memory, body="closing?", status="resolved", reply_to=q["id"])
+    # A stranger's bare resolved reply does not close — and since 2026-08-23
+    # it is not even accepted: it would settle nothing, so the hub refuses it
+    # at the door WITH the gesture that works, instead of taking the post and
+    # voiding it in silence.
+    noop = client.post("/channels/room/messages", headers=memory,
+                       json={"body": "closing?", "status": "resolved",
+                             "reply_to": q["id"]})
+    assert noop.status_code == 400
+    assert "flow" in noop.json()["detail"]         # names who may close it
+    # ...and what to do INSTEAD, computed for this row: flow's ask names
+    # nobody, so `memory` may answer it, and that is the gesture offered.
+    assert 'answers=["1"]' in noop.json()["detail"]
     client.post("/inbox/ack", json={"cursors": {"room": 10_000}},
                 headers=ruling_holder)
     assert q["seq"] in inbox_seqs(client, ruling_holder)   # sticky despite ack
@@ -184,10 +194,12 @@ def test_envelope_carries_has_resolved_reply():
                            register(client, "other"))
     make_channel(client, flow, "room", memory, other)
     q = post(client, flow, body="q", title="q", status="open",
-             asks=[{"id": "1", "text": "a?"}])
-    # A non-authoritative resolved reply doesn't close, but the signal shows.
-    post(client, memory, body="fyi resolved elsewhere", status="resolved",
-         reply_to=q["id"])
+             asks=[{"id": "1", "text": "a?"}, {"id": "2", "text": "b?"}])
+    # A resolved reply that discharges ONE of two asks doesn't close, but the
+    # signal shows. (Until 2026-08-23 this used a bystander's BARE resolved;
+    # the hub now refuses that outright — see `resolved_settles_nothing`.)
+    post(client, memory, body="the first one", status="resolved",
+         reply_to=q["id"], answers=["1"])
     env = next(e for e in client.get("/inbox", headers=other).json()
                if e["seq"] == q["seq"])
     assert env["has_resolved_reply"] is True
@@ -1150,16 +1162,24 @@ def test_a_history_row_carries_the_verdict_not_just_the_shape():
     from /owed, and a message shown from another room had to have its replies
     fetched or say nothing.
 
-    `has_resolved_reply` is not a substitute: a bystander's `resolved` sets it
-    and closes nothing, so a client rendering "settled" from that flag states
-    something the hub did not say."""
+    `has_resolved_reply` is not a substitute: a `resolved` reply can set it
+    while closing nothing, so a client rendering "settled" from that flag
+    states something the hub did not say.
+
+    THE SHAPE THAT SETS IT MOVED (2026-08-23). This used to use a pure
+    bystander's bare `resolved` — which the hub now refuses outright, because
+    it settles nothing (`resolved_settles_nothing`). The invariant is
+    untouched and so is the reason it matters; what demonstrates it is now a
+    PARTIAL discharge, which is the shape a client is most likely to
+    misrender: a real answer, really accepted, and the question still open."""
     client = make_client()
     op = register(client, "op", operator=True)
-    asker, bystander = register(client, "asker"), register(client, "bystander")
-    make_channel(client, asker, "room", op, bystander)
+    asker, answerer = register(client, "asker"), register(client, "answerer")
+    make_channel(client, asker, "room", op, answerer)
 
     q = post(client, asker, body="q", title="q", status="open",
-             asks=[{"id": "1", "text": "a?", "to": ["bystander"]}])
+             asks=[{"id": "1", "text": "a?", "to": ["answerer"]},
+                   {"id": "2", "text": "b?", "to": ["op"]}])
 
     def row():
         return next(m for m in
@@ -1168,12 +1188,12 @@ def test_a_history_row_carries_the_verdict_not_just_the_shape():
 
     assert row()["closed"] is False and row()["closed_by"] is None
 
-    # A bystander's resolved reply carries no authority over someone else's
-    # ask: the flag goes true, the verdict does not.
-    post(client, bystander, body="calling it done", status="resolved",
-         reply_to=q["id"])
+    # One ask of two, answered on a `resolved`: the flag goes true, the
+    # verdict does not.
+    post(client, answerer, body="mine is done", status="resolved",
+         reply_to=q["id"], answers=["1"])
     assert row()["has_resolved_reply"] is True
-    assert row()["closed"] is False, "a bystander closed another seat's ask"
+    assert row()["closed"] is False, "one of two asks closed the question"
 
     # The operator's word does close it, and the row names who.
     post(client, op, body="ruled", status="resolved", reply_to=q["id"])

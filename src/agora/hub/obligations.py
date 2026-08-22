@@ -31,6 +31,7 @@ carry no transport or storage concerns.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from ..models import Message
@@ -221,6 +222,65 @@ def closed_authoritatively(parent: Message, replies: list[Message],
     return any(_closes(parent, r, operators, delegates, closure_rule_epoch,
                        rulers)
                for r in replies)
+
+
+def resolved_settles_nothing(parent: Message, replies: list[Message],
+                             prospective: Message,
+                             judge: Callable[[Message, list[Message]],
+                                             DischargeState]) -> bool:
+    """Would the thread still be UNSETTLED after this `resolved` lands?
+    (teaching refusal, 0062.)
+
+    The hub already refuses an `answers[]` that can discharge nothing, WITH
+    the correct gesture — four field incidents in one day bought that rule.
+    It accepted in silence the same shape one field over: a `resolved` from a
+    seat that holds no closure authority over the row, which closes nothing,
+    discharges nothing, and leaves the thread open and escalating. Same
+    shape, opposite treatment, chosen by nobody. agora-wui's console printed
+    "Marked #N resolved." on exactly that no-op — a false assertion in the
+    shared record.
+
+    IT RUNS THE REAL LADDER, DELIBERATELY, instead of restating today's
+    exits. The allow-set must be whatever the CURRENT rules allow, and this
+    file's rules move: on the evening this was written, `d6b63d4` (a named
+    addressee's cited completion report discharges an ask-less addressed peer
+    request) and this refusal were both committed, both unserved, and landed
+    in the SAME restart. A predicate spelling out today's authorized senders
+    would have rejected precisely the discharge `d6b63d4` was written to
+    create, and nothing would have warned us — the conflict arrives already
+    live. agora-wui asked for that ordering test (#30) before either half was
+    serving; it is `test_the_d6b63d4_shaped_resolved_is_NOT_refused`, and
+    replacing this body with an allow-list is what turns it red.
+
+    It is also why the question is not `_closes`: `d6b63d4`'s exit lives in
+    `discharge_state`, not in `_closes`. A named addressee reporting
+    completion with cited evidence DISCHARGES an ask-less addressed peer
+    request and carries no closure AUTHORITY, so a predicate written as
+    `_closes(...) is False -> refuse` refuses the delivery report.
+
+    `DischargeState.closed` is the ONE field that covers both, and this
+    depends on it: BOTH branches of `discharge_state` return `closed =
+    discharged or closed_by_resolve`. Narrow `closed` so it no longer implies
+    discharge and this gate widens silently — come back here if you do.
+
+    NARROW ON PURPOSE, and each of these is a case it must NOT fire on:
+
+    * an ALREADY-SETTLED thread. Settling there is not impossible, it already
+      happened, and a late `resolved` on a settled row is ceremony, not a
+      lie. This needs no guard of its own — `closed` is monotone in
+      `replies`, so an already-closed parent is still closed `after`. (An
+      explicit `before.closed` guard was written first and deleted: deleting
+      it turned nothing red, which is the tell.)
+    * a `resolved` carrying `settled_by`, `answers` or `consumes` — none
+      reaches here (see the caller): each is policed by its own validator and
+      each is by construction not a no-op.
+
+    `judge` is the service's ONE discharge call, so operator ids, delegate
+    sets, ruling scope and every epoch guard are exactly what the live rows
+    are computed with. `replies` is the parent's existing replies; passing
+    them is what makes the answer "is this thread settled once your message
+    lands", which is the question a poster is actually owed."""
+    return not judge(parent, list(replies) + [prospective]).closed
 
 
 def _cites_evidence(reply: Message) -> bool:

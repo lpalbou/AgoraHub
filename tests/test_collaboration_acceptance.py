@@ -808,8 +808,18 @@ def test_closure_a_bystander_cannot_close_a_humans_request(team: Fleet):
             "the delegate stopped owing the operator's request because someone "
             "else spoke in the thread", fleet.arc)
 
-    fleet.post("writer", ROOM, status="resolved", reply_to=ask["id"],
-               body="calling this done", note="bystander tries to CLOSE")
+    # A bystander's bare `resolved` is REFUSED outright (2026-08-23; before
+    # that it was accepted and silently void, so the poster believed they had
+    # closed the human's request and the row went on escalating).
+    bare = fleet.client.post(f"/channels/{ROOM}/messages",
+                             json={"status": "resolved", "reply_to": ask["id"],
+                                   "body": "calling this done"},
+                             headers=fleet.headers["writer"])
+    require(bare.status_code == 400 and "ordinary reply" in bare.text,
+            "CLOSURE/a-resolved-that-settles-nothing-is-refused",
+            "a bystander's bare `resolved` on the human's request was "
+            "accepted — accepted-and-void is how a seat comes to believe it "
+            "closed something it did not", fleet.arc)
     require(not fleet.discharge(ask["id"]).closed,
             "CLOSURE/only-the-operator-or-the-delegate-closes-a-human-request",
             "a bystander's bare `resolved` closed the human's request — "

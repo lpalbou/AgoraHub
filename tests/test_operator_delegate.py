@@ -379,16 +379,31 @@ def test_delegate_uncited_resolved_on_commission_is_refused_with_recipe(
     assert task.id not in _owed_ids(service, editor)
 
 
-def test_bystander_plain_resolved_is_not_refused(service, fleet):
-    """The refusal is scoped to the reporting delegate (whose resolved IS
-    the completion report). A bystander's plain resolved reply stays legal
-    and simply does not close anything."""
+def test_bystander_plain_resolved_gets_the_bystander_refusal(service, fleet):
+    """REVERSED 2026-08-23, and the reversal is the point.
+
+    This test used to be named `..._is_not_refused` and pinned the stance
+    that a bystander's plain `resolved` "stays legal and simply does not
+    close anything". Legal-and-void is the defect: the poster is told
+    nothing, the row keeps escalating against the seat that owes it, and
+    agora-wui's console printed "Marked #N resolved." over the top — a false
+    assertion in the shared record.
+
+    What the old test was really protecting survives intact and is asserted
+    below: the DELEGATE's evidence recipe must not be thrown at a bystander,
+    who could not use it. The bystander now gets their own refusal, naming
+    who may close and what to post instead."""
     op, reader, editor, _ = fleet
     _delegate(service)
     task = service.post_message(op, "at-test", PostMessage(
         body="build it", status="open", title="commission"))
-    service.post_message(editor, "at-test", PostMessage(
-        body="fwiw looks done", status="resolved", reply_to=task.id))
+    with pytest.raises(HubError) as exc:
+        service.post_message(editor, "at-test", PostMessage(
+            body="fwiw looks done", status="resolved", reply_to=task.id))
+    assert exc.value.status_code == 400
+    assert "ordinary reply" in exc.value.detail
+    assert "data.evidence" not in exc.value.detail, \
+        "handed a bystander the delegate's completion-report recipe"
     assert task.id in _owed_ids(service, reader)
 
 
@@ -429,23 +444,32 @@ def test_a_named_seat_can_close_an_operator_request_with_evidence(service, fleet
 def test_only_the_named_seat_or_a_delegate_may_report_completion(service, fleet):
     """The door is the ADDRESSEE's, not the room's, and an UNADDRESSED
     commission still has no addressee to pay the price — so it stays the
-    operator's to close, which is the case the 2026-08-04 rule was for."""
+    operator's to close, which is the case the 2026-08-04 rule was for.
+
+    Both halves were ACCEPTED-AND-VOID until 2026-08-23: `reader` could post
+    a completion report on work that was never theirs, the hub took it, and
+    the row went on escalating against the seat who actually owed it. The
+    rule did not change; what changed is that a `resolved` which can settle
+    nothing is refused instead of pocketed."""
     op, reader, editor, _ = fleet
     f = service.fs_write(editor, "at-test", "other.md", content="x")
     evidence = [{"kind": "fs", "ref": f"other.md@{f.version}"}]
 
     named = service.post_message(op, "at-test", PostMessage(
         body="editor, do X", status="open", title="x", to=["editor"]))
-    service.post_message(reader, "at-test", PostMessage(
-        body="I did it", status="resolved", reply_to=named.id,
-        data={"evidence": evidence}))
+    with pytest.raises(HubError) as exc:
+        service.post_message(reader, "at-test", PostMessage(
+            body="I did it", status="resolved", reply_to=named.id,
+            data={"evidence": evidence}))
+    assert exc.value.status_code == 400
     assert named.id in _owed_ids(service, editor), "a bystander closed it"
 
     unaddressed = service.post_message(op, "at-test", PostMessage(
         body="someone look at this", status="open", title="loose"))
-    service.post_message(reader, "at-test", PostMessage(
-        body="looked", status="resolved", reply_to=unaddressed.id,
-        data={"evidence": evidence}))
+    with pytest.raises(HubError):
+        service.post_message(reader, "at-test", PostMessage(
+            body="looked", status="resolved", reply_to=unaddressed.id,
+            data={"evidence": evidence}))
     state = service._discharge(unaddressed, service.db.replies_to(unaddressed.id))
     assert not state.closed, "an unaddressed commission closed without the operator"
 

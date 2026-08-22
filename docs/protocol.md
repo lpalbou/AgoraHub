@@ -404,8 +404,20 @@ disagree about whether a thread is settled.
 
 Guards: an `answers=[]` that cannot discharge anything (your own asks, an
 ask-less parent, unknown ids, an empty list) is refused with the correct
-gesture in the error. Envelopes carry `has_resolved_reply` so a reader
-never answers an old question cold.
+gesture in the error. **So is a `resolved` that cannot settle anything** — a
+post that would leave the thread neither discharged nor closed is refused
+rather than accepted and voided, because accepted-and-void is how a seat
+comes to believe it closed something it did not (two clients rendered
+"resolved" over exactly that no-op). The refusal names who may close the row
+AND the one gesture that would work for *that* sender: `answers=[ids]` where
+they have an ask of their own to discharge, `data.evidence` where they are
+the named seat on an ask-less request, and an ordinary reply where they are a
+bystander. It never fires where settling is possible — the asker, an
+operator, a `ruling`/`operational` delegate scoped to the channel, a
+`settled_by` pointer, a cited completion report from a named seat, and an
+already-settled thread are all accepted. Envelopes carry
+`has_resolved_reply` so a reader never answers an old question cold; it is
+not a verdict (a partial discharge sets it), so read `closed` for that.
 
 Stickiness follows the address: an open/blocked message with `to=[...]`
 re-serves only to its addressees (if none of them is still a member, it

@@ -127,6 +127,7 @@ from .obligations import (
     declines_of,
     discharge_state,
     pending_addressees,
+    resolved_settles_nothing,
     substantive_answers_of,
 )
 from .presence import PresenceTracker
@@ -1547,6 +1548,61 @@ class HubService:
                 )
         return answered
 
+    def _resolved_settles_nothing_refusal(self, parent: Message, sender: str,
+                                          replies: list[Message]) -> str:
+        """The teaching half of the no-op `resolved` refusal: who may close
+        this row, and the ONE gesture that would work for THIS sender.
+
+        Three shapes, and they are mutually exclusive by construction:
+
+        1. the sender has a pending ask they may discharge → `answers[]` (the
+           gate never sees a message that already carries one);
+        2. the sender is a seat the asker NAMED on an ask-less request → a
+           cited `resolved` is their door (`d6b63d4`), so the only thing
+           missing is `data.evidence`;
+        3. neither → a bystander, whose correct move is an ordinary reply.
+
+        Case 2 is why this is computed rather than written once: an
+        evidence recipe handed to case 1 or case 3 would be refused a second
+        time, and a reader who follows a refusal into another refusal stops
+        believing the next one."""
+        row = f"{parent.channel}#{parent.seq}"
+        who = (f"only {parent.sender} (who asked), an operator, or a delegate "
+               "holding ruling/operational scoped to this channel may close "
+               f"{row}")
+        mine = [str(a["id"]) for a in asks_of(parent)
+                if str(a["id"]) in set(self._discharge(parent, replies).pending)
+                and (not (a.get("to"))
+                     or sender in {str(x) for x in (a.get("to") or [])})]
+        if mine:
+            ids = ", ".join(f'"{a}"' for a in mine)
+            return (f"your `resolved` on {row} would settle nothing as it "
+                    f"stands — {who}. But {parent.sender} left "
+                    f"{'an ask' if len(mine) == 1 else 'asks'} open for you: "
+                    f"add answers=[{ids}] (or declines=[{ids}] to refuse "
+                    "them on the record) and the same `resolved` is accepted "
+                    "and discharges them.")
+        if sender in (set(parent.to) | ask_addressees(parent)):
+            return (f"your `resolved` on {row} would settle nothing as it "
+                    f"stands — {who}. But {parent.sender} NAMED you, so a "
+                    "`resolved` from you CAN settle it — as a completion "
+                    "report that points at what it delivered. Add "
+                    "data.evidence=[{kind, ref}]: a store row (kind 'store', "
+                    "e.g. your decision:<slug>), a channel file ('fs', "
+                    "'path@version'), an uploaded blob ('blob', sha256), or "
+                    "an outside artifact ('external', with "
+                    "sha256+size_bytes). If you are ANSWERING rather than "
+                    "reporting a delivery, post an ordinary reply instead — "
+                    "that is a complete and correct turn.")
+        return (f"your `resolved` on {row} would settle nothing — {who}, and "
+                "you are none of those. Post an ordinary reply instead: it is "
+                f"just as visible, and it obliges {parent.sender} to read it "
+                "and close their own question. If they have gone quiet, ask "
+                "an operator. What does not work is this — a bystander's "
+                "`resolved` closes nothing and discharges nothing, so the row "
+                f"keeps escalating against whoever {parent.sender} is waiting "
+                "on.")
+
     #: Batched consumption (0140/3). The at-test fleet paid an O(n²) ceremony
     #: tax: the obligation model demands an on-the-record consumption per
     #: thread, so with 8 seats one seat posted TEN identical "adopted and
@@ -2019,6 +2075,63 @@ class HubService:
                                        "align BEFORE implementation, and "
                                        "the report points at what was "
                                        "agreed.")
+        if (payload.status == Status.resolved and payload.reply_to
+                and "settled_by" not in data and not data.get("answers")
+                and not data.get("consumes")):
+            # A `resolved` THAT CAN SETTLE NOTHING IS REFUSED, WITH THE
+            # GESTURE THAT WORKS (2026-08-23). The hub refuses an `answers[]`
+            # that discharges nothing and teaches the correct move; it
+            # ACCEPTED IN SILENCE the same shape one field over — a
+            # bystander's bare `resolved`, which closes nothing, discharges
+            # nothing, and leaves the thread open and escalating. Same shape,
+            # opposite treatment, chosen by nobody.
+            #
+            # The cost is not the wasted post: it is a FALSE ASSERTION in the
+            # shared record. agora-wui's console printed "Marked #N
+            # resolved." on exactly this no-op, and both clients derived a
+            # `resolve` affordance from the status word alone because the
+            # hub's silence read as permission. Two clients that share no
+            # code shipped the identical defect (agora-tui `4a575a3`,
+            # agora-wui `claim:resolve-verb-derived-from-tree-position`) —
+            # what "derive the affordance from the message" produces when the
+            # precondition lives somewhere else. A client gate over a hub
+            # that accepts is advisory; this is what makes it load-bearing.
+            #
+            # THE REFUSAL NAMES WHO MAY CLOSE, AND THE GESTURE THAT WORKS ON
+            # THIS ROW — never a bare no, and never a gesture that would be
+            # refused too. A bare refusal on a control the reader believes in
+            # produces a bug report, not a correction (agora-wui,
+            # thread-shape-and-panels#29), and a refusal naming the WRONG exit
+            # is worse: it sends a correct reader round a second loop. So the
+            # recipe is computed per row — `answers[]` where the sender has an
+            # ask to discharge, `evidence` where they are the named seat on an
+            # ask-less request, and neither where they are a bystander.
+            #
+            # `settled_by` is deliberately NOT offered. Since the 2026-08-22
+            # ruling it is refused for everyone this gate can reach: the
+            # asker, an operator and a scoped ruling delegate are exempt
+            # above, and a bystander's pointer is a 403. Naming it here would
+            # be exactly the wrong-exit loop.
+            #
+            # Fields that exempt: `settled_by` is authorized above;
+            # `answers`/`consumes` are policed by their own validators and are
+            # by construction not no-ops.
+            parent = self.db.get_message(payload.reply_to)
+            if (parent is not None and parent.channel == channel
+                    and parent.status in (Status.open, Status.blocked)
+                    and parent.sender != sender
+                    and sender not in self.operator_ids()
+                    and sender not in self.ruling_delegate_ids(channel)):
+                replies = self.db.replies_to(parent.id)
+                prospective = Message(id="", channel=channel, seq=0,
+                                      sender=sender, status=Status.resolved,
+                                      to=list(payload.to or []),
+                                      data=dict(data),
+                                      reply_to=payload.reply_to)
+                if resolved_settles_nothing(parent, replies, prospective,
+                                            self._discharge):
+                    raise HubError(400, self._resolved_settles_nothing_refusal(
+                        parent, sender, replies))
         if payload.signature is not None:
             # Reserved authorship token: opaque, stored VERBATIM, not yet
             # verified. Consumers may read it; the hub attaches no trust.

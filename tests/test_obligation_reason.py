@@ -331,10 +331,18 @@ def test_the_2026_08_11_lesson_survives_the_new_door():
     make_channel(client, alice, "room", bob)
     ref = _store_file(client, bob, "room", "proof.md")
 
-    # 1. `resolved` with NO evidence: a promise wearing a verb.
+    # 1. `resolved` with NO evidence: a promise wearing a verb. Until
+    #    2026-08-23 it was ACCEPTED and silently void — the row stayed and
+    #    escalated against bob, and nothing told him why. It is now refused
+    #    at the door, and because bob is the seat alice NAMED, the refusal
+    #    hands him his own door rather than a bare no.
     a = post(client, alice, body="job a", title="a", status="blocked", to=["bob"])
-    post(client, bob, body="all done, trust me", title="re", status="resolved",
-         reply_to=a["id"])
+    void = client.post("/channels/room/messages", headers=bob,
+                       json={"body": "all done, trust me", "title": "re",
+                             "status": "resolved", "reply_to": a["id"]})
+    assert void.status_code == 400
+    assert "NAMED you" in void.json()["detail"]
+    assert "data.evidence" in void.json()["detail"]
     assert a["seq"] in {r["seq"] for r in rows_for(client, bob)}
 
     # 2. Evidence but NOT `resolved`: still in flight.
@@ -352,7 +360,13 @@ def test_the_2026_08_11_lesson_survives_the_new_door():
 def test_a_bystanders_cited_resolved_does_not_clear_the_named_seats_row():
     """The door is the ADDRESSEE's. A seat the asker never named cannot
     report completion on their behalf — that is the 2026-08-04 bystander
-    lesson, which this must not undo."""
+    lesson, which this must not undo.
+
+    Since 2026-08-23 carol does not merely fail to clear the row: she is
+    refused, because her `resolved` settles nothing. Note what the refusal
+    must NOT say to her — she already cited evidence, so an "add
+    data.evidence" recipe would send a correct reader round a second loop.
+    The recipe is computed per row, and hers is the bystander one."""
     client = make_client()
     alice, bob = register(client, "alice"), register(client, "bob")
     carol = register(client, "carol")
@@ -361,7 +375,207 @@ def test_a_bystanders_cited_resolved_does_not_clear_the_named_seats_row():
     job = post(client, alice, body="bob's job", title="job", status="blocked",
                to=["bob"])
     ref = _store_file(client, carol, "room", "carol.md")
-    post(client, carol, body="I did it", title="re", status="resolved",
-         reply_to=job["id"], data={"evidence": [{"kind": "fs", "ref": ref}]})
+    refused = client.post("/channels/room/messages", headers=carol,
+                          json={"body": "I did it", "title": "re",
+                                "status": "resolved", "reply_to": job["id"],
+                                "data": {"evidence": [{"kind": "fs",
+                                                       "ref": ref}]}})
+    assert refused.status_code == 400
+    assert "data.evidence" not in refused.json()["detail"], \
+        "told a seat that already cited evidence to add evidence"
+    assert "ordinary reply" in refused.json()["detail"]
 
     assert job["seq"] in {r["seq"] for r in rows_for(client, bob)}
+
+
+# -- a `resolved` that can settle nothing is refused (2026-08-23) -----------
+#
+# The hub refuses an `answers[]` that discharges nothing WITH the correct
+# gesture — four field incidents in one day bought that rule — and accepted
+# in silence the same shape one field over. agora-wui's console printed
+# "Marked #N resolved." on exactly that no-op; two clients that share no code
+# then derived a `resolve` affordance from the status word alone, because the
+# hub's silence read as permission (agora-tui `4a575a3`, agora-wui `e35b53e`).
+#
+# The agreed constraints (thread-shape-and-panels#29/#30) are what these
+# tests pin: (1) the refusal NAMES who may close, never a bare no; (2) it
+# fires ONLY where settling is provably impossible.
+
+def _grant(client: TestClient, agent_id: str, powers: list[str],
+           scope: str = "*") -> None:
+    r = client.put("/admin/delegation",
+                   json={"agent_id": agent_id, "powers": powers,
+                         "scope": scope},
+                   headers={"Authorization": f"Bearer {ADMIN_KEY}"})
+    assert r.status_code == 200, r.text
+    client.app.state.service._delegations_cache_at = 0.0
+
+
+def _resolve(client: TestClient, headers: dict, parent_id: str, **data):
+    return client.post("/channels/room/messages", headers=headers,
+                       json={"body": "closing", "status": "resolved",
+                             "reply_to": parent_id, **data})
+
+
+def test_a_bystanders_bare_resolved_is_refused_and_named():
+    """(a) The core case, and constraint (1): the refusal must NAME who may
+    close the row. A bare no on a control the reader believes in produces a
+    bug report, not a correction."""
+    client = make_client()
+    alice, bob = register(client, "alice"), register(client, "bob")
+    carol = register(client, "carol")
+    make_channel(client, alice, "room", bob, carol)
+    # Addressed to bob, so carol is a true bystander: no ask of her own to
+    # discharge and no completion report she is entitled to make.
+    job = post(client, alice, body="bob's job", title="job", status="blocked",
+               to=["bob"])
+
+    r = _resolve(client, carol, job["id"])
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert "alice" in detail, "constraint (1): the refusal must name who may close"
+    assert "ruling/operational" in detail
+    assert "ordinary reply" in detail
+    # ...and the row is untouched: nothing was posted.
+    assert job["seq"] in {x["seq"] for x in rows_for(client, bob)}
+
+
+def test_the_author_an_operator_and_a_scoped_ruling_delegate_are_all_accepted():
+    """(b)(c)(d)(e) Constraint (2): it fires ONLY where settling is provably
+    impossible. Four seats CAN settle, and each must still be accepted —
+    including the `operational` half of the pair, which my own restatement of
+    this rule narrowed to `ruling` twice in one evening."""
+    client = make_client()
+    alice = register(client, "alice")
+    op = register(client, "op", operator=True)
+    ruler, operational = register(client, "ruler"), register(client, "ops")
+    make_channel(client, alice, "room", op, ruler, operational)
+    _grant(client, "ruler", ["ruling"], scope="room")
+    _grant(client, "ops", ["operational"], scope="room")
+
+    for seat, who in ((alice, "the author"), (op, "an operator"),
+                      (ruler, "a ruling delegate"),
+                      (operational, "an operational delegate")):
+        q = post(client, alice, body="q", title="q", status="open",
+                 asks=[{"id": "1", "text": "a?"}])
+        r = _resolve(client, seat, q["id"])
+        assert r.status_code == 200, f"{who} was refused: {r.text}"
+
+
+def test_a_ruling_delegate_scoped_ELSEWHERE_is_refused():
+    """The falsification for (d)/(e): scope is load-bearing. Delete the
+    `scope` check in `ruling_delegate_ids` and this goes green while a grant
+    over another room silently closes threads here."""
+    client = make_client()
+    alice, ruler = register(client, "alice"), register(client, "ruler")
+    make_channel(client, alice, "room", ruler)
+    make_channel(client, alice, "elsewhere", ruler)
+    _grant(client, "ruler", ["ruling"], scope="elsewhere")
+    q = post(client, alice, body="q", title="q", status="open",
+             asks=[{"id": "1", "text": "a?"}])
+    assert _resolve(client, ruler, q["id"]).status_code == 400
+
+
+def test_a_resolved_carrying_settled_by_is_never_touched_by_this_gate():
+    """(f) The audited supersession path is authorized by its own rule, and
+    this gate must not second-guess it. The asker's `settled_by` close is the
+    one that must keep working."""
+    client = make_client()
+    alice, bob = register(client, "alice"), register(client, "bob")
+    make_channel(client, alice, "room", bob)
+    q = post(client, alice, body="q", title="q", status="open",
+             asks=[{"id": "1", "text": "a?"}])
+    elsewhere = post(client, bob, body="the ruling", title="ruling")
+    r = _resolve(client, alice, q["id"],
+                 data={"settled_by": elsewhere["id"]})
+    assert r.status_code == 200, r.text
+
+
+def test_the_d6b63d4_shaped_resolved_is_NOT_refused():
+    """(g) THE ORDERING TEST, asked for by agora-wui (#30) before either half
+    was serving, and this is why it exists.
+
+    `d6b63d4` — a named addressee's CITED completion report discharges an
+    ask-less addressed peer request — and this refusal were both committed
+    and unserved on the same evening, so they land in the same restart. A
+    refusal written as "refuse unless it CLOSES" would reject precisely the
+    discharge `d6b63d4` was written to create, and nothing would have warned
+    us: the conflict arrives already live.
+
+    THE FALSIFICATION, and I checked it rather than asserting it. Dropping
+    the `discharged` half of the predicate does NOT turn this red: both
+    branches of `discharge_state` return `closed = discharged or
+    closed_by_resolve`, so `closed` already covers the `d6b63d4` exit. What
+    DOES turn it red is the mistake the test was written against — replacing
+    the delta with an allow-list of today's authorized senders. Verified by
+    doing it: this and `..._named_seat_that_DELIVERS_...` both fail, and
+    nothing else does."""
+    client = make_client()
+    alice, bob = register(client, "alice"), register(client, "bob")
+    make_channel(client, alice, "room", bob)
+    job = post(client, alice, body="bob's job", title="job", status="blocked",
+               to=["bob"])
+    ref = _store_file(client, bob, "room", "delivery.md")
+
+    r = _resolve(client, bob, job["id"],
+                 data={"evidence": [{"kind": "fs", "ref": ref}]})
+    assert r.status_code == 200, r.text
+    # ...and it really did settle it — the row is gone, which is the whole
+    # point of not refusing it.
+    assert job["seq"] not in {x["seq"] for x in rows_for(client, bob)}
+
+
+def test_an_already_closed_thread_is_not_refused():
+    """Constraint (2) at its other edge: on a CLOSED thread settling is not
+    impossible, it already happened. A late `resolved` there is ceremony, not
+    a false assertion, and refusing it would be this gate overreaching.
+
+    Falsification: the allow-list version (see the `d6b63d4` test) refuses
+    bob here, so this goes red with it. What does NOT falsify it is deleting
+    an explicit already-closed guard — I wrote one, deleted it, and nothing
+    went red, because `closed` is monotone in the reply list. The guard is
+    gone; this test is what keeps the behaviour."""
+    client = make_client()
+    alice, bob = register(client, "alice"), register(client, "bob")
+    make_channel(client, alice, "room", bob)
+    q = post(client, alice, body="q", title="q", status="open",
+             asks=[{"id": "1", "text": "a?"}])
+    post(client, alice, body="closing my own", status="resolved",
+         reply_to=q["id"])
+    assert _resolve(client, bob, q["id"]).status_code == 200
+
+
+def test_the_refusal_hands_each_seat_the_gesture_that_would_actually_work():
+    """Constraint (1) done properly. A refusal naming the WRONG exit is worse
+    than a bare one: it sends a correct reader round a second loop, and the
+    second refusal is the one they stop believing.
+
+    Three senders, three recipes, and each assertion falsifies the other two:
+    collapse `_resolved_settles_nothing_refusal` to any single message and at
+    least two of these go red."""
+    client = make_client()
+    alice, bob = register(client, "alice"), register(client, "bob")
+    carol = register(client, "carol")
+    make_channel(client, alice, "room", bob, carol)
+
+    # 1. A seat with a pending ask of its own: the exit is answers[].
+    q = post(client, alice, body="q", title="q", status="open",
+             asks=[{"id": "7", "text": "a?", "to": ["bob"]}])
+    d = _resolve(client, bob, q["id"]).json()["detail"]
+    assert 'answers=["7"]' in d and 'declines=["7"]' in d
+    assert "data.evidence" not in d, "an ask needs an answer, not a citation"
+
+    # 2. The NAMED seat on an ask-less request: the exit is evidence.
+    job = post(client, alice, body="bob's job", title="job", status="blocked",
+               to=["bob"])
+    d = _resolve(client, bob, job["id"]).json()["detail"]
+    assert "NAMED you" in d and "data.evidence" in d
+    assert "answers=[" not in d, "there is no ask to answer here"
+
+    # 3. A true bystander: neither recipe would work, and offering one would
+    #    be the second-loop failure. `settled_by` is not offered either — it
+    #    is a 403 for exactly this seat since the 2026-08-22 ruling.
+    d = _resolve(client, carol, job["id"]).json()["detail"]
+    assert "ordinary reply" in d
+    assert "data.evidence" not in d and "answers=[" not in d
+    assert "settled_by" not in d, "offered an exit that is refused with a 403"
