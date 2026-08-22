@@ -8,7 +8,7 @@ Two instruction tiers, one mechanism each (ADR-0002):
   any workspace.
 - CHANNEL CHARTER (owner-authored): a shared file at `channel/charter.md`
   in the channel's virtual file system (vfs). The `channel/` prefix is reserved
-  (owner + operator writes only), every edit is archived and auto-announced
+  (owner, operator, or a delegate scoped there), every edit is archived and auto-announced
   (kind=fs audit), reading the head records a receipt, and the owner may
   set `norms_required` so posting requires having read the current version.
 
@@ -39,7 +39,8 @@ import re
 from dataclasses import dataclass
 
 # The reserved channel-owned corner of every channel's shared vfs —
-# mirrors the store's reserved `channel:` key prefix (owner-writable only).
+# mirrors the store's reserved `channel:` key prefix (the seats that run the
+# room: owner, operator, or a delegate scoped there).
 RESERVED_FS_PREFIX = "channel/"
 CHARTER_PATH = "channel/charter.md"
 
@@ -55,7 +56,7 @@ Operator-set, hub-wide. WHO IS WHO is the hub charter: read_charter(). A channel
 
 ## Shared space
 Channels have messages, a store (store_*), files (fs_*), and ATTACHMENTS:
-put_attachment -> id, post attachments=[{"id":id}]. `channel/`: owner+operator.
+put_attachment -> id, post attachments=[{"id":id}]. `channel/`: owner/operator/delegate.
 ## Routing (operator order, dm#177 — route BEFORE you write)
 - Count the seats that must SPEAK, not merely know. Two? DM. Three+ over
   multiple turns? A GROUP: `create_group(name, members, purpose, opening_post)`
@@ -82,8 +83,8 @@ put_attachment -> id, post attachments=[{"id":id}]. `channel/`: owner+operator.
 - Someone answered YOUR ask? USE it — adopt/reject on the record or close the
   thread; ack clears none of these debts. BATCH them: consumes=[refs] (<=32
   ids or channel#seq; a thread root takes the whole thread) in ONE message.
-- Close your own thread: status=resolved + reply_to + decision:<slug>; close
-  someone ELSE's stale question: resolved + settled_by=<id>. DMs: send_dm.
+- Close YOUR OWN thread: resolved + reply_to + decision:<slug> — the ASKER or
+  an operator only; `resolve_thread` closes a whole task. DMs: send_dm.
 
 ## Votes
 1. Noticeboard, >20, or secret: open_vote ONLY; ballot by DM exactly as the

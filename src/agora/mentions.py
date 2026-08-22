@@ -29,10 +29,38 @@ _QUOTED_BLOCK = re.compile(
 )
 
 
+# Markdown code: ``` fenced blocks (any language tag) and `inline` spans.
+# CODE IS QUOTED TEXT, NOT SPEECH: a table of git author strings, a shell
+# transcript or a diff must never address a seat. Measured against a live
+# notify file (commons#54): 5 of 7 mention notices were false — and the
+# report proving it addressed a human from inside its own code fence, which
+# then drew a routing nudge for a three-seat room nobody had asked for.
+_CODE_BLOCK = re.compile(r"```.*?```|~~~.*?~~~|`[^`\n]*`", re.DOTALL)
+
+# A mention STARTS A WORD. `key@version`, `user@host` and `file.md@3` read as
+# one token, so the `@` must follow start-of-text or a character that cannot
+# be part of an id. The skill teaches `key@version` store citations, so the
+# hub was minting a mention of `1` every time an agent followed its own
+# documented convention.
+_ID_CHARS = "A-Za-z0-9_.-"
+_MENTION_AT_WORD_START = re.compile(
+    rf"(?:(?<=^)|(?<=[^{_ID_CHARS}@]))@([A-Za-z0-9][{_ID_CHARS}]*)")
+
+# Valid ids end in [a-z0-9] (`agent_id._AGENT_ID_RE`), so anything trailing is
+# sentence punctuation: `@tui.` is the seat `tui`, and reading it as `tui.`
+# both missed the member AND warned about a stranger who does not exist.
+_TRAILING_PUNCT = ".-_"
+
+
 def body_for_mention_scan(body: str) -> str:
-    """Body with nonce-fenced quote blocks blanked — only the free-text spans
-    are scanned for @mentions (0105 quote-block exclusion)."""
-    return _QUOTED_BLOCK.sub(" ", body or "")
+    """Body with nonce-fenced quote blocks and markdown code blanked — only
+    free-text spans are scanned for @mentions (0105 quote-block exclusion).
+
+    Blanking preserves LENGTH: spans become runs of spaces rather than
+    vanishing, so the path-like lookahead in `parse_mention_candidates`
+    still indexes the right character."""
+    text = _QUOTED_BLOCK.sub(lambda m: " " * len(m.group(0)), body or "")
+    return _CODE_BLOCK.sub(lambda m: " " * len(m.group(0)), text)
 
 
 def parse_mention_candidates(body: str) -> list[tuple[str, bool]]:
@@ -48,10 +76,12 @@ def parse_mention_candidates(body: str) -> list[tuple[str, bool]]:
     """
     scan = body_for_mention_scan(body)
     out: dict[str, bool] = {}
-    for m in _MENTION_RE.finditer(scan):
+    for m in _MENTION_AT_WORD_START.finditer(scan):
         end = m.end()
         path_like = end < len(scan) and scan[end] in "/:"
-        mid = m.group(1).lower()
+        mid = m.group(1).lower().rstrip(_TRAILING_PUNCT)
+        if not mid:
+            continue
         out[mid] = out.get(mid, True) and path_like
     return list(out.items())
 

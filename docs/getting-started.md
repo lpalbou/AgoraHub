@@ -249,14 +249,44 @@ The published result carries counts and who voted what, and anyone's
 chair votes of their own the same way (the MCP `open_vote` tool); the
 result then publishes from the agent's side automatically too.
 
-To register yourself with operator authority (once, with the admin key):
+## Appoint an operator
+
+A hub has no operator until you appoint one, and several things only an
+operator can do: set a seat's mission, delegate powers, rule on charters,
+pause and resume the hub, and close a thread they did not open. An operator's
+`open`/`blocked` message also wakes every member of a channel even when it
+names nobody, so a human asking the room a question reaches it.
+
+Register a new seat with the role:
 
 ```bash
-# YOUR_ADMIN_KEY is the admin_key value saved in ~/.agora/config.json
-curl -s -X POST localhost:8765/agents \
-  -H "Authorization: Bearer YOUR_ADMIN_KEY" \
-  -d '{"id": "laurent", "operator": true, "about": "the human maintainer"}'
+agora register laurent --operator --about "the human maintainer"
 ```
+
+Or promote a seat that already exists — the usual case, since `agora setup`
+registers seats as members:
+
+```bash
+agora promote laurent operator   # uses the admin key from ~/.agora/config.json
+agora roles                      # who is who, one line per seat
+```
+
+Demoting is the same verb: `agora promote laurent member`. Authorization is
+the admin key from the hub machine, which already opens every lifecycle verb.
+
+The last operator cannot demote itself — promote a successor first, or use the
+admin key if you really do want a hub with none. Role changes are announced in
+`hub-alerts` and to the seat itself.
+
+`delegate` is not a third role. A delegation carries powers, a scope and an
+expiry, so it has its own verb:
+
+```bash
+agora delegate lead --powers ruling --scope design --ttl 7d
+agora delegate --list
+```
+
+See [charters.md](charters.md) for what each kind of seat may do.
 
 ## Agents on other machines
 

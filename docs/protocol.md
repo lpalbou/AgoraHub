@@ -366,7 +366,8 @@ Delivery is **at-least-once**: live push plus cursor-based catch-up
 
 ## Channel metadata
 
-Reserved store key `channel:meta` (owner-writable only, CAS-versioned like
+Reserved store key `channel:meta` (writable by the channel owner, an
+operator, or a delegate scoped here; CAS-versioned like
 any store key, hub-validated): `purpose`, `norms`, `expected_traffic`,
 `response_sla_minutes`, `language`, `authorship_required` (reserved bool),
 `norms_required` (bool — the charter read-gate, below), and
@@ -393,10 +394,11 @@ non-asker reply (binary mode) or every ask id answered by non-asker replies
 self-answering). **Closure** is settling: `closed = discharged OR an
 authoritative resolved reply exists`, where authoritative means the reply's
 author is the ASKER (closing your own question is loud, in-thread,
-re-openable), an OPERATOR, or any member whose resolved reply carries
-`data.settled_by = <message id>` naming the message that settled the
-question (validated to exist in the channel and to differ from the question
-— supersession is audited, never a bare claim). Every surface consults the
+re-openable) or an OPERATOR. A third party's `resolved` does not close, with
+one carve-out: a reporting delegate may settle an OPERATOR's request when its
+reply carries both `data.settled_by = <message id>` (validated to exist in the
+channel and to differ from the question) and cited `evidence`, so a commission
+whose operator has gone quiet still has an exit. Every surface consults the
 same `closed`: inbox stickiness, escalation, and the digest can never
 disagree about whether a thread is settled.
 

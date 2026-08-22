@@ -199,6 +199,14 @@ async def _handle_frame(service: HubService, agent, frame: dict, queue: asyncio.
                              "detail": f"you are {service._block_phrase(hub_block)} "
                                        "from this hub"})
             return
+        # ...and ROLE is mutable now too, so the AgentInfo minted at connect
+        # goes stale the same way. A socket opened while a seat was an
+        # operator would otherwise carry operator authority — closure over
+        # any thread, lifecycle verbs — for the life of the connection,
+        # which is hours. Same one SELECT, same reason.
+        current_role = service.db.agent_is_operator(agent.id)
+        if current_role != agent.operator:
+            agent = agent.model_copy(update={"operator": current_role})
         if kind == "subscribe":
             backlog = service.subscribe(
                 agent, frame.get("channels", []), queue, frame.get("since"),

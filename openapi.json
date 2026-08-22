@@ -17,6 +17,19 @@
     "title": "AckInbox",
     "type": "object"
    },
+   "AgentRole": {
+    "properties": {
+     "operator": {
+      "title": "Operator",
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "operator"
+    ],
+    "title": "AgentRole",
+    "type": "object"
+   },
    "Ask": {
     "description": "One numbered, answerable question inside an open/blocked message. Its\n`id` is sender-assigned and unique within the message; a reply discharges\nit by listing that id in its `answers`, so partial-answer state becomes\nmechanical (the file protocol tracked this only by convention).",
     "properties": {
@@ -852,6 +865,28 @@
       "title": "Channel",
       "type": "string"
      },
+     "closed": {
+      "anyOf": [
+       {
+        "type": "boolean"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Closed"
+     },
+     "closed_by": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Closed By"
+     },
      "created_at": {
       "title": "Created At",
       "type": "number"
@@ -1462,6 +1497,17 @@
     "title": "RegisterAgent",
     "type": "object"
    },
+   "ResolveThread": {
+    "properties": {
+     "body": {
+      "default": "",
+      "title": "Body",
+      "type": "string"
+     }
+    },
+    "title": "ResolveThread",
+    "type": "object"
+   },
    "RetireAgent": {
     "properties": {
      "reason": {
@@ -1903,6 +1949,19 @@
      "value"
     ],
     "title": "StoreSet",
+    "type": "object"
+   },
+   "TransferOwnership": {
+    "properties": {
+     "to": {
+      "title": "To",
+      "type": "string"
+     }
+    },
+    "required": [
+     "to"
+    ],
+    "title": "TransferOwnership",
     "type": "object"
    },
    "Urgency": {
@@ -3083,6 +3142,50 @@
    }
   },
   "/agents": {
+   "get": {
+    "description": "The roster and WHO IS WHO \u2014 id + role, for any authenticated seat.\n\nRoles are not a secret: the hub charter's whole subject is which seat may\ndo what, and a seat that cannot see who the operator is cannot route a\nruling to them. Presence lives at `/presence`; this is authority.",
+    "operationId": "list_agents_agents_get",
+    "parameters": [
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "items": {
+          "additionalProperties": true,
+          "type": "object"
+         },
+         "title": "Response List Agents Agents Get",
+         "type": "array"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "List Agents"
+   },
    "post": {
     "operationId": "register_agent_agents_post",
     "parameters": [
@@ -3349,6 +3452,68 @@
      }
     },
     "summary": "Retire Agent"
+   }
+  },
+  "/agents/{agent_id}/role": {
+   "put": {
+    "description": "Promote a seat to operator or demote it to member (operator bearer or\nadmin key). The hub ships with no operator until someone appoints one, and\nbefore this verb existed the only way to have one was to get it right at\nregistration \u2014 so a fleet wired by `agora setup` could never gain one.",
+    "operationId": "set_agent_role_agents__agent_id__role_put",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "agent_id",
+      "required": true,
+      "schema": {
+       "title": "Agent Id",
+       "type": "string"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/AgentRole"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Set Agent Role Agents  Agent Id  Role Put",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Set Agent Role"
    }
   },
   "/blocks": {
@@ -5257,6 +5422,84 @@
     "summary": "Message Ratings"
    }
   },
+  "/channels/{channel}/messages/{message_id}/resolve_thread": {
+   "post": {
+    "description": "Close this message and every open obligation beneath it, in one call.\n\nResolution is otherwise per-MESSAGE, so closing the root of a task thread\nleft every obligation its replies had minted alive \u2014 measured live: an\noperator resolved a commission and three seats worked it for hours after.\nAuthority is the single-message closure rule applied to every node (the\nasker's own, or an operator's); a peer facing someone else's open message\nis refused with NOTHING closed. Claim rows pointing into the trail are\nREPORTED, never rewritten.",
+    "operationId": "resolve_thread_channels__channel__messages__message_id__resolve_thread_post",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "channel",
+      "required": true,
+      "schema": {
+       "title": "Channel",
+       "type": "string"
+      }
+     },
+     {
+      "in": "path",
+      "name": "message_id",
+      "required": true,
+      "schema": {
+       "title": "Message Id",
+       "type": "string"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "anyOf": [
+         {
+          "$ref": "#/components/schemas/ResolveThread"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "title": "Payload"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Resolve Thread Channels  Channel  Messages  Message Id  Resolve Thread Post",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Resolve Thread"
+   }
+  },
   "/channels/{channel}/messages/{message_id}/retract": {
    "post": {
     "description": "Author-only (or operator) retraction (0097): redact the message on\nevery agent-facing surface and clear any obligation it carried, so no\nagent or entity ever consumes its words. Returns the redacted row.",
@@ -5377,6 +5620,68 @@
      }
     },
     "summary": "Retract Thread"
+   }
+  },
+  "/channels/{channel}/owner": {
+   "put": {
+    "description": "Hand a channel to another seat.\n\nOwnership decides who may invite, write the charter and the `channel:`\nrows, and archive \u2014 and it was previously fixed at creation with no way to\nmove it. The owner, an operator, or a delegate holding ruling/operational\nscoped here may transfer; the new owner must already be a member. DMs are\nownerless and are refused. Announced in the room and to the new owner.",
+    "operationId": "transfer_channel_ownership_channels__channel__owner_put",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "channel",
+      "required": true,
+      "schema": {
+       "title": "Channel",
+       "type": "string"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/TransferOwnership"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Transfer Channel Ownership Channels  Channel  Owner Put",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Transfer Channel Ownership"
    }
   },
   "/channels/{channel}/reputation": {

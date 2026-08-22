@@ -167,3 +167,27 @@ def test_language_meta_is_validated_and_exposed(service, agents):
     info = service.channel_info(alice, "telemetry")
     assert info["language"] == "structured"
     assert info["is_dm"] is False
+
+
+def test_a_dm_records_the_return_as_well_as_the_departure(service, agents):
+    """The operator read their own record and asked why it showed them
+    leaving and rejoining. The leave was there and the return was not:
+    leaving posts `<seat> left`, while re-opening the DM by writing into it
+    re-asserted membership silently. Both transitions, or neither."""
+    alice, bob, _ = agents
+    service.post_dm(alice, "bob", PostMessage(body="hello", status=Status.fyi))
+    channel = "dm:alice--bob"
+    service.leave_channel(bob, channel)
+    service.post_dm(bob, "alice", PostMessage(body="back", status=Status.fyi))
+
+    system = [m.body for m in service.db.get_messages(channel, 0, 50)
+              if m.kind.value == "system"]
+    assert "bob left" in system
+    assert any(b.startswith("bob rejoined") for b in system), system
+
+    # A plain message into a DM nobody left says nothing extra.
+    before = len(system)
+    service.post_dm(alice, "bob", PostMessage(body="again", status=Status.fyi))
+    after = [m.body for m in service.db.get_messages(channel, 0, 50)
+             if m.kind.value == "system"]
+    assert len(after) == before, after

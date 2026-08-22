@@ -692,6 +692,17 @@ class Database:
         return AgentInfo(id=row["id"], name=row["name"], about=row["about"],
                          operator=bool(row["operator"]), created_at=row["created_at"])
 
+    def set_operator(self, agent_id: str, operator: bool) -> None:
+        """Promote or demote a seat. Registration used to be the only writer
+        of this column, which meant a fleet provisioned by `agora setup` had
+        NO operator at all and no way to mint one — the human's own seat could
+        not set a mission, and every `from-operator` carve-out in the hub was
+        unreachable code."""
+        with self._lock:
+            self._conn.execute("UPDATE agents SET operator = ? WHERE id = ?",
+                               (1 if operator else 0, agent_id))
+            self._conn.commit()
+
     def set_about(self, agent_id: str, about: str) -> None:
         with self._lock:
             self._conn.execute("UPDATE agents SET about = ? WHERE id = ?", (about, agent_id))
@@ -983,6 +994,35 @@ class Database:
                 "INSERT OR IGNORE INTO members (channel, agent_id, role, joined_at) VALUES (?,?,?,?)",
                 (channel, agent_id, role, time.time()),
             )
+            self._conn.commit()
+
+    def transfer_channel_ownership(self, channel: str, new_owner: str) -> None:
+        """Hand a room to another seat: `channels.created_by` AND the members
+        table move together.
+
+        Authority keys on `created_by` in some paths (archive, which evicts
+        every member including the owner) and on `members.role` in others
+        (invites, before this), so leaving either behind would produce a room
+        with two half-owners — one who can archive it and one who can invite
+        to it."""
+        now = time.time()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT created_by FROM channels WHERE name = ?",
+                (channel,)).fetchone()
+            if row is None:
+                return
+            self._conn.execute(
+                "UPDATE channels SET created_by = ? WHERE name = ?",
+                (new_owner, channel))
+            self._conn.execute(
+                "UPDATE members SET role = 'member' WHERE channel = ? AND role = 'owner'",
+                (channel,))
+            self._conn.execute(
+                "INSERT INTO members (channel, agent_id, role, joined_at) "
+                "VALUES (?,?,'owner',?) ON CONFLICT(channel, agent_id) "
+                "DO UPDATE SET role = 'owner'",
+                (channel, new_owner, now))
             self._conn.commit()
 
     def remove_member(self, channel: str, agent_id: str) -> None:

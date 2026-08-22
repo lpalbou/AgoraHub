@@ -165,22 +165,24 @@ def test_revoking_the_delegation_stops_the_routing(service, fleet):
 # -- no delegate: the operator gets a real, findable warning ------------------
 
 
-def test_without_a_delegate_the_operator_is_warned_in_a_real_dm(service, fleet):
-    """Fallback per the ruling. NOT the ephemeral notify-file doorbell used
-    for routing teaching — a human must be able to find this later, so it is
-    a stored DM in the hub->operator room."""
+def test_an_unaddressed_operator_message_draws_no_warning(service, fleet):
+    """Operator ruling, 2026-08-22: "a message on a channel with no @seat is
+    totally ok, it just means it's addressed to all — then each seat decides
+    if they can contribute or not."
+
+    The hub used to warn the human that such a message "creates NO obligation
+    for anyone". That was written when a room-wide open woke nobody, so the
+    request really could evaporate; since the wake rule was repaired, an open
+    naming nobody wakes every member. The room hears it, and what it obliges
+    is a read."""
     op, reader, editor, _ = fleet
     m = _post(service, op, "reply", body="rebuild the PDF", title="task",
               root_seat=editor)
-    assert m.id not in _owed_ids(service, reader)  # nobody owes it
-    dm = f"dm:hub--{op.id}" if "hub" < op.id else f"dm:{op.id}--hub"
-    warns = [x for x in service.db.get_messages(dm, 0, 50)
-             if "HUB WARNING" in (x.body or "")]
-    assert len(warns) == 1
-    assert "creates NO obligation" in warns[0].body
-    assert "reporting" in warns[0].body
-    # It is STORED (findable), unlike the ephemeral doorbell notices.
-    assert warns[0].id and not warns[0].id.startswith("notice:")
+    assert m.id not in _owed_ids(service, reader)  # still obliges no ONE seat
+    for room in (service.DARK_ALERTS_CHANNEL,
+                 f"dm:hub--{op.id}" if "hub" < op.id else f"dm:{op.id}--hub"):
+        assert not [x for x in service.db.get_messages(room, 0, 50)
+                    if "HUB WARNING" in (x.body or "")], room
 
 
 def test_no_warning_when_a_delegate_exists_or_seats_are_named(service, fleet):
@@ -388,3 +390,166 @@ def test_bystander_plain_resolved_is_not_refused(service, fleet):
     service.post_message(editor, "at-test", PostMessage(
         body="fwiw looks done", status="resolved", reply_to=task.id))
     assert task.id in _owed_ids(service, reader)
+
+
+def test_a_named_seat_can_close_an_operator_request_with_evidence(service, fleet):
+    """The missing door, reported by three seats independently (commons#70,
+    #74): an operator posts `open`, the named seat answers in-thread, and the
+    row stays and escalates against the one seat that did the work.
+
+    Every exit was shut. `answers=[...]` needs ask ids an ask-less commission
+    does not have; `settled_by` is refused on an operator's request. The
+    hub's advice was "Answer it", and answering was exactly what did not
+    clear it — so a seat that delivered looked identical to a seat that
+    ignored the human.
+
+    The 2026-08-04 lesson is kept whole: a bare "on it" still settles
+    nothing. What clears the row is a `resolved` reply CITING what was
+    delivered — the same price the reporting delegate already paid."""
+    op, reader, editor, _ = fleet
+    f = service.fs_write(editor, "at-test", "plan.md", content="the plan")
+    evidence = [{"kind": "fs", "ref": f"plan.md@{f.version}"}]
+
+    commission = service.post_message(op, "at-test", PostMessage(
+        body="write up the plan", status="open", title="plan", to=["editor"]))
+    assert commission.id in _owed_ids(service, editor)
+
+    # "on it" is engagement, not completion — the row stays.
+    service.post_message(editor, "at-test", PostMessage(
+        body="on it", status="reply", reply_to=commission.id))
+    assert commission.id in _owed_ids(service, editor)
+
+    # A cited completion report from the NAMED seat clears it.
+    service.post_message(editor, "at-test", PostMessage(
+        body="delivered", status="resolved", reply_to=commission.id,
+        data={"evidence": evidence}))
+    assert commission.id not in _owed_ids(service, editor)
+
+
+def test_only_the_named_seat_or_a_delegate_may_report_completion(service, fleet):
+    """The door is the ADDRESSEE's, not the room's, and an UNADDRESSED
+    commission still has no addressee to pay the price — so it stays the
+    operator's to close, which is the case the 2026-08-04 rule was for."""
+    op, reader, editor, _ = fleet
+    f = service.fs_write(editor, "at-test", "other.md", content="x")
+    evidence = [{"kind": "fs", "ref": f"other.md@{f.version}"}]
+
+    named = service.post_message(op, "at-test", PostMessage(
+        body="editor, do X", status="open", title="x", to=["editor"]))
+    service.post_message(reader, "at-test", PostMessage(
+        body="I did it", status="resolved", reply_to=named.id,
+        data={"evidence": evidence}))
+    assert named.id in _owed_ids(service, editor), "a bystander closed it"
+
+    unaddressed = service.post_message(op, "at-test", PostMessage(
+        body="someone look at this", status="open", title="loose"))
+    service.post_message(reader, "at-test", PostMessage(
+        body="looked", status="resolved", reply_to=unaddressed.id,
+        data={"evidence": evidence}))
+    state = service._discharge(unaddressed, service.db.replies_to(unaddressed.id))
+    assert not state.closed, "an unaddressed commission closed without the operator"
+
+
+def test_store_evidence_accepts_the_documented_key_at_version(service, fleet):
+    """Reported by agora-wui the first time anyone used the completion door
+    in anger: `fs` evidence REQUIRES `path@version`, while `store` looked its
+    ref up verbatim — so citing a store row the documented way searched for a
+    key literally named `decision:foo@1` and answered "does not exist" about a
+    row `store_get` had served the same minute. Opposite conventions, and an
+    error that sent the author hunting a missing row instead of a wrong form."""
+    op, reader, editor, _ = fleet
+    service.store_set(editor, "at-test", "decision:thing", {"what": "ruled"}, None)
+    commission = service.post_message(op, "at-test", PostMessage(
+        body="do it", status="open", title="t", to=["editor"]))
+
+    def close(ref):
+        return service.post_message(editor, "at-test", PostMessage(
+            body="delivered", status="resolved", reply_to=commission.id,
+            data={"evidence": [{"kind": "store", "ref": ref}]}))
+
+    posted = close("decision:thing@1")
+    assert posted.data["evidence"][0]["ref"] == "decision:thing"  # normalized
+    assert posted.data["evidence"][0]["verified"] is True
+    assert commission.id not in _owed_ids(service, editor)
+    close("decision:thing")                                       # bare: still fine
+
+    # A stale version is refused with the truth — the store keeps only HEAD,
+    # so v1 cannot be served back and stamping HEAD under the author's older
+    # number would misrepresent what a reader will see.
+    service.store_set(editor, "at-test", "decision:thing", {"what": "revised"}, 1)
+    with pytest.raises(HubError) as bad:
+        close("decision:thing@1")
+    assert "now at v2" in bad.value.detail
+    close("decision:thing@2")                                     # current: fine
+
+
+def test_a_named_seats_uncited_resolved_is_refused_with_the_recipe(service, fleet):
+    """THE ADDRESSEE WAS PAYING THE DELEGATE'S PRICE WITHOUT BEING TOLD IT
+    (2026-08-22). `_operator_settled` accepts a cited `resolved` from a seat
+    the operator NAMED as well as from the reporting delegate — that door is
+    the 2026-08-04 fix. The post-time gate that teaches the contract fired
+    only for delegates, so a named seat's evidence-less `resolved` was
+    accepted in silence and discharged nothing.
+
+    Live, on this hub: agora-wui posted three such replies on laurent's
+    ask-less DM opens. All three were accepted, all three stayed ANSWER-owed,
+    and the seat ran a controlled experiment to work out why. Every exit was
+    shut and none of them was named — the exact complaint the 2026-08-04
+    comment in `_message_data` records for the delegate."""
+    op, reader, editor, _ = fleet
+    commission = service.post_message(op, "at-test", PostMessage(
+        body="have a look at this", status="open", title="look", to=["editor"]))
+
+    with pytest.raises(HubError) as refused:
+        service.post_message(editor, "at-test", PostMessage(
+            body="had a look, here is what it is", status="resolved",
+            reply_to=commission.id))
+    assert "named you on at-test#" in refused.value.detail
+    assert "data.evidence" in refused.value.detail
+    # The refusal must name the OTHER legitimate exit, not just the priced
+    # one: answering a question is a complete turn, and the asker closes it.
+    assert "ordinary reply" in refused.value.detail
+
+    # That other exit is real: the plain reply posts, and it leaves the row
+    # owed — which is correct, and now discoverable rather than mysterious.
+    service.post_message(editor, "at-test", PostMessage(
+        body="had a look, here is what it is", status="reply",
+        reply_to=commission.id))
+    assert commission.id in _owed_ids(service, editor)
+
+    # And the priced exit clears it.
+    service.store_set(editor, "at-test", "decision:looked", {"what": "it is X"}, None)
+    service.post_message(editor, "at-test", PostMessage(
+        body="reported", status="resolved", reply_to=commission.id,
+        data={"evidence": [{"kind": "store", "ref": "decision:looked@1"}]}))
+    assert commission.id not in _owed_ids(service, editor)
+
+
+def test_the_named_seat_pays_the_citation_but_not_the_delegates_review_gates(
+        service, fleet):
+    """Scope of the 2026-08-22 widening. The CITATION requirement follows
+    `_operator_settled`, so it covers both seats. The adversarial-review and
+    plan-citation gates are about how a DELEGATE delivers a commission — a
+    named seat reporting its own slice must not be asked for a peer review of
+    it, or the widening would make the addressee door unusable in exactly the
+    peopled rooms it was built for."""
+    op, reader, editor, at1 = fleet
+    commission = service.post_message(op, "at-test", PostMessage(
+        body="your slice", status="open", title="slice", to=["editor"]))
+    service.store_set(editor, "at-test", "decision:my-slice", {"done": True}, None)
+    # Self-authored, no peer review, no plan row: fine for a named seat.
+    service.post_message(editor, "at-test", PostMessage(
+        body="slice delivered", status="resolved", reply_to=commission.id,
+        data={"evidence": [{"kind": "store", "ref": "decision:my-slice@1"}]}))
+    assert commission.id not in _owed_ids(service, editor)
+
+    # The delegate posting the identical report still meets the review gate.
+    _delegate(service)
+    commission2 = service.post_message(op, "at-test", PostMessage(
+        body="the whole thing", status="open", title="all", to=["reader"]))
+    service.store_set(reader, "at-test", "decision:whole", {"done": True}, None)
+    with pytest.raises(HubError) as refused:
+        service.post_message(reader, "at-test", PostMessage(
+            body="delivered", status="resolved", reply_to=commission2.id,
+            data={"evidence": [{"kind": "store", "ref": "decision:whole@1"}]}))
+    assert "uncontested delivery" in refused.value.detail

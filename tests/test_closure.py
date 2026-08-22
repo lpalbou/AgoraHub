@@ -71,7 +71,16 @@ def test_asker_resolved_reply_closes_on_all_surfaces():
                for d in digest["decided"])
 
 
-def test_third_party_resolved_needs_settled_by_pointer():
+def test_a_third_party_cannot_close_someone_elses_thread():
+    """This test used to pin the opposite: a `settled_by` pointer let ANY
+    member retire ANY thread. That door was shut in front of operator-authored
+    requests on 2026-08-06 and left open everywhere else; the operator ruled
+    on 2026-08-22 that a question belongs to whoever asked it — they know
+    whether it was answered and a bystander does not.
+
+    What a third party should do instead is in the refusal text: post the
+    pointer as an ordinary reply. It is just as visible and it obliges the
+    asker to read it and close their own question."""
     client = make_client()
     flow, memory, ruling_holder = (register(client, "flow"),
                                    register(client, "memory"),
@@ -81,20 +90,30 @@ def test_third_party_resolved_needs_settled_by_pointer():
              asks=[{"id": "1", "text": "a?"}])
     ruling = post(client, ruling_holder, body="the ruling", title="ruling")
 
-    # A stranger's bare resolved reply does NOT close (needs the audit pointer).
+    # A stranger's bare resolved reply does not close.
     post(client, memory, body="closing?", status="resolved", reply_to=q["id"])
     client.post("/inbox/ack", json={"cursors": {"room": 10_000}},
                 headers=ruling_holder)
     assert q["seq"] in inbox_seqs(client, ruling_holder)   # sticky despite ack
 
-    # An invalid pointer is refused loudly.
+    # An invalid pointer is still refused loudly, and now so is a VALID one
+    # from someone who is neither the asker nor an operator.
     bad = client.post("/channels/room/messages", headers=memory,
                       json={"body": "x", "status": "resolved", "reply_to": q["id"],
                             "data": {"settled_by": "01NOTAREALID"}})
     assert bad.status_code == 400
+    refused = client.post("/channels/room/messages", headers=memory,
+                          json={"body": "settled by the ruling",
+                                "status": "resolved", "reply_to": q["id"],
+                                "data": {"settled_by": ruling["id"]}})
+    assert refused.status_code == 403
+    assert "flow" in refused.json()["detail"]      # names who may close it
+    client.post("/inbox/ack", json={"cursors": {"room": 10_000}},
+                headers=ruling_holder)
+    assert q["seq"] in inbox_seqs(client, ruling_holder)
 
-    # With a valid pointer naming the settling message, it closes everywhere.
-    post(client, memory, body="settled by the ruling", status="resolved",
+    # The ASKER closes their own question, and it closes everywhere.
+    post(client, flow, body="settled by the ruling", status="resolved",
          reply_to=q["id"], data={"settled_by": ruling["id"]})
     client.post("/inbox/ack", json={"cursors": {"room": 10_000}},
                 headers=ruling_holder)
@@ -922,9 +941,14 @@ def test_fleet_liveness_sweep_alerts_once_then_recovers(monkeypatch):
     assert any("FLEET DARK" in m["body"] for m in msgs)
     assert any("FLEET RECOVERED" in m["body"] for m in msgs)
 
-    dm = client.get("/channels/dm:hub--op/messages", headers=op).json()
-    assert any("FLEET DARK" in m["body"] for m in dm)
-    assert any("FLEET RECOVERED" in m["body"] for m in dm)
+    # ...and NOT mirrored into the operator's DM room. A DM is a conversation
+    # the human opened; hub notices posted into it displace the thread they
+    # are holding, and a system row has no author who can retract it
+    # (operator ruling, 2026-08-22). `hub-alerts` is where the hub speaks.
+    dm = client.get("/channels/dm:hub--op/messages", headers=op)
+    rows = dm.json() if dm.status_code == 200 else []
+    assert not [m for m in rows if isinstance(m, dict)
+                and "FLEET" in (m.get("body") or "")]
 
 
 def test_fleet_liveness_snapshot_on_status(monkeypatch):
@@ -974,3 +998,184 @@ def test_retire_report_digest_rows_closes_legacy_hourly_digest_posts():
     alerts = client.get("/channels/hub-alerts/messages", headers=op).json()
     assert any(m.get("reply_to") == legacy.id for m in alerts)
     assert service._retire_report_digest_rows() == []
+
+
+def test_the_closure_tightening_does_not_reopen_history():
+    """The epoch, and why it exists. Tightening `_closes` without one reopens
+    every thread ever closed by a third-party pointer AT ONCE — each instantly
+    SLA-breached, waking the fleet on work that finished weeks ago. This repo
+    has that scar: the 2026-08-04 operator tightening reopened 132 ask-less
+    messages on 23 seats, some 19 days old, which is why four sibling epochs
+    already exist in obligations.py."""
+    from agora.hub.obligations import _closes
+    from agora.models import Kind, Message, Status
+
+    def m(sender, status="open", data=None, ts=100.0):
+        return Message(id=f"x{sender}{ts}", channel="c", seq=1, sender=sender,
+                       kind=Kind.message, status=Status(status), title="",
+                       body="b", data=data or {}, created_at=ts)
+
+    epoch = 1000.0
+    asked = m("alice")
+    pointer = {"settled_by": "01SOMEMESSAGE"}
+    ops, delegates = frozenset({"boss"}), frozenset({"lead"})
+
+    # Closed by a bystander BEFORE the rule changed: still closed, forever.
+    assert _closes(asked, m("carol", "resolved", pointer, ts=500),
+                   ops, delegates, epoch) is True
+    # The same act after the epoch: refused.
+    assert _closes(asked, m("carol", "resolved", pointer, ts=2000),
+                   ops, delegates, epoch) is False
+    # The asker and the operator are unaffected either side of it.
+    assert _closes(asked, m("alice", "resolved", ts=2000), ops, delegates, epoch)
+    assert _closes(asked, m("boss", "resolved", ts=2000), ops, delegates, epoch)
+    # The delegate keeps its door on an OPERATOR's request, with evidence,
+    # and only there (2026-08-01: something must settle a commission whose
+    # operator has gone quiet).
+    cited = {"settled_by": "01SOMEMESSAGE", "evidence": ["shipped it"]}
+    assert _closes(m("boss"), m("lead", "resolved", cited, ts=2000),
+                   ops, delegates, epoch) is True
+    assert _closes(asked, m("lead", "resolved", cited, ts=2000),
+                   ops, delegates, epoch) is False
+
+
+# -- resolving a THREAD, not one message (operator ruling, 2026-08-22) --------
+
+def test_resolving_a_thread_closes_every_obligation_beneath_it():
+    """Measured on a live hub: the operator resolved the WebOS commission at
+    04:58 and three seats worked it for hours afterwards. Resolution was
+    per-MESSAGE — `replies_to` walks direct children only — so the obligations
+    the thread had spawned were never touched."""
+    client = make_client()
+    boss = register(client, "boss", operator=True)
+    alice, bob = register(client, "alice"), register(client, "bob")
+    make_channel(client, boss, "room", alice, bob)
+
+    root = post(client, boss, body="build the thing", title="task", status="open")
+    q1 = post(client, alice, body="which parser?", status="open",
+              reply_to=root["id"], to=["bob"])
+    post(client, bob, body="and which codec?", status="open",
+         reply_to=q1["id"], to=["alice"])
+    assert client.get("/owed", headers=alice).json()["to_answer"]
+    assert client.get("/owed", headers=bob).json()["to_answer"]
+
+    out = client.post(f"/channels/room/messages/{root['id']}/resolve_thread",
+                      json={}, headers=boss)
+    assert out.status_code == 200, out.text
+    assert len(out.json()["closed"]) == 3
+    assert not client.get("/owed", headers=alice).json()["to_answer"]
+    assert not client.get("/owed", headers=bob).json()["to_answer"]
+
+
+def test_a_thread_resolve_reports_claim_rows_and_never_touches_them():
+    """The refused temptation. The hub cannot know whether work already done
+    should be thrown away, and `store_set` will not write another seat's row
+    anyway — but returning success while the claims still read `active` is
+    the same lie the operator hit from the other direction."""
+    client = make_client()
+    boss = register(client, "boss", operator=True)
+    alice = register(client, "alice")
+    make_channel(client, boss, "room", alice)
+    root = post(client, boss, body="build it", title="task", status="open")
+    client.put("/channels/room/store/claim:thing", headers=alice,
+               json={"value": {"owner": "alice", "status": "active",
+                               "source_message_id": root["id"]}})
+
+    out = client.post(f"/channels/room/messages/{root['id']}/resolve_thread",
+                      json={}, headers=boss).json()
+    assert [c["key"] for c in out["claims"]] == ["claim:thing"]
+    row = client.get("/channels/room/store/claim:thing", headers=alice).json()
+    assert row["value"]["status"] == "active", "the hub rewrote someone's claim"
+
+
+def test_a_peer_cannot_close_a_thread_holding_other_seats_questions():
+    """Authority is the single-message rule applied to every node, and the
+    refusal is all-or-nothing: a partial close reports success over a thread
+    that is still alive."""
+    client = make_client()
+    boss = register(client, "boss", operator=True)
+    alice, bob = register(client, "alice"), register(client, "bob")
+    make_channel(client, boss, "room", alice, bob)
+    root = post(client, alice, body="mine", title="mine", status="open")
+    post(client, bob, body="bob's question", status="open", reply_to=root["id"],
+         to=["alice"])
+
+    r = client.post(f"/channels/room/messages/{root['id']}/resolve_thread",
+                    json={}, headers=alice)
+    assert r.status_code == 403 and "bob" in r.json()["detail"]
+    # NOTHING closed: bob's question is still owed by alice.
+    assert client.get("/owed", headers=alice).json()["to_answer"]
+    # The operator can.
+    assert client.post(f"/channels/room/messages/{root['id']}/resolve_thread",
+                       json={}, headers=boss).status_code == 200
+
+
+def test_board_and_owed_agree_about_who_is_behind():
+    """One fact, one answer. `/owed` releases an addressee who has engaged and
+    has no pending ask naming them; `board` re-derived the same question and
+    did not, so a seat that had answered sat on the operator's board as
+    ESCALATED while `/owed` said it owed nothing — the louder surface being
+    the wrong one."""
+    client = make_client()
+    op = register(client, "op", operator=True)
+    a = register(client, "a")
+    b = register(client, "b")
+    make_channel(client, op, "room", a, b)
+
+    m = post(client, op, body="two lanes", title="mandate", status="open",
+             to=["a", "b"],
+             asks=[{"id": "1", "text": "a?", "to": ["a"]},
+                   {"id": "2", "text": "b?", "to": ["b"]}])
+    # `a` answers its own ask; `b` has not answered yet.
+    post(client, a, body="acknowledged", status="reply", reply_to=m["id"],
+         answers=["1"])
+
+    def pending(headers):
+        return {(r["channel"], r["seq"])
+                for r in client.get("/board", headers=headers).json()["pending_on_me"]}
+
+    def owed(headers):
+        return {(r["channel"], r["seq"])
+                for r in client.get("/owed", headers=headers).json()["to_answer"]}
+
+    assert owed(a) == pending(a) == set(), "a answered and is still listed"
+    # ...and the seat that has NOT answered is still on both.
+    assert ("room", m["seq"]) in owed(b)
+    assert ("room", m["seq"]) in pending(b)
+
+
+def test_a_history_row_carries_the_verdict_not_just_the_shape():
+    """agora-wui, agora-and-wui#9: a client could render "you owe this" but
+    never "this is done" — the only authoritative signal was a row's ABSENCE
+    from /owed, and a message shown from another room had to have its replies
+    fetched or say nothing.
+
+    `has_resolved_reply` is not a substitute: a bystander's `resolved` sets it
+    and closes nothing, so a client rendering "settled" from that flag states
+    something the hub did not say."""
+    client = make_client()
+    op = register(client, "op", operator=True)
+    asker, bystander = register(client, "asker"), register(client, "bystander")
+    make_channel(client, asker, "room", op, bystander)
+
+    q = post(client, asker, body="q", title="q", status="open",
+             asks=[{"id": "1", "text": "a?", "to": ["bystander"]}])
+
+    def row():
+        return next(m for m in
+                    client.get("/channels/room/messages", headers=asker).json()
+                    if m["id"] == q["id"])
+
+    assert row()["closed"] is False and row()["closed_by"] is None
+
+    # A bystander's resolved reply carries no authority over someone else's
+    # ask: the flag goes true, the verdict does not.
+    post(client, bystander, body="calling it done", status="resolved",
+         reply_to=q["id"])
+    assert row()["has_resolved_reply"] is True
+    assert row()["closed"] is False, "a bystander closed another seat's ask"
+
+    # The operator's word does close it, and the row names who.
+    post(client, op, body="ruled", status="resolved", reply_to=q["id"])
+    assert row()["closed"] is True
+    assert row()["closed_by"] == "op"

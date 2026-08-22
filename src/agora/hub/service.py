@@ -107,6 +107,7 @@ from .attention import DEFAULT_RESPONSE_SLA_MINUTES, AttentionPolicy, SlidingWin
 from .notify import FanOut, LoopBinder, Notifier
 from .obligations import (
     DischargeState,
+    _closes,
     ask_addressees,
     asks_of,
     closed_authoritatively,
@@ -399,6 +400,15 @@ class HubService:
         # binary rule must stay settled.
         self._peer_addressed_rule_epoch = float(self.db.meta_set_default(
             "peer_addressed_rule_epoch", str(time.time())))
+        # ...and for the 2026-08-22 closure ruling: only the asker, an
+        # operator, or a reporting delegate citing evidence on an operator's
+        # request may close a thread — a bystander's `settled_by` pointer no
+        # longer carries authority. Its own epoch, for the same reason as
+        # every sibling above: threads already closed under the old rule stay
+        # closed. Without it, tightening reopens each one AT ONCE, instantly
+        # SLA-breached, and the fleet wakes on work that finished weeks ago.
+        self._closure_rule_epoch = float(self.db.meta_set_default(
+            "closure_rule_epoch", str(time.time())))
         # Operator-key burst tripwire (0104, the Jul-14 impersonation): on a
         # shared machine any local process can read the operator's cached
         # key and speak as the human — unpreventable hub-side (the key IS
@@ -474,9 +484,11 @@ class HubService:
 
     def operator_ids(self) -> frozenset[str]:
         """Operator agent ids (closure authority, ADR-0003). Cached: it is
-        consulted per envelope; registration is the only mutation path. The
-        generation check means a racing registration can never freeze a
-        stale set into the cache."""
+        consulted per envelope. TWO writers bust it — `register_agent` and
+        `set_agent_role` — and the generation check means a racing write can
+        never freeze a stale set into the cache. (It said "registration is
+        the only mutation path" until roles became changeable; a promotion
+        the cache never saw looks exactly like the ruling not working.)"""
         cached = self._operators
         if cached is not None:
             return cached
@@ -485,6 +497,107 @@ class HubService:
         if gen == self._op_gen:
             self._operators = ids
         return ids
+
+    def set_agent_role(self, agent: AgentInfo, target_id: str,
+                       operator: bool) -> dict[str, Any]:
+        """Promote a seat to operator, or demote it back to member.
+
+        Registration was the only writer of this column, so a fleet wired by
+        `agora setup` had no operator and no way to mint one: the human's own
+        seat could not set a mission, and the `from-operator` carve-outs in
+        `qualifies`, the stop hook and the SDK were unreachable code on every
+        CLI-provisioned hub.
+
+        WHO MAY CALL IT: an operator, or the admin key (`operator_or_admin`) —
+        the same gate as every other lifecycle verb. Never a seat on itself:
+        self-promotion from a member key would make the whole role meaningless.
+
+        THE LAST OPERATOR MAY NOT DEMOTE THEMSELVES. Operator-hood is the only
+        identity-bearing authority; with zero operators the hub keeps working
+        but every operator verb is reachable only from the machine holding the
+        admin key. That is a recoverable state, not a nice one, and it should
+        be entered on purpose (demote via the admin key) rather than by a seat
+        tidying up its own roster."""
+        # `operator_or_admin` AUTHENTICATES; it does not authorize. It hands
+        # back whichever seat's key was presented (the admin key arrives as a
+        # synthetic `operator` principal), so every lifecycle verb enforces
+        # operator-hood itself — `retire_agent` does the same three lines
+        # above. Without this a plain member could demote the operator, which
+        # is exactly what happened the first time this verb was tested.
+        if not agent.operator:
+            raise HubError(403, "changing a seat's role is an operator act")
+        if not self.db.agent_exists(target_id):
+            raise HubError(404, f"no such agent '{target_id}'")
+        if self.db.agent_retirement(target_id) is not None:
+            raise HubError(409, f"agent '{target_id}' is retired")
+        was = self.db.agent_is_operator(target_id)
+        if operator and agent.id == target_id and not was:
+            # Unreachable while the gate above stands (a non-operator never
+            # gets here), and stated anyway: the day someone loosens that
+            # gate, self-promotion is the hole it opens.
+            raise HubError(403, "a seat cannot promote itself")
+        if not operator:
+            remaining = set(self.db.list_operator_ids()) - {target_id}
+            if was and not remaining and agent.id == target_id:
+                raise HubError(
+                    409,
+                    "you are the last operator: demoting yourself would leave "
+                    "the hub with none, and only the admin key could appoint "
+                    "another. Promote a successor first, or do it with the "
+                    "admin key if that is really what you want.")
+        self.db.set_operator(target_id, operator)
+        # BUST THE CLOSURE-AUTHORITY CACHE. `operator_ids()` memoizes on the
+        # assumption that registration is the only mutation; without this a
+        # promoted seat would keep being read as a member for the life of the
+        # process — and the bug would look like "the ruling did not work".
+        self._op_gen += 1
+        self._operators = None
+        if was == operator:
+            return {"agent": target_id, "operator": operator, "changed": False,
+                    "by": agent.id}
+        try:
+            self._ensure_alerts_channel()
+            if operator:
+                # An operator reads hub-alerts by construction (the room's
+                # whole membership is operators + reporting delegates), so a
+                # promotion that does not seat them there is a promotion in
+                # name only.
+                if not self.db.is_member(self.DARK_ALERTS_CHANNEL, target_id):
+                    self.db.add_member(self.DARK_ALERTS_CHANNEL, target_id)
+            elif target_id not in self.reporting_delegate_ids():
+                # ...and a demotion that leaves them there is a disclosure
+                # leak, not an oversight: that room is private precisely
+                # because its alerts name which seats are behind on what. A
+                # reporting delegate keeps its seat on its own authority.
+                self.db.remove_member(self.DARK_ALERTS_CHANNEL, target_id)
+        except HubError:
+            pass
+        # ANNOUNCE ON BOTH EDGES, like a delegation. Operator-hood is a
+        # strictly larger grant than any delegation, and `grant_delegation`
+        # has told both the room and the holder since 2026-08-06 ("a power
+        # the holder cannot discover is not a power"). A role that changes
+        # in silence is worse: the seat keeps acting under authority it no
+        # longer has, and the room cannot tell who may rule on what.
+        role = "an operator" if operator else "a member"
+        self._post_system(
+            self.DARK_ALERTS_CHANNEL,
+            f"ROLE CHANGED: {target_id} is now {role} — by {agent.id}.",
+            status=Status.fyi)
+        self._post_system(
+            self.DARK_ALERTS_CHANNEL,
+            (f"YOU ARE NOW AN OPERATOR ({target_id}), granted by {agent.id}. "
+             "You may set missions, delegate, rule on charters, pause and "
+             "resume the hub, and close any thread. Your open/blocked in a "
+             "channel wakes every member of it, addressed or not — the room "
+             "is expected to evaluate what you ask. Use it deliberately."
+             if operator else
+             f"YOUR ROLE CHANGED ({target_id}): you are now a member, by "
+             f"{agent.id}. Operator verbs will refuse from here. Anything "
+             "you were carrying on that authority stops — say so where you "
+             "were carrying it rather than letting it look done."),
+            to=[target_id], status=Status.fyi)
+        return {"agent": target_id, "operator": operator, "changed": True,
+                "by": agent.id}
 
     def set_about(self, agent: AgentInfo, about: str) -> AgentInfo:
         """Self-description: scope of ownership, what to ask this agent about.
@@ -815,10 +928,23 @@ class HubService:
         # INSERT OR IGNORE, so re-asserting is a no-op for existing members.
         _, created = self.db.ensure_channel(name, private=True, created_by="hub",
                                             add_owner=False)
+        # A RE-ADD IS RECORDED, because the departure was. Leaving posts
+        # `<seat> left`; re-opening the DM by writing into it used to post
+        # nothing, so the transcript showed a departure and no return. The
+        # operator read their own record and asked why it showed them leaving
+        # and rejoining — the leave was there, the return was not, and the
+        # gap between them looked like the hub losing track of a member.
+        # Symmetry is the whole fix: both transitions, or neither.
+        rejoining = [seat for seat in (agent.id, peer)
+                     if not created and not self.db.is_member(name, seat)]
         self.db.add_member(name, agent.id, role="member")
         self.db.add_member(name, peer, role="member")
         if created:
             self._post_system(name, f"direct channel between {agent.id} and {peer}")
+        for seat in rejoining:
+            self._post_system(
+                name, f"{seat} rejoined — writing to a direct channel re-opens "
+                      "it for both peers")
         return self.channel_info(agent, name)
 
     def post_dm(self, agent: AgentInfo, peer: str, payload: PostMessage) -> Message:
@@ -837,15 +963,17 @@ class HubService:
     def create_invite(self, agent: AgentInfo, channel: str,
                       invitee: str | None, ttl_seconds: float = 86400.0) -> str:
         self._require_unpaused(agent)
-        # Only owners may extend the trust boundary of a private channel.
-        # This blunts the confused-deputy risk of an LLM member being talked
-        # into inviting an attacker (red-team finding).
+        # Widening the trust boundary of a private room is an OWNER's act —
+        # the confused-deputy risk of an LLM member being talked into
+        # inviting an attacker (red-team finding) is why it is not every
+        # member's. It is not the owner's ALONE, though: an operator and a
+        # delegate running the room need it too, and an owner-only rule left
+        # a delegate able to declare a room's phases but not invite the seat
+        # required to work them.
         if self.db.channel_archived(channel):
             raise HubError(409, f"channel '{channel}' is archived (ended) — "
                                 "no new invites")
-        role = self.db.member_role(channel, agent.id)
-        if role != "owner":
-            raise HubError(403, "only the channel owner can create invites")
+        self._require_channel_admin(agent, channel, "creating an invite")
         if invitee is not None and not self.db.agent_exists(invitee):
             raise HubError(404, f"agent '{invitee}' is not registered")
         token = new_token("invite")
@@ -1337,13 +1465,22 @@ class HubService:
             # be able to settle a commission whose operator has gone quiet —
             # but it pays the same price as any other completion report: it
             # must cite what it delivered.
+            # ...AND THE SAME IS NOW TRUE OF A PEER'S THREAD (operator ruling,
+            # 2026-08-22). The 2026-08-06 fix closed this door only in front
+            # of operator-authored requests; everywhere else `settled_by`
+            # stayed the master key it had always been, and a bystander could
+            # retire any question by pointing at any message. A question
+            # belongs to whoever asked it: they know whether it was answered
+            # and a stranger does not.
             parent = self.db.get_message(payload.reply_to)
-            if parent is not None and parent.sender in self.operator_ids():
+            if parent is not None:
+                parent_is_operator = parent.sender in self.operator_ids()
                 # `_prepare_structured` is called before the Message exists;
                 # the authenticated poster reaches this helper as `sender`.
-                if sender in self.operator_ids():
+                if (sender in self.operator_ids() or sender == parent.sender
+                        or sender in self.ruling_delegate_ids(channel)):
                     pass
-                elif sender in self.reporting_delegate_ids():
+                elif sender in self.reporting_delegate_ids() and parent_is_operator:
                     if not (data.get("evidence")
                             or payload.data and payload.data.get("evidence")):
                         raise HubError(400,
@@ -1351,12 +1488,20 @@ class HubService:
                                        "`evidence` naming what you delivered "
                                        "— a pointer at another message is a "
                                        "bare claim wearing an audit trail")
-                else:
+                elif parent_is_operator:
                     raise HubError(403,
                                    "only the operator, or a reporting "
                                    "delegate citing evidence, may settle an "
                                    "operator's request. Answer it, or ask the "
                                    "delegate to report on it.")
+                else:
+                    raise HubError(
+                        403,
+                        f"only {parent.sender} (who asked) or an operator may "
+                        "close this thread. Post your pointer as an ordinary "
+                        "reply instead — it is just as visible, and it obliges "
+                        f"{parent.sender} to read it and close their own "
+                        "question. If they have gone quiet, ask an operator.")
             data["settled_by"] = pointer
         if "evidence" in data:
             data["evidence"] = self._validate_evidence(channel, data["evidence"])
@@ -1375,114 +1520,163 @@ class HubService:
             if (parent is not None and parent.channel == channel
                     and parent.status in (Status.open, Status.blocked)
                     and parent.sender in self.operator_ids()
-                    and sender not in self.operator_ids()
-                    and sender in self.reporting_delegate_ids()):
+                    and sender not in self.operator_ids()):
+                is_delegate = sender in self.reporting_delegate_ids()
+                # THE ADDRESSEE PAYS THE SAME PRICE, SO IT MUST BE TOLD THE
+                # SAME THING (2026-08-22). `_operator_settled` accepts a
+                # cited `resolved` from a seat the operator NAMED as well as
+                # from the reporting delegate — that addressee door is the
+                # 2026-08-04 fix. This gate did not know about it: it fired
+                # only for delegates, so a NAMED seat's evidence-less
+                # `resolved` was accepted in silence and discharged nothing.
+                # The hub refused the delegate with a recipe and let the
+                # addressee walk into the identical void.
+                #
+                # Measured live (agora-wui, six rows): three `resolved`
+                # replies from the addressed seat on an operator's ask-less
+                # DM opens, none carrying evidence, all accepted, all still
+                # ANSWER-owed and escalating hours later — while the seat ran
+                # a controlled experiment to find out why. Every exit was
+                # shut and none of them was named, which is the exact
+                # complaint the 2026-08-04 comment above records.
+                #
+                # Scope: the CITATION requirement follows `_operator_settled`
+                # and so covers both seats. The adversarial-review and plan
+                # gates below stay delegate-only — they are about how a
+                # delegate delivers a commission, not about a named seat
+                # reporting its own slice.
+                named = set(parent.to) | ask_addressees(parent)
                 refs = data.get("evidence") or []
                 citable = any(not isinstance(r, dict)
                               or r.get("verified") is not False
                               for r in refs)
-                if not citable:
-                    raise HubError(400,
-                                   "your `resolved` here is the completion "
-                                   "report on an operator's request, and it "
-                                   "must point at what it delivered — add "
-                                   "data.evidence=[{kind, ref}] citing the "
-                                   "delivery: a store row (kind 'store', e.g. "
-                                   "your decision:<slug>), a channel file "
-                                   "('fs', 'path@version'), an uploaded blob "
-                                   "('blob', sha256), or an outside artifact "
-                                   "('external', with sha256+size_bytes). "
-                                   "Without a citation the request stays "
-                                   "open and every addressed seat keeps "
-                                   "waking on it.")
-                # ADVERSARIAL REVIEW IS PART OF DELIVERY (operator ruling,
-                # 2026-08-12): "no agent should single-handedly try to solve
-                # the full task ... we HAVE to encourage ADVERSARIAL
-                # discussions to ensure quality delivery." A completion
-                # report every citation of which the delegate authored
-                # itself is an uncontested delivery — live (fund3), a
-                # working game shipped with zero peer review and two of
-                # three specialists' plans silently reduced to inputs. In a
-                # room that HAS peers, at least one cited artifact must be
-                # authored by someone other than the delegate — a review
-                # verdict, a peer's slice delivery, anything a reader can
-                # attribute to a second mind. Hub-authored rows and the
-                # operator's own seats don't count as peers; a delegate
-                # working alone keeps the old single-author rule (no
-                # deadlock).
-                peers = {m.agent_id for m in self.db.list_members(channel)
-                         if m.agent_id not in (sender, "hub")
-                         and m.agent_id not in self.operator_ids()}
-                if peers:
-                    # THE PLAN IS NOT ITS OWN REVIEW (2026-08-13). Both
-                    # checks in this block read the same `refs`, so ONE
-                    # peer-authored `plan:` row satisfied both: the plan
-                    # citation found its row, and this check found a
-                    # non-sender author. A delivery with zero review passed
-                    # the review gate. The reviewed artifact must be a
-                    # second, non-plan citation.
-                    authors = {r.get("updated_by") or r.get("created_by")
-                               for r in refs if isinstance(r, dict)
-                               and not (r.get("kind") == "store"
-                                        and str(r.get("ref", "")).startswith("plan:"))}
-                    authors.discard(None)
-                    if not (authors - {sender}):
+                if is_delegate or sender in named:
+                    if not citable and is_delegate:
                         raise HubError(400,
-                                       "an uncontested delivery is not a "
-                                       "delivery: every evidence citation "
-                                       "here is authored by you, and this "
-                                       "room has peers. Have a contributor "
-                                       "adversarially review a slice they "
-                                       "did NOT write — cold-read the "
-                                       "artifact against the operator's "
-                                       "original words, hunt defects, put "
-                                       "the verdict on the record (a "
-                                       "`review:<slug>` store row or a "
-                                       "reviewed file on the channel fs) — "
-                                       "then cite that peer-authored "
-                                       "artifact in data.evidence alongside "
-                                       "your own. The agreed plan does "
-                                       "not count as its own review.")
-                # PLAN ELABORATION IS A MANDATORY STEP (operator ruling,
-                # 2026-08-12): "no agent should ever start working
-                # before a plan has been created and agreed upon." The
-                # plan phase is where seats argue, own and defend their
-                # perspectives — especially seats rooted in existing
-                # packages whose constraints rule paths in and out. The
-                # hub cannot see a premature build in a filesystem
-                # workspace, but it CAN refuse to answer the user
-                # without the plan on the record: the completion report
-                # must cite the agreed plan row it delivered under.
-                #
-                # OUTSIDE `if peers:` (2026-08-13): this requirement is
-                # about the delegate's own conduct, not about having
-                # colleagues, and nested inside the peer gate it
-                # evaporated in exactly the two rooms where nobody else
-                # is watching — a peerless channel, and the operator DM,
-                # whose only other member IS the operator, so `peers` is
-                # empty there by construction. Reporting into the DM was
-                # a one-line bypass. Kept AFTER the review check so the
-                # refusal a delegate meets first in a peopled room is
-                # still the review one.
-                if not any(isinstance(r, dict) and r.get("kind") == "store"
-                           and str(r.get("ref", "")).startswith("plan:")
-                           for r in refs):
-                    raise HubError(400,
-                                   "no delivery without the plan it was "
-                                   "built under: cite the agreed plan — "
-                                   "a `plan:<slug>` store row recording "
-                                   "each seat's slice, the SEAMS between "
-                                   "those slices (each place one seat's "
-                                   "output is another's input, with the "
-                                   "observation that proves it landed), "
-                                   "and how the contested points were "
-                                   "settled in the room — in data.evidence "
-                                   "alongside the artifact and the peer "
-                                   "review. Plan elaboration is a "
-                                   "mandatory step: seats argue and "
-                                   "align BEFORE implementation, and "
-                                   "the report points at what was "
-                                   "agreed.")
+                                       "your `resolved` here is the completion "
+                                       "report on an operator's request, and it "
+                                       "must point at what it delivered — add "
+                                       "data.evidence=[{kind, ref}] citing the "
+                                       "delivery: a store row (kind 'store', e.g. "
+                                       "your decision:<slug>), a channel file "
+                                       "('fs', 'path@version'), an uploaded blob "
+                                       "('blob', sha256), or an outside artifact "
+                                       "('external', with sha256+size_bytes). "
+                                       "Without a citation the request stays "
+                                       "open and every addressed seat keeps "
+                                       "waking on it.")
+                    if not citable:
+                        raise HubError(
+                            400,
+                            f"{parent.sender} named you on "
+                            f"{parent.channel}#{parent.seq}, so a `resolved` "
+                            "reply from you CAN settle it — but only as a "
+                            "completion report that points at what it "
+                            "delivered. Add data.evidence=[{kind, ref}]: a "
+                            "store row (kind 'store', e.g. your "
+                            "decision:<slug>), a channel file ('fs', "
+                            "'path@version'), an uploaded blob ('blob', "
+                            "sha256), or an outside artifact ('external', "
+                            "with sha256+size_bytes). If you are ANSWERING "
+                            "rather than reporting a delivery, post an "
+                            "ordinary reply instead: that is a complete and "
+                            "correct turn, and the request then stays open "
+                            f"until {parent.sender} closes it. What does not "
+                            "work is this — an uncited `resolved` is accepted "
+                            "and discharges nothing, so the row keeps "
+                            "escalating against you.")
+                if is_delegate:
+                    # Delegate-only: how a DELEGATE delivers a
+                    # commission. A named seat reporting its own
+                    # slice pays the citation above and no more.
+                    # ADVERSARIAL REVIEW IS PART OF DELIVERY (operator ruling,
+                    # 2026-08-12): "no agent should single-handedly try to solve
+                    # the full task ... we HAVE to encourage ADVERSARIAL
+                    # discussions to ensure quality delivery." A completion
+                    # report every citation of which the delegate authored
+                    # itself is an uncontested delivery — live (fund3), a
+                    # working game shipped with zero peer review and two of
+                    # three specialists' plans silently reduced to inputs. In a
+                    # room that HAS peers, at least one cited artifact must be
+                    # authored by someone other than the delegate — a review
+                    # verdict, a peer's slice delivery, anything a reader can
+                    # attribute to a second mind. Hub-authored rows and the
+                    # operator's own seats don't count as peers; a delegate
+                    # working alone keeps the old single-author rule (no
+                    # deadlock).
+                    peers = {m.agent_id for m in self.db.list_members(channel)
+                             if m.agent_id not in (sender, "hub")
+                             and m.agent_id not in self.operator_ids()}
+                    if peers:
+                        # THE PLAN IS NOT ITS OWN REVIEW (2026-08-13). Both
+                        # checks in this block read the same `refs`, so ONE
+                        # peer-authored `plan:` row satisfied both: the plan
+                        # citation found its row, and this check found a
+                        # non-sender author. A delivery with zero review passed
+                        # the review gate. The reviewed artifact must be a
+                        # second, non-plan citation.
+                        authors = {r.get("updated_by") or r.get("created_by")
+                                   for r in refs if isinstance(r, dict)
+                                   and not (r.get("kind") == "store"
+                                            and str(r.get("ref", "")).startswith("plan:"))}
+                        authors.discard(None)
+                        if not (authors - {sender}):
+                            raise HubError(400,
+                                           "an uncontested delivery is not a "
+                                           "delivery: every evidence citation "
+                                           "here is authored by you, and this "
+                                           "room has peers. Have a contributor "
+                                           "adversarially review a slice they "
+                                           "did NOT write — cold-read the "
+                                           "artifact against the operator's "
+                                           "original words, hunt defects, put "
+                                           "the verdict on the record (a "
+                                           "`review:<slug>` store row or a "
+                                           "reviewed file on the channel fs) — "
+                                           "then cite that peer-authored "
+                                           "artifact in data.evidence alongside "
+                                           "your own. The agreed plan does "
+                                           "not count as its own review.")
+                    # PLAN ELABORATION IS A MANDATORY STEP (operator ruling,
+                    # 2026-08-12): "no agent should ever start working
+                    # before a plan has been created and agreed upon." The
+                    # plan phase is where seats argue, own and defend their
+                    # perspectives — especially seats rooted in existing
+                    # packages whose constraints rule paths in and out. The
+                    # hub cannot see a premature build in a filesystem
+                    # workspace, but it CAN refuse to answer the user
+                    # without the plan on the record: the completion report
+                    # must cite the agreed plan row it delivered under.
+                    #
+                    # OUTSIDE `if peers:` (2026-08-13): this requirement is
+                    # about the delegate's own conduct, not about having
+                    # colleagues, and nested inside the peer gate it
+                    # evaporated in exactly the two rooms where nobody else
+                    # is watching — a peerless channel, and the operator DM,
+                    # whose only other member IS the operator, so `peers` is
+                    # empty there by construction. Reporting into the DM was
+                    # a one-line bypass. Kept AFTER the review check so the
+                    # refusal a delegate meets first in a peopled room is
+                    # still the review one.
+                    if not any(isinstance(r, dict) and r.get("kind") == "store"
+                               and str(r.get("ref", "")).startswith("plan:")
+                               for r in refs):
+                        raise HubError(400,
+                                       "no delivery without the plan it was "
+                                       "built under: cite the agreed plan — "
+                                       "a `plan:<slug>` store row recording "
+                                       "each seat's slice, the SEAMS between "
+                                       "those slices (each place one seat's "
+                                       "output is another's input, with the "
+                                       "observation that proves it landed), "
+                                       "and how the contested points were "
+                                       "settled in the room — in data.evidence "
+                                       "alongside the artifact and the peer "
+                                       "review. Plan elaboration is a "
+                                       "mandatory step: seats argue and "
+                                       "align BEFORE implementation, and "
+                                       "the report points at what was "
+                                       "agreed.")
         if payload.signature is not None:
             # Reserved authorship token: opaque, stored VERBATIM, not yet
             # verified. Consumers may read it; the hub attaches no trust.
@@ -2091,6 +2285,26 @@ class HubService:
         participants.discard("hub")
         return sorted(p for p in participants if p)
 
+    def _teaching_is_for_a_machine(self, agent_id: str) -> bool:
+        """Would this hub teaching land on a HUMAN?
+
+        Operator ruling, 2026-08-22: *"the hub should never say to a human he
+        was wrong and ask him to run MCP commands — a human is not an AI
+        agent and can't run MCP like that. When a human asks several seats a
+        question on any channel, the hub doesn't have to tell him to do it
+        somewhere else."*
+
+        The hub's routing and convention teachings are written for agents:
+        they prescribe `create_group(...)`, `notice={kind,key}`, store rows.
+        A human reading them is told they posted wrongly and handed an API
+        they cannot call. So these teachings are suppressed for an operator
+        seat — the human's message is delivered exactly as sent, and the
+        seats decide who answers, which is the whole point of a room.
+
+        Alerts a human can ACT on are untouched; this only silences the
+        "you should have done it another way" class."""
+        return agent_id not in self.operator_ids()
+
     def _routing_nudges(self, agent: AgentInfo, channel: str,
                         message: Message) -> None:
         if channel.startswith(DM_PREFIX) or agent.id == "hub":
@@ -2185,6 +2399,7 @@ class HubService:
                 root = self.db.get_message(root.reply_to) or root
             if (root is not None and root.kind == Kind.message
                     and root.status in (Status.open, Status.blocked)
+                    and self._teaching_is_for_a_machine(root.sender)
                     and self.db.meta_get(f"taskroomnudge:{root.id}") is None):
                 replies = self.db.replies_to(root.id)
                 if not any(r.status == Status.resolved for r in replies):
@@ -2204,7 +2419,14 @@ class HubService:
                             f"{names}  — keep #{channel} for the pointer, "
                             "cross-room decisions, milestones, and final "
                             "delivery.",
-                            status="fyi", reply_to=root.id)
+                            # The `@names` in the body are create_group
+                            # ARGUMENTS, not addressees — naming three seats
+                            # to make one act is the diffusion `MAX_ASK_TO`
+                            # exists to prevent. The thread's author is the
+                            # seat who opens the room, so the nudge is
+                            # theirs. Addressed `fyi`: attribution without a
+                            # debt the hub cannot close.
+                            to=[root.sender], status="fyi", reply_to=root.id)
         # -- board convention (replaces the 0.12.55 refusal): sender-facing ---
         # On an opt-in noticeboard channel a root post without a typed notice
         # is DELIVERED; the sender simply learns the convention that buys them
@@ -2212,7 +2434,8 @@ class HubService:
         if (message.reply_to is None
                 and self._channel_traffic_policy(channel) == "noticeboard"
                 and not (message.data or {}).get("notice")
-                and not (message.data or {}).get("vote")):
+                and not (message.data or {}).get("vote")
+                and self._teaching_is_for_a_machine(agent.id)):
             self._deliver_doorbell(
                 agent.id, message,
                 f"HUB NOTICE — #{channel} is a noticeboard: posts here carry "
@@ -2239,6 +2462,8 @@ class HubService:
                 return
             if self.db.meta_get(f"forknudge:{root.id}") is not None:
                 return
+            if not self._teaching_is_for_a_machine(root.sender):
+                return          # the nudge would tell a human to run MCP
             replies = self.db.replies_to(root.id)
             if any(r.status == Status.resolved for r in replies):
                 return  # thread already closing — too late to redirect
@@ -2260,7 +2485,10 @@ class HubService:
                     f"Routing). Fork it:  agora group {slug} "
                     f"{names}  — then resolve this thread with one pointer "
                     "reply. (One-time nudge; the hub never blocks.)",
-                    status="fyi", reply_to=root.id)
+                    # "resolve this thread" is an act only the root author
+                    # holds authority for (`obligations._closes`), so the
+                    # nudge names them and nobody else.
+                    to=[root.sender], status="fyi", reply_to=root.id)
 
     @dataclass
     class _MentionContext:
@@ -2445,7 +2673,23 @@ class HubService:
             f"human key. If this was not {operator_id} at a keyboard, a "
             "local process is speaking with the operator's cached key "
             "(the Jul-14 forgery class): verify the posts, retract what "
-            "is false, rotate the key. One alert per episode.")
+            "is false, rotate the key. One alert per episode.",
+            # The body issues instructions to ONE named human, who holds the
+            # only lever that resolves it (the key). Addressed `fyi`: it is
+            # theirs to read, but the hub cannot discharge a key rotation, so
+            # it must not mint a debt that outlives the episode.
+            to=[operator_id], status=Status.fyi)
+        # ...and reach them where a human actually reads. A suspected key
+        # compromise is the last alert that should sit unseen in a room the
+        # operator may not be watching — `_fleet_liveness_sweep` already
+        # mirrors its alerts to the operator's DM; this one did not.
+        self._post_operator_dm(
+            operator_id,
+            f"HUB WARNING — {len(recent)} posts under your key "
+            f"'{operator_id}' within {self.OPERATOR_BURST_WINDOW:.0f}s "
+            "(machine cadence on a human key). If that was not you: verify "
+            "the posts, retract what is false, rotate the key.",
+            dedupe_key=f"operator-burst:{operator_id}:{int(now)}")
 
     def _require_charter_read(self, channel: str, agent: AgentInfo) -> None:
         """The opt-in charter gate (channel:meta.norms_required): posting
@@ -2483,9 +2727,22 @@ class HubService:
         # addressees (measured: 8 undischargeable rows on one delegate).
         # `dedupe_key` makes a hub event idempotent under (channel, hub, key):
         # a repeated sweep tick cannot double-announce the same event.
+        #
+        # `to` AND `status` ARE DECIDED SEPARATELY, ALWAYS. This used to read
+        # `status or ("open" if to else "fyi")`, so naming an addressee
+        # silently promoted a notice to an OBLIGATION — the 0093 class this
+        # function's own comment warns about, re-opened by anyone who "just
+        # adds `to`" for correct attribution. Addressing says WHO a message
+        # is for; status says whether it is a debt. A room announcement whose
+        # subject is a seat wants the first and not the second.
+        if to and status is None:
+            raise ValueError(
+                "a hub message with `to` must state its `status` explicitly: "
+                "'fyi' addresses the seat without minting a debt the hub "
+                "can never discharge; 'open' mints one and needs a closer.")
         message = self.db.insert_message(
             channel, "hub", kind=Kind.system.value,
-            status=status or ("open" if to else "fyi"), urgency="inbox",
+            status=status or "fyi", urgency="inbox",
             title="", body=body, data=data, reply_to=reply_to, to=to or [],
             dedupe_key=dedupe_key,
         )
@@ -2576,9 +2833,17 @@ class HubService:
         for m in messages:
             row = MessageRow(**m.model_dump())
             if not m.retracted:
-                ds = self._discharge(m, by_parent.get(m.id, []))
+                replies = by_parent.get(m.id, [])
+                ds = self._discharge(m, replies)
                 row.pending_asks = [] if ds.closed else list(ds.pending)
                 row.has_resolved_reply = ds.has_resolved_reply
+                # The VERDICT, not just the shape of the thread — one field
+                # so a client never has to infer settlement from an absence
+                # or from `has_resolved_reply`, which a bystander can set.
+                row.closed = ds.closed
+                row.closed_by = next(
+                    (r.sender for r in replies
+                     if self._closes_one(m, r)), None) if ds.closed else None
                 ratings = by_rated.get(m.id, [])
                 row.ratings = RatingTally(
                     up=sum(1 for r in ratings if r["value"] > 0),
@@ -2777,7 +3042,7 @@ class HubService:
             # mandatory' stops being true mechanically, not hortatorily.
             replies = self.db.replies_to(message.id)
             owes_reply = not (
-                closed_authoritatively(message, replies, self.operator_ids())
+                self._closed_authoritatively(message, replies)
                 or any(r.sender == viewer_id for r in replies))
             already_read = self.db.has_read(message.id, viewer_id)
         envelope = self.attention.envelope_for(
@@ -2889,15 +3154,120 @@ class HubService:
             raise HubError(403, "only the author (or an operator) can retract "
                                 "a message — you can retract what YOU said, "
                                 "not what others said")
-        if message.kind != Kind.message:
-            raise HubError(400, "only chat messages can be retracted, not "
-                                "system/fs events")
+        if message.kind != Kind.message and not agent.operator:
+            # A system row is authored by `hub`, so author-retraction can
+            # never reach it: without an operator door, a hub notice posted
+            # into someone's room is unremovable by anyone, forever. The
+            # operator is the one principal who can be trusted to unsay the
+            # hub's own words — and had to be, the first time the hub put a
+            # notice where a human was holding a conversation.
+            raise HubError(403, "only an operator can retract a system/fs "
+                                "event — they are the hub's own words, not "
+                                "yours")
         self.db.retract_message(message_id, agent.id)
         redacted = self.db.get_message(message_id)  # redacted view for the wire
         # Broadcast the retraction so live subscribers redact in place (the
         # tombstone is the payload; the words never ride the wire again).
         self._wake(redacted)
         return redacted
+
+    RESOLVE_THREAD_LIMIT = 200
+
+    def resolve_thread(self, agent: AgentInfo, channel: str,
+                       message_id: str, body: str = "") -> dict[str, Any]:
+        """Close a WHOLE TRAIL: the named message and every open obligation
+        beneath it, in one call.
+
+        WHY IT EXISTS. Resolution was per-MESSAGE — `db.replies_to` walks
+        direct children only — so an operator who resolved the root of a task
+        thread closed exactly one row. Measured on a live hub (2026-08-22):
+        the operator resolved the WebOS commission at 04:58 and three seats
+        went on working it for hours, because every obligation between them
+        had been minted by REPLIES the resolve never touched, and the work
+        itself had moved to a room spawned from that thread.
+
+        AUTHORITY is the single-message closure rule (`_closes`) applied to
+        every node, never a weaker one: an operator may close anyone's, the
+        asker their own. A non-operator whose trail contains someone else's
+        open message is REFUSED OUTRIGHT and nothing is closed — a partial
+        close is worse than none, because it reports success over a thread
+        that is still alive.
+
+        WHAT IT DOES NOT DO: touch `claim:` rows. It REPORTS the ones whose
+        `source_message_id` points into this trail and leaves them to their
+        owners — the hub cannot know whether work already done should be
+        thrown away, and `store_set` refuses to write another seat's row
+        anyway. A verb that returned success while the claims still read
+        `active` would be the same lie from the other direction."""
+        self.require_membership(channel, agent.id)
+        trail = self.db.thread_messages(channel, message_id,
+                                        limit=self.RESOLVE_THREAD_LIMIT + 1)
+        if not trail:
+            raise HubError(404, f"message '{message_id}' not found in '{channel}'")
+        overflow = len(trail) > self.RESOLVE_THREAD_LIMIT
+        trail = trail[:self.RESOLVE_THREAD_LIMIT]
+        live: list[Message] = []
+        for m in trail:
+            if m.kind != Kind.message or m.retracted:
+                continue
+            if m.status not in (Status.open, Status.blocked):
+                continue
+            if self._closed_authoritatively(m, self.db.replies_to(m.id)):
+                continue
+            live.append(m)
+        others = sorted({m.sender for m in live if m.sender != agent.id})
+        may_close_anyones = (agent.operator
+                             or agent.id in self.ruling_delegate_ids(channel))
+        if others and not may_close_anyones:
+            raise HubError(
+                403,
+                "closing a thread is the asker's, an operator's, or a "
+                "ruling delegate's act — this "
+                f"trail has {len(others)} open message(s) asked by other "
+                f"seat(s) ({', '.join(others)}), so NOTHING was closed. Close "
+                "your own, or ask an operator or the room's delegate.")
+        closed: list[str] = []
+        for m in live:
+            note = body or ("thread closed: this work is stood down. Stop "
+                            "here and post no further replies on it.")
+            reply = PostMessage(body=note, status=Status.resolved,
+                                reply_to=m.id, title="thread closed")
+            closed.append(self.post_message(agent, channel, reply).id)
+        # Every closer is a reply, so each thread participant gets exactly one
+        # `reply-to-me` wake — the stand-down notification falls out of the
+        # closure and needs no separate broadcast (a `resolved` naming nobody
+        # wakes nobody, which is what made the operator's stop order silent).
+        return {"channel": channel, "root": message_id,
+                "closed": closed, "claims": self._claims_touching(channel, trail),
+                "truncated": overflow}
+
+    def _claims_touching(self, channel: str, trail: list[Message]) -> list[dict[str, Any]]:
+        """Live claim rows whose `source_message_id` points into this trail.
+
+        REPORTED, never mutated. Matching is a substring test because the
+        field is free text in practice: real rows carry bare ids, `webos#85`,
+        and prose like "webos#157 / 01M0…, corrected by webos#160". An exact
+        match would silently miss most of them, and silence is the failure
+        this whole verb exists to fix."""
+        needles = {m.id for m in trail} | {f"{channel}#{m.seq}" for m in trail}
+        out: list[dict[str, Any]] = []
+        for entry in self.db.store_keys(channel):
+            key = entry["key"]
+            if not key.startswith("claim:"):
+                continue
+            stored = self.db.store_get(channel, key)
+            if stored is None or not isinstance(stored.value, dict):
+                continue
+            src = str(stored.value.get("source_message_id") or "")
+            if not src or not any(n in src for n in needles):
+                continue
+            status = str(stored.value.get("status") or "")
+            if status.split() and status.split()[0].strip(":.,").lower() in (
+                    "done", "shipped", "cancelled", "canceled", "abandoned"):
+                continue
+            out.append({"key": key, "owner": str(stored.value.get("owner") or ""),
+                        "status": status[:120]})
+        return out
 
     def retract_thread(self, agent: AgentInfo, channel: str,
                        message_id: str) -> dict[str, Any]:
@@ -2994,7 +3364,7 @@ class HubService:
                 # yields only open/blocked, so this branch is exactly the
                 # _addressed_debts rows.)
                 replies = self.db.replies_to(message.id)
-                if closed_authoritatively(message, replies, self.operator_ids()):
+                if self._closed_authoritatively(message, replies):
                     continue
                 if any(r.sender == agent.id for r in replies):
                     continue
@@ -3111,6 +3481,21 @@ class HubService:
         parent = self.db.get_message(m.reply_to) if m.reply_to else None
         return not (parent is not None and parent.sender == viewer_id)
 
+    def ruling_delegate_ids(self, channel: str) -> frozenset[str]:
+        """Seats whose ruling/operational grant REACHES this channel.
+
+        Closure authority for a delegate is scoped exactly like every other
+        act it may perform here: an unscoped grant reaches nothing, and a
+        grant scoped elsewhere does not leak in."""
+        out = set()
+        for d in self.active_delegations():
+            scope = str(d.get("scope") or "").strip()
+            if scope not in ("*", channel):
+                continue
+            if set(str(p) for p in (d.get("powers") or ())) & self.CHANNEL_AUTHORITY_POWERS:
+                out.add(str(d["agent_id"]))
+        return frozenset(out)
+
     def _discharge(self, m: Message, replies: list[Message]) -> DischargeState:
         """THE discharge call. Every surface goes through here so operator
         and delegate authority can never be computed one way for /owed and
@@ -3121,7 +3506,54 @@ class HubService:
                                self._operator_rule_epoch,
                                self._operator_asks_rule_epoch,
                                self._canvass_rule_epoch,
-                               self._peer_addressed_rule_epoch)
+                               self._peer_addressed_rule_epoch,
+                               self._closure_rule_epoch,
+                               self.ruling_delegate_ids(m.channel))
+
+    def _addressee_released(self, m: Message, ds: DischargeState,
+                            agent_id: str) -> bool:
+        """Has an addressee ENGAGED and been left with no pending ask of
+        their own? `/owed` has applied this since 2026-08-11 ("keeping the
+        row told one seat two things at once"); `board` did not, so the two
+        surfaces answered the same question differently.
+
+        Not a new rule and deliberately not a looser one: an ask-less
+        commission still pins every addressee (the 75-second-discharge
+        protection), an UNADDRESSED pending ask still pins everyone it could
+        name, and an operator's request still needs its cited completion
+        report."""
+        if not asks_of(m):
+            return False              # ask-less: only a real settlement clears
+        if agent_id in pending_addressees(m, ds.pending):
+            return False              # a pending ask still names them
+        pending = set(ds.pending)
+        if any(not (a.get("to") or a.get("assignee"))
+               for a in asks_of(m) if str(a.get("id")) in pending):
+            return False              # an ask naming nobody is everyone's
+        if self._operator_delegate_debt(agent_id, m):
+            return False
+        return any(r.sender == agent_id for r in self.db.replies_to(m.id))
+
+    def _closes_one(self, m: Message, reply: Message) -> bool:
+        """Did THIS reply carry the closure authority? `_closed_authoritatively`
+        answers "did anyone"; naming who is what lets a reader see whether a
+        thread was ruled shut or simply answered in full."""
+        return _closes(m, reply, self.operator_ids(),
+                       self.reporting_delegate_ids(),
+                       self._closure_rule_epoch,
+                       self.ruling_delegate_ids(m.channel))
+
+    def _closed_authoritatively(self, m: Message,
+                                replies: list[Message]) -> bool:
+        """THE closure call, for the same reason `_discharge` is THE discharge
+        call: closure authority computed one way for `/owed` and another for a
+        sweep is how a thread reads settled on one surface while its work is
+        still undone. Fourteen call sites used to pass `operator_ids()` alone,
+        which silently meant "no delegates, no epoch"."""
+        return closed_authoritatively(m, replies, self.operator_ids(),
+                                      self.reporting_delegate_ids(),
+                                      self._closure_rule_epoch,
+                                      self.ruling_delegate_ids(m.channel))
 
     def reporting_delegate_ids(self) -> frozenset[str]:
         """Seats holding an active `reporting` delegation — the fleet's
@@ -3233,7 +3665,7 @@ class HubService:
                 # seat's reply never clears YOUR debt (the multi-addressee
                 # free-rider hole); only your own reply or an authoritative
                 # closure does.
-                if closed_authoritatively(m, replies, ops):
+                if self._closed_authoritatively(m, replies):
                     continue
                 if any(r.sender == agent.id for r in replies):
                     continue
@@ -3359,7 +3791,7 @@ class HubService:
         cursor_cache: dict[tuple[str, str], int] = {}
         for m in self.db.my_open_messages(agent.id, channels):
             replies = self.db.replies_to(m.id)
-            if closed_authoritatively(m, replies, ops):
+            if self._closed_authoritatively(m, replies):
                 continue
             structured = bool(asks_of(m))
             for r in replies:
@@ -3438,7 +3870,7 @@ class HubService:
         to_close: list[CloseRow] = []
         for m in self.db.my_open_messages(agent.id, channels):
             replies = self.db.replies_to(m.id)
-            if closed_authoritatively(m, replies, ops):
+            if self._closed_authoritatively(m, replies):
                 continue
             ds = self._discharge(m, replies)
             if not ds.discharged:
@@ -3577,10 +4009,11 @@ class HubService:
             # hub-created room (`commons`) has no owner row at all, so an
             # owner-only rule made its purpose, norms, SLA and traffic_policy
             # permanently unwritable by anyone on every fresh deployment.
-            if (not agent.operator
-                    and self.db.member_role(channel, agent.id) != "owner"):
+            if not self.may_administer_channel(agent, channel):
                 raise HubError(403, f"'{key}' is channel-level metadata: "
-                                    "owner-writable only (or the operator)")
+                                    "writable by the channel owner, an "
+                                    "operator, or a delegate holding "
+                                    "ruling/operational scoped here")
             if key == CHANNEL_META_KEY:
                 # Purpose/norm/SLA edits must not accidentally turn off a
                 # noticeboard. `store set` replaces values, so preserve this
@@ -4567,7 +5000,36 @@ class HubService:
                             "updated_by": row["updated_by"],
                             "updated_at": row["updated_at"], "verified": True})
             elif kind == "store":
+                # `key@version` IS ACCEPTED (agora-wui, 2026-08-22). The two
+                # lanes had opposite conventions — `fs` REQUIRES `path@version`
+                # and `store` looked the ref up verbatim — so citing a store
+                # row the documented way searched for a key literally named
+                # `decision:foo@1` and answered "does not exist" about a row
+                # `store_get` had served the same minute. The author is then
+                # hunting a missing row instead of a wrong form.
+                #
+                # The verbatim lookup goes FIRST so a key that really contains
+                # `@` still resolves; only then is a trailing `@<digits>`
+                # read as a version.
                 entry = self.db.store_get(channel, ref)
+                if entry is None:
+                    key, _, want = ref.rpartition("@")
+                    if key and want.isdigit():
+                        entry = self.db.store_get(channel, key)
+                        if entry is not None and entry.version != int(want):
+                            # The store keeps only HEAD, so v1 cannot be
+                            # served back. Say which version the reader would
+                            # actually get rather than stamping HEAD under the
+                            # author's older number.
+                            raise HubError(
+                                400,
+                                f"evidence cites '{key}@{want}' but that row "
+                                f"is now at v{entry.version}, and the store "
+                                "keeps only HEAD — the cited version cannot "
+                                "be served. Re-read it and cite the current "
+                                f"version, or cite '{key}' bare.")
+                        if entry is not None:
+                            ref = key
                 if entry is None:
                     raise HubError(400, f"evidence cites store row '{ref}', "
                                         f"which does not exist in '{channel}'")
@@ -4663,15 +5125,17 @@ class HubService:
 
     def _require_channel_authority(self, channel: str, agent: AgentInfo) -> None:
         """The reserved `channel/` fs prefix mirrors the store's `channel:` keys:
-        channel-owned surfaces are writable by the owner alone — plus the
-        operator, which is the unfreeze path when an owner session is gone
-        (there is no ownership transfer). DMs have no owner, so the prefix is
-        structurally unwritable there. One check, deliberately not a roles
-        system (design ruling, backlog 0060)."""
-        if agent.operator or self.db.member_role(channel, agent.id) == "owner":
+        channel-owned surfaces (the charter among them) are writable by the
+        seats that RUN the room: its owner, an operator, or a delegate holding
+        ruling/operational scoped here. DMs have no owner, so the prefix is
+        structurally unwritable there. One predicate shared with invites and
+        ownership transfer, so the three cannot drift apart again."""
+        if self.may_administer_channel(agent, channel):
             return
         raise HubError(403, f"'{RESERVED_FS_PREFIX}...' files are channel-owned: "
-                            "writable by the channel owner and the operator only")
+                            "writable by the channel owner, an operator, or a "
+                            "delegate holding ruling/operational scoped to "
+                            "this channel")
 
     def fs_write(self, agent: AgentInfo, channel: str, path: str,
                  content: str | None = None, mime: str = "text/markdown",
@@ -5056,6 +5520,30 @@ class HubService:
                               + (f" {closed} gate grant(s) it made under "
                                  "proxy were withdrawn with it." if closed
                                  else ""))
+            # ...AND TELL THE SEAT, the way a GRANT already does. The grant
+            # side has told the holder since 2026-08-06 ("a power the holder
+            # cannot discover is not a power"); the revoke side announced to
+            # `hub-alerts` and to `whoami` and left the holder to find out by
+            # being refused. A seat acting on authority the hub has silently
+            # taken away is the same defect with the sign flipped, and it
+            # fails at the worst moment — mid-act, on someone else's behalf.
+            # `fyi`, not `open`: losing a power obliges no answer, and the
+            # hub has nothing to discharge. (Unlike the grant, which asks the
+            # seat to go act on what it can now do.)
+            self._post_system(
+                self.DARK_ALERTS_CHANNEL,
+                f"YOUR POWERS WERE REVOKED: you ({agent_id}) hold no "
+                "delegated powers as of now. Anything you were carrying "
+                "under them stops here — say so where you were carrying it, "
+                "rather than letting it look done. whoami.delegations is the "
+                "only proof; prose claims count for nothing."
+                + (f" {closed} gate grant(s) you made under proxy were "
+                   "withdrawn with it." if closed else ""),
+                # No dedupe_key: this twin fires exactly where the room-facing
+                # announcement above fires, so it inherits that cadence. A
+                # time-bucketed key here raised DuplicateMessage out of
+                # `revoke_delegation` when two revokes landed in one second.
+                to=[agent_id], status=Status.fyi)
         return revoked
 
     # -- moderation: kick (timed block) and ban (permanent block) -------------------
@@ -5470,6 +5958,104 @@ class HubService:
         info = self.db.get_channel(channel)
         return info is not None and info.created_by == agent_id
 
+    #: Powers that let a delegate act for the room the way its owner does.
+    #: Same pair `PHASE_POWERS` uses — a seat trusted to declare which
+    #: version of an artifact is in force is trusted to run the room.
+    CHANNEL_AUTHORITY_POWERS = frozenset({"ruling", "operational"})
+
+    def may_administer_channel(self, agent: AgentInfo, channel: str) -> bool:
+        """May this seat perform an OWNER's act here — invite, hand over
+        ownership, write the charter and the `channel:` rows?
+
+        Owner, operator, or a delegate holding `ruling`/`operational` that
+        REACHES this channel (`proxy` counts too: acting on the owner's
+        behalf is what it is for). Scope is honoured — an unscoped grant
+        reaches nothing and a grant scoped elsewhere does not leak here, the
+        same rule `has_proxy` enforces.
+
+        ONE predicate for all four acts on purpose. They were written
+        separately and drifted: archiving accepted owner-or-operator, invites
+        owner ONLY, `channel/` files owner-or-operator, and phase rows
+        owner/operator/ruling-delegate/steward — so a delegate appointed to
+        run a room could declare its phases but not invite the seat it needed
+        to do the work."""
+        if agent.operator or self._is_channel_owner(channel, agent.id):
+            return True
+        if agent.id in self.ruling_delegate_ids(channel):
+            return True
+        return self.has_proxy(agent.id, channel)
+
+    def transfer_channel_ownership(self, agent: AgentInfo, channel: str,
+                                   new_owner: str) -> dict[str, Any]:
+        """Hand a room to another seat.
+
+        There was no such operation: `created_by` was written once at creation
+        and never again, so an owner who wanted to hand a room over had no
+        move to make, and several refusals said so in passing ("there is no
+        ownership transfer"). That made ownership an accident of who typed
+        `create_channel` first, permanent for the life of the room.
+
+        Who may: the owner, an operator, or a delegate holding
+        ruling/operational scoped here — the same predicate as invites and
+        charter writes. The new owner must already be a MEMBER: handing a room
+        to a seat that cannot read it strands it. DMs are ownerless by
+        construction and are refused."""
+        self._require_unpaused(agent)
+        self._require_not_archived(channel)
+        # No membership requirement on the CALLER, matching `archive_channel`:
+        # an operator must be able to unstick a room they do not sit in, which
+        # is the case that makes this verb worth having.
+        if channel.startswith(DM_PREFIX):
+            raise HubError(400, "a DM is ownerless — neither peer owns the "
+                                "other's record, so there is nothing to hand over")
+        info = self.db.get_channel(channel)
+        if info is None:
+            raise HubError(404, f"no such channel '{channel}'")
+        self._require_channel_admin(agent, channel, "transferring ownership")
+        if not self.db.agent_exists(new_owner):
+            raise HubError(404, f"agent '{new_owner}' is not registered")
+        if not self.db.is_member(channel, new_owner):
+            raise HubError(
+                409,
+                f"'{new_owner}' is not a member of '{channel}' — invite them "
+                "first, or they would own a room they cannot read")
+        previous = info.created_by
+        if previous == new_owner:
+            return {"channel": channel, "owner": new_owner, "changed": False}
+        self.db.transfer_channel_ownership(channel, new_owner)
+        # On the record, in the room: ownership decides who may invite, write
+        # the charter and archive, so a silent handover leaves every member
+        # guessing who to ask.
+        self._post_system(
+            channel,
+            f"channel ownership transferred: {previous} -> {new_owner} "
+            f"(by {agent.id}). {new_owner} now owns the charter, the "
+            "`channel:` rows, invites and the room's end.",
+            status=Status.fyi)
+        self._post_system(
+            channel,
+            f"YOU NOW OWN '{channel}' ({new_owner}), handed over by "
+            f"{agent.id}. Yours now: the charter (`channel/charter.md`), the "
+            "`channel:` metadata rows, minting invites, and archiving the "
+            "room when the work is done.",
+            to=[new_owner], status=Status.fyi)
+        return {"channel": channel, "owner": new_owner, "previous": previous,
+                "changed": True, "by": agent.id}
+
+    def _require_channel_admin(self, agent: AgentInfo, channel: str,
+                               act: str) -> None:
+        """`may_administer_channel`, as a teaching refusal."""
+        if self.may_administer_channel(agent, channel):
+            return
+        info = self.db.get_channel(channel)
+        owner = info.created_by if info is not None else "the owner"
+        raise HubError(
+            403,
+            f"{act} in '{channel}' needs the channel owner ({owner}), an "
+            "operator, or a delegate holding ruling/operational scoped to "
+            f"this channel. Ask {owner} or an operator — or ask the operator "
+            "to delegate it to you.")
+
     #: How long a principal must be silent before a proxy holder may act in
     #: their name. Well above the 600s presence window on purpose: presence
     #: `offline` means NO CONTACT, never "gone", and an operator reading the
@@ -5860,7 +6446,9 @@ class HubService:
                 f"{row['next'] or 'next-phase'} work, it should wait for "
                 f"{row['current']} to be declared complete"
                 + (f" by {steward}." if steward
-                   else " by the channel's steward or the operator."))
+                   else " by the channel's steward or the operator."),
+                title=f"hub notice: you wrote {path} while "
+                      f"{row['key']} is open")
             if steward and steward != agent.id:
                 self._deliver_doorbell(
                     steward, mirror,
@@ -5869,7 +6457,9 @@ class HubService:
                     f"while {row['current']} is still open. You steward this "
                     f"track: if {row['current']} is finished, declare it "
                     f"(store_set {row['key']} status=complete) so the next "
-                    "phase can start on the record.")
+                    "phase can start on the record.",
+                    title=f"hub notice: {row['key']} is open and "
+                          f"{agent.id} wrote {path} — you steward it")
 
     def _charter_change_advisory(self, channel: str, actor: AgentInfo,
                                  version: int, mirror: Message) -> None:
@@ -6194,6 +6784,17 @@ class HubService:
                            "pending_asks": state.pending,
                            "escalated": age > sla_s}
                     if agent.id in m.to or agent.id in assignees:
+                        # ...UNLESS the viewer has already engaged and no
+                        # pending ask still names them — the release `/owed`
+                        # applies (see `_addressee_released`). Without it the
+                        # two surfaces disagree about the same message, and
+                        # the louder one wins: the operator's own mandate sat
+                        # on this board at 392 minutes ESCALATED while /owed
+                        # said the seat owed nothing, which is precisely the
+                        # "one fact, three answers" failure the comment above
+                        # records for the author case.
+                        if self._addressee_released(m, state, agent.id):
+                            continue
                         pending_on_me.append(row)
                     elif channel.startswith(DM_PREFIX):
                         # A DM has an implicit audience of one: an open DM
@@ -7191,39 +7792,43 @@ class HubService:
 
     def _undelegated_operator_warning(self, agent: AgentInfo,
                                       message: Message) -> None:
-        """The operator spoke and NOBODY owes it — say so in a real DM.
+        """RETIRED BY OPERATOR RULING (2026-08-22). Kept as the funnel so the
+        call sites stay honest and the warning cannot creep back.
 
-        With a reporting delegate the ruling routes every operator line to
-        them (_operator_delegate_debt). Without one, an unaddressed operator
-        message still obliges nobody, and the 2026-08-01 failure showed how
-        invisible that is: the request simply evaporated. This warning is
-        deliberately NOT the ephemeral notify-file doorbell used for
-        routing teaching — a human must be able to find it later, so it is a
-        stored DM in the hub→operator room. Dedupe is per message id: a
-        retry or a re-post can never turn it into a nag."""
-        if message.kind != Kind.message or agent.id not in self.operator_ids():
-            return
-        if message.to or ask_addressees(message):
-            return  # named seats own it
-        if self.reporting_delegate_ids():
-            return  # the delegate owes it by construction
-        self._post_operator_dm(
-            agent.id,
-            f"HUB WARNING — your message '{message.title or message.id}' in "
-            f"#{message.channel} names no seat and this hub has no reporting "
-            "delegate, so it creates NO obligation for anyone: nothing will "
-            "escalate and no seat is accountable for it. Name the seats "
-            'you want (to=["seat"]), or appoint a delegate '
-            "(`agora delegate <seat> --powers reporting`) who owns your "
-            "requests end to end.",
-            dedupe_key=f"undelegated-operator:{message.id}")
+        The hub used to tell an operator that an unaddressed message "creates
+        NO obligation for anyone". The operator's ruling: *"a message on a
+        channel with no @seat is totally ok, it just means it's addressed to
+        all — then each seat decides if they can contribute or not."*
+
+        The warning was also outlived by the wake fix. It was written when a
+        room-wide open reached nobody, so an unaddressed request really could
+        evaporate (the 2026-08-01 failure). Since `qualifies` was repaired, an
+        open naming nobody wakes every member of the channel — the room does
+        hear it, and what it obliges is a READ, not an answer from a
+        particular seat. Warning the human that nothing will happen, when the
+        whole room was just woken, taught the opposite of what is true."""
+        return
 
     def _post_operator_dm(self, operator_id: str, body: str,
                           dedupe_key: str | None = None) -> None:
-        """Mirror hub-alerts into the operator's DM (0110 card routing)."""
-        channel = self._ensure_operator_dm_channel(operator_id)
-        self._post_system(channel, body, to=[operator_id], status="fyi",
-                          dedupe_key=dedupe_key)
+        """DISABLED BY OPERATOR RULING (2026-08-22). Kept as the one funnel so
+        callers need no change and the rule cannot be reintroduced piecemeal.
+
+        The hub used to mirror its alerts into the operator's DM room. Two
+        things were wrong with that, and the operator named both:
+
+        1. A DM room is a CONVERSATION. A human opens one to ask a question
+           and expects the answers there; hub notices arriving in it displace
+           the thread they are holding — and until now nothing could remove
+           them, because a system row has no author who can retract it.
+        2. The notices speak to agents. They name MCP tools and store keys a
+           human at a terminal has no way to call, so the hub was issuing
+           instructions to a reader who cannot follow them.
+
+        `hub-alerts` remains the operator's channel and every alert still
+        lands there in full. Nothing is lost except the duplicate in a room
+        that belongs to a conversation."""
+        return
 
     def _fleet_liveness_sweep(self) -> list[str]:
         """0110: one FLEET DARK alert when aggregate reception collapses;
@@ -7259,7 +7864,13 @@ class HubService:
                 f"— per-seat DARK/DEAF only fires on individual SLA debts. "
                 f"Only the operator can restart seats. One alert per episode.")
             self._ensure_alerts_channel()
+            # Explicit since `to` no longer decides status. This one IS a
+            # debt — only the operator can restart seats — and it has a
+            # closer (`_close_standing_fleet_alerts`), which is the whole
+            # licence for an `open` the hub authors. Its RECOVERED twin below
+            # is deliberately `fyi` for the opposite reason.
             self._post_system(self.DARK_ALERTS_CHANNEL, body, to=ops,
+                              status=Status.open,
                               data={"fleet_alert": "dark"})
             for op in ops:
                 self._post_operator_dm(op, body)
@@ -7688,6 +8299,10 @@ class HubService:
               "row is the progress receipt that clears this; a row "
               "marked done/shipped never alerts. The hub closes this "
               "alert itself when the set changes or empties.",
+            # Explicit since the to/status coupling was removed: this one IS
+            # a debt, and the hub closes it itself (see the resolved closer
+            # above) — which is what makes an `open` legitimate here.
+            status=Status.open,
             to=stewards,
             data={"steward_sig": sig, "steward_keys": sorted(live_keys)})
         return [f"stale-claims:{len(live)}"]
@@ -7709,7 +8324,7 @@ class HubService:
         for m in self.db.open_obligations([self.DARK_ALERTS_CHANNEL]):
             if m.sender != "hub" or not m.body.startswith(marker):
                 continue
-            if closed_authoritatively(m, self.db.replies_to(m.id), ops):
+            if self._closed_authoritatively(m, self.db.replies_to(m.id)):
                 continue
             out.append(m)
         return out
@@ -7811,7 +8426,7 @@ class HubService:
               "never leave the wait implicit. Touching the phase row is the "
               "receipt that clears this; the hub closes this alert itself "
               "when the set changes or empties.",
-            to=sorted(recipients),
+            to=sorted(recipients), status=Status.open,
             data={"phase_sig": sig, "phase_keys": sorted(live_keys)})
         return [f"stalled-phase:{len(live)}"]
 
@@ -8331,7 +8946,7 @@ class HubService:
                 "cadence and clears this ping; done/parked rows never "
                 "ping. The hub closes this ping itself when the set "
                 "changes or empties.",
-                to=[owner],
+                to=[owner], status=Status.open,
                 data={"claim_due": {"sig": sig, "owner": owner,
                                     "claims": [k for k, _i, _b in rows]}})
             alerted.append(f"claim-due:{ch}/{owner}:{len(rows)}")
@@ -8350,7 +8965,7 @@ class HubService:
                 info = m.data.get("claim_due")
                 if not isinstance(info, dict):
                     continue
-                if closed_authoritatively(m, self.db.replies_to(m.id), ops):
+                if self._closed_authoritatively(m, self.db.replies_to(m.id)):
                     continue
                 owner = str(info.get("owner") or (m.to[0] if m.to else ""))
                 out.setdefault((ch, owner), []).append(m)
@@ -8530,6 +9145,14 @@ class HubService:
             self.DARK_ALERTS_CHANNEL,
             body + self._silence_alert_suffix(agent_id, explicit_class),
             to=stewards or None,
+            # A steward who is told is a steward who owes an answer; with no
+            # steward to name there is nobody to oblige, so the same alert
+            # stands as the operator's record instead. Explicit since `to` no
+            # longer decides status. `exclude=agent_id` above is load-bearing
+            # and must stay: a dark reporting delegate handed the alert about
+            # ITSELF would owe a debt it is by definition offline to settle,
+            # and the next sweep would re-fire on that debt forever.
+            status=Status.open if stewards else Status.fyi,
             data={"silence_alert": {"kind": kind, "agent_id": agent_id}},
         )
 
@@ -8580,7 +9203,7 @@ class HubService:
             if tag not in ("dark", "recovered") and not m.body.startswith(
                     ("FLEET DARK:", "FLEET RECOVERED:")):
                 continue
-            if closed_authoritatively(m, self.db.replies_to(m.id), ops):
+            if self._closed_authoritatively(m, self.db.replies_to(m.id)):
                 continue
             self._post_system(self.DARK_ALERTS_CHANNEL, reason,
                               status="resolved", reply_to=m.id)
@@ -8603,7 +9226,7 @@ class HubService:
                 bucket = recovered
             else:
                 continue
-            if closed_authoritatively(m, self.db.replies_to(m.id), ops):
+            if self._closed_authoritatively(m, self.db.replies_to(m.id)):
                 continue
             bucket.append(m)
         return dark, recovered
@@ -8674,7 +9297,7 @@ class HubService:
             if not ((m.data or {}).get("report_digest")
                     or m.title == "hourly digest: desk facts"):
                 continue
-            if closed_authoritatively(m, self.db.replies_to(m.id), ops):
+            if self._closed_authoritatively(m, self.db.replies_to(m.id)):
                 continue
             self._post_system(
                 self.DARK_ALERTS_CHANNEL,
@@ -8723,7 +9346,7 @@ class HubService:
             subject = self._silence_alert_subject(m)
             if subject is None or subject in live:
                 continue
-            if closed_authoritatively(m, self.db.replies_to(m.id), ops):
+            if self._closed_authoritatively(m, self.db.replies_to(m.id)):
                 continue
             kind, agent_id = subject
             self._post_system(
@@ -8768,7 +9391,7 @@ class HubService:
             subject = self._silence_alert_subject(m)
             if subject is None:
                 continue
-            if closed_authoritatively(m, self.db.replies_to(m.id), ops):
+            if self._closed_authoritatively(m, self.db.replies_to(m.id)):
                 continue
             standing.setdefault(subject, []).append(m)
         for (kind, agent_id), rows in standing.items():
@@ -9114,7 +9737,7 @@ class HubService:
                 # the storm class the directive epoch exists to prevent); it
                 # makes the silence VISIBLE to the operator, which is the
                 # part that costs nothing and was missing.
-                if closed_authoritatively(m, replies, ops):
+                if self._closed_authoritatively(m, replies):
                     continue
                 for seat in sorted(set(m.to) - repliers - {owner}):
                     rows.append({
@@ -9165,7 +9788,7 @@ class HubService:
             for m in self.db.open_obligations([self.DARK_ALERTS_CHANNEL]):
                 if m.sender != "hub":
                     continue
-                if closed_authoritatively(m, self.db.replies_to(m.id), ops):
+                if self._closed_authoritatively(m, self.db.replies_to(m.id)):
                     continue
                 standing_open += 1
                 if self._silence_alert_subject(m) is not None:

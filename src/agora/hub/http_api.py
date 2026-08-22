@@ -182,6 +182,41 @@ def retire_agent(
                 payload.reason if payload else "")
 
 
+class AgentRole(BaseModel):
+    operator: bool
+
+
+@router.get("/agents")
+def list_agents(
+    # Any authenticated seat, OR the admin key — the operator running the hub
+    # asks "who is who" from the machine, before they hold a seat key at all.
+    agent: AgentInfo = Depends(operator_or_admin),
+    service: HubService = Depends(get_service),
+) -> list[dict[str, Any]]:
+    """The roster and WHO IS WHO — id + role, for any authenticated seat.
+
+    Roles are not a secret: the hub charter's whole subject is which seat may
+    do what, and a seat that cannot see who the operator is cannot route a
+    ruling to them. Presence lives at `/presence`; this is authority."""
+    ops = service.operator_ids()
+    return [{"id": aid, "operator": aid in ops}
+            for aid in sorted(service.db.list_agent_ids())]
+
+
+@router.put("/agents/{agent_id}/role")
+def set_agent_role(
+    agent_id: str,
+    payload: AgentRole,
+    agent: AgentInfo = Depends(operator_or_admin),
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    """Promote a seat to operator or demote it to member (operator bearer or
+    admin key). The hub ships with no operator until someone appoints one, and
+    before this verb existed the only way to have one was to get it right at
+    registration — so a fleet wired by `agora setup` could never gain one."""
+    return _run(service.set_agent_role, agent, agent_id, payload.operator)
+
+
 @router.delete("/agents/{agent_id}/retire")
 def unretire_agent(
     agent_id: str,
@@ -1052,6 +1087,31 @@ def retract_message(
     return _run(service.retract_message, agent, channel, message_id).model_dump()
 
 
+class ResolveThread(BaseModel):
+    body: str = ""
+
+
+@router.post("/channels/{channel}/messages/{message_id}/resolve_thread")
+def resolve_thread(
+    channel: str,
+    message_id: str,
+    payload: ResolveThread | None = None,
+    agent: AgentInfo = Depends(current_agent),
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    """Close this message and every open obligation beneath it, in one call.
+
+    Resolution is otherwise per-MESSAGE, so closing the root of a task thread
+    left every obligation its replies had minted alive — measured live: an
+    operator resolved a commission and three seats worked it for hours after.
+    Authority is the single-message closure rule applied to every node (the
+    asker's own, or an operator's); a peer facing someone else's open message
+    is refused with NOTHING closed. Claim rows pointing into the trail are
+    REPORTED, never rewritten."""
+    return _run(service.resolve_thread, agent, channel, message_id,
+                payload.body if payload else "")
+
+
 @router.post("/channels/{channel}/messages/{message_id}/retract_thread")
 def retract_thread(
     channel: str,
@@ -1066,6 +1126,27 @@ def retract_thread(
     in the trail is refused outright with NOTHING retracted. Descendants only,
     never ancestors. Returns the count and the redacted rows."""
     return _run(service.retract_thread, agent, channel, message_id)
+
+
+class TransferOwnership(BaseModel):
+    to: str
+
+
+@router.put("/channels/{channel}/owner")
+def transfer_channel_ownership(
+    channel: str,
+    payload: TransferOwnership,
+    agent: AgentInfo = Depends(current_agent),
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    """Hand a channel to another seat.
+
+    Ownership decides who may invite, write the charter and the `channel:`
+    rows, and archive — and it was previously fixed at creation with no way to
+    move it. The owner, an operator, or a delegate holding ruling/operational
+    scoped here may transfer; the new owner must already be a member. DMs are
+    ownerless and are refused. Announced in the room and to the new owner."""
+    return _run(service.transfer_channel_ownership, agent, channel, payload.to)
 
 
 @router.get("/channels/{channel}/info")

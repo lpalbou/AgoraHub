@@ -177,19 +177,24 @@ def test_trail_is_walked_from_the_db_not_a_client_window():
 
 
 def test_system_rows_in_the_trail_are_skipped_not_fatal():
-    """The single verb 400s on a system/fs row; one join notice must not veto
-    a whole thread retraction."""
+    """A member cannot retract a system/fs row; one join notice must not veto
+    a whole thread retraction.
+
+    The OPERATOR can (operator ruling, 2026-08-22): a system row is authored
+    by `hub`, so author-retraction never reaches it, and without an operator
+    door a hub notice posted into someone's room was unremovable by anyone,
+    forever."""
     client = make_client()
     ka, kb, kop = room(client)
     root = post(client, ka, body="root")
     reply = post(client, kb, body="reply", status="reply", reply_to=root["id"])
-    # Any system/fs row in the channel (joins produce them) proves the
-    # single-verb refusal exists; the thread verb must not inherit it.
+    # Any system/fs row in the channel (joins produce them).
     history = client.get("/channels/room/messages", headers=kop).json()
     system = next(m for m in history if m["kind"] != "message")
-    bad = client.post(f"/channels/room/messages/{system['id']}/retract",
-                      headers=kop)
-    assert bad.status_code == 400
+    assert client.post(f"/channels/room/messages/{system['id']}/retract",
+                       headers=ka).status_code == 403      # a member: no
+    assert client.post(f"/channels/room/messages/{system['id']}/retract",
+                       headers=kop).status_code == 200     # the operator: yes
 
     r = client.post(f"/channels/room/messages/{root['id']}/retract_thread",
                     headers=kop)

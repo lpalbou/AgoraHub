@@ -1868,7 +1868,8 @@ def cmd_register(args: argparse.Namespace) -> None:
     r = httpx.post(f"{url}/agents",
                    headers={"Authorization": f"Bearer {admin}"},
                    json={"id": args.agent, "about": args.about or "",
-                         "mission": getattr(args, "mission", "") or ""},
+                         "mission": getattr(args, "mission", "") or "",
+                         "operator": bool(getattr(args, "operator", False))},
                    timeout=10.0)
     if r.status_code == 409:
         sys.exit(f"agent '{args.agent}' is already registered; keys are "
@@ -1885,7 +1886,8 @@ def cmd_register(args: argparse.Namespace) -> None:
     if args.json:
         print(json.dumps(payload, indent=2))
         return
-    print(f"agent '{args.agent}' registered at {url} (operator=false)")
+    is_op = bool(payload.get("agent", {}).get("operator"))
+    print(f"agent '{args.agent}' registered at {url} (operator={str(is_op).lower()})")
     print(f"  api_key: {payload['api_key']}")
     if getattr(args, "seed", False):
         keys_path = _config.home() / "keys.json"
@@ -1899,6 +1901,71 @@ def cmd_register(args: argparse.Namespace) -> None:
         print(f"  (or: agora setup {args.agent} --harness FRAMEWORK --url "
               f"{url} --key THAT_KEY — cursor|claude|codex|abstractcode)")
         print("  (same machine? re-run with --seed to skip the paste)")
+
+
+def _role_bearer(args) -> str:
+    """The admin key by default — it is the hub machine's credential and it
+    already authorizes every lifecycle verb. An operator SEAT's key works too
+    (`--as`), for an operator administering a hub they do not host."""
+    url = _hub_url(args)
+    if getattr(args, "as_agent", None):
+        return _config.resolve_key(url, args.as_agent,
+                                   admin_key=getattr(args, "admin_key", None))
+    return _admin_key_or_exit(args, url)
+
+
+def cmd_roles(args: argparse.Namespace) -> None:
+    """`agora roles [seat]` — who is who, one line per seat."""
+    import httpx
+
+    url = _hub_url(args)
+    r = httpx.get(f"{url}/agents",
+                  headers={"Authorization": f"Bearer {_role_bearer(args)}"},
+                  timeout=10.0)
+    if r.status_code != 200:
+        sys.exit(f"cannot read the roster: {r.status_code} {r.text}")
+    rows = [a for a in r.json() if not args.agent or a.get("id") == args.agent]
+    if not rows:
+        sys.exit(f"no such agent '{args.agent}'")
+    for a in sorted(rows, key=lambda x: str(x.get("id"))):
+        print(f"{str(a.get('id')):20} "
+              f"{'operator' if a.get('operator') else 'member'}")
+
+
+def cmd_promote(args: argparse.Namespace) -> None:
+    """`agora promote <seat> <member|operator>` — set a seat's role.
+
+    A hub has no operator until one is appointed, and several things need
+    one: missions, delegation, charter rulings, pausing the hub, closing a
+    thread you did not open, and reaching a whole room with a question that
+    names nobody."""
+    import httpx
+
+    url = _hub_url(args)
+    if args.role == "delegate":
+        sys.exit(
+            "a delegation is not a role flip: it carries POWERS, a SCOPE and "
+            "an expiry, so it has its own verb —\n"
+            f"  agora delegate {args.agent} --powers ruling "
+            "--scope <channel> [--ttl 7d]\n"
+            "  (powers: ruling, operational, reporting, moderation, proxy; "
+            "`agora delegate --list` shows active grants)")
+    want_operator = args.role == "operator"
+    r = httpx.put(f"{url}/agents/{args.agent}/role",
+                  headers={"Authorization": f"Bearer {_role_bearer(args)}"},
+                  json={"operator": want_operator}, timeout=10.0)
+    if r.status_code != 200:
+        sys.exit(f"role change refused: {r.status_code} {r.text}")
+    out = r.json()
+    role = "operator" if out.get("operator") else "member"
+    if not out.get("changed"):
+        print(f"'{args.agent}' was already {role} — nothing changed")
+        return
+    print(f"'{args.agent}' is now {role} (by {out.get('by')})")
+    if role == "operator":
+        print("  they may now: set missions, delegate, rule on charters, "
+              "pause/resume the hub, and close any thread. Their room-wide "
+              "open/blocked also wakes every member of a channel.")
 
 
 def cmd_seed_key(args: argparse.Namespace) -> None:
@@ -2820,6 +2887,52 @@ def cmd_retract(args):
         row = await c.retract(a.channel, a.message_id)
         print(f"retracted {a.message_id} in {a.channel} — now reads "
               f"{row['body']!r} on every surface; obligation (if any) cleared")
+    _run_agent_cmd(args, go)
+
+
+def cmd_resolve(args):
+    """`agora resolve <channel> <message_id> [body]` — close a whole thread.
+
+    Resolution is otherwise per-message: closing a task's root leaves every
+    obligation its replies minted alive, which is how an operator's "stop
+    working on this" reached nobody while three seats carried on for hours."""
+    async def go(c, a):
+        report = await c.resolve_thread(a.channel, a.message_id, a.body)
+        n = len(report["closed"])
+        if not n:
+            print(f"nothing open under {a.message_id} in {a.channel} — "
+                  "the thread was already closed")
+        else:
+            print(f"closed {n} open message(s) under {a.message_id} in "
+                  f"{a.channel}; each participant gets one wake, and the "
+                  "thread is settled on every surface")
+        if report.get("truncated"):
+            print("  NOTE: the trail was longer than the bound — re-run to "
+                  "continue closing it")
+        claims = report.get("claims") or []
+        if claims:
+            print(f"  {len(claims)} live claim row(s) point at this thread. "
+                  "The hub does NOT touch them — only their owners know "
+                  "whether finished work should be kept:")
+            for row in claims:
+                print(f"    {row['key']} ({row['owner']}) — {row['status']}")
+    _run_agent_cmd(args, go)
+
+
+def cmd_transfer(args):
+    """`agora transfer <channel> <new-owner> --as <seat>` — hand a room over.
+
+    Ownership decides who may invite, write the charter and the `channel:`
+    rows, and archive the room; it used to be fixed at creation with no move
+    available."""
+    async def go(c, a):
+        out = await c.transfer_channel_ownership(a.channel, a.new_owner)
+        if not out.get("changed"):
+            print(f"'{a.new_owner}' already owns {a.channel} — nothing changed")
+            return
+        print(f"{a.channel}: ownership {out['previous']} -> {out['owner']} "
+              f"(by {out['by']}). They now hold the charter, the channel: "
+              "rows, invites and the room's end.")
     _run_agent_cmd(args, go)
 
 
@@ -3774,7 +3887,36 @@ def build_parser() -> argparse.ArgumentParser:
                     help="also cache the minted key in this machine's "
                          "keys.json (the agent runs HERE; skips the "
                          "seed-key paste)")
+    rg.add_argument("--operator", action="store_true",
+                    help="register this seat as an OPERATOR (may set "
+                         "missions, delegate, rule on charters, pause the "
+                         "hub, and close any thread; its room-wide "
+                         "open/blocked wakes every member)")
     rg.set_defaults(func=cmd_register)
+
+    pr = sub.add_parser("promote",
+                        help="set a seat's role: agora promote <seat> "
+                             "<member|operator>")
+    pr.add_argument("agent", help="the seat, e.g. laurent")
+    pr.add_argument("role", choices=["member", "operator", "delegate"],
+                    help="member | operator (delegate is a scoped grant — "
+                         "see `agora delegate`)")
+    pr.add_argument("--url", default=None)
+    pr.add_argument("--admin-key", dest="admin_key", default=None,
+                    help="admin key (default: $AGORA_ADMIN_KEY, then config.json)")
+    pr.add_argument("--as", dest="as_agent", default=None,
+                    help=argparse.SUPPRESS)   # an operator seat's key, if you
+    #                                           prefer it to the admin key
+    pr.set_defaults(func=cmd_promote)
+
+    rl = sub.add_parser("roles", help="who is who: one line per seat")
+    rl.add_argument("agent", nargs="?", default="",
+                    help="one seat (default: the whole roster)")
+    rl.add_argument("--url", default=None)
+    rl.add_argument("--admin-key", dest="admin_key", default=None,
+                    help="admin key (default: $AGORA_ADMIN_KEY, then config.json)")
+    rl.add_argument("--as", dest="as_agent", default=None, help=argparse.SUPPRESS)
+    rl.set_defaults(func=cmd_roles)
 
     mi = sub.add_parser("mission", help="operator: set what a seat is FOR "
                                         "(rides every whoami; required "
@@ -4478,6 +4620,22 @@ def build_parser() -> argparse.ArgumentParser:
                          "is entirely yours — otherwise refused with nothing "
                          "retracted)")
     rc.set_defaults(func=cmd_retract)
+
+    rv = _agent_parser("resolve", "close a thread: this message and every "
+                                  "open obligation beneath it, in one call")
+    rv.add_argument("channel", help="the channel the thread is in")
+    rv.add_argument("message_id", help="the thread root (or any node in it)")
+    rv.add_argument("body", nargs="?", default="",
+                    help="what to say while closing (default: a stand-down "
+                         "note telling the room to stop work on it)")
+    rv.set_defaults(func=cmd_resolve)
+
+    tr = _agent_parser("transfer", "hand a channel to another seat (owner, "
+                                   "operator, or a scoped ruling delegate)")
+    tr.add_argument("channel", help="the channel to hand over")
+    tr.add_argument("new_owner", help="the seat that will own it (must "
+                                      "already be a member)")
+    tr.set_defaults(func=cmd_transfer)
 
     rt = _agent_parser("rate", "cast/revise your ONE live reputation vote "
                                "on a colleague (evidence-based)")

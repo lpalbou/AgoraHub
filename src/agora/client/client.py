@@ -297,6 +297,29 @@ class AgoraClient:
         return self._json(await self._http.post(
             f"/channels/{channel}/messages/{message_id}/retract_thread"))
 
+    async def resolve_thread(self, channel: str, message_id: str,
+                             body: str = "") -> dict[str, Any]:
+        """Close a message AND every open obligation beneath it, in one call.
+
+        Resolution is otherwise per-message, so closing a task's root left the
+        obligations its replies had minted alive and the seats working. The
+        asker's own thread, or an operator's on anyone's; a peer facing
+        someone else's open message is refused with nothing closed. Claim rows
+        pointing into the trail come back in `claims` — reported, not
+        rewritten, because only their owners know what to do with them."""
+        return self._json(await self._http.post(
+            f"/channels/{channel}/messages/{message_id}/resolve_thread",
+            json={"body": body}))
+
+    async def transfer_channel_ownership(self, channel: str,
+                                         to: str) -> dict[str, Any]:
+        """Hand a channel to another seat: the charter, the `channel:` rows,
+        invites and the room's end go with it. Owner, operator, or a delegate
+        holding ruling/operational scoped here; the new owner must already be
+        a member."""
+        return self._json(await self._http.put(
+            f"/channels/{channel}/owner", json={"to": to}))
+
     async def rate(self, channel: str, target: str, axis: str, value: int,
                    note: str = "") -> dict[str, Any]:
         """Cast/revise your one live reputation vote (0094): axis in

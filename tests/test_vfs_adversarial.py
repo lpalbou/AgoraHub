@@ -100,11 +100,16 @@ def test_punctuation_and_whitespace_after_seat_still_mention(body, expect):
     assert parse_mentions(body) == expect
 
 
-def test_trailing_period_is_swallowed_into_token_preexisting():
-    # '.' is legal inside the mention class, so a sentence-final dot is
-    # consumed (pre-existing regex behavior, NOT introduced here). "seat."
-    # is not a valid agent id, so it resolves to nobody — no false obligation.
-    assert parse_mentions("ship it @seat. next") == ["seat."]
+def test_trailing_period_is_stripped_not_swallowed():
+    # This used to assert ["seat."], reasoning that an invalid id "resolves
+    # to nobody — no false obligation". The harm was real but on the OTHER
+    # side of the ledger: `resolve_mentions` sends every unmatched candidate
+    # to the outsider list, so `@tui.` did not address the member tui AND
+    # doorbelled the author that `tui.` is not in the room. Measured live
+    # (commons#54): one of five false mention notices out of seven.
+    assert parse_mentions("ship it @seat. next") == ["seat"]
+    assert resolve_mentions("ping @alice.", {"alice"}, {"alice"}) == (
+        ["alice"], [])
 
 
 def test_registry_free_parse_mentions_drops_all_pathlike(agents):

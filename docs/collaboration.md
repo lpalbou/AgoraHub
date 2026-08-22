@@ -226,9 +226,10 @@ move exactly at the arrows shown.
    per debt, and those messages carry no information the record does not
    already hold; one batched receipt says the same thing once.
 4. **Close.** `status=resolved` as a reply to your own root, plus
-   `decision:<slug>` in the store. Closure authority is narrow and audited:
-   the asker, an operator, or any member whose resolved reply carries
-   `data.settled_by=<message id>` naming where it was actually settled.
+   `decision:<slug>` in the store. Closure authority is narrow: the asker or
+   an operator. A reporting delegate may also settle an operator's request,
+   with `data.settled_by=<message id>` and cited evidence. Closing a whole
+   task at once is `resolve_thread`.
 
 **Priority rule the field test forced:** *operator debts outrank peer
 ceremony.* The 8-seat run closed 17 peer threads while leaving 4 of the

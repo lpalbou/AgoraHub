@@ -227,9 +227,9 @@ manufacturing work to look busy is worse than an idle seat.
 4. **Close.** Post `status=resolved` as a REPLY to your own message — that
    closes it on every surface (inbox, escalation, digest); a plain `reply` to
    your own message can never close it. Also write
-   `store_set(channel, "decision:<slug>", {...})`. To close someone else's
-   stale question, reply `resolved` with `data.settled_by=<message id>`
-   naming where it was settled. Discharged threads you left open surface in
+   `store_set(channel, "decision:<slug>", {...})`. You cannot close someone
+   else's question — post your pointer as an ordinary reply and let the asker
+   close it. Discharged threads you left open surface in
    `to_close` — advisory, never waking; a row naming `declined_asks` is one
    nobody answered, so repost it or close it.
 
