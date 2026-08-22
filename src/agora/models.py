@@ -1022,6 +1022,144 @@ class AgentInfo(BaseModel):
     created_at: float = Field(default_factory=time.time)
 
 
+# -- spawn requests (a seat is WANTED; the hub never starts one) --------------
+#
+# The hub RECORDS that a seat is wanted. A human-started `agora runner` on the
+# target machine pulls the row and acts on it. Design:
+# `plan/spawn-a-seat-from-the-chat.md` in the agora-and-wui channel vfs, from
+# laurent's dm#24. Three lines in this repo forbid the obvious alternative
+# (hub forks the driver): architecture.md:340 "the hub never creates turns",
+# drive.py:11-14 "NOT hub machinery", and backlog/deprecated/0051 — a
+# supervision layer the maintainer deleted hours after it was completed.
+
+MAX_SPAWN_FOLDER_CHARS = 256
+MAX_SPAWN_DETAIL_CHARS = 500   # the runner's own sentence, rendered verbatim
+MAX_SPAWN_HARNESS_CHARS = 64
+
+
+class SpawnState(str, Enum):
+    """Lifecycle of a spawn request. `awaiting_approval` is NOT cosmetic: under
+    `--require-approval` a request sits for however long it takes a human at
+    some other machine's tty to type `y`, and rendering that as `claimed` shows
+    a normal-looking claim while nothing is happening — the "working…" light
+    this project already refused to ship (the hub cannot observe an agentic
+    loop), arriving through a different door."""
+
+    pending = "pending"                      # recorded; no runner has taken it
+    claimed = "claimed"                      # a runner owns it and is working
+    awaiting_approval = "awaiting_approval"  # a human at the runner's tty must say yes
+    running = "running"                      # the seat joined; its driver is up
+    stopped = "stopped"                      # terminal: the driver is down
+    rejected = "rejected"                    # terminal: runner policy refused it
+    failed = "failed"                        # terminal: it broke
+
+
+#: Terminal states — nothing leaves these. A row here is finished business.
+SPAWN_TERMINAL: frozenset[SpawnState] = frozenset(
+    {SpawnState.stopped, SpawnState.rejected, SpawnState.failed})
+
+#: The only transitions the hub accepts. Every non-terminal state may go to
+#: `failed` or `rejected`: a runner that dies mid-boot, or refuses on one of
+#: its five local gates, must always be able to say so. Nothing may go
+#: BACKWARDS — a row that reached `running` cannot return to `pending` and be
+#: claimed by a second runner, which is what would give one request two live
+#: seats.
+SPAWN_TRANSITIONS: dict[SpawnState, frozenset[SpawnState]] = {
+    SpawnState.pending: frozenset({SpawnState.claimed, SpawnState.rejected,
+                                   SpawnState.failed}),
+    SpawnState.claimed: frozenset({SpawnState.awaiting_approval,
+                                   SpawnState.running, SpawnState.rejected,
+                                   SpawnState.failed}),
+    SpawnState.awaiting_approval: frozenset({SpawnState.running,
+                                             SpawnState.rejected,
+                                             SpawnState.failed}),
+    SpawnState.running: frozenset({SpawnState.stopped, SpawnState.failed}),
+    SpawnState.stopped: frozenset(),
+    SpawnState.rejected: frozenset(),
+    SpawnState.failed: frozenset(),
+}
+
+
+class SpawnFolderRefused(ValueError):
+    """The requested folder is not a runner-relative hint.
+
+    Non-negotiable #2 of the design: no hub endpoint accepts a filesystem path
+    the hub itself will use. `folder` is a HINT resolved inside the runner's
+    own `--root`; an absolute path, a `..` segment or a `~` is a caller trying
+    to name a location on someone else's disk, and the hub refuses it at the
+    door rather than trusting the runner to catch it. The runner re-checks
+    anyway (defence in depth) — this refusal exists so a client shows the
+    operator a 400 with a reason instead of a `rejected` row minutes later."""
+
+
+def validate_spawn_folder(folder: str) -> str:
+    """Return the normalised folder hint, or raise SpawnFolderRefused."""
+    hint = folder.strip()
+    if not hint:
+        return ""
+    if len(hint) > MAX_SPAWN_FOLDER_CHARS:
+        raise SpawnFolderRefused(
+            f"folder hint is longer than {MAX_SPAWN_FOLDER_CHARS} characters")
+    if hint.startswith("/") or hint.startswith("~") or "\\" in hint:
+        raise SpawnFolderRefused(
+            "folder is a hint relative to the runner's own root, never an "
+            f"absolute path: drop the leading '{hint[0]}'")
+    if re.match(r"^[A-Za-z]:", hint):
+        raise SpawnFolderRefused(
+            "folder is a hint relative to the runner's own root, never a "
+            "drive-absolute path")
+    if ".." in hint.split("/"):
+        raise SpawnFolderRefused(
+            "folder may not contain '..' — it is resolved inside the runner's "
+            "root and may not escape it")
+    return hint.strip("/")
+
+
+class SpawnRequest(BaseModel):
+    """One recorded intent to start a seat, and everything the runner needs.
+
+    `machine` is required and defaults to "local" from day one even though v1
+    has exactly one runner. It is the v2 seam: adding a routing dimension later
+    means changing every caller, while adding a registry behind a field that
+    already exists changes nobody. Per ADR-0001 the routing target is the
+    RUNNER'S OWN SEAT ID, never a hostname — the hub still never parses `@`.
+    """
+
+    id: str
+    machine: str = "local"
+    seat_id: str
+    mission: str = ""
+    harness: str = ""
+    #: Relative to the runner's root; "" means `<root>/<seat_id>`. Validated by
+    #: `validate_spawn_folder` at the door — the hub never resolves it.
+    folder: str = ""
+    channels: list[str] = Field(default_factory=list)
+    #: Runner-side knobs (permission floor, about, …). Free-form on purpose:
+    #: the runner owns policy and a hub-side enum would make every new knob a
+    #: hub release.
+    options: dict[str, Any] = Field(default_factory=dict)
+    state: SpawnState = SpawnState.pending
+    #: The runner's OWN sentence about this row's state, rendered verbatim by
+    #: every client — so a refusal names itself instead of the operator having
+    #: to go and read a log on another machine.
+    detail: str = ""
+    requested_by: str = ""
+    claimed_by: str = ""
+    #: The PUBLIC id of the single-use join token minted for this request. The
+    #: hub never holds the secret (the runner receives it once, at claim), and
+    #: the public id is what makes revoke-on-failure possible.
+    join_token_id: str = ""
+    created_at: float = 0.0
+    updated_at: float = 0.0
+    claimed_at: float | None = None
+    #: An operator asked for this seat to stop. It is a REQUEST, not a state:
+    #: only the runner can end a process, so the hub records the intent and the
+    #: runner moves the row to `stopped`. A row that never reaches `stopped`
+    #: with this set is a runner that is not listening — which is visible,
+    #: where a hub-side lie about it would not be.
+    stop_requested_at: float | None = None
+
+
 class ColleagueNote(BaseModel):
     """Private, subjective, free-text impression of another agent.
 

@@ -24,7 +24,18 @@ from typing import Any
 
 from . import search_index as _si
 from .ids import new_ulid
-from .models import DM_PREFIX, AgentInfo, Channel, Member, Message, StoreEntry
+from .models import (
+    DM_PREFIX,
+    SPAWN_TERMINAL,
+    SPAWN_TRANSITIONS,
+    AgentInfo,
+    Channel,
+    Member,
+    Message,
+    SpawnRequest,
+    SpawnState,
+    StoreEntry,
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS agents (
@@ -79,6 +90,10 @@ CREATE TABLE IF NOT EXISTS join_tokens (
     secret_hash TEXT NOT NULL,
     agent_id    TEXT,               -- NULL = redeemer chooses the id
     about       TEXT NOT NULL DEFAULT '',
+    mission     TEXT NOT NULL DEFAULT '',     -- the OPERATOR's charge, carried
+                                  -- to redemption: a seat spawned with its
+                                  -- mission only in the hub is a seat that
+                                  -- forgets what it is for after a compaction
     channels    TEXT NOT NULL DEFAULT '[]',   -- JSON list: public auto-joins
     created_by  TEXT NOT NULL DEFAULT 'admin',
     created_at  REAL NOT NULL,
@@ -325,6 +340,36 @@ CREATE TABLE IF NOT EXISTS meta (
     key    TEXT PRIMARY KEY,
     value  TEXT NOT NULL
 );
+-- The hub RECORDS that a seat is wanted; it never starts one. A human-started
+-- `agora runner` on the target machine long-polls this table, claims a row,
+-- and runs the same join + drive a human runs today. No column here holds a
+-- path the hub will use, a machine credential, or a spawned seat's api key:
+-- `folder` is a hint relative to the RUNNER's own root, and the credential is
+-- the join token we already ship (single-use, TTL'd, id-pinned, hashed at
+-- rest, and it cannot mint an operator). Only the token's PUBLIC id is stored.
+CREATE TABLE IF NOT EXISTS spawn_requests (
+    id            TEXT PRIMARY KEY,
+    machine       TEXT NOT NULL DEFAULT 'local',  -- v2 seam; the routing target
+                                  -- is a RUNNER'S SEAT ID, never a hostname
+    seat_id       TEXT NOT NULL,
+    mission       TEXT NOT NULL DEFAULT '',
+    harness       TEXT NOT NULL DEFAULT '',
+    folder        TEXT NOT NULL DEFAULT '',       -- relative hint; '' = <root>/<seat_id>
+    channels      TEXT NOT NULL DEFAULT '[]',     -- JSON list
+    options       TEXT NOT NULL DEFAULT '{}',     -- JSON object: runner-side knobs
+    state         TEXT NOT NULL DEFAULT 'pending',
+    detail        TEXT NOT NULL DEFAULT '',       -- the runner's OWN sentence
+    requested_by  TEXT NOT NULL DEFAULT '',
+    claimed_by    TEXT NOT NULL DEFAULT '',
+    join_token_id TEXT NOT NULL DEFAULT '',
+    created_at    REAL NOT NULL,
+    updated_at    REAL NOT NULL,
+    claimed_at    REAL,
+    stop_requested_at REAL          -- an operator asked for it to stop; only
+                                    -- the runner can actually end the process
+);
+CREATE INDEX IF NOT EXISTS idx_spawn_requests_poll
+    ON spawn_requests (machine, state, created_at);
 """
 
 
@@ -346,6 +391,18 @@ class DuplicateMessage(Exception):
     def __init__(self, message_id: str) -> None:
         super().__init__(message_id)
         self.message_id = message_id
+
+
+class SpawnTransitionRefused(Exception):
+    """A spawn row was asked to do something its lifecycle forbids. Carries
+    HubError's (status, detail) shape without importing the service layer:
+    404 unknown row, 409 an illegal or terminal transition, 403 another
+    runner's row."""
+
+    def __init__(self, status_code: int, detail: str) -> None:
+        super().__init__(detail)
+        self.status_code = status_code
+        self.detail = detail
 
 
 class JoinTokenRefused(Exception):
@@ -435,6 +492,16 @@ class Database:
             if "mission" not in agent_cols:
                 self._conn.execute(
                     "ALTER TABLE agents ADD COLUMN mission TEXT NOT NULL DEFAULT ''")
+            # A join token can carry the operator's MISSION for the seat it
+            # mints (spawn-from-the-chat). Pre-existing tokens default to '',
+            # which is exactly what they meant: no mission was stated, so
+            # redemption leaves the seat's mission empty as before.
+            jt_cols = {r["name"] for r in self._conn.execute(
+                "PRAGMA table_info(join_tokens)")}
+            if "mission" not in jt_cols:
+                self._conn.execute(
+                    "ALTER TABLE join_tokens ADD COLUMN mission TEXT NOT NULL"
+                    " DEFAULT ''")
             # Role-scoped charter views (0147): which SLICE a receipt was for.
             # Backfilled 'full' rather than left NULL, because that is what
             # actually happened: every read before this build served the whole
@@ -1164,25 +1231,32 @@ class Database:
 
     def create_join_token(self, token_id: str, secret: str, agent_id: str | None,
                           about: str, channels: list[str], created_by: str,
-                          ttl_seconds: float, max_uses: int) -> dict[str, Any]:
+                          ttl_seconds: float, max_uses: int,
+                          mission: str = "") -> dict[str, Any]:
         """Store a new join token (secret hashed, plaintext never lands).
         Expired rows are lazily purged on the way in. Returns the stored row's
         public fields; raises JoinTokenRefused(409) on a token_id collision
-        (astronomically rare — the caller may simply re-mint)."""
+        (astronomically rare — the caller may simply re-mint).
+
+        `mission` rides the token so a seat minted without a human at a shell
+        arrives already knowing what it is FOR. It is the operator's charge and
+        the redeemer cannot choose it: unlike `about`, a redemption-time value
+        never overrides it."""
         now = time.time()
         with self._lock:
             self._purge_expired_join_tokens_locked(now)
             cur = self._conn.execute(
                 "INSERT OR IGNORE INTO join_tokens (token_id, secret_hash, agent_id,"
-                " about, channels, created_by, created_at, expires_at, max_uses)"
-                " VALUES (?,?,?,?,?,?,?,?,?)",
-                (token_id, hash_secret(secret), agent_id, about,
+                " about, mission, channels, created_by, created_at, expires_at,"
+                " max_uses) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (token_id, hash_secret(secret), agent_id, about, mission,
                  json.dumps(channels), created_by, now, now + ttl_seconds, max_uses),
             )
             self._conn.commit()
         if cur.rowcount == 0:
             raise JoinTokenRefused(409, f"join token id '{token_id}' already exists")
         return {"token_id": token_id, "agent_id": agent_id, "about": about,
+                "mission": mission,
                 "channels": channels, "created_by": created_by,
                 "created_at": now, "expires_at": now + ttl_seconds,
                 "max_uses": max_uses}
@@ -1228,6 +1302,14 @@ class Database:
             info = self._insert_agent_locked(effective, name, api_key,
                                              operator=False,  # forced server-side
                                              about=about or row["about"])
+            # The token's mission is the OPERATOR's charge and is applied
+            # server-side. The redeemer has no say — it may choose its `about`
+            # and never its mission, the same asymmetry set_about/set_mission
+            # enforces for a live seat.
+            token_mission = (row["mission"] or "") if "mission" in row.keys() else ""
+            if token_mission:
+                self._conn.execute("UPDATE agents SET mission = ? WHERE id = ?",
+                                   (token_mission, effective))
             used_by = json.loads(row["used_by"] or "[]") + [effective]
             self._conn.execute(
                 "UPDATE join_tokens SET uses = uses + 1, used_by = ?"
@@ -1246,13 +1328,14 @@ class Database:
         with self._lock:
             self._purge_expired_join_tokens_locked(now)
             rows = self._conn.execute(
-                "SELECT token_id, agent_id, about, channels, created_by,"
+                "SELECT token_id, agent_id, about, mission, channels, created_by,"
                 " created_at, expires_at, max_uses, uses, revoked_at, used_by"
                 " FROM join_tokens ORDER BY created_at"
             ).fetchall()
         return [
             {"token_id": r["token_id"], "agent_id": r["agent_id"],
-             "about": r["about"], "channels": json.loads(r["channels"] or "[]"),
+             "about": r["about"], "mission": r["mission"],
+             "channels": json.loads(r["channels"] or "[]"),
              "created_by": r["created_by"], "created_at": r["created_at"],
              "expires_at": r["expires_at"], "max_uses": r["max_uses"],
              "uses": r["uses"], "revoked_at": r["revoked_at"],
@@ -1283,6 +1366,164 @@ class Database:
         caller (list) never leaves the transaction open."""
         self._conn.execute("DELETE FROM join_tokens WHERE expires_at < ?", (now,))
         self._conn.commit()
+
+    # -- spawn requests (a seat is WANTED; a runner pulls it) -----------------
+
+    @staticmethod
+    def _row_to_spawn(row: sqlite3.Row) -> SpawnRequest:
+        return SpawnRequest(
+            id=row["id"], machine=row["machine"], seat_id=row["seat_id"],
+            mission=row["mission"], harness=row["harness"], folder=row["folder"],
+            channels=json.loads(row["channels"] or "[]"),
+            options=json.loads(row["options"] or "{}"),
+            state=SpawnState(row["state"]), detail=row["detail"],
+            requested_by=row["requested_by"], claimed_by=row["claimed_by"],
+            join_token_id=row["join_token_id"],
+            created_at=row["created_at"], updated_at=row["updated_at"],
+            claimed_at=row["claimed_at"],
+            stop_requested_at=row["stop_requested_at"])
+
+    def create_spawn_request(self, *, machine: str, seat_id: str, mission: str,
+                             harness: str, folder: str, channels: list[str],
+                             options: dict[str, Any],
+                             requested_by: str) -> SpawnRequest:
+        """Record that a seat is WANTED. Nothing starts here — this is a row,
+        and a runner on `machine` is what turns it into a process."""
+        now = time.time()
+        spawn_id = new_ulid()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO spawn_requests (id, machine, seat_id, mission,"
+                " harness, folder, channels, options, state, requested_by,"
+                " created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (spawn_id, machine, seat_id, mission, harness, folder,
+                 json.dumps(channels), json.dumps(options),
+                 SpawnState.pending.value, requested_by, now, now),
+            )
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT * FROM spawn_requests WHERE id = ?", (spawn_id,)).fetchone()
+        return self._row_to_spawn(row)
+
+    def get_spawn_request(self, spawn_id: str) -> SpawnRequest | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM spawn_requests WHERE id = ?", (spawn_id,)).fetchone()
+        return self._row_to_spawn(row) if row is not None else None
+
+    def list_spawn_requests(self, *, machine: str = "", active_only: bool = False,
+                            limit: int = 100) -> list[SpawnRequest]:
+        """Newest first. `active_only` drops the terminal rows — the operator's
+        "what is happening right now" view, where a week of stopped seats is
+        noise."""
+        sql = "SELECT * FROM spawn_requests"
+        clauses: list[str] = []
+        params: list[Any] = []
+        if machine:
+            clauses.append("machine = ?")
+            params.append(machine)
+        if active_only:
+            placeholders = ",".join("?" * len(SPAWN_TERMINAL))
+            clauses.append(f"state NOT IN ({placeholders})")
+            params.extend(sorted(s.value for s in SPAWN_TERMINAL))
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [self._row_to_spawn(r) for r in rows]
+
+    def claim_spawn_request(self, *, machine: str, runner_id: str,
+                            join_token_id: str = "") -> SpawnRequest | None:
+        """Atomically hand the oldest pending request on `machine` to one
+        runner, or return None if there is nothing to do.
+
+        Select-then-update under the write lock is the whole concurrency
+        story: two runners polling the same machine serialize here, and the
+        loser sees the row already `claimed` and gets None rather than a
+        second seat for one request. This is the primitive that makes
+        `claimed_by` load-bearing rather than decorative the day a second
+        runner exists."""
+        now = time.time()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM spawn_requests WHERE machine = ? AND state = ?"
+                " ORDER BY created_at LIMIT 1",
+                (machine, SpawnState.pending.value)).fetchone()
+            if row is None:
+                return None
+            self._conn.execute(
+                "UPDATE spawn_requests SET state = ?, claimed_by = ?,"
+                " claimed_at = ?, updated_at = ?, join_token_id = ?"
+                " WHERE id = ? AND state = ?",
+                (SpawnState.claimed.value, runner_id, now, now, join_token_id,
+                 row["id"], SpawnState.pending.value))
+            self._conn.commit()
+            fresh = self._conn.execute(
+                "SELECT * FROM spawn_requests WHERE id = ?", (row["id"],)).fetchone()
+        return self._row_to_spawn(fresh)
+
+    def set_spawn_state(self, spawn_id: str, state: SpawnState, *,
+                        detail: str = "", by: str = "") -> SpawnRequest:
+        """Advance a row, or raise SpawnTransitionRefused.
+
+        The transition table is enforced HERE rather than in the caller
+        because both the HTTP layer and the runner write these rows, and a
+        state machine checked in two places is a state machine checked in
+        neither. Backwards moves are what this refuses: a `running` row that
+        could return to `pending` would be claimable by a second runner, which
+        is one request with two live seats."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM spawn_requests WHERE id = ?", (spawn_id,)).fetchone()
+            if row is None:
+                raise SpawnTransitionRefused(404, f"no spawn request '{spawn_id}'")
+            current = SpawnState(row["state"])
+            if state is not current and state not in SPAWN_TRANSITIONS[current]:
+                if current in SPAWN_TERMINAL:
+                    raise SpawnTransitionRefused(
+                        409, f"spawn request is {current.value} (terminal): it "
+                             f"cannot become {state.value}")
+                raise SpawnTransitionRefused(
+                    409, f"a spawn request cannot go from {current.value} to "
+                         f"{state.value}")
+            if by and row["claimed_by"] and by != row["claimed_by"]:
+                raise SpawnTransitionRefused(
+                    403, f"spawn request is claimed by '{row['claimed_by']}'")
+            now = time.time()
+            self._conn.execute(
+                "UPDATE spawn_requests SET state = ?, detail = ?, updated_at = ?"
+                " WHERE id = ?", (state.value, detail, now, spawn_id))
+            self._conn.commit()
+            fresh = self._conn.execute(
+                "SELECT * FROM spawn_requests WHERE id = ?", (spawn_id,)).fetchone()
+        return self._row_to_spawn(fresh)
+
+    def request_spawn_stop(self, spawn_id: str) -> SpawnRequest:
+        """Record that an operator wants this seat stopped. Idempotent, and it
+        does NOT move the state: only the runner can end a process, so the hub
+        stamps the intent and the runner reports `stopped`. A row that stays
+        `running` with a stop stamp is a runner that is not listening — which
+        is a fact worth being able to see, where a hub-side state change would
+        have hidden it behind a comfortable lie."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM spawn_requests WHERE id = ?", (spawn_id,)).fetchone()
+            if row is None:
+                raise SpawnTransitionRefused(404, f"no spawn request '{spawn_id}'")
+            if SpawnState(row["state"]) in SPAWN_TERMINAL:
+                raise SpawnTransitionRefused(
+                    409, f"spawn request is already {row['state']}")
+            if row["stop_requested_at"] is None:
+                now = time.time()
+                self._conn.execute(
+                    "UPDATE spawn_requests SET stop_requested_at = ?,"
+                    " updated_at = ? WHERE id = ?", (now, now, spawn_id))
+                self._conn.commit()
+            fresh = self._conn.execute(
+                "SELECT * FROM spawn_requests WHERE id = ?", (spawn_id,)).fetchone()
+        return self._row_to_spawn(fresh)
 
     # -- messages ------------------------------------------------------------
 
