@@ -513,6 +513,77 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
         return _call("DELETE", f"/agents/{agent_id}/retire")
 
     @mcp.tool()
+    def spawn_seat(seat_id: str, harness: str, mission: str = "",
+                   machine: str = "local", folder: str = "",
+                   channels: list[str] | None = None) -> dict:
+        """Ask for a NEW SEAT to be started on a machine (OPERATOR only, and
+        never delegable — no grant, including proxy, confers it).
+
+        This RECORDS that a seat is wanted and starts nothing. A human-started
+        `agora runner` on `machine` claims the request, checks it against its
+        own local gates (workspace root, installed harnesses, seat cap), and
+        BY DEFAULT asks a human at its terminal before anything runs. The hub
+        opens no connection, holds no ssh key, and knows no absolute path.
+
+        `harness` is required and the runner refuses one it does not have —
+        call `list_machines` for the set each machine actually announced, and
+        never offer a name from a list of your own. `folder` is a HINT
+        relative to the runner's own root (absolute paths and `..` are
+        refused); empty means `<root>/<seat_id>`. `mission` rides the join
+        token, so the seat arrives already knowing what it is FOR.
+
+        Watch it with `list_spawns`: `pending` means no runner has taken it,
+        and `awaiting_approval` names the machine whose human has not yet said
+        yes. A row is never proof that a process is running — only the
+        runner's own report is.
+        """
+        return _call("POST", "/spawns",
+                     json={"seat_id": seat_id, "harness": harness,
+                           "mission": mission, "machine": machine,
+                           "folder": folder, "channels": channels or []})
+
+    @mcp.tool()
+    def list_spawns(machine: str = "", active_only: bool = False) -> list:
+        """Spawn requests and where each got to (OPERATOR only), newest first.
+
+        States: `pending` (no runner has taken it) -> `claimed` ->
+        `awaiting_approval` (a human at that machine has not typed y) ->
+        `running`, plus terminal `stopped`, `rejected` and `failed`. `detail`
+        is the runner's OWN sentence — read it verbatim; it is where a refusal
+        names itself instead of you having to find a log on another machine.
+        """
+        return _call("GET", "/spawns", params={"machine": machine,
+                                               "active_only": active_only})
+
+    @mcp.tool()
+    def stop_spawn(spawn_id: str) -> dict:
+        """Ask for a spawned seat to be stopped (OPERATOR only).
+
+        This records the INTENT and does not change the state: only the runner
+        can end a process. A row that stays `running` with a stop stamp is a
+        runner that is not listening — which is worth seeing, where a hub-side
+        flip to `stopped` would have hidden it behind a comfortable lie.
+        """
+        return _call("POST", f"/spawns/{spawn_id}/stop")
+
+    @mcp.tool()
+    def list_machines() -> list:
+        """Which machines can host a new seat, and what each can actually run.
+
+        Readable by any seat, because a client cannot honestly say "no runner
+        available" without being able to ask. Four different facts, four
+        different sentences — do not collapse them:
+        an EMPTY list = no runner is registered anywhere (an admin names one);
+        `announced_at: null` = named but never started;
+        `harnesses: []` = a runner is up and has no harness installed;
+        an error = this hub does not serve the route at all.
+        `harnesses` is the RUNNER's announced set and the only list to offer:
+        the hub keeps no harness enum, and an unrecognised name renders
+        verbatim rather than being dropped.
+        """
+        return _call("GET", "/machines")
+
+    @mcp.tool()
     def join_channel(channel: str, invite_token: str | None = None) -> dict:
         """Join a channel (private ones need an invite token). Returns the
         channel's metadata, language, and members with their self-descriptions
