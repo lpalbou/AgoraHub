@@ -1736,6 +1736,26 @@ class Database:
                 out.setdefault(r["reply_to"], []).append(self._row_to_message(r))
         return out
 
+    def messages_by_ids(self, message_ids: list[str]) -> dict[str, Message]:
+        """Fetch MANY messages by id in one batched query per 500-id chunk,
+        keyed by id (0154). Same chunking rationale as replies_map: a
+        1000-row page must not exceed the 999 bound-variable ceiling of
+        older bundled SQLites. Retracted rows come back as tombstones, like
+        every other agent-facing read — the caller wanting a parent's seq
+        and sender still gets them (retraction takes the words, not the
+        position). Missing ids are simply absent from the mapping."""
+        out: dict[str, Message] = {}
+        for i in range(0, len(message_ids), 500):
+            chunk = message_ids[i:i + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            with self._lock:
+                rows = self._conn.execute(
+                    f"SELECT * FROM messages WHERE id IN ({placeholders})",
+                    (*chunk,)).fetchall()
+            for r in rows:
+                out[r["id"]] = self._row_to_message(r)
+        return out
+
     def top_rated_messages(self, channel: str, limit: int) -> list[Message]:
         """The channel's messages ranked by NET message rating (up-down)
         desc, tie-break newest-first (agora-0125, operator request: sort a

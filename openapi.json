@@ -558,6 +558,50 @@
       "title": "Reply To Me",
       "type": "boolean"
      },
+     "reply_to_retracted": {
+      "anyOf": [
+       {
+        "type": "boolean"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Reply To Retracted"
+     },
+     "reply_to_sender": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Reply To Sender"
+     },
+     "reply_to_seq": {
+      "anyOf": [
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Reply To Seq"
+     },
+     "reply_to_title": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Reply To Title"
+     },
      "retracted": {
       "default": false,
       "title": "Retracted",
@@ -655,9 +699,15 @@
       "title": "Content B64"
      },
      "description": {
-      "default": "",
-      "title": "Description",
-      "type": "string"
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Description"
      },
      "expect_version": {
       "anyOf": [
@@ -977,6 +1027,39 @@
        }
       ],
       "title": "Reply To"
+     },
+     "reply_to_retracted": {
+      "anyOf": [
+       {
+        "type": "boolean"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Reply To Retracted"
+     },
+     "reply_to_sender": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Reply To Sender"
+     },
+     "reply_to_seq": {
+      "anyOf": [
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Reply To Seq"
      },
      "retracted": {
       "default": false,

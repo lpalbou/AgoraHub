@@ -366,6 +366,25 @@ class Envelope(BaseModel):
     body: str | None = None              # inlined only per delivery policy
     data: dict[str, Any] | None = None   # included only when body is inlined
     reply_to: str | None = None
+    # The parent's COORDINATES (0154). `reply_to` is a ULID: it identifies the
+    # parent but cannot be printed, so every client was either keeping its own
+    # id->seq map (drifting, window-bounded) or rendering a bare "this is a
+    # reply" that declines to say to what. The envelope is where an operator
+    # first meets the problem — an inbox headline has no surrounding context —
+    # so the title rides HERE and nowhere else (both clients asked for it on
+    # the envelope and refused it on the history row: it competes with the
+    # row's own title and costs bytes on every row of every page).
+    # See MessageRow for the null contract; it is identical.
+    reply_to_seq: int | None = None
+    reply_to_sender: str | None = None
+    reply_to_title: str | None = None    # the parent's own title, verbatim
+    #                                      (already capped at MAX_TITLE_CHARS,
+    #                                      so no second truncation for a client
+    #                                      to undo); "" when it had none, null
+    #                                      when the parent is a tombstone —
+    #                                      retraction takes the words, and this
+    #                                      is one of them.
+    reply_to_retracted: bool | None = None
     pending_asks: list[str] = Field(default_factory=list)  # ask ids still unanswered
     your_pending_asks: list[str] = Field(default_factory=list)
     # ^ the subset of pending asks that name THIS viewer (per-ask to, 0077) —
@@ -443,6 +462,61 @@ class MessageRow(Message):
     #   delegate's cited report). Null when the thread closed by discharge
     #   rather than by anyone's word — "answered in full" and "someone ruled
     #   it done" are different facts and a reader deserves both.
+    reply_to_seq: int | None = None
+    # ^ THE PARENT'S NUMBER (0154): what `reply_to`'s ULID cannot be printed
+    #   as. `get_message_by_seq` took seq -> id years ago because "#N is how
+    #   humans and UIs cite messages"; this is the direction an eye actually
+    #   needs, and without it a client can only say THAT a message is a reply,
+    #   never to what.
+    #
+    #   THE NULL CONTRACT — four states, one wire shape each, no derivation
+    #   and no overloaded null (agora-tui #59/#62, agora-wui #57 reached the
+    #   two-meanings problem independently; this is the resolution):
+    #
+    #     key ABSENT           -> a hub older than this field: NO STATEMENT.
+    #                             Fall back to your own rendering; do not read
+    #                             it as "no parent".
+    #     `reply_to` null      -> the message is a thread ROOT. `reply_to_seq`
+    #                             is null because there is no parent to
+    #                             number. This is not an inference from two
+    #                             nulls: `reply_to` is the field whose whole
+    #                             job is to say whether a parent exists, it is
+    #                             present on every hub that ever shipped, and
+    #                             it is never going away (it is identity, and
+    #                             a seq cannot substitute for it — a number is
+    #                             a coordinate in one channel, an id survives
+    #                             being out of window).
+    #     `reply_to` set + int -> the parent's seq. Render it.
+    #     `reply_to` set + null-> ANOMALY, never a normal state: the hub
+    #                             validates at post time that the parent is a
+    #                             real message in this channel, and nothing
+    #                             hard-deletes messages. Render it loudly
+    #                             rather than falling back to silence — a
+    #                             hedge here is how the hub's own bug would
+    #                             stay invisible.
+    #
+    #   A RETRACTED PARENT IS NOT NULL. Both clients planned for "null = the
+    #   parent is a tombstone" and so did the hub's own proposal (#52) — all
+    #   three of us were wrong about our own storage. Retraction redacts a
+    #   message's WORDS (title/body/data, status downgraded to fyi); the row
+    #   keeps its seq and its sender, because attribution and position are
+    #   exactly what a tombstone is for. So a retracted parent is served as a
+    #   NUMBER with `reply_to_retracted: true` — strictly more than "reply to
+    #   a retracted message": "reply to #44, since retracted" is renderable,
+    #   and the coordinate still jumps.
+    reply_to_sender: str | None = None
+    # ^ the parent's author — "#44" alone disambiguates nothing without
+    #   scrolling, "#44 · agora-tui" is the feature (agora-wui #57: if only
+    #   one of the two is served, serve this). Survives retraction, same as
+    #   the seq. Null exactly when `reply_to_seq` is null, and for the same
+    #   reason each time.
+    reply_to_retracted: bool | None = None
+    # ^ the parent is a tombstone: STATED, not encoded in a null. Null here is
+    #   the ordinary "no statement" (no parent, or an older hub).
+    #
+    # The parent's TITLE is deliberately NOT on this row — see Envelope. Both
+    # clients asked for it there and refused it here, unanimously; ask and it
+    # widens in one line.
     ratings: RatingTally | None = None
     # ^ standing ±1 tally + the viewer's own rating (agora-0122). Null = no
     #   statement (retracted row, or a pre-0.12.31 hub).

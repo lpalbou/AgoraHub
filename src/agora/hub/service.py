@@ -2881,9 +2881,27 @@ class HubService:
         by_rated = self.db.ratings_for_messages(ids)
         read_ids = (self.db.reads_for_messages(ids, viewer_id)
                     if viewer_id else set())
+        # Parent coordinates (0154), ONE batched query for the whole page —
+        # the alternative every client was reduced to is a per-row fetch or a
+        # private id->seq map that only knows what it has already scrolled.
+        parents = self.db.messages_by_ids(
+            [m.reply_to for m in messages if m.reply_to])
         out: list[MessageRow] = []
         for m in messages:
             row = MessageRow(**m.model_dump())
+            # Set OUTSIDE the `not retracted` guard, unlike every other
+            # decoration here: those are thread state, which a tombstone
+            # genuinely no longer has. A retracted message's own `reply_to`
+            # is still served, so blanking its coordinates would serve an
+            # unprintable id and call it a day — the exact defect this field
+            # exists to end, reintroduced on the one row class that cannot
+            # complain about it.
+            if m.reply_to:
+                parent = parents.get(m.reply_to)
+                if parent is not None:
+                    row.reply_to_seq = parent.seq
+                    row.reply_to_sender = parent.sender
+                    row.reply_to_retracted = parent.retracted
             if not m.retracted:
                 replies = by_parent.get(m.id, [])
                 ds = self._discharge(m, replies)
@@ -3099,7 +3117,7 @@ class HubService:
             already_read = self.db.has_read(message.id, viewer_id)
         envelope = self.attention.envelope_for(
             viewer_id, message,
-            parent_sender=parent.sender if parent else None,
+            parent=parent,
             has_reply=closed, pending_asks=pending, ask_total=total,
             declined_asks=declined,
             has_resolved_reply=has_resolved, owes_reply=owes_reply,

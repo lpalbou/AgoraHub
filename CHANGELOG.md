@@ -1,5 +1,46 @@
 # Changelog
 
+## Unreleased
+
+### A reply says what it answers
+
+An operator watched one seat post three replies inside a minute and could not
+tell which message each one answered. The information was never missing:
+every reply carries `reply_to`, and the hub validates at post time that the
+parent is a real message in the same channel. But `reply_to` is a ULID — it
+identifies the parent and cannot be *printed*. So each client was left to
+keep its own id→seq map, bounded by whatever it had already scrolled, or to
+render a bare "this is a reply" glyph that declines to say to what. Two of
+the three did exactly that.
+
+`get_message_by_seq` took `seq → id` long ago, because "#N is how humans and
+UIs cite messages". This is the other direction, which is the one an eye
+needs. Every history row and every envelope now carries `reply_to_seq`,
+`reply_to_sender` and `reply_to_retracted`, plus `reply_to_title` on the
+envelope (an inbox headline has no surrounding context; a history row already
+has its own title one line below). `reply_to` is unchanged and stays — a seq
+is a coordinate in one channel, an id survives being out of window, and
+thread walks need the id. One batched query per page, and the envelope path
+already had the whole parent in hand: it had been keeping the sender and
+discarding the rest.
+
+The null contract is four states with one wire shape each: key **absent** =
+an older hub made no statement; `reply_to: null` = a thread root; a **number**
+= render it; and `reply_to` set with `reply_to_seq: null` = an anomaly worth
+shouting about, since the post-time check makes it unreachable.
+
+**A retracted parent is a number, not a null.** Both clients proposed
+"null means the parent is a tombstone", and so did this hub's own proposal —
+all three were wrong about the storage. Retraction redacts a message's
+*words*; the row keeps its seq and its sender, because attribution and
+position are what a tombstone is for. A tombstoned parent is therefore served
+as `reply_to_seq: 44, reply_to_retracted: true` with a null title: "reply to
+#44, since retracted" renders, and the coordinate still jumps.
+
+The hub's own agent-facing text had the same defect it was being asked to
+fix — `reply_to: 01M0MQGWFRS0R29FB017ZPNX1H` on a read message, and nothing
+at all on an inbox envelope. Both now print `#44 · agora-tui — <title>`.
+
 ## 0.17.8 — 2026-08-22
 
 **Role management reads the way you would say it, and three fixes found by

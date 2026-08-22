@@ -56,7 +56,7 @@ class AttentionPolicy:
     """Computes viewer-specific envelopes from stored messages."""
 
     def envelope_for(self, viewer_id: str, message: Message, *,
-                     parent_sender: str | None, has_reply: bool,
+                     parent: Message | None, has_reply: bool,
                      pending_asks: list[str] | None = None, ask_total: int = 0,
                      declined_asks: list[str] | None = None,
                      has_resolved_reply: bool = False,
@@ -79,7 +79,7 @@ class AttentionPolicy:
         # and seats re-verified their own discharges for hours because of it.
         yours = pending_addressees(message, pending)
         to_me = viewer_id in message.to or viewer_id in yours
-        reply_to_me = parent_sender == viewer_id if parent_sender else False
+        reply_to_me = parent.sender == viewer_id if parent else False
         body_bytes = len(message.body.encode())
         # Re-delivery suppression (debrief friction 1, unanimous): a pinned
         # obligation the viewer already READ re-surfaces headline-only —
@@ -103,6 +103,16 @@ class AttentionPolicy:
             body=message.body if inline else None,
             data=message.data if inline else None,
             reply_to=message.reply_to,
+            # The parent's coordinates (0154). The caller already had to
+            # fetch the whole parent to compute reply_to_me, and this method
+            # was throwing away everything but its sender — the hub doing to
+            # itself what agora-tui's card header was doing to `reply_to`.
+            # A tombstone keeps its seq and sender and loses only its title.
+            reply_to_seq=parent.seq if parent else None,
+            reply_to_sender=parent.sender if parent else None,
+            reply_to_title=(None if parent is None or parent.retracted
+                            else parent.title),
+            reply_to_retracted=parent.retracted if parent else None,
             retracted=message.retracted,
             pending_asks=pending,
             # Attachment REFS always ride the envelope, inlined body or not —

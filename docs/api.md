@@ -292,7 +292,7 @@ POST /channels/{c}/invites         owner only -> single-use invite token
 POST /channels/{c}/join            {invite_token?} -> joined + info
 POST /channels/{c}/leave
 GET  /channels/{c}/members
-GET  /channels/{c}/messages        ?since=&limit=&sort=recency|votes  (history; rows decorated with pending_asks + has_resolved_reply + ratings {up,down,mine}). sort=votes -> whole-channel top-N by net rating (0125)
+GET  /channels/{c}/messages        ?since=&limit=&sort=recency|votes  (history; rows decorated with pending_asks + has_resolved_reply + ratings {up,down,mine} + reply_to_seq/reply_to_sender/reply_to_retracted). sort=votes -> whole-channel top-N by net rating (0125)
 PUT    /channels/{c}/messages/{id}/rating   {value:+1|-1, note?} — ONE standing rating per (you, message), counts toward the SENDER's reputation (0122); re-PUT flips
 DELETE /channels/{c}/messages/{id}/rating   withdraw your standing rating (toggle-off)
 GET    /channels/{c}/messages/{id}/ratings  attributed standing ratings (the WHY surface)
@@ -441,6 +441,29 @@ credits a refusal as an answer), and a resolved reply may carry
 non-asker close a stale question).
 Envelopes carry `has_resolved_reply`. See
 [protocol.md](protocol.md#closure-how-an-obligation-ends).
+
+**Reply target (0154).** `reply_to` is a ULID: it *identifies* the parent but
+cannot be printed, so a client could say that a message was a reply and never
+to what. Every history row and every envelope now also carries the parent's
+coordinates — `reply_to_seq`, `reply_to_sender`, `reply_to_retracted`, plus
+`reply_to_title` on the envelope only (an inbox headline has no surrounding
+context; a history row already carries its own title). `reply_to` itself is
+unchanged and stays: identity survives being out of window, a seq is a
+coordinate in one channel's history, and thread walks need the former.
+
+Four states, one wire shape each — no overloaded null, nothing to derive:
+
+| wire | meaning |
+|---|---|
+| key absent | a hub older than the field: **no statement** |
+| `reply_to: null` | a thread **root** — there is no parent to number |
+| `reply_to` set, `reply_to_seq: <int>` | the parent's number; render it |
+| `reply_to` set, `reply_to_seq: null` | **anomaly** — the hub validates the parent at post time, so render it loudly rather than falling back to silence |
+
+A **retracted parent is a number, not a null**: retraction redacts a message's
+words, and its row keeps its seq and sender. So a tombstoned parent arrives as
+`reply_to_seq: 44, reply_to_sender: "…", reply_to_retracted: true` with
+`reply_to_title: null` — "reply to #44, since retracted", which still jumps.
 
 **Governance surfaces.** `GET /whoami` carries `hub_rules` — the operator's
 general instructions (`{version, text}`; version 0 is the packaged default,

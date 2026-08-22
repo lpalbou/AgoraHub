@@ -29,7 +29,7 @@ import json
 import secrets
 from typing import Any
 
-from .models import elide, Envelope, Message
+from .models import elide, Envelope, MessageRow
 
 _TOKEN = "AGORA"  # marker stem; the real fence includes an unpredictable nonce
 
@@ -104,6 +104,28 @@ def _fence(nonce: str, label: str, fields: dict[str, str], content: str) -> str:
             f"\u27e6/AGORA:{nonce}\u27e7")
 
 
+def _reply_to_field(reply_to: str | None, seq: int | None, sender: str | None,
+                    title: str | None, retracted: bool | None) -> str:
+    """The parent as a COORDINATE, not a ULID (0154).
+
+    An agent reading `reply_to: 01M0MQGWFRS0R29FB017ZPNX1H` learns that a
+    message answers something and cannot say what — the operator's complaint
+    at agora-and-wui#51, which lands on this surface exactly as it lands on
+    the GUI ones. Empty when there is no parent (the fence drops empty
+    fields); LOUD when the hub served an id it could not resolve, because a
+    reply pointing at nothing is a hub bug and a quiet fallback is how it
+    would stay one.
+    """
+    if not reply_to:
+        return ""
+    if seq is None:
+        return f"UNRESOLVED PARENT id={reply_to} — report this, the hub validates it at post time"
+    who = f" · {sender}" if sender else ""
+    if retracted:
+        return f"#{seq}{who} (retracted)"
+    return f"#{seq}{who}" + (f" — {title}" if title else "")
+
+
 def _flags(e: Envelope) -> str:
     parts = []
     if e.critical:
@@ -139,13 +161,17 @@ def render_messages(messages: list[dict[str, Any]]) -> str:
     nonce = secrets.token_hex(6)
     blocks = []
     for row in messages:
-        m = Message(**row)
+        # MessageRow, not Message: the parent coordinates (0154) ride the row,
+        # and parsing as the bare Message would drop them silently.
+        m = MessageRow(**row)
         fields = {
             "channel": m.channel, "seq": m.seq, "sender": m.sender,
             "status": m.status.value, "urgency": m.urgency.value,
             "critical": "yes" if m.critical else "",
             "title": display_title(m.title, m.body),
-            "reply_to": m.reply_to or "",
+            "reply_to": _reply_to_field(m.reply_to, m.reply_to_seq,
+                                        m.reply_to_sender, None,
+                                        m.reply_to_retracted),
             "asks": _asks_field(m.data),
             "answers": ", ".join(str(a) for a in (m.data or {}).get("answers", [])
                                  ) if isinstance((m.data or {}).get("answers"), list) else "",
@@ -190,6 +216,12 @@ def render_envelopes(rows: list[dict[str, Any]]) -> str:
             "channel": e.channel, "seq": e.seq, "sender": e.sender,
             "status": e.status.value, "urgency": e.effective_urgency.value,
             "flags": _flags(e), "asks": asks_field,
+            # WHAT this answers, on the surface where the operator first met
+            # the problem: an inbox headline has no surrounding context, so
+            # the parent's title earns its bytes here (agora-wui#57).
+            "reply_to": _reply_to_field(e.reply_to, e.reply_to_seq,
+                                        e.reply_to_sender, e.reply_to_title,
+                                        e.reply_to_retracted),
             # The dead-ask guard (ADR-0003): a reader must never answer an old
             # open question cold when its thread already carries a resolution.
             "thread": ("a resolved reply exists — read the thread before "
