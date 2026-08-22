@@ -282,3 +282,86 @@ def test_an_UNADDRESSED_pending_ask_is_still_everyones_asks_row():
              to=["bob"], asks=[{"id": "1", "text": "who knows this?"}])
 
     assert reason_for(client, bob, q["seq"]) == "asks_pending"
+
+
+# -- the addressee's door on a peer's ask-less request (2026-08-22) ----------
+
+def _store_file(client: TestClient, headers: dict, channel: str, path: str) -> str:
+    r = client.put(f"/channels/{channel}/fs/{path}",
+                   json={"content": "the delivery", "description": "proof"},
+                   headers=headers)
+    assert r.status_code == 200, r.text
+    return f"{path}@{r.json()['version']}"
+
+
+def test_a_named_seat_that_DELIVERS_clears_a_peers_ask_less_request():
+    """The completion exit the 2026-08-11 rule left shut.
+
+    That rule kept the OWNERSHIP exit open — a linked claim row moves the
+    pressure onto the claim. But a seat that FINISHES inside one turn has no
+    claim to materialize, and its cited completion report moved nothing: the
+    row stood and escalated against the one seat that did the work. Found
+    from the inside — this hub told `agora` it still owed
+    `agora-and-wui#217` after the commit answering it was pushed and cited.
+
+    Same door and same price as the operator rule: `resolved`, from a seat
+    the asker NAMED, citing evidence the hub resolved at post time.
+    """
+    client = make_client()
+    alice, bob = register(client, "alice"), register(client, "bob")
+    make_channel(client, alice, "room", bob)
+
+    job = post(client, alice, body="please do the thing", title="thing",
+               status="blocked", to=["bob"])
+    assert job["seq"] in {r["seq"] for r in rows_for(client, bob)}
+
+    ref = _store_file(client, bob, "room", "delivered.md")
+    post(client, bob, body="done, here it is", title="delivered",
+         status="resolved", reply_to=job["id"],
+         data={"evidence": [{"kind": "fs", "ref": ref}]})
+
+    assert job["seq"] not in {r["seq"] for r in rows_for(client, bob)}
+
+
+def test_the_2026_08_11_lesson_survives_the_new_door():
+    """Each half of the price is load-bearing. Drop any one and the old lie
+    — a bare reply means the work is done — comes back."""
+    client = make_client()
+    alice, bob = register(client, "alice"), register(client, "bob")
+    make_channel(client, alice, "room", bob)
+    ref = _store_file(client, bob, "room", "proof.md")
+
+    # 1. `resolved` with NO evidence: a promise wearing a verb.
+    a = post(client, alice, body="job a", title="a", status="blocked", to=["bob"])
+    post(client, bob, body="all done, trust me", title="re", status="resolved",
+         reply_to=a["id"])
+    assert a["seq"] in {r["seq"] for r in rows_for(client, bob)}
+
+    # 2. Evidence but NOT `resolved`: still in flight.
+    b = post(client, alice, body="job b", title="b", status="blocked", to=["bob"])
+    post(client, bob, body="progress", title="re", status="reply",
+         reply_to=b["id"], data={"evidence": [{"kind": "fs", "ref": ref}]})
+    assert b["seq"] in {r["seq"] for r in rows_for(client, bob)}
+
+    # 3. "on it" — the exact reply the 2026-08-11 rule was written to refuse.
+    c = post(client, alice, body="job c", title="c", status="blocked", to=["bob"])
+    post(client, bob, body="on it", title="re", status="reply", reply_to=c["id"])
+    assert c["seq"] in {r["seq"] for r in rows_for(client, bob)}
+
+
+def test_a_bystanders_cited_resolved_does_not_clear_the_named_seats_row():
+    """The door is the ADDRESSEE's. A seat the asker never named cannot
+    report completion on their behalf — that is the 2026-08-04 bystander
+    lesson, which this must not undo."""
+    client = make_client()
+    alice, bob = register(client, "alice"), register(client, "bob")
+    carol = register(client, "carol")
+    make_channel(client, alice, "room", bob, carol)
+
+    job = post(client, alice, body="bob's job", title="job", status="blocked",
+               to=["bob"])
+    ref = _store_file(client, carol, "room", "carol.md")
+    post(client, carol, body="I did it", title="re", status="resolved",
+         reply_to=job["id"], data={"evidence": [{"kind": "fs", "ref": ref}]})
+
+    assert job["seq"] in {r["seq"] for r in rows_for(client, bob)}

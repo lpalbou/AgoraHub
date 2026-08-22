@@ -406,7 +406,41 @@ def discharge_state(parent: Message, replies: list[Message],
             # is done. The addressee's own /owed row may still clear once a
             # linked claim exists; the thread itself stays open until an
             # authoritative close.
-            discharged = False
+            #
+            # THE ADDRESSEE'S DOOR (2026-08-22). The rule above left the
+            # OWNERSHIP exit open — a linked claim row moves the seat's /owed
+            # pressure onto the claim (`owed()`, and test_obligation_reason
+            # pins it). What it left shut is the COMPLETION exit, and that is
+            # the shape it was written to reward: a seat that FINISHES inside
+            # one turn has no claim to materialize (a claim row for delivered
+            # work is a lie), and its cited completion report moved nothing —
+            # so the row stood and escalated against the one seat that did the
+            # work. Found from the inside: this hub told `agora` it still owed
+            # `agora-and-wui#217` after the commit answering it was pushed and
+            # cited.
+            #
+            # It is the identical hole `_operator_settled` grew a door for
+            # ("the named seat answers in-thread, and the row stays and
+            # escalates against the one seat that did the work"), and the
+            # asymmetry ran backwards: the operator's word is the STRICTER
+            # case and yet had more exits than a peer's.
+            #
+            # Same door, same price, and the 2026-08-11 lesson is kept whole:
+            # a bare non-sender reply still settles nothing, and "on it" is
+            # still not delivery. What clears it is a `resolved` from a seat
+            # the asker actually NAMED, citing evidence the hub resolved at
+            # post time — a report the asker can check, not a promise.
+            #
+            # No epoch guard, deliberately, and this is the one direction that
+            # needs none: the `_directive_epoch` discipline exists because
+            # TIGHTENING re-opened 132 settled rows at once. Adding an exit
+            # can only discharge rows that are open right now, and only those
+            # where a named seat already posted a cited completion report —
+            # which is precisely the state this says was never a debt.
+            discharged = any(
+                r.status.value == "resolved" and r.sender != parent.sender
+                and r.sender in named and _cites_evidence(r)
+                for r in replies)
         else:
             discharged = bool(non_sender)
         return DischargeState(mode="binary", discharged=discharged,
