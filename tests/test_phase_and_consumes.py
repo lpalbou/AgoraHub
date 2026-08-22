@@ -447,3 +447,125 @@ def test_consumes_dedupes_the_same_debt_cited_twice(tmp_path):
     assert r.status_code == 200
     assert r.json()["data"]["consumes"] == [answer["id"]]
     assert client.get("/owed", headers=asker).json()["counts"]["to_consume"] == 4
+
+
+def test_reading_the_answer_first_does_not_make_consumes_a_lie(tmp_path):
+    """THE INSTRUCTION TRAP (0157). Three seats hit this in one afternoon,
+    each by following the hub's own documented order.
+
+    `check_inbox` prints: "CONSUME <ref> — read_message id=… and use it".
+    The read IS a discharge (to_consume clears on the receipt). So the seat
+    that obeys, then does the honest thing and cites the ref on its next
+    message, used to get "consumes names 1 ref(s) you owe no consumption
+    for" — which reads as *you never owed this* when the truth is *you
+    settled it a moment ago, by doing what I told you*.
+
+    agora-wui#114 named the bias: "the surface that quietly succeeds is the
+    one that discharges without a record, and the surface that refuses is
+    the one that would have created the record. That is the wrong way round
+    for an instrument the operator reads." The refusal taught seats to stop
+    using `consumes`, so the hub kept the silent discharge and lost the
+    receipt. It is now a no-op WITH the receipt."""
+    client = make_client(tmp_path)
+    asker = register(client, "chair")
+    writer = register(client, "writer")
+    make_room(client, asker, "story", writer)
+    (root, answer), = _five_debts(client, asker, writer)[:1]
+
+    # Follow check_inbox's own instruction.
+    assert client.get(f"/channels/story/messages/{answer['id']}",
+                      headers=asker).status_code == 200
+    assert not any(r["answer_id"] == answer["id"] for r in
+                   client.get("/owed", headers=asker).json()["to_consume"])
+
+    posted = client.post("/channels/story/messages",
+                         json={"body": "adopted", "status": "fyi",
+                               "title": "adopted",
+                               "consumes": [f"story#{answer['seq']}"]},
+                         headers=asker)
+    assert posted.status_code == 200, posted.text
+    # The receipt is on the record, which is the entire point.
+    assert posted.json()["data"]["consumes"] == [answer["id"]]
+
+
+def test_the_already_read_no_op_is_not_a_free_pass_for_any_message(tmp_path):
+    """The narrowness is the whole safety of it: a reply in a thread the
+    sender did NOT open stays un-settleable however thoroughly they read
+    it, or `consumes` becomes an "I have seen this" oracle over every
+    message in every room they belong to."""
+    client = make_client(tmp_path)
+    asker = register(client, "chair")
+    writer = register(client, "writer")
+    make_room(client, asker, "story", writer)
+
+    # writer's OWN thread; chair is a bystander who reads both messages.
+    root = client.post("/channels/story/messages",
+                       json={"body": "writer's question", "status": "open",
+                             "title": "theirs",
+                             "asks": [{"id": "1", "text": "?", "to": ["chair"]}]},
+                       headers=writer).json()
+    reply = client.post("/channels/story/messages",
+                        json={"body": "a bystander reply", "status": "reply",
+                              "reply_to": root["id"]},
+                        headers=asker).json()
+    other = client.post("/channels/story/messages",
+                        json={"body": "unrelated", "status": "fyi",
+                              "title": "unrelated"},
+                        headers=writer).json()
+    for m in (root, other):
+        client.get(f"/channels/story/messages/{m['id']}", headers=asker)
+
+    for ref in (f"story#{root['seq']}", f"story#{other['seq']}"):
+        refused = client.post("/channels/story/messages",
+                              json={"body": "x", "status": "fyi",
+                                    "consumes": [ref]}, headers=asker)
+        assert refused.status_code == 400, ref
+        assert "you owe no consumption for" in refused.json()["detail"]
+    assert reply["seq"]  # the bystander reply exists and settles nothing
+
+
+def test_a_deeper_reply_in_your_own_thread_is_not_a_settleable_debt(tmp_path):
+    """The no-op is DIRECT-reply only, and this is why.
+
+    The hub already refuses an `answers` that is not a direct reply to the
+    message carrying the ask ("your reply can never discharge your own
+    asks"), so every real consumption debt is depth one and a walk to the
+    thread root would buy nothing. What it would buy is a FALSE receipt: in
+    `root(mine) -> r1(theirs) -> r2(theirs)`, r2 is no debt at all, and a
+    root walk would let a read of it be recorded as a debt settled.
+
+    A receipt for a debt that never existed is the same lie as a debt that
+    looks settled and is not — one failure in each direction, and this area
+    has now produced both."""
+    client = make_client(tmp_path)
+    asker = register(client, "chair")
+    writer = register(client, "writer")
+    make_room(client, asker, "story", writer)
+
+    root = client.post("/channels/story/messages",
+                       json={"body": "q?", "status": "open", "title": "q",
+                             "asks": [{"id": "1", "text": "?", "to": ["writer"]}]},
+                       headers=asker).json()
+    mid = client.post("/channels/story/messages",
+                      json={"body": "thinking", "status": "reply",
+                            "reply_to": root["id"]}, headers=writer).json()
+    deep = client.post("/channels/story/messages",
+                       json={"body": "still thinking", "status": "reply",
+                             "reply_to": mid["id"]}, headers=writer).json()
+
+    # The direct reply IS a debt and settles after a read...
+    client.get(f"/channels/story/messages/{mid['id']}", headers=asker)
+    assert client.post("/channels/story/messages",
+                       json={"body": "adopted", "status": "fyi",
+                             "title": "adopted",
+                             "consumes": [f"story#{mid['seq']}"]},
+                       headers=asker).status_code == 200
+
+    # ...the one below it never was, however thoroughly it is read.
+    client.get(f"/channels/story/messages/{deep['id']}", headers=asker)
+    refused = client.post("/channels/story/messages",
+                          json={"body": "x", "status": "fyi",
+                                "consumes": [f"story#{deep['seq']}"]},
+                          headers=asker)
+    assert refused.status_code == 400
+    assert "you owe no consumption for" in refused.json()["detail"]

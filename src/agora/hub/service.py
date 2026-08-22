@@ -1336,6 +1336,25 @@ class HubService:
             return self.db.get_message_by_seq(channel, int(ref))
         return self.db.get_message(ref)
 
+    def _replies_directly_to(self, m: Message, agent_id: str) -> bool:
+        """Is `m` a DIRECT reply to a message `agent_id` wrote? (0157.)
+
+        Direct, not a walk to the thread root — and the tightness is the
+        safety. The hub already enforces that an answer replies to the
+        message carrying the ask (a deeper `answers` is refused: "your reply
+        can never discharge your own asks"), so every real consumption debt
+        is depth one and a walk would buy nothing. What it WOULD buy is a
+        false receipt: in `root(mine) -> r1(theirs) -> r2(theirs)`, `r2` is
+        no debt at all, and an ancestor walk would let a read of it be
+        recorded as a debt settled. A receipt for a debt that never existed
+        is the same lie as a debt that looks settled and is not — the two
+        failures this whole area keeps producing, one in each direction."""
+        if not m.reply_to:
+            return False
+        parent = self.db.get_message(m.reply_to)
+        return (parent is not None and parent.channel == m.channel
+                and parent.sender == agent_id)
+
     def _validate_consumes(self, agent: AgentInfo, channel: str,
                            raw: Any) -> tuple[list[str], list[str]]:
         """Resolve `consumes` to (answer message ids to receipt, stored refs).
@@ -1383,6 +1402,39 @@ class HubService:
                 # does a reply of theirs that never carried consumption.
                 if (found is not None and found.sender == agent.id
                         and found.status in (Status.open, Status.blocked)):
+                    if found.id not in stored:
+                        stored.append(found.id)
+                    continue
+                # AN ANSWER YOU ALREADY DISCHARGED BY READING IT IS ALSO A
+                # NO-OP, NOT AN ERROR — the same ruling as the clause above,
+                # for the case three seats hit in one afternoon.
+                #
+                # THE TRAP, IN THE ORDER THE HUB ITSELF PRESCRIBES IT:
+                # `check_inbox` prints "CONSUME <ref> — read_message id=…
+                # and use it". The seat reads it, which IS a discharge
+                # (to_consume clears on the read receipt). Then the seat does
+                # the honest, documented thing and cites the ref on its next
+                # message — and got "you owe no consumption for", which reads
+                # as "you never owed this" when the truth is "you already
+                # settled it, a moment ago, by following the instruction".
+                #
+                # agora-wui#114 named the bias exactly: "the surface that
+                # quietly succeeds is the one that discharges without a
+                # record, and the surface that refuses is the one that would
+                # have created the record. That is the wrong way round for an
+                # instrument the operator reads." Refusing here taught three
+                # seats to stop using `consumes` — so the hub kept the silent
+                # discharge and lost the receipt.
+                #
+                # Accepted narrowly: a reply, in a thread whose ROOT this
+                # sender wrote, that this sender has actually READ. No
+                # existence oracle (someone else's thread stays
+                # un-settleable), and no free pass for a message that was
+                # never a debt — the read receipt is the evidence the
+                # discharge really happened.
+                if (found is not None and found.sender != agent.id
+                        and self._replies_directly_to(found, agent.id)
+                        and self.db.has_read(found.id, agent.id)):
                     if found.id not in stored:
                         stored.append(found.id)
                     continue
