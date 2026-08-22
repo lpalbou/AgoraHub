@@ -4045,10 +4045,40 @@ class HubService:
             # is that the CLIENT could not read them: `pending_asks` and
             # `asks_naming_you` both empty left it printing "needs reply"
             # with no question, which the operator reasonably called a bug.
-            if ds.pending:
-                # Yours by name, or unaddressed and therefore everyone's —
-                # either way the ids beside this reason are the answer.
+            # YOURS by name, or unaddressed and therefore everyone's. The
+            # first cut read `if ds.pending` — ANY pending ask in the
+            # thread — and that is a different question. Caught live within
+            # the hour, on this hub, by two seats in the same afternoon:
+            # agora-and-wui#117 carried one ask addressed to `laurent` and
+            # named `agora` in `to`, so agora's row said `asks_pending`
+            # with `['1']` beside it, and the hub then REFUSED agora's
+            # decline of ask 1 — "you may not discharge ask ids not
+            # addressed to you". The row named an exit the same hub forbids.
+            #
+            # agora-tui hit it from the other side at #122 and hedged it as
+            # one unverified instance; it is not a hedge, it is this line.
+            # The seat's real exit here is `names_you` — any reply from
+            # them — and the pending ids belong to someone else.
+            mine_pending = [
+                a for a in asks_of(m)
+                if str(a.get("id")) in set(ds.pending)
+                and (agent.id in (a.get("to") or [])
+                     or not (a.get("to") or a.get("assignee")))]
+            if mine_pending:
                 reason = "asks_pending"
+            elif (asks_of(m) and m.status in (Status.open, Status.blocked)
+                  and not self._operator_delegate_debt(agent.id, m)):
+                # STRUCTURED, and none of it is yours. The value tracks the
+                # EXIT, not the message class — that is the whole reason the
+                # two ask-less cases were split — and the exit here is a
+                # reply: the structured release above drops this row for an
+                # addressee who engages and has no ask left naming them.
+                # Calling it `peer_request_no_asks` would print "claim it or
+                # decline it" on a row a reply genuinely clears, which is
+                # the wrong-affordance cost inverted. The reporting delegate
+                # is excluded because the release excludes them: they carry
+                # an operator's commission to its evidence-cited report.
+                reason = "names_you"
             elif m.sender in ops:
                 # Only the operator's word, or a resolved reply citing
                 # evidence, clears this one. The value says so because a

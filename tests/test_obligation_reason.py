@@ -209,3 +209,76 @@ def test_every_served_row_carries_a_reason():
         "names_you", "peer_request_no_asks",
         "operator_request_awaiting_your_report", "asks_pending",
     }
+
+
+def test_a_pending_ask_addressed_to_ANOTHER_seat_is_not_your_asks_row():
+    """THE FIELD INCIDENT, second generation — caught on the live hub within
+    an hour of shipping this enum, by two seats independently.
+
+    agora-and-wui#117 named `agora` in `to` and carried one ask addressed to
+    `laurent`. agora's row came back `asks_pending` with `['1']` beside it,
+    so agora tried to DECLINE ask 1 — the charter's honest exit for an ask
+    that is not yours — and the same hub refused: *"you may not discharge
+    ask ids not addressed to you"*. The row named an exit the hub forbids,
+    which is the exact defect this enum was built to end, reintroduced by
+    the enum.
+
+    agora-tui hit the mirror image at #122 and hedged it as one unverified
+    instance. It is not a hedge; it is one line, and it read `if ds.pending`
+    when the question is *whether any pending ask is MINE*.
+
+    The seat's real exit is `names_you` — any reply from them clears it —
+    and it must say so."""
+    client = make_client()
+    laurent = register(client, "laurent", operator=True)
+    alice, bob = register(client, "alice"), register(client, "bob")
+    make_channel(client, laurent, "room", alice, bob)
+
+    q = post(client, alice, body="asking the operator", title="q",
+             status="open", to=["laurent", "bob"],
+             asks=[{"id": "1", "text": "which layout?", "to": ["laurent"]}])
+
+    # laurent owns the ask and gets the asks row, with the id to answer.
+    assert reason_for(client, laurent, q["seq"]) == "asks_pending"
+
+    # bob is named on the message and on no ask. Not an asks row: bob cannot
+    # answer '1' and cannot decline it either.
+    assert reason_for(client, bob, q["seq"]) == "names_you"
+    row = next(r for r in rows_for(client, bob) if r["seq"] == q["seq"])
+    assert row["asks_naming_you"] == []
+
+    # And the hub still refuses bob the ids, which is the refusal that has to
+    # agree with the reason above rather than contradict it.
+    refused = client.post("/channels/room/messages", headers=bob, json={
+        "body": "not mine", "title": "no", "status": "reply",
+        "reply_to": q["id"], "declines": ["1"]})
+    assert refused.status_code == 400
+    assert "not addressed to you" in refused.text
+
+    # And the exit the value NAMES is the exit that works. Asserting the
+    # word alone would be decoration: the whole complaint is rows naming an
+    # act that does not clear them, so the act has to be performed.
+    post(client, bob, body="noted, not mine", title="noted", status="reply",
+         reply_to=q["id"])
+    assert all(r["seq"] != q["seq"] for r in rows_for(client, bob))
+    # ...and laurent's ask is untouched by bob replying.
+    assert reason_for(client, laurent, q["seq"]) == "asks_pending"
+
+
+def test_an_UNADDRESSED_pending_ask_is_still_everyones_asks_row():
+    """The other half, and the reason the fix is not "only asks naming you".
+
+    An ask with no `to` names nobody and is therefore everyone's — the same
+    reading `pending_addressees` and the driver both take. If this narrowed
+    to per-ask addressing, a bare open question to a room would tell every
+    addressee `names_you` and hide the question they are actually being
+    asked."""
+    client = make_client()
+    laurent = register(client, "laurent", operator=True)
+    alice, bob = register(client, "alice"), register(client, "bob")
+    make_channel(client, laurent, "room", alice, bob)
+
+    q = post(client, alice, body="anyone", title="q", status="open",
+             to=["bob"], asks=[{"id": "1", "text": "who knows this?"}])
+
+    assert reason_for(client, bob, q["seq"]) == "asks_pending"
