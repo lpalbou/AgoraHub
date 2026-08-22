@@ -1617,6 +1617,20 @@ class Database:
             ).fetchone()
         return row is not None
 
+    def read_at(self, message_id: str, agent_id: str) -> float | None:
+        """WHEN this seat read the message, or None if it has not (0156).
+
+        `has_read` answers the boolean the obligation ledger needs; the
+        pickup rungs need the timestamp, because age is what turns a rung
+        into a decision — "read, no claim" is a state, "read 14m ago, no
+        claim" is something the asker can act on (agora-wui#90)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT read_at FROM reads WHERE message_id = ? AND agent_id = ?",
+                (message_id, agent_id),
+            ).fetchone()
+        return float(row["read_at"]) if row else None
+
     def messages_since(self, since: float) -> list[Message]:
         """All non-retracted messages newer than `since`, hub-wide — the noise
         report's raw material (0135). Time-bounded (the report caps its

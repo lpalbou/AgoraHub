@@ -74,6 +74,7 @@ from ..models import (
     Message,
     MessageRow,
     ObligationRow,
+    PickupRung,
     OwedCounts,
     OwedReport,
     PhaseRow,
@@ -2250,6 +2251,11 @@ class HubService:
             self._dark_addressee_nudge(agent, message, addressees,
                                        override_dark)
             self._undelegated_operator_warning(agent, message)
+            # `replied` / `declined` just moved on the PARENT's ladder, so
+            # the push goes to the parent's sender, not to this one (0156).
+            # A reply is the rung this seat's asker is actually waiting on.
+            if parent is not None:
+                self._publish_pickup(parent)
         except Exception:
             logging.getLogger("agora.hub.routing").exception(
                 "routing nudge failed (post succeeded)")
@@ -2886,6 +2892,9 @@ class HubService:
         # private id->seq map that only knows what it has already scrolled.
         parents = self.db.messages_by_ids(
             [m.reply_to for m in messages if m.reply_to])
+        # Lazily scanned once per page, and only for a viewer reading their
+        # own messages — see the pickup branch below.
+        claim_links: dict[str, dict[str, tuple[str, str]]] | None = None
         out: list[MessageRow] = []
         for m in messages:
             row = MessageRow(**m.model_dump())
@@ -2924,6 +2933,22 @@ class HubService:
                     # Own messages stay null: authorship needs no reading,
                     # and a false "unread" on your own post would badge it.
                     row.read = m.id in read_ids
+                elif viewer_id and m.sender == viewer_id:
+                    # WHO HAS THIS (0156) — the asker's own instrument, and
+                    # only theirs. It exposes other seats' read receipts to
+                    # the sender, which both client seats consented to on the
+                    # record; nobody consented to it being public, so it
+                    # never rides a row served to a third party.
+                    #
+                    # The claim index is scanned ONCE for the page and only
+                    # if this viewer has a message on it: it is O(store rows)
+                    # and a 200-row history page of your own channel would
+                    # otherwise scan the whole store 200 times.
+                    if claim_links is None:
+                        claim_links = self._declared_claim_links(m.channel)
+                    rungs = self._pickup_rungs(m, replies, links=claim_links)
+                    if rungs:
+                        row.pickup = rungs
             out.append(row)
         return out
 
@@ -3204,6 +3229,12 @@ class HubService:
         chain.reverse()  # oldest first: read the conversation in order
         for item in chain:
             self.db.mark_read(item.id, agent.id)
+            # The `read` rung just moved for whoever asked (0156). Weak on
+            # purpose — a driven seat reads its whole inbox by construction
+            # — but it is the difference between "never delivered" and
+            # "opened it and did not pick it up", and the second is the
+            # state the operator has no instrument for today.
+            self._publish_pickup_quietly(item)
         return chain
 
     def retract_message(self, agent: AgentInfo, channel: str,
@@ -3338,6 +3369,163 @@ class HubService:
             out.append({"key": key, "owner": str(stored.value.get("owner") or ""),
                         "status": status[:120]})
         return out
+
+    def _declared_claim_links(
+            self, channel: str) -> dict[str, dict[str, tuple[str, str]]]:
+        """claim rows in `channel` whose `source_message_id` DECLARES its
+        source exactly: {message id: {owner: (claim key, state word)}} (0156).
+
+        Deliberately stricter than `_claims_touching`, and the two are not
+        redundant. That one matches by SUBSTRING because the field is free
+        text in practice (`webos#85`, bare ids, prose like "webos#157 /
+        01M0…, corrected by webos#160") and it feeds a REPORT a human reads
+        — a loose match there costs a glance. This feeds a live per-message
+        instrument the operator will trust, and both client seats refused
+        the substring join for exactly that reason: it will eventually
+        attribute one seat's claim to another seat's message, in front of
+        them, and do it silently (agora-tui#81, agora-wui#90).
+
+        So a link is DECLARED only when the whole field, stripped, is one
+        resolvable ref — a message id or `channel#seq`. Prose does not link
+        here. That is a real cost (a row whose source is a sentence shows as
+        unclaimed) and it is the honest side of it: the alternative is a
+        confident wrong name.
+
+        ONE pass yields both the key and the state word. The first cut of
+        this had a second scanner beside it (`_claim_key_for`) repeating the
+        same ref-matching to fetch the key — two implementations of one
+        match, which is exactly the drift `has_resolved_reply` cost three
+        clients this morning, and O(store) per message on top.
+        """
+        out: dict[str, dict[str, tuple[str, str]]] = {}
+        for entry in self.db.store_keys(channel):
+            key = entry["key"]
+            if not key.startswith("claim:"):
+                continue
+            stored = self.db.store_get(channel, key)
+            if stored is None or not isinstance(stored.value, dict):
+                continue
+            value = stored.value
+            ref = str(value.get("source_message_id") or "").strip()
+            if not ref or any(c.isspace() for c in ref):
+                continue        # prose, or several refs: not a declaration
+            target = self._resolve_consume_ref(ref, channel)
+            if target is None or target.channel != channel:
+                continue
+            owner = str(value.get("owner") or stored.updated_by or "")
+            if not owner:
+                continue
+            state = str(value.get("status") or "").split()
+            # The row's OWN first word, re-read every time (agora-tui#81):
+            # never "claimed plus an age" for a client to interpret, because
+            # `parked` is a declared state that a count-up rail would render
+            # as neglect.
+            out.setdefault(target.id, {})[owner] = (
+                key, state[0].strip(":.,").lower() if state else "")
+        return out
+
+    def _pickup_rungs(
+            self, m: Message, replies: list[Message],
+            links: dict[str, dict[str, tuple[str, str]]] | None = None,
+    ) -> list[PickupRung]:
+        """How far each addressee of `m` has got (0156). Sender-only; see
+        PickupRung for what each rung claims and refuses to claim.
+
+        agora-wui#90 asked that an offline, never-reachable seat show
+        NOTHING rather than `delivered` ("`delivered` beside `offline` reads
+        as progress when it is the absence of it"). There is no branch for
+        that here because there is no `delivered` rung to suppress: delivery
+        is true the instant the message is posted, for every member, so it
+        carries no information. The constraint is satisfied by the rung set,
+        which is the only place a constraint like that stays satisfied.
+
+        `links` is the channel's declared claim index, passed in when a
+        CALLER is doing a whole page (one store scan for the page instead of
+        one per row) and computed here when nobody has one."""
+        seats = [s for s in dict.fromkeys(list(m.to) + sorted(ask_addressees(m)))
+                 if s != m.sender]
+        if not seats:
+            return []
+        ds = self._discharge(m, replies)
+        if links is None:
+            links = self._declared_claim_links(m.channel)
+        by_seat = {r.sender: r for r in replies if r.sender != m.sender}
+        declined_by = {
+            r.sender for r in replies
+            if isinstance((r.data or {}).get("declines"), list)
+            and (r.data or {}).get("declines")}
+        out: list[PickupRung] = []
+        for seat in seats:
+            presence = self.presence.get(seat).state
+            reply = by_seat.get(seat)
+            claim = links.get(m.id, {}).get(seat)
+            read_at = self.db.read_at(m.id, seat)
+            acked = self.db.get_cursor(seat, m.channel) >= m.seq
+            rung, since, claim_key, claim_state = "none", 0.0, None, None
+            if acked:
+                rung, since = "acked", 0.0
+            if read_at is not None:
+                rung, since = "read", read_at
+            if claim is not None:
+                rung, (claim_key, claim_state) = "claimed", claim
+            if reply is not None:
+                rung, since = "replied", reply.created_at
+            if seat in declined_by:
+                rung = "declined"
+            out.append(PickupRung(
+                seat=seat, rung=rung, since=since, presence=presence,
+                claim_key=claim_key, claim_state=claim_state,
+                # From _discharge, never from "a reply arrived": the two come
+                # apart on a multi-addressee ask (agora-tui#86).
+                still_owes=not self._addressee_released(m, ds, seat),
+            ))
+        return out
+
+    def _publish_pickup(self, message: Message | None,
+                        links: dict[str, dict[str, tuple[str, str]]] | None = None,
+                        ) -> None:
+        """Push the CURRENT ladder of `message` to the seat that sent it
+        (0156) — the half of this feature the operator actually asked for.
+
+        The row alone would leave him where he started: *"we just type a
+        message and wait to see if anyone is gonna answer"* describes a
+        surface you have to go back and look at. A push is what turns "did
+        anyone pick this up" from a question into something that arrives.
+
+        EVERY EVENT CARRIES THE WHOLE LADDER, and no delta form exists —
+        agora-tui#81, adopted as C3 and deliberately absolute rather than
+        "for now": a client that missed one delta of a count-up stream is
+        not stale, it is confidently wrong with no way to find out. The
+        cheap optimisation is exactly how that property gets removed later
+        by someone who reads only the code.
+
+        Sender-only, like the row: this carries other seats' read receipts.
+        Fire-and-forget — a push that could 500 the act that triggered it
+        would be worse than no push at all, so every call site wraps this."""
+        if message is None or message.retracted:
+            return
+        rungs = self._pickup_rungs(message, self.db.replies_to(message.id),
+                                   links=links)
+        if not rungs:
+            return
+        self.fanout.publish(f"agent/{message.sender}", {
+            "type": "pickup",
+            "channel": message.channel,
+            "message_id": message.id,
+            "seq": message.seq,
+            "pickup": [r.model_dump() for r in rungs],
+        })
+
+    def _publish_pickup_quietly(self, message: Message | None) -> None:
+        """`_publish_pickup`, never raising. The ladder is an instrument
+        bolted onto acts that must succeed without it (a post, a read, a
+        claim write); a fault here is a lost frame the next row read
+        repairs, and it must never become a failed post."""
+        try:
+            self._publish_pickup(message)
+        except Exception:
+            logging.getLogger("agora.hub.pickup").exception(
+                "pickup push failed (the act it followed succeeded)")
 
     def retract_thread(self, agent: AgentInfo, channel: str,
                        message_id: str) -> dict[str, Any]:
@@ -4076,7 +4264,47 @@ class HubService:
         """
         for channel, seq in cursors.items():
             self.require_membership(channel, agent.id)
-            self.db.set_cursor(agent.id, channel, min(seq, self.db.last_seq(channel)))
+            before = self.db.get_cursor(agent.id, channel)
+            target = min(seq, self.db.last_seq(channel))
+            self.db.set_cursor(agent.id, channel, target)
+            if target > before:
+                self._publish_pickup_swept(agent.id, channel, before, target)
+
+    #: How far back an ack may sweep and still push (0156). A catch-up ack
+    #: after hours away is not the realtime case, and recomputing a ladder
+    #: per message across a thousand-message backlog would make every seat's
+    #: first ack expensive for a signal nobody is watching in that moment.
+    #: Past this the pushes are skipped WHOLESALE rather than truncated to
+    #: the first N — a partial sweep would leave the asker's rail correct for
+    #: the messages that happened to be scanned and stale for the rest, with
+    #: nothing saying which is which. The row (C4) repairs it on next read.
+    _PICKUP_SWEEP_MAX = 200
+
+    def _publish_pickup_swept(self, seat: str, channel: str,
+                              before: int, target: int) -> None:
+        """`acked` just moved for every message this cursor swept past
+        (0156) — push the askers' ladders.
+
+        This is the rung that says *"they have seen it and done nothing
+        yet"*, which is the operator's complaint stated precisely. It is
+        also the weakest rung on the ladder and the one a client must not
+        dress up: a seat that acked is a seat that triaged, not a seat that
+        agreed."""
+        if target - before > self._PICKUP_SWEEP_MAX:
+            return
+        try:
+            swept = [m for m in self.db.get_messages(
+                        channel, since_seq=before, limit=self._PICKUP_SWEEP_MAX)
+                     if m.seq <= target and m.sender != seat and not m.retracted
+                     and (seat in m.to or seat in ask_addressees(m))]
+            if not swept:
+                return
+            links = self._declared_claim_links(channel)
+            for m in swept:
+                self._publish_pickup(m, links=links)
+        except Exception:
+            logging.getLogger("agora.hub.pickup").exception(
+                "pickup sweep push failed (the ack succeeded)")
 
     # -- store -------------------------------------------------------------------
 
@@ -4331,6 +4559,19 @@ class HubService:
                     ).hexdigest()[:24])
             except DuplicateMessage:
                 pass
+        if key.startswith("claim:") and isinstance(value, dict):
+            # THE RUNG THE OPERATOR IS WAITING FOR (0156). `claimed` is the
+            # only rung that is an affirmative act rather than a side effect
+            # of transport, and a store write rings nobody — which is the
+            # defect that left seven seats idle on a done milestone
+            # (`waiting_on`, above, is the other half of the same lesson).
+            # The state word moving (open -> parked -> done) pushes too: a
+            # ladder that announced the claim and then went quiet would
+            # leave the asker watching a row that says `claimed` forever.
+            ref = str(value.get("source_message_id") or "").strip()
+            if ref and not any(c.isspace() for c in ref):
+                self._publish_pickup_quietly(
+                    self._resolve_consume_ref(ref, channel))
         return entry
 
     # -- unified backlog rows (0103, operator ruling c3328) ----------------------

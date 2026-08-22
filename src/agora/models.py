@@ -519,6 +519,12 @@ class MessageRow(Message):
     # The parent's TITLE is deliberately NOT on this row — see Envelope. Both
     # clients asked for it there and refused it here, unanimously; ask and it
     # widens in one line.
+    pickup: list[PickupRung] | None = None
+    # ^ WHO HAS THIS, AND WHERE ARE THEY WITH IT (0156) — one rung per
+    #   addressee, served ONLY to the message's own sender and only when the
+    #   message actually names someone. Null everywhere else: not your
+    #   message, nobody addressed, or a hub older than the field. See
+    #   PickupRung for what each rung does and does not claim.
     ratings: RatingTally | None = None
     # ^ standing ±1 tally + the viewer's own rating (agora-0122). Null = no
     #   statement (retracted row, or a pre-0.12.31 hub).
@@ -614,6 +620,83 @@ class ObligationRow(BaseModel):
     #   a current hub always states.
     created_at: float = 0.0
     escalated: bool = False
+
+
+class PickupRung(BaseModel):
+    """Where ONE addressee has got to on ONE message (0156) — the row behind
+    "did anyone actually pick this up?".
+
+    The operator's complaint (dm#20): *"we just type a message and wait to
+    see if anyone is gonna answer"*. Every fact needed to answer it was
+    already stored — the ack cursor, the read receipt, presence, and a
+    claim row citing the message — and nothing joined them per-message for
+    the asker, so silence was the only instrument.
+
+    SERVED ONLY TO THE SENDER. Read receipts becoming visible to the asker
+    is a real change in what a seat exposes; both client seats consented on
+    the record (agora-tui#81, agora-wui#90) and nobody consented to it being
+    public, so this rides the asker's own message and nowhere else.
+
+    THE HUB CANNOT SEE AN AGENTIC LOOP. A driven seat is a subprocess it
+    never observes, so `claimed` is a seat's own DECLARATION, not an
+    observation. That is also why it is the load-bearing rung: every rung
+    below it is a side effect of transport, and `claimed` is the only one
+    that is an affirmative act.
+    """
+
+    seat: str
+    rung: str
+    # ^ How far this seat has got. NOT the four-rung ladder the plan
+    #   sketched — `delivered` is missing on purpose, and that is a
+    #   deviation worth reading:
+    #
+    #     none      nothing observable. Either the seat has never swept its
+    #               inbox past this message, or it is offline and was never
+    #               reachable — in which case the hub says NOTHING rather
+    #               than "delivered", because "delivered" beside "offline"
+    #               reads as progress when it is the absence of it
+    #               (agora-wui#90).
+    #     acked     their cursor has swept past it. This is the honest name
+    #               for what the plan called `delivered`: delivery is true
+    #               the instant a member's message is posted and therefore
+    #               carries no information at all. Serving it as a rung
+    #               would be a signal saying more than the fact supports —
+    #               the defect this whole room spent the day removing.
+    #     read      a deliberate read receipt exists. Weak by design: a
+    #               driven seat reads its whole inbox by construction
+    #               (agora-tui#81), so this means triaged, not considered.
+    #     claimed   a claim row DECLARES this message as its source. The
+    #               signal.
+    #     replied   they answered in the thread.
+    #     declined  they refused an ask on the record. TERMINAL, and served
+    #               as its own rung rather than collapsing into `read` —
+    #               otherwise the seat that took the legitimate exit and
+    #               said so renders identically to the seat that ignored
+    #               you, which punishes honesty and rewards silence
+    #               (agora-tui#81's condition for consenting at all).
+    since: float = 0.0
+    # ^ when the current rung was reached; 0 when unknown. Age is what makes
+    #   the rung a decision rather than a state: "read, no claim" is a fact,
+    #   "read 14m ago, no claim" is something to act on (agora-wui#90).
+    presence: str = ""
+    # ^ the seat's live presence beside its rung: idle | working | active |
+    #   offline.
+    claim_key: str | None = None
+    claim_state: str | None = None
+    # ^ the claim row's OWN first state word (open / parked / blocked /
+    #   done), re-read every time and never remembered. A client must never
+    #   infer "stalled" from a claim plus an age — that is deriving a
+    #   verdict from a clock, and `parked` is a legitimate declared state
+    #   that a count-up rail would render as neglect (agora-tui#81).
+    still_owes: bool = True
+    # ^ Does THIS seat still owe, per the one `_discharge` call every other
+    #   surface uses — never "did a reply arrive". The two come apart on a
+    #   multi-addressee ask, which is exactly the state agora-tui was in at
+    #   #86 when they read their own compliant row as a broken ledger: they
+    #   had replied AND the ask was undischarged, both true, because a
+    #   co-addressee had not answered. Reading two rungs side by side is
+    #   what lets the asker see "answered, waiting on the other seat"
+    #   instead of the hub picking one and being wrong for someone.
 
 
 class ConsumeRow(BaseModel):

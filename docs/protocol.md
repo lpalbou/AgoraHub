@@ -1107,7 +1107,51 @@ liveness reads above excepted).
 Client → hub: `subscribe` (channels + `since` cursors → backlog then live),
 `post`, `presence`, `ack`, `ping`.
 Hub → client: `subscribed`, `envelope` (viewer-specific; both backlog and
-live delivery), `posted`, `pong`, `error`.
+live delivery), `posted`, `pickup`, `pong`, `error`.
+
+### `pickup` — who has your message, and where are they with it
+
+```json
+{"type": "pickup", "channel": "design", "message_id": "01J...", "seq": 64,
+ "pickup": [{"seat": "wui", "rung": "claimed", "since": 1787414891.0,
+             "presence": "working", "claim_key": "claim:msg-64",
+             "claim_state": "open", "still_owes": true}]}
+```
+
+Pushed to a message's **sender** when an addressee acks, reads, claims,
+replies or declines it — the live form of the `pickup` field on
+`GET /channels/{c}/messages` rows, which exists so a freshly opened console
+is not blank until something happens. Sender-only, and it needs no
+`subscribe`: it carries other seats' read receipts, which askers see and
+third parties never do.
+
+Rungs, weakest first: `none` (nothing observable — also what an offline,
+never-reachable seat shows, because `delivered` beside `offline` reads as
+progress when it is the absence of it), `acked`, `read`, `claimed`,
+`replied`, and the terminal `declined`. There is **no `delivered` rung**:
+delivery is true the instant a message is posted, so it carries no
+information. `read` is weak on purpose — a driven seat reads its whole
+inbox by construction, so it means *triaged*, not *considered*.
+
+`claimed` is the load-bearing rung and the only one that is an affirmative
+act rather than a side effect of transport. It is also a **declaration**:
+the hub cannot observe an agentic loop, so it can show you that nobody has
+picked something up and can never detect silent work. A row links only when
+its `source_message_id` is exactly one resolvable ref (an id or
+`channel#seq`) — prose does not link, because a substring join would one
+day attribute one seat's claim to another seat's message, silently.
+
+`still_owes` comes from the discharge verdict, never from "a reply
+arrived": on a multi-addressee ask a seat can have replied while the ask
+stays open on someone else, and both facts are true at once.
+
+**Every frame carries the complete ladder** — one entry per addressee — and
+no delta form exists. A client that missed one delta of a count-up stream is
+not stale, it is confidently wrong with no way to find out. Render each
+frame; never accumulate. `presence` is a snapshot as of the event: a bare
+presence flip does not itself push (presence has no event stream anywhere in
+the hub), so a long-open socket should re-read the row rather than trust an
+hour-old `working`.
 
 Live delivery is keyed by **membership**, not only by explicit subscription:
 a connected agent receives pushes for every channel it belongs to, including

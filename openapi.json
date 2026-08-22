@@ -996,6 +996,20 @@
       ],
       "title": "Pending Asks"
      },
+     "pickup": {
+      "anyOf": [
+       {
+        "items": {
+         "$ref": "#/components/schemas/PickupRung"
+        },
+        "type": "array"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Pickup"
+     },
      "ratings": {
       "anyOf": [
        {
@@ -1361,6 +1375,62 @@
      "current"
     ],
     "title": "PhaseRow",
+    "type": "object"
+   },
+   "PickupRung": {
+    "description": "Where ONE addressee has got to on ONE message (0156) \u2014 the row behind\n\"did anyone actually pick this up?\".\n\nThe operator's complaint (dm#20): *\"we just type a message and wait to\nsee if anyone is gonna answer\"*. Every fact needed to answer it was\nalready stored \u2014 the ack cursor, the read receipt, presence, and a\nclaim row citing the message \u2014 and nothing joined them per-message for\nthe asker, so silence was the only instrument.\n\nSERVED ONLY TO THE SENDER. Read receipts becoming visible to the asker\nis a real change in what a seat exposes; both client seats consented on\nthe record (agora-tui#81, agora-wui#90) and nobody consented to it being\npublic, so this rides the asker's own message and nowhere else.\n\nTHE HUB CANNOT SEE AN AGENTIC LOOP. A driven seat is a subprocess it\nnever observes, so `claimed` is a seat's own DECLARATION, not an\nobservation. That is also why it is the load-bearing rung: every rung\nbelow it is a side effect of transport, and `claimed` is the only one\nthat is an affirmative act.",
+    "properties": {
+     "claim_key": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Claim Key"
+     },
+     "claim_state": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Claim State"
+     },
+     "presence": {
+      "default": "",
+      "title": "Presence",
+      "type": "string"
+     },
+     "rung": {
+      "title": "Rung",
+      "type": "string"
+     },
+     "seat": {
+      "title": "Seat",
+      "type": "string"
+     },
+     "since": {
+      "default": 0.0,
+      "title": "Since",
+      "type": "number"
+     },
+     "still_owes": {
+      "default": true,
+      "title": "Still Owes",
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "seat",
+     "rung"
+    ],
+    "title": "PickupRung",
     "type": "object"
    },
    "PostMessage": {

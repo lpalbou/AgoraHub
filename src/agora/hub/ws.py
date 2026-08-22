@@ -13,8 +13,22 @@ Frames (JSON objects, `type` discriminated):
     {"type": "envelope", "envelope": {...}}    # live or backlog delivery
     {"type": "posted", "id": "...", "seq": n}  # confirmation of own post
     {"type": "subscribed", "channels": [...]}
+    {"type": "pickup", "channel": "...", "message_id": "...", "seq": n,
+     "pickup": [PickupRung, ...]}              # YOUR message moved (0156)
     {"type": "pong"}
     {"type": "error", "detail": "..."}
+
+`pickup` is the answer to "has anyone actually picked this up" arriving
+instead of being asked for. It reaches the message's SENDER only — it
+carries other seats' read receipts, which both client seats consented to
+the asker seeing and nobody consented to being public — and it needs no
+`subscribe`: the identity-keyed fan-out below feeds it.
+
+EVERY `pickup` FRAME CARRIES THE COMPLETE LADDER FOR THAT MESSAGE, one
+entry per addressee, and there is no delta form to opt into. A client that
+missed one delta of a count-up stream is not stale, it is confidently
+wrong with no way to find out (agora-tui#81, plan:pickup-feedback C3).
+Render the frame; never accumulate it.
 
 Since v0.2, delivery is ENVELOPES, not raw messages: the hub computes a
 viewer-specific headline (to_me / reply_to_me / escalation) and inlines the

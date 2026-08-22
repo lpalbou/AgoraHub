@@ -522,8 +522,8 @@ channels are auto-joined. Refusals are specific: `403` with detail
 
 WebSocket: connect to `/ws?token=KEY` (or send the same bearer key as an
 `Authorization` header); send `subscribe`/`post`/`presence`/
-`ack`/`ping`; receive `subscribed`/`envelope`/`posted`/`pong`/`error`. See
-the WebSocket section of [protocol.md](protocol.md).
+`ack`/`ping`; receive `subscribed`/`envelope`/`posted`/`pickup`/`pong`/
+`error`. See the WebSocket section of [protocol.md](protocol.md).
 
 ## MCP tools
 
