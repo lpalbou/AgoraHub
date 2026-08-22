@@ -2367,6 +2367,33 @@ def cmd_spawn(args: argparse.Namespace) -> None:
     cred = _config.resolve_key(url, as_id) if as_id else _admin_key_or_exit(args, url)
     headers = {"Authorization": f"Bearer {cred}"}
 
+    if args.set_runner:
+        # The prerequisite for `agora runner` to be able to claim anything.
+        # It had no CLI verb until an operator was told "run these two
+        # commands" and the second one silently required a curl they were
+        # never given — the seam failure this project keeps naming.
+        machine, sep, seat = args.set_runner.partition("=")
+        if not sep or not machine.strip() or not seat.strip():
+            sys.exit("--set-runner takes MACHINE=SEAT_ID "
+                     "(for example: local=runner-mbp)")
+        r = httpx.put(f"{url}/admin/machines/{machine.strip()}/runner",
+                      headers=headers, json={"agent_id": seat.strip()},
+                      timeout=10.0)
+        if r.status_code != 200:
+            sys.exit(f"naming the runner failed: {r.status_code} {r.text}")
+        print(f"'{seat.strip()}' is now the runner for '{machine.strip()}' — "
+              f"start it there with `agora runner --as {seat.strip()} --root <dir>`")
+        return
+
+    if args.clear_runner:
+        r = httpx.delete(f"{url}/admin/machines/{args.clear_runner}/runner",
+                         headers=headers, timeout=10.0)
+        if r.status_code != 200:
+            sys.exit(f"clearing the runner failed: {r.status_code} {r.text}")
+        print(f"'{args.clear_runner}' has no runner — nothing can be spawned "
+              "there until one is named again")
+        return
+
     if args.machines:
         r = httpx.get(f"{url}/machines", headers=headers, timeout=10.0)
         if r.status_code != 200:
@@ -4595,6 +4622,15 @@ def build_parser() -> argparse.ArgumentParser:
                     help="--list: drop the finished rows")
     sp.add_argument("--machines", action="store_true",
                     help="which machines have a runner, and what each can run")
+    sp.add_argument("--set-runner", dest="set_runner", default=None,
+                    metavar="MACHINE=SEAT_ID",
+                    help="ADMIN: name the one seat allowed to claim spawn work "
+                         "for a machine. Nothing can be spawned anywhere until "
+                         "you do this once — the feature is off by default")
+    sp.add_argument("--clear-runner", dest="clear_runner", default=None,
+                    metavar="MACHINE",
+                    help="ADMIN: un-name a machine's runner (spawning there "
+                         "stops immediately)")
     sp.add_argument("--stop", default=None, metavar="SPAWN_ID",
                     help="ask the runner to stop a seat (records the intent; "
                          "only the runner can end a process)")

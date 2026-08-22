@@ -785,3 +785,37 @@ def test_spawn_list_is_empty_without_inventing_a_row(live_hub, isolated_home,
     _run_cli(["spawn", "--list", "--url", live_hub.url,
               "--admin-key", live_hub.admin])
     assert "no spawn requests" in capsys.readouterr().out
+
+
+def test_spawn_set_runner_closes_the_step_that_needed_a_curl(
+        live_hub, isolated_home, capsys):
+    """`agora runner` cannot claim anything until an admin names its seat.
+    That prerequisite had no CLI verb, so "run these two commands" quietly
+    required an HTTP call the operator was never given."""
+    _register(live_hub.url, "runner-mbp")
+
+    _run_cli(["spawn", "--set-runner", "local=runner-mbp",
+              "--url", live_hub.url, "--admin-key", live_hub.admin])
+    out = capsys.readouterr().out
+    assert "'runner-mbp' is now the runner for 'local'" in out
+    # And it hands over the next command rather than leaving them to find it.
+    assert "agora runner --as runner-mbp" in out
+
+    _run_cli(["spawn", "--machines", "--url", live_hub.url,
+              "--admin-key", live_hub.admin])
+    assert "runner=runner-mbp" in capsys.readouterr().out
+
+    _run_cli(["spawn", "--clear-runner", "local", "--url", live_hub.url,
+              "--admin-key", live_hub.admin])
+    assert "nothing can be spawned there" in capsys.readouterr().out
+    _run_cli(["spawn", "--machines", "--url", live_hub.url,
+              "--admin-key", live_hub.admin])
+    assert "no runner is registered" in capsys.readouterr().out
+
+
+def test_spawn_set_runner_refuses_a_malformed_pair(live_hub, isolated_home):
+    for bad in ("local", "=runner-mbp", "local="):
+        with pytest.raises(SystemExit) as exc:
+            _run_cli(["spawn", "--set-runner", bad, "--url", live_hub.url,
+                      "--admin-key", live_hub.admin])
+        assert "MACHINE=SEAT_ID" in str(exc.value)
