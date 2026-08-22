@@ -903,6 +903,19 @@
     "title": "LeaderboardReport",
     "type": "object"
    },
+   "MachineRunner": {
+    "properties": {
+     "agent_id": {
+      "title": "Agent Id",
+      "type": "string"
+     }
+    },
+    "required": [
+     "agent_id"
+    ],
+    "title": "MachineRunner",
+    "type": "object"
+   },
    "MessageRow": {
     "description": "A history-page row (`GET /channels/{c}/messages`): the immutable\nMessage plus the two thread-derived facts every client was re-deriving\nfrom its own reply scans (parity move 2, agora-0118). The hub already\ncomputes both for envelopes and digests; serving them here deletes\ncontinuum's `replied_ids` walk and chat's `_pending_ask_ids`.\n\nAll decorations are OPTIONAL with null meaning \"the hub made no\nstatement\" (adversary P2-3/P2-5): a retracted tombstone carries no\nthread state, and a new client parsing an OLD hub's rows must be able\nto represent \"not served\" instead of misreading absence as \"nothing\npending\". Non-retracted rows from a current hub always carry values.",
     "properties": {
@@ -2080,6 +2093,35 @@
     "title": "SetPresence",
     "type": "object"
    },
+   "SpawnClaim": {
+    "properties": {
+     "machine": {
+      "default": "local",
+      "title": "Machine",
+      "type": "string"
+     }
+    },
+    "title": "SpawnClaim",
+    "type": "object"
+   },
+   "SpawnStateUpdate": {
+    "properties": {
+     "detail": {
+      "default": "",
+      "title": "Detail",
+      "type": "string"
+     },
+     "state": {
+      "title": "State",
+      "type": "string"
+     }
+    },
+    "required": [
+     "state"
+    ],
+    "title": "SpawnStateUpdate",
+    "type": "object"
+   },
    "Status": {
     "description": "Conversational obligation of a message.",
     "enum": [
@@ -2871,6 +2913,119 @@
      }
     },
     "summary": "Set Embedding"
+   }
+  },
+  "/admin/machines/{machine}/runner": {
+   "delete": {
+    "operationId": "clear_machine_runner_admin_machines__machine__runner_delete",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "machine",
+      "required": true,
+      "schema": {
+       "title": "Machine",
+       "type": "string"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Clear Machine Runner Admin Machines  Machine  Runner Delete",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Clear Machine Runner"
+   },
+   "put": {
+    "description": "Name the ONE seat that may claim spawn work for `machine`.\n\nADMIN KEY, like every other identity verb, and for the same reason:\nclaiming a request hands out a join token, so a weaker gate here would let\nany authenticated member register the wanted seat under its own key. The\nregistry starts EMPTY \u2014 with no runner named, nothing can be spawned\nanywhere, which is also the honest source for the clients' \"no runner\navailable on <machine>\" empty state.",
+    "operationId": "set_machine_runner_admin_machines__machine__runner_put",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "machine",
+      "required": true,
+      "schema": {
+       "title": "Machine",
+       "type": "string"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/MachineRunner"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": {
+          "type": "string"
+         },
+         "title": "Response Set Machine Runner Admin Machines  Machine  Runner Put",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Set Machine Runner"
    }
   },
   "/admin/missions": {
@@ -7424,6 +7579,52 @@
     "summary": "Revoke Join Token"
    }
   },
+  "/machines": {
+   "get": {
+    "description": "Which machines can host a seat, and which seat speaks for each. Any\nauthenticated seat may read it: a client cannot honestly render \"no runner\navailable on <machine>\" without being able to ask. An EMPTY list is the\ntrue answer, and the one both clients agreed to render as an instruction\nrather than hide.",
+    "operationId": "list_machines_machines_get",
+    "parameters": [
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "items": {
+          "additionalProperties": true,
+          "type": "object"
+         },
+         "title": "Response List Machines Machines Get",
+         "type": "array"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "List Machines"
+   }
+  },
   "/me/about": {
    "put": {
     "operationId": "set_about_me_about_put",
@@ -7903,6 +8104,300 @@
      }
     },
     "summary": "Search"
+   }
+  },
+  "/spawns": {
+   "get": {
+    "description": "The operator's \"what is happening\" view, newest first.",
+    "operationId": "list_spawns_spawns_get",
+    "parameters": [
+     {
+      "in": "query",
+      "name": "machine",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Machine",
+       "type": "string"
+      }
+     },
+     {
+      "in": "query",
+      "name": "active_only",
+      "required": false,
+      "schema": {
+       "default": false,
+       "title": "Active Only",
+       "type": "boolean"
+      }
+     },
+     {
+      "in": "query",
+      "name": "limit",
+      "required": false,
+      "schema": {
+       "default": 100,
+       "title": "Limit",
+       "type": "integer"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "items": {
+          "additionalProperties": true,
+          "type": "object"
+         },
+         "title": "Response List Spawns Spawns Get",
+         "type": "array"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "List Spawns"
+   }
+  },
+  "/spawns/claim": {
+   "post": {
+    "description": "The runner's pull: take the oldest pending request for this machine.\n\n`{\"request\": null}` means there is nothing to do \u2014 the ordinary answer,\nnot an error. On a claim the response carries a single-use join token\nwhose PLAINTEXT appears exactly once, here. The hub never stores it and\ncannot serve it again; a runner that loses it fails the row and the\noperator re-requests.",
+    "operationId": "claim_spawn_spawns_claim_post",
+    "parameters": [
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/SpawnClaim"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Claim Spawn Spawns Claim Post",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Claim Spawn"
+   }
+  },
+  "/spawns/{spawn_id}": {
+   "get": {
+    "operationId": "get_spawn_spawns__spawn_id__get",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "spawn_id",
+      "required": true,
+      "schema": {
+       "title": "Spawn Id",
+       "type": "string"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Get Spawn Spawns  Spawn Id  Get",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Get Spawn"
+   }
+  },
+  "/spawns/{spawn_id}/state": {
+   "post": {
+    "description": "The runner reports where it has got to. Illegal transitions are 409 \u2014\nthe row can never go backwards, so one request can never become two live\nseats.",
+    "operationId": "set_spawn_state_spawns__spawn_id__state_post",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "spawn_id",
+      "required": true,
+      "schema": {
+       "title": "Spawn Id",
+       "type": "string"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/SpawnStateUpdate"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Set Spawn State Spawns  Spawn Id  State Post",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Set Spawn State"
+   }
+  },
+  "/spawns/{spawn_id}/stop": {
+   "post": {
+    "description": "Ask for a running seat to be stopped. This records the INTENT and does\nnot change the state: only the runner can end a process. A row that stays\n`running` with a stop stamp is a runner that is not listening \u2014 worth\nseeing, where a hub-side flip to `stopped` would have hidden it.",
+    "operationId": "stop_spawn_spawns__spawn_id__stop_post",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "spawn_id",
+      "required": true,
+      "schema": {
+       "title": "Spawn Id",
+       "type": "string"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Stop Spawn Spawns  Spawn Id  Stop Post",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Stop Spawn"
    }
   },
   "/stats/activity": {

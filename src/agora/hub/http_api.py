@@ -298,6 +298,151 @@ def revoke_join_token(
     return {"token_id": token_id, "revoked": True}
 
 
+# -- spawn requests (a seat is WANTED; a runner pulls it) ----------------------
+#
+# The hub records the intent and NEVER starts a process (architecture.md:340,
+# pinned by a test that greps this package for subprocess/exec/fork). Design:
+# `plan/spawn-a-seat-from-the-chat.md` in the agora-and-wui vfs.
+#
+# `POST /spawns` — the operator-side CREATE route — is deliberately absent
+# until laurent settles agora-and-wui#178 ask 1 (admin key vs operator_or_admin
+# vs no approval). Everything below is the runner-side wire plus read/stop, and
+# is identical under all three options.
+
+
+class MachineRunner(BaseModel):
+    agent_id: str
+
+
+@router.put("/admin/machines/{machine}/runner")
+def set_machine_runner(
+    machine: str,
+    payload: MachineRunner,
+    token: str = Depends(bearer_token),
+    service: HubService = Depends(get_service),
+    admin_key: str = Depends(get_admin_key),
+) -> dict[str, str]:
+    """Name the ONE seat that may claim spawn work for `machine`.
+
+    ADMIN KEY, like every other identity verb, and for the same reason:
+    claiming a request hands out a join token, so a weaker gate here would let
+    any authenticated member register the wanted seat under its own key. The
+    registry starts EMPTY — with no runner named, nothing can be spawned
+    anywhere, which is also the honest source for the clients' "no runner
+    available on <machine>" empty state."""
+    if not hmac.compare_digest(token, admin_key):
+        raise HTTPException(403, "naming a machine's runner requires the admin key")
+    return _run(service.set_machine_runner, machine, payload.agent_id)
+
+
+@router.delete("/admin/machines/{machine}/runner")
+def clear_machine_runner(
+    machine: str,
+    token: str = Depends(bearer_token),
+    service: HubService = Depends(get_service),
+    admin_key: str = Depends(get_admin_key),
+) -> dict[str, Any]:
+    if not hmac.compare_digest(token, admin_key):
+        raise HTTPException(403, "clearing a machine's runner requires the admin key")
+    return {"machine": machine, "cleared": _run(service.clear_machine_runner, machine)}
+
+
+@router.get("/machines")
+def list_machines(
+    agent: AgentInfo = Depends(operator_or_admin),
+    service: HubService = Depends(get_service),
+) -> list[dict[str, Any]]:
+    """Which machines can host a seat, and which seat speaks for each. Any
+    authenticated seat may read it: a client cannot honestly render "no runner
+    available on <machine>" without being able to ask. An EMPTY list is the
+    true answer, and the one both clients agreed to render as an instruction
+    rather than hide."""
+    runners = service.list_machine_runners()
+    return [{"machine": m, "runner": r} for m, r in sorted(runners.items())]
+
+
+@router.get("/spawns")
+def list_spawns(
+    machine: str = Query(default=""),
+    active_only: bool = Query(default=False),
+    limit: int = Query(default=100),
+    agent: AgentInfo = Depends(operator_or_admin),
+    service: HubService = Depends(get_service),
+) -> list[dict[str, Any]]:
+    """The operator's "what is happening" view, newest first."""
+    if not agent.operator:
+        raise HTTPException(403, "spawn requests are an operator view")
+    rows = _run(service.list_spawn_requests, machine=machine,
+                active_only=active_only, limit=limit)
+    return [r.model_dump(mode="json") for r in rows]
+
+
+@router.get("/spawns/{spawn_id}")
+def get_spawn(
+    spawn_id: str,
+    agent: AgentInfo = Depends(operator_or_admin),
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    if not agent.operator:
+        raise HTTPException(403, "spawn requests are an operator view")
+    return _run(service.get_spawn_request, spawn_id).model_dump(mode="json")
+
+
+class SpawnClaim(BaseModel):
+    machine: str = "local"
+
+
+@router.post("/spawns/claim")
+def claim_spawn(
+    payload: SpawnClaim,
+    agent: AgentInfo = Depends(current_agent),
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    """The runner's pull: take the oldest pending request for this machine.
+
+    `{"request": null}` means there is nothing to do — the ordinary answer,
+    not an error. On a claim the response carries a single-use join token
+    whose PLAINTEXT appears exactly once, here. The hub never stores it and
+    cannot serve it again; a runner that loses it fails the row and the
+    operator re-requests."""
+    claimed = _run(service.claim_spawn_request, agent, payload.machine)
+    return claimed if claimed is not None else {"request": None}
+
+
+class SpawnStateUpdate(BaseModel):
+    state: str
+    detail: str = ""    # the runner's OWN sentence; clients render it verbatim
+
+
+@router.post("/spawns/{spawn_id}/state")
+def set_spawn_state(
+    spawn_id: str,
+    payload: SpawnStateUpdate,
+    agent: AgentInfo = Depends(current_agent),
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    """The runner reports where it has got to. Illegal transitions are 409 —
+    the row can never go backwards, so one request can never become two live
+    seats."""
+    return _run(service.set_spawn_state, agent, spawn_id, payload.state,
+                payload.detail).model_dump(mode="json")
+
+
+@router.post("/spawns/{spawn_id}/stop")
+def stop_spawn(
+    spawn_id: str,
+    agent: AgentInfo = Depends(operator_or_admin),
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    """Ask for a running seat to be stopped. This records the INTENT and does
+    not change the state: only the runner can end a process. A row that stays
+    `running` with a stop stamp is a runner that is not listening — worth
+    seeing, where a hub-side flip to `stopped` would have hidden it."""
+    if not agent.operator:
+        raise HTTPException(403, "stopping a spawned seat is an operator act")
+    return _run(service.request_spawn_stop, agent, spawn_id).model_dump(mode="json")
+
+
 @router.post("/join")
 def join(
     payload: JoinRequest,

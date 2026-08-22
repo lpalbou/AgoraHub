@@ -21,7 +21,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..agent_id import validate_agent_id
-from ..db import Database, DuplicateMessage, JoinTokenRefused
+from ..db import (
+    Database,
+    DuplicateMessage,
+    JoinTokenRefused,
+    SpawnTransitionRefused,
+)
 from ..governance import (
     CHANNEL_CHARTER_SEED,
     CHARTER_PATH,
@@ -61,6 +66,8 @@ from ..models import (
     MAX_DATA_BYTES,
     MAX_FS_BINARY_BYTES,
     MAX_FS_PATH_CHARS,
+    MAX_SPAWN_DETAIL_CHARS,
+    MAX_SPAWN_HARNESS_CHARS,
     MAX_STORE_VALUE_BYTES,
     NOTICE_KINDS,
     AgentInfo,
@@ -83,6 +90,9 @@ from ..models import (
     SearchHit,
     SearchReport,
     SearchSection,
+    SpawnFolderRefused,
+    SpawnRequest,
+    SpawnState,
     Status,
     StoreEntry,
     Urgency,
@@ -92,6 +102,7 @@ from ..models import (
     sanitize_block,
     sanitize_text,
     sanitize_title,
+    validate_spawn_folder,
 )
 from ..vote import (
     VOTE_RESULT_KEY,
@@ -711,7 +722,8 @@ class HubService:
     def create_join_token(self, agent_id: str | None = None, about: str = "",
                           channels: list[str] | None = None,
                           ttl_seconds: float = 86400.0, max_uses: int = 1,
-                          created_by: str = "admin") -> dict[str, Any]:
+                          created_by: str = "admin",
+                          mission: str = "") -> dict[str, Any]:
         """Mint a join token: registers exactly ONE (or max_uses) non-operator
         agent(s) and is valid on no other endpoint. Plaintext is returned once
         here; the hub stores only the secret's hash. Format
@@ -735,7 +747,8 @@ class HubService:
         secret = os.urandom(24).hex()  # 192-bit secret, the api-key idiom
         row = self.db.create_join_token(
             token_id, secret, agent_id, sanitize_text(about, MAX_ABOUT_CHARS, field="about"),
-            preset, created_by, ttl_seconds, max_uses)
+            preset, created_by, ttl_seconds, max_uses,
+            mission=sanitize_block(mission, MAX_MISSION_CHARS, field="mission"))
         return {**row, "token": f"{JOIN_TOKEN_PREFIX}{token_id}.{secret}"}
 
     @staticmethod
@@ -794,6 +807,184 @@ class HubService:
         if not self.db.revoke_join_token(token_id):
             raise HubError(404, f"join token '{token_id}' not found "
                                 "(expired tokens are purged)")
+
+    # -- spawn requests (a seat is WANTED; a runner pulls it) --------------------
+    #
+    # The hub records the intent. A human-started `agora runner` on the target
+    # machine claims the row and runs the same join a human runs today. Design:
+    # `plan/spawn-a-seat-from-the-chat.md` (agora-and-wui vfs), from dm#24.
+
+    #: meta-key prefix for the machine -> runner-seat registry. This is
+    #: deliberately NOT the `machines` table: that is v2, and the design says
+    #: so. It is the smallest thing that can answer "who may claim work for
+    #: this machine" — and it answers NOBODY until an admin says otherwise.
+    MACHINE_RUNNER_PREFIX = "spawn_runner:"
+
+    #: A spawned seat's join token is redeemed by a runner that is already
+    #: holding the row: minutes, not the 24h a human onboarding gets.
+    SPAWN_TOKEN_TTL = 900.0
+
+    @staticmethod
+    def _validate_machine(machine: str) -> str:
+        name = (machine or "local").strip()
+        if not name or len(name) > 64 or any(
+                ord(c) < 33 or ord(c) == 127 for c in name):
+            raise HubError(400, "machine must be a short printable name with "
+                                "no spaces or control characters")
+        return name
+
+    def set_machine_runner(self, machine: str, agent_id: str) -> dict[str, str]:
+        """Name the ONE seat allowed to claim spawn work for `machine`.
+
+        This gate is not in the reviewed design and it closes a hole that was:
+        `claim` hands out a join token, so without it ANY authenticated member
+        could claim a pending request and register the wanted seat under its
+        own key — the hub's own "identity creation is admin-key-only" line,
+        walked around. Writing it is therefore an ADMIN act, like every other
+        identity verb, and the registry starts EMPTY: with no runner named,
+        nothing can be claimed at all. That default is also exactly the
+        "no runner available on <machine>" empty state both clients agreed to
+        render, true by construction rather than by a client's guess.
+        """
+        machine = self._validate_machine(machine)
+        self._validate_agent_id(agent_id)
+        if not self.db.agent_exists(agent_id):
+            raise HubError(404, f"no such agent '{agent_id}' — a runner is a "
+                                "seat with its own key, registered like any "
+                                "other")
+        self.db.meta_set(self.MACHINE_RUNNER_PREFIX + machine, agent_id)
+        return {"machine": machine, "runner": agent_id}
+
+    def clear_machine_runner(self, machine: str) -> bool:
+        machine = self._validate_machine(machine)
+        return self.db.meta_delete(self.MACHINE_RUNNER_PREFIX + machine)
+
+    def machine_runner(self, machine: str) -> str:
+        return self.db.meta_get(self.MACHINE_RUNNER_PREFIX + machine) or ""
+
+    def list_machine_runners(self) -> dict[str, str]:
+        return self.db.meta_list_prefix(self.MACHINE_RUNNER_PREFIX)
+
+    def _require_runner(self, agent: AgentInfo, machine: str) -> str:
+        machine = self._validate_machine(machine)
+        named = self.machine_runner(machine)
+        if not named:
+            raise HubError(
+                403, f"no runner is registered for '{machine}' — an admin "
+                     f"names one with PUT /admin/machines/{machine}/runner "
+                     "before any seat can be spawned there")
+        if agent.id != named:
+            raise HubError(403, f"'{named}' is the runner for '{machine}'")
+        return machine
+
+    def create_spawn_request(self, actor: AgentInfo, *, seat_id: str,
+                             mission: str = "", harness: str = "",
+                             machine: str = "local", folder: str = "",
+                             channels: list[str] | None = None,
+                             options: dict[str, Any] | None = None
+                             ) -> SpawnRequest:
+        """Record that a seat is wanted. Every refusal here happens BEFORE the
+        row exists, so a request that cannot possibly succeed never becomes a
+        pending row a runner has to reject minutes later on another machine."""
+        machine = self._validate_machine(machine)
+        self._validate_agent_id(seat_id)
+        self._require_not_hub_blocked_id(seat_id)
+        if self.db.agent_exists(seat_id):
+            raise HubError(409, f"agent '{seat_id}' already exists")
+        if self.db.agent_retirement(seat_id) is not None:
+            raise HubError(409, f"agent id '{seat_id}' is retired and is never "
+                                "reused")
+        harness = (harness or "").strip()
+        if not harness:
+            raise HubError(400, "harness is required — the runner refuses one "
+                                "it does not have installed, and a request "
+                                "without one cannot be checked at all")
+        if len(harness) > MAX_SPAWN_HARNESS_CHARS:
+            raise HubError(400, f"harness name exceeds "
+                                f"{MAX_SPAWN_HARNESS_CHARS} characters")
+        try:
+            folder = validate_spawn_folder(folder)
+        except SpawnFolderRefused as e:
+            raise HubError(400, str(e)) from e
+        mission = sanitize_block(mission, MAX_MISSION_CHARS, field="mission")
+        preset = [c.strip() for c in (channels or [])
+                  if isinstance(c, str) and c.strip()]
+        opts = options if isinstance(options, dict) else {}
+        return self.db.create_spawn_request(
+            machine=machine, seat_id=seat_id, mission=mission, harness=harness,
+            folder=folder, channels=preset, options=opts,
+            requested_by=actor.id)
+
+    def list_spawn_requests(self, *, machine: str = "",
+                            active_only: bool = False,
+                            limit: int = 100) -> list[SpawnRequest]:
+        return self.db.list_spawn_requests(
+            machine=self._validate_machine(machine) if machine else "",
+            active_only=active_only, limit=max(1, min(int(limit), 500)))
+
+    def get_spawn_request(self, spawn_id: str) -> SpawnRequest:
+        row = self.db.get_spawn_request(spawn_id)
+        if row is None:
+            raise HubError(404, f"no spawn request '{spawn_id}'")
+        return row
+
+    def claim_spawn_request(self, agent: AgentInfo, machine: str = "local"
+                            ) -> dict[str, Any] | None:
+        """The runner's pull. Returns the claimed row plus a single-use join
+        token whose PLAINTEXT is served exactly once, or None when there is
+        nothing to do.
+
+        The token is minted here rather than by the runner because minting is
+        an identity act: the hub pins it to the row's `seat_id`, gives it
+        minutes of life, and carries the operator's mission on it. The runner
+        never gains the power to mint a token for any other id.
+        """
+        machine = self._require_runner(agent, machine)
+        row = self.db.claim_spawn_request(machine=machine, runner_id=agent.id)
+        if row is None:
+            return None
+        # The id may have been taken between the request and the claim (a
+        # human ran `agora setup` with the same name). Reject the row with the
+        # reason rather than handing the runner a token that cannot redeem.
+        try:
+            token = self.create_join_token(
+                agent_id=row.seat_id, channels=row.channels,
+                ttl_seconds=self.SPAWN_TOKEN_TTL, max_uses=1,
+                created_by=agent.id, mission=row.mission)
+        except HubError as e:
+            self.db.set_spawn_state(row.id, SpawnState.rejected,
+                                    detail=str(e.detail), by=agent.id)
+            raise
+        row = self.db.attach_spawn_token(row.id, token["token_id"])
+        return {"request": row.model_dump(mode="json"),
+                "join_token": token["token"]}
+
+    def set_spawn_state(self, agent: AgentInfo, spawn_id: str, state: str,
+                        detail: str = "") -> SpawnRequest:
+        """The runner reports where it has got to. The transition table lives
+        in the db so this and any other writer are held to the same rules."""
+        row = self.get_spawn_request(spawn_id)
+        self._require_runner(agent, row.machine)
+        try:
+            target = SpawnState(state)
+        except ValueError as e:
+            raise HubError(400, f"unknown spawn state '{state}' — one of "
+                                f"{sorted(s.value for s in SpawnState)}") from e
+        detail = sanitize_text(detail, MAX_SPAWN_DETAIL_CHARS, field="detail")
+        try:
+            return self.db.set_spawn_state(spawn_id, target, detail=detail,
+                                           by=agent.id)
+        except SpawnTransitionRefused as e:
+            raise HubError(e.status_code, e.detail) from e
+
+    def request_spawn_stop(self, agent: AgentInfo, spawn_id: str) -> SpawnRequest:
+        """Record that the operator wants this seat stopped. The hub does not
+        move the state: only the runner can end a process."""
+        self.get_spawn_request(spawn_id)
+        try:
+            return self.db.request_spawn_stop(spawn_id)
+        except SpawnTransitionRefused as e:
+            raise HubError(e.status_code, e.detail) from e
 
     # -- channels ---------------------------------------------------------------
 

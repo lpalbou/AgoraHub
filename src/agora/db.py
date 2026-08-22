@@ -1464,6 +1464,21 @@ class Database:
                 "SELECT * FROM spawn_requests WHERE id = ?", (row["id"],)).fetchone()
         return self._row_to_spawn(fresh)
 
+    def attach_spawn_token(self, spawn_id: str, join_token_id: str) -> SpawnRequest:
+        """Record WHICH join token was minted for this row. The public id
+        only — the secret went to the runner once and the hub never held it.
+        Keeping the id is what makes revoke-on-failure possible."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE spawn_requests SET join_token_id = ?, updated_at = ?"
+                " WHERE id = ?", (join_token_id, time.time(), spawn_id))
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT * FROM spawn_requests WHERE id = ?", (spawn_id,)).fetchone()
+        if row is None:
+            raise SpawnTransitionRefused(404, f"no spawn request '{spawn_id}'")
+        return self._row_to_spawn(row)
+
     def set_spawn_state(self, spawn_id: str, state: SpawnState, *,
                         detail: str = "", by: str = "") -> SpawnRequest:
         """Advance a row, or raise SpawnTransitionRefused.
@@ -2168,6 +2183,23 @@ class Database:
             row = self._conn.execute(
                 "SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
         return row["value"]
+
+    def meta_list_prefix(self, prefix: str) -> dict[str, str]:
+        """Every meta key under `prefix` (exclusive of the prefix itself),
+        keyed by the remainder. The machine→runner registry rides meta rather
+        than a table of its own, so it needs a prefix scan."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT key, value FROM meta WHERE key LIKE ? ORDER BY key",
+                (prefix + "%",)).fetchall()
+        return {r["key"][len(prefix):]: r["value"] for r in rows
+                if len(r["key"]) > len(prefix)}
+
+    def meta_delete(self, key: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM meta WHERE key = ?", (key,))
+            self._conn.commit()
+        return cur.rowcount > 0
 
     def meta_set(self, key: str, value: str) -> None:
         """Upsert a meta key. Used for restart-durable watchdog flap guards
