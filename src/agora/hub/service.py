@@ -1031,6 +1031,31 @@ class HubService:
 
     def leave_channel(self, agent: AgentInfo, channel: str) -> None:
         self.require_membership(channel, agent.id)
+        # A DM HAS NO EXIT, SO THE HUB OWNS THE REFUSAL (operator order,
+        # agora-and-wui#18). Membership in a two-party room is structural —
+        # it IS the channel name — and every other door already says so:
+        # `join_channel` refuses ("direct channels cannot be joined"),
+        # `open_dm` re-asserts membership on both sides, and the reserved
+        # `channel/` prefix is unwritable there because a DM is ownerless.
+        # Only this door disagreed, and leaving through it is destructive to
+        # the OTHER peer: their room keeps accepting posts nobody is
+        # delivered.
+        #
+        # The order it implements is the general one, not this instance: a
+        # client must not be able to drop a seat — least of all the human —
+        # out of a DM as a side effect of another action. Three clients
+        # independently reported having no leave control (WUI unreachable by
+        # luck, TUI absent entirely), which is exactly why the guarantee does
+        # not belong in any of them: `leave` is self-only, so the request
+        # that removed the operator carried the operator's own key, and no
+        # amount of client discipline constrains the next caller. Enforced
+        # here, every client inherits it.
+        if channel.startswith(DM_PREFIX):
+            raise HubError(403, f"'{channel}' is a direct channel — its two "
+                                "members are the room, so it cannot be left "
+                                "(there is no rejoin door, and the peer would "
+                                "keep posting to nobody). Stop posting, or ask "
+                                "an operator to retire the seat.")
         # Membership is shared state and the departure broadcasts: frozen
         # during a pause like every other shared-world mutation (review MED-2).
         self._require_unpaused(agent, channel)

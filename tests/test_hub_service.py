@@ -351,8 +351,8 @@ def test_ledger_requires_membership(service, agents):
 
 
 def test_open_dm_is_idempotent_and_rejoinable(service, agents):
-    """Concurrent/repeat first-contact must not 500, and a peer that left a DM
-    can always re-open it (membership is re-asserted every call)."""
+    """Concurrent/repeat first-contact must not 500, and a peer missing from a
+    DM is re-admitted by open_dm (membership is re-asserted every call)."""
     alice, bob = agents
     first = service.open_dm(alice, "bob")
     dm = first["channel"]["name"]
@@ -360,11 +360,33 @@ def test_open_dm_is_idempotent_and_rejoinable(service, agents):
     # Opening again from either side is a no-op get-or-create, never an error.
     again = service.open_dm(bob, "alice")
     assert again["channel"]["name"] == dm
-    # A left peer can re-open (the dead-end the trust review flagged).
-    service.leave_channel(bob, dm)
+    # A peer whose membership went missing by any route (historically a
+    # leave; today only retirement) re-enters through open_dm — the dead-end
+    # the trust review flagged.
+    service.db.remove_member(dm, "bob")
     assert not service.db.is_member(dm, "bob")
     service.open_dm(bob, "alice")
     assert service.db.is_member(dm, "bob")
+
+
+def test_a_dm_cannot_be_left(service, agents):
+    """The hub, not the client, guarantees nobody is dropped out of a DM
+    (operator order, agora-and-wui#18). `leave` is self-only, so the caller
+    always holds the seat's key — the refusal has to live here or it does not
+    exist. Falsification: delete the DM_PREFIX guard in `leave_channel` and
+    this goes red on both the refusal and the surviving membership."""
+    alice, bob = agents
+    dm = service.open_dm(alice, "bob")["channel"]["name"]
+    with pytest.raises(HubError) as e:
+        service.leave_channel(bob, dm)
+    assert e.value.status_code == 403
+    assert "direct channel" in str(e.value.detail)
+    assert service.db.is_member(dm, "bob")
+    # Ordinary rooms are untouched: leaving one is still a member's own call.
+    service.create_channel(alice, "town", private=False)
+    service.join_channel(bob, "town", None)
+    service.leave_channel(bob, "town")
+    assert not service.db.is_member("town", "bob")
 
 
 # -- the hub owns the vote deadline (0140 field test 2) --------------------------
