@@ -1014,11 +1014,56 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
                              f"Its pending asks {pending} are ANOTHER seat's — "
                              "the hub will refuse your answers/declines on "
                              "them. DO or claim any work it assigns")
-            else:
-                naming = f" asks naming you: {mine}" if mine else ""
+            elif mine:
                 lines.append(f"- ANSWER {row['channel']}#{row['seq']} from "
                              f"{row['sender']} (pending {pending},"
-                             f"{naming}{age}) — "
+                             f" asks naming you: {mine}{age}) — "
+                             f"read_message id={row['id']}, then reply "
+                             f"in-thread with answers={mine} (or "
+                             f"declines={mine} to refuse them on the record) "
+                             "and DO or claim any work it assigns")
+            elif row.get("reason") == "operator_request_awaiting_your_report":
+                # ASK-LESS ROWS GET THE EXIT THE HUB ACTUALLY HONOURS. The
+                # `reason` enum was added (dd07c45) because these two look
+                # identical on the row and their exits INVERT — and this
+                # renderer, which holds the value, went on printing one
+                # generic sentence for both. That is the enum's own founding
+                # complaint reproduced in the surface that reports it.
+                #
+                # Deferred once as "three sentences need three falsifications"
+                # (claim:msg-244). tui's test for an honest deferral
+                # (thread-shape-and-panels#117) is "is there a part that ships
+                # without the design question?" — and here there is no design
+                # question at all: every exit below is already ruled and
+                # documented on ObligationRow.reason. So the deferral was work
+                # wearing a fork's clothes, which is exactly the anaesthetic
+                # row they were describing.
+                lines.append(f"- REPORT {row['channel']}#{row['seq']} from "
+                             f"{row['sender']} (an operator's request;{age}) — "
+                             f"read_message id={row['id']}. A plain reply does "
+                             "NOT clear this: only the operator's own word, or "
+                             "your `resolved` reply citing data.evidence for "
+                             "what you delivered. DO the work first")
+            elif row.get("reason") == "peer_request_no_asks":
+                lines.append(f"- TAKE {row['channel']}#{row['seq']} from "
+                             f"{row['sender']} (a peer's request, no asks;"
+                             f"{age}) — read_message id={row['id']}. A bare "
+                             "reply does NOT clear it (\"on it\" is not "
+                             "delivery): materialize a claim row citing this "
+                             "message, or post `resolved` citing evidence if "
+                             "you have already delivered")
+            elif row.get("reason") == "names_you":
+                lines.append(f"- REPLY {row['channel']}#{row['seq']} from "
+                             f"{row['sender']} (it names you;{age}) — "
+                             f"read_message id={row['id']}, then reply "
+                             "in-thread: ANY reply of yours clears this row. "
+                             "DO or claim any work it assigns")
+            else:
+                # `reason` absent = a hub too old to state one. Say the
+                # general thing rather than guess a specific exit — the
+                # absent-key contract, not a default.
+                lines.append(f"- ANSWER {row['channel']}#{row['seq']} from "
+                             f"{row['sender']} (pending {pending},{age}) — "
                              f"read_message id={row['id']}, then reply in-thread "
                              "(answers=[...] only if it asked numbered questions) "
                              "and DO or claim any work it assigns")

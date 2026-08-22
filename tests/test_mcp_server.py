@@ -297,3 +297,64 @@ def test_a_row_whose_asks_DO_name_you_still_says_ANSWER(hub, monkeypatch):
     assert f"ANSWER room#{seq}" in text
     assert "asks naming you: ['1']" in text
     assert f"REPLY room#{seq}" not in text
+
+
+def test_each_ask_less_reason_gets_the_exit_the_hub_actually_honours(hub, monkeypatch):
+    """The `reason` enum exists (dd07c45) because these cases look identical
+    on the row and their exits INVERT. This renderer held the value and
+    printed one generic sentence for all of them — the enum's own founding
+    complaint, reproduced in the surface that reports it.
+
+    Three reasons, three exits, and each assertion falsifies the other two:
+    collapse any two branches and at least one goes red.
+    """
+    import httpx
+
+    op_key = _make_agent(hub, "boss", operator=True)
+    peer = _make_agent(hub, "alice")
+    bob_key = _make_agent(hub, "bob")
+    a = {"Authorization": f"Bearer {peer}"}
+    b = {"Authorization": f"Bearer {bob_key}"}
+    o = {"Authorization": f"Bearer {op_key}"}
+    httpx.post(f"{hub}/channels", json={"name": "room", "private": False},
+               headers=a, timeout=5)
+    for h in (b, o):
+        httpx.post(f"{hub}/channels/room/join", json={}, headers=h, timeout=5)
+
+    # 1. an OPERATOR's ask-less request: only their word or resolved+evidence.
+    httpx.post(f"{hub}/channels/room/messages",
+               json={"body": "do the thing", "title": "op job",
+                     "status": "blocked", "to": ["bob"]}, headers=o, timeout=5)
+    # 2. a PEER's ask-less request: a claim row, not a reply.
+    httpx.post(f"{hub}/channels/room/messages",
+               json={"body": "peer job", "title": "peer job",
+                     "status": "blocked", "to": ["bob"]}, headers=a, timeout=5)
+    # 3. a directive debt: any reply clears it.
+    root = httpx.post(f"{hub}/channels/room/messages",
+                      json={"body": "root", "title": "root"},
+                      headers=a, timeout=5).json()
+    httpx.post(f"{hub}/channels/room/messages",
+               json={"body": "pointing at you", "title": "yours",
+                     "status": "reply", "reply_to": root["id"],
+                     "to": ["bob"]}, headers=a, timeout=5)
+
+    text = _owed_text(_server_against(hub, monkeypatch, bob_key))
+
+    # The operator's: named REPORT, and it says a reply will not do.
+    assert "REPORT room#" in text
+    assert "data.evidence" in text
+    # The peer's: named TAKE, and it names the claim row.
+    assert "TAKE room#" in text
+    assert "claim row citing this message" in text
+    assert '"on it" is not delivery' in text
+    # The directive debt: any reply.
+    assert "REPLY room#" in text
+    assert "ANY reply of yours clears this row" in text
+    # And none of the three is offered the answers[] gesture, which discharges
+    # nothing on any of them. Scoped to the OWED lines: the static triage
+    # footer mentions `answers=[...]` as general guidance and is not a
+    # per-row instruction, so asserting over the whole render would have
+    # passed or failed for the wrong reason.
+    owed_lines = [ln for ln in text.splitlines() if ln.startswith("- ")]
+    assert owed_lines, "no OWED rows rendered"
+    assert not any("answers=[...]" in ln for ln in owed_lines)
