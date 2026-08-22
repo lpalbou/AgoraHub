@@ -556,6 +556,62 @@ class ObligationRow(BaseModel):
     title: str = ""
     pending_asks: list[str] = Field(default_factory=list)
     asks_naming_you: list[str] = Field(default_factory=list)
+    reason: str | None = None
+    # ^ WHY this row is here (0155). Until this existed the row carried
+    #   `pending_asks` and `asks_naming_you` and nothing else, so when both
+    #   were empty a client had literally nothing to show and printed the
+    #   bare fact of the row — "needs reply", with no question anywhere.
+    #   The operator read that as a bug (laurent, agora-and-wui#53) and it is
+    #   not: naming a seat creates the debt, asks only itemise it. But the
+    #   client was not being terse, and it was not free to guess: the hub
+    #   never told it why.
+    #
+    #   AN ENUM, NEVER DISPLAY TEXT (agora-wui#58). The wording belongs to
+    #   the client — it has to fit a pill in a narrow column, a tooltip and
+    #   an aria-label, three lengths that would otherwise be truncations of
+    #   the hub's prose. And it is on the ROW, not the message: one message
+    #   can name two seats for two different reasons, and `/owed` is already
+    #   per-seat, so a message-level field would put the client straight back
+    #   into deriving which reason applied to it.
+    #
+    #     asks_pending
+    #         Numbered asks still pending that are YOURS — named, or
+    #         unaddressed and therefore everyone's. The ids ride beside it.
+    #     names_you
+    #         A directive debt: an addressed `reply`/`fyi`. Any reply from
+    #         you clears it.
+    #     peer_request_no_asks
+    #         A PEER's ask-less open/blocked naming you. A bare reply does
+    #         NOT clear it — "a peer's addressed work ask is not closed by
+    #         'on it'" (2026-08-11). What clears it is a CLAIM ROW citing
+    #         this message (ownership materialized, pressure moved onto the
+    #         claim) or an authoritative close.
+    #
+    #         Both clients specified this case as "any reply from me clears
+    #         it" (agora-wui#58, agora-tui#60) and both were wrong about the
+    #         hub. Serving the value without this note would have had them
+    #         render an exit that does not exist — a seat replies, watches
+    #         the row survive, and learns the ledger is broken. Caught by
+    #         test_the_two_ask_less_cases_are_distinguishable_and_they_invert,
+    #         which asserted the described behaviour and went red.
+    #     operator_request_awaiting_your_report
+    #         An operator's ask-less open/blocked landing on you (named, or
+    #         routed to the reporting delegate). ONLY the operator's own word
+    #         or a `resolved` reply citing evidence clears it.
+    #
+    #   The last two look identical on the row and invert (agora/0.4 #27),
+    #   which is why they are separate values rather than one. It is not
+    #   cosmetic: agora-tui#60 reports that their action rail offers `↩reply`
+    #   on every row and `✓resolve` on any open/blocked — so on an operator's
+    #   ask-less open they were offering the verb that CANNOT discharge it
+    #   beside the one that can, with nothing to tell them apart. Which verb
+    #   discharges a row is the hub's verdict and was not derivable from
+    #   `status`.
+    #
+    #   Precedence when several could apply: asks_pending, then
+    #   operator_request_awaiting_your_report, then peer_request_no_asks,
+    #   then names_you. Null = no statement (a hub older than this field);
+    #   a current hub always states.
     created_at: float = 0.0
     escalated: bool = False
 

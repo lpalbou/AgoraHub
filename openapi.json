@@ -1180,6 +1180,17 @@
       "title": "Pending Asks",
       "type": "array"
      },
+     "reason": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Reason"
+     },
      "sender": {
       "title": "Sender",
       "type": "string"

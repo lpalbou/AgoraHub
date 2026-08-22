@@ -3752,6 +3752,12 @@ class HubService:
                 to_answer.append(ObligationRow(
                     channel=m.channel, id=m.id, seq=m.seq,
                     sender=m.sender, title=m.title,
+                    # This whole branch IS case 2 (0155): an addressed
+                    # reply/fyi carrying no asks. Any reply from this seat
+                    # clears it — which is exactly what the client could not
+                    # say, because the row looked identical to the operator
+                    # case that a reply cannot clear.
+                    reason="names_you",
                     created_at=m.created_at,
                     escalated=age > sla_cache[m.channel] * 60.0,
                 ))
@@ -3846,6 +3852,25 @@ class HubService:
             if m.channel not in sla_cache:
                 sla_cache[m.channel] = self.channel_sla(m.channel)
             age = now - m.created_at - self.paused_seconds_since(m.created_at)
+            # WHY this row is here (0155). Everything below is read off the
+            # same facts the branches above already established — the point
+            # is that the CLIENT could not read them: `pending_asks` and
+            # `asks_naming_you` both empty left it printing "needs reply"
+            # with no question, which the operator reasonably called a bug.
+            if ds.pending:
+                # Yours by name, or unaddressed and therefore everyone's —
+                # either way the ids beside this reason are the answer.
+                reason = "asks_pending"
+            elif m.sender in ops:
+                # Only the operator's word, or a resolved reply citing
+                # evidence, clears this one. The value says so because a
+                # client offering "reply" here offers a verb that cannot
+                # discharge the row (agora-tui#60).
+                reason = "operator_request_awaiting_your_report"
+            elif m.status in (Status.open, Status.blocked):
+                reason = "peer_request_no_asks"
+            else:
+                reason = "names_you"
             to_answer.append(ObligationRow(
                 channel=m.channel, id=m.id, seq=m.seq,
                 sender=m.sender, title=m.title,
@@ -3853,6 +3878,7 @@ class HubService:
                 asks_naming_you=sorted(
                     str(a["id"]) for a in asks_of(m)
                     if agent.id in (a.get("to") or []) and str(a["id"]) in ds.pending),
+                reason=reason,
                 created_at=m.created_at,
                 escalated=age > sla_cache[m.channel] * 60.0,
             ))
