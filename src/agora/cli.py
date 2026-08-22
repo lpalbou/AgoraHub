@@ -2402,9 +2402,18 @@ def cmd_spawn(args: argparse.Namespace) -> None:
         if not rows:
             # The honest empty state, and the same sentence both clients show:
             # no runner is registered ANYWHERE, so nothing can be spawned.
-            print("no runner is registered on this hub — an admin names one "
-                  "with `agora runner` on the target machine plus\n"
-                  "  PUT /admin/machines/<machine>/runner")
+            # 90b2d91 gave this step a verb and did not reach the one place
+            # an operator meets it. The empty state still recited the raw
+            # `PUT` that commit existed to replace, and it named the steps
+            # out of order — the runner cannot be started until its seat is
+            # registered AND named. Three commands, in the order they work.
+            print("no runner is registered on this hub, so nothing can be "
+                  "spawned anywhere. An admin turns it on with:\n"
+                  "  agora register <seat-id> --mission 'speaks for this "
+                  "machine' --seed\n"
+                  "  agora spawn --set-runner <machine>=<seat-id>\n"
+                  "  agora runner --as <seat-id> --root <absolute-dir>   "
+                  "(on that machine)")
             return
         for row in rows:
             seen = ("never started" if row.get("announced_at") is None

@@ -222,16 +222,34 @@ def default_joiner(cfg: RunnerConfig, row: dict[str, Any], token: str,
                    folder: Path) -> None:
     """Run the SAME onboarding a human runs today. This is the highest-leverage
     reuse in the design: the runner gains no new power, it just types what a
-    person would have typed. `run_join` also mirrors the mission into the
-    harness rule file — the part that survives a compaction, and the reason a
-    seat spawned with its mission only in the hub is a seat that forgets what
-    it is for."""
+    person would have typed.
+
+    That reuse is also why the mission reaches the seat's PROMPT and not only
+    its hub record — but only as of 2026-08-23, and this docstring claimed it
+    before it was true. `run_join` did not mirror the mission; the mirror ran
+    from `agora setup` and `agora drive` alone, so every spawned seat got a
+    rule file with no standing charge. I had corrected exactly this claim once
+    already (`dm#27`) and then wrote it here as fact. Asserting it twice did
+    not build it; running the four documented steps against a scratch hub and
+    reading the file did.
+
+    `mcp_command` MUST be resolved, never passed as a placeholder. It was
+    `""` until 2026-08-23, and `run_join` probes it before redeeming the
+    invite — so every spawn died at `mcp-runtime` with `'' is not executable
+    on PATH`, a refusal naming no command, on every machine. The feature had
+    never worked end to end and 1828 tests said nothing, because the CLI's
+    own `agora join` resolves the command at its call site (`cli.py`) and
+    nothing exercised THIS one. Found by running the four steps I had been
+    handing the operator, which is the only thing that could have found it:
+    it is a seam, and both sides passed their own tests."""
     from .join import run_join
+    from .mcp.runtime import resolve_mcp_command
 
     folder.mkdir(parents=True, exist_ok=True)
     run_join(url=cfg.url, token=token, agent_id=row["seat_id"], about="",
              harness=row["harness"], workspace=str(folder), with_hook=True,
-             listen=False, mcp_command="", vendor_bootstrap=False)
+             listen=False, mcp_command=resolve_mcp_command(),
+             vendor_bootstrap=False)
 
 
 def handle_request(cfg: RunnerConfig, state: RunnerState, row: dict[str, Any],

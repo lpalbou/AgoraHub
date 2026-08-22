@@ -704,3 +704,63 @@ def test_mcp_no_key_error_is_surface_aware(isolated_home, monkeypatch):
     with pytest.raises(SystemExit) as exc:
         _resolve_credentials()
     assert "Run `agora up`" in str(exc.value)
+
+
+def test_a_remotely_joined_seat_gets_its_MISSION_IN_THE_RULE_FILE(
+        live_hub, isolated_home, tmp_path):
+    """The mission must reach the PROMPT, not only a tool result (2026-08-21:
+    7/20 honoured it from an erased whoami, 20/20 from the system prompt).
+
+    `mirror_mission_from_hub` was called from `agora setup` and `agora drive`
+    and NEVER from `run_join` — so a seat that joined from an invite, or that
+    `agora runner` spawned, had its mission on the hub and nowhere in its
+    prompt. Worst in the spawn lane: there is no human at that terminal to
+    notice the seat is working without a charge.
+
+    Found by running the documented operator path against a scratch hub and
+    reading the file — 74 lines, no mission block — after I had asserted the
+    behaviour twice in prose (`dm#26`, corrected at `dm#27`, then re-asserted
+    in `runner.default_joiner`'s docstring).
+
+    Shaped as join -> set mission -> RE-run, which is not a contrivance: it is
+    the repair path `run_join` documents ("a burned artifact re-run on a
+    machine that already holds the key skips redemption and only re-wires"),
+    and it pins both halves at once. The first read is the falsification
+    baseline — without it, an assertion that the block is present proves
+    nothing about whether this call put it there.
+
+    Falsification: drop the `mirror_mission_from_hub` loop from
+    `join._wire_workspace` and the second read goes red.
+    """
+    minted = httpx.post(f"{live_hub.url}/join-tokens",
+                        json={"agent_id": "scribe"},
+                        headers=_admin(), timeout=5).json()
+    workspace = tmp_path / "seat"
+    workspace.mkdir()
+
+    def _join_here(agent_id=None):
+        # The repair re-run must NAME the seat: the cached-key lookup keys on
+        # the effective id, and a raw token (as opposed to a full artifact)
+        # pins none — so an unnamed re-run tries to redeem a burned token.
+        return run_join(url=live_hub.url, token=minted["token"],
+                        agent_id=agent_id,
+                        about="", harness="claude", workspace=str(workspace),
+                        with_hook=False, listen=False, mcp_command="agora-mcp")
+
+    assert _join_here().code == 0
+    # BASELINE: no mission set on the hub, so no block — and the mirror says
+    # so rather than writing an empty heading.
+    assert "agora:mission:begin" not in (workspace / "CLAUDE.md").read_text()
+
+    charge = "write the minutes and nothing else"
+    r = httpx.put(f"{live_hub.url}/admin/agents/scribe/mission",
+                  json={"mission": charge}, headers=_admin(), timeout=5)
+    assert r.status_code == 200, r.text
+
+    assert _join_here("scribe").code == 0            # the documented repair
+    rules = (workspace / "CLAUDE.md").read_text()
+    assert charge in rules
+    # ...inside the managed block, so a later re-join REPLACES it rather than
+    # stacking a second stale charge under the same heading.
+    assert "<!-- agora:mission:begin -->" in rules
+    assert "<!-- agora:mission:end -->" in rules

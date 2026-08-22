@@ -337,3 +337,62 @@ def test_run_once_with_nothing_pending_says_so_and_writes_nothing(cfg):
     hub = _FakeHub(None)
     assert R.run_once(cfg, RunnerState(), hub) == "nothing to do"
     assert hub.states == []
+
+
+# -- the seam every test above stubs (2026-08-23) ------------------------------
+#
+# `joiner` is injected in all eleven tests above, which is right for testing
+# the DECISION — and it meant `default_joiner`, the real one, was never run.
+# It passed `mcp_command=""` to `run_join`, which probes that command before
+# redeeming the invite, so EVERY spawn died at `mcp-runtime` with `'' is not
+# executable on PATH` — a refusal naming no command, on every machine.
+#
+# 1828 tests were green. The feature had never worked end to end once. Both
+# sides of the seam passed their own tests: the CLI's `agora join` resolves
+# the command at its own call site, and the runner's gates all pass with a
+# fake joiner. Found by running the four steps I had been handing the
+# operator, which is the only thing that could have found it.
+
+def test_default_joiner_passes_a_REAL_mcp_command_not_a_placeholder(
+        cfg, tmp_path, monkeypatch):
+    """The falsification is one character: put `mcp_command=""` back in
+    `default_joiner` and this goes red. Nothing else in this file does."""
+    from agora.mcp import runtime as _rt
+
+    seen: dict = {}
+    monkeypatch.setattr("agora.join.run_join",
+                        lambda **kw: seen.update(kw))
+    monkeypatch.setattr(_rt, "resolve_mcp_command", lambda: "/opt/bin/agora-mcp")
+
+    R.default_joiner(cfg, _row(), "agora-join_tok", tmp_path / "scribe")
+
+    assert seen["mcp_command"] == "/opt/bin/agora-mcp"
+    # ...and the guard that states WHY, so a future refactor that reintroduces
+    # an empty default is caught even if the resolver is stubbed differently.
+    assert seen["mcp_command"], "run_join probes this; empty fails every spawn"
+
+
+def test_the_resolver_names_a_command_even_when_it_finds_NOTHING(monkeypatch):
+    """The other half of the seam, and the FALLBACK branch specifically.
+
+    `default_joiner` is only as good as what it calls, and the branch that
+    matters is the one on a machine where nothing is installed: the resolver
+    must still name SOMETHING, because the probe's diagnostic quotes it and
+    `'' is not executable on PATH` tells the reader nothing to act on. That
+    unreadable refusal is exactly what the placeholder bug produced.
+
+    WRITTEN TWICE. The first version just asserted `resolve_mcp_command()` is
+    non-empty, and it passed whether the fallback was `"agora-mcp"` or `""` —
+    because this machine HAS `agora-mcp` on PATH, so the fallback never ran.
+    A green check over a branch it never reached. Emptying PATH and the two
+    sibling lookups is what makes the falsification bite."""
+    from agora.mcp import runtime as _rt
+
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr(_rt.sys, "argv", ["pytest"])
+    # Both sibling probes must miss too, or a candidate is found and the
+    # fallback is skipped again — the mistake this docstring records.
+    monkeypatch.setattr(_rt.Path, "is_file", lambda self: False)
+
+    assert _rt.resolve_mcp_command().strip(), \
+        "a probe failure must be able to name the command it could not run"

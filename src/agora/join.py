@@ -478,6 +478,26 @@ def _wire_workspace(harness: str | tuple[str, ...], workspace: Path, agent_id: s
             print(f"  bootstrap   -> {detail}")
             if not ok:
                 issues.append(f"Codex vendor bootstrap needs action: {detail}")
+    # THE MISSION MUST REACH THE PROMPT, NOT ONLY A TOOL RESULT (2026-08-23).
+    # `mirror_mission_from_hub` was called from `agora setup` and from `agora
+    # drive` — and never from HERE, the remote-join path. So a seat that
+    # joined from an invite, or that a runner spawned, had its mission on the
+    # hub and nowhere in its system prompt. That is the 7/20-vs-20/20 gap the
+    # mirror was written for, in the lane where it is least recoverable: a
+    # spawned seat has no human at its terminal to notice it is working
+    # without a charge.
+    #
+    # Found by running the four steps I had been handing the operator, on a
+    # scratch hub: the spawned seat's CLAUDE.md had 74 lines and no mission
+    # block. I had already corrected this claim ONCE (dm#27, "the rule-file
+    # mirror is the runner's job and the runner does not exist yet"), then
+    # re-asserted it as fact in `runner.default_joiner`'s docstring when the
+    # runner did exist. Saying it twice did not build it.
+    #
+    # Best-effort by contract — an unreachable hub returns [] and never fails
+    # a join — so this cannot turn a working onboarding into a broken one.
+    for note in _sh.mirror_mission_from_hub(workspace, harnesses, url, agent_id):
+        print(f"  mission     -> {note}")
     print(f"  key          -> cached only in {_config.home() / 'keys.json'} "
           "(0600); harness config contains no bearer")
     default_drive = harnesses[0] if len(harnesses) == 1 else None
