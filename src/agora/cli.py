@@ -2351,6 +2351,86 @@ def cmd_retire(args: argparse.Namespace) -> None:
             "retired list too)")
 
 
+def cmd_spawn(args: argparse.Namespace) -> None:
+    """Ask for a seat, list the requests, or ask for one to stop.
+
+    This RECORDS an intent. Nothing starts here and nothing starts in the hub:
+    an `agora runner` on the target machine claims the row, checks it against
+    its own local gates, and (by default) asks a human at its terminal before
+    anything runs. Authority resolves like every sibling operator verb — an
+    operator agent key via --as, else the hub's admin key.
+    """
+    import httpx
+
+    url = _hub_url(args)
+    as_id = getattr(args, "as_id", None)
+    cred = _config.resolve_key(url, as_id) if as_id else _admin_key_or_exit(args, url)
+    headers = {"Authorization": f"Bearer {cred}"}
+
+    if args.machines:
+        r = httpx.get(f"{url}/machines", headers=headers, timeout=10.0)
+        if r.status_code != 200:
+            sys.exit(f"listing machines failed: {r.status_code} {r.text}")
+        rows = r.json()
+        if not rows:
+            # The honest empty state, and the same sentence both clients show:
+            # no runner is registered ANYWHERE, so nothing can be spawned.
+            print("no runner is registered on this hub — an admin names one "
+                  "with `agora runner` on the target machine plus\n"
+                  "  PUT /admin/machines/<machine>/runner")
+            return
+        for row in rows:
+            seen = ("never started" if row.get("announced_at") is None
+                    else ", ".join(row.get("harnesses") or []) or "no harness installed")
+            print(f"  {row['machine']:<16} runner={row['runner']:<16} {seen}")
+        return
+
+    if args.list:
+        r = httpx.get(f"{url}/spawns", headers=headers,
+                      params={"active_only": args.active}, timeout=10.0)
+        if r.status_code != 200:
+            sys.exit(f"listing spawn requests failed: {r.status_code} {r.text}")
+        rows = r.json()
+        print("no spawn requests" if not rows else "")
+        for row in rows:
+            stop = " (stop requested)" if row.get("stop_requested_at") else ""
+            print(f"  {row['id'][-6:]}  {row['seat_id']:<16} {row['machine']:<12} "
+                  f"{row['state']:<18}{stop} {row.get('detail', '')}")
+        return
+
+    if args.stop:
+        r = httpx.post(f"{url}/spawns/{args.stop}/stop", headers=headers, timeout=10.0)
+        if r.status_code != 200:
+            sys.exit(f"stop failed: {r.status_code} {r.text}")
+        # Say exactly what happened: the hub recorded a REQUEST. Printing
+        # "stopped" here would be the client asserting an outcome only the
+        # runner can produce.
+        print(f"stop requested for '{r.json()['seat_id']}' — the runner on "
+              f"'{r.json()['machine']}' ends the process and reports it")
+        return
+
+    if not args.seat_id:
+        sys.exit("name the seat id to spawn (or pass --list / --machines / --stop ID)")
+    if not args.harness:
+        sys.exit("--harness is required: the runner refuses one it does not "
+                 "have installed, and a request without one cannot be checked "
+                 "at all (`agora spawn --machines` shows what each can run)")
+    payload = {"seat_id": args.seat_id, "harness": args.harness,
+               "mission": args.mission or "", "machine": args.machine,
+               "folder": args.folder or "",
+               "channels": [c.strip() for c in (args.channels or "").split(",")
+                            if c.strip()]}
+    r = httpx.post(f"{url}/spawns", headers=headers, json=payload, timeout=10.0)
+    if r.status_code != 200:
+        sys.exit(f"spawn request refused: {r.status_code} {r.text}")
+    row = r.json()
+    print(f"requested '{row['seat_id']}' on '{row['machine']}' "
+          f"({row['harness']}) — {row['state']}")
+    print("  the hub started nothing: a runner on that machine claims this "
+          "row, applies its own gates,\n  and by default asks a human there "
+          "before anything runs. Watch it with `agora spawn --list`.")
+
+
 def cmd_attachment(args):
     """Upload/download message attachments (0091). `put` prints the sha256
     id to reference from a post's attachments=[{"id": ...}]; `get` writes
@@ -4485,6 +4565,43 @@ def build_parser() -> argparse.ArgumentParser:
     rt.add_argument("--admin-key", dest="admin_key", default=None,
                     help="admin key (default: $AGORA_ADMIN_KEY, then config.json)")
     rt.set_defaults(func=cmd_retire)
+
+    # Same authority shape as `retire`: an operator agent key via --as, else
+    # the hub's admin key. NOT _agent_parser — the machine running the hub
+    # holds the admin key and no agent identity, and that was the c3707
+    # refusal.
+    sp = sub.add_parser("spawn",
+                        help="ask for a new seat on a machine running `agora "
+                             "runner` (operator/admin): records the request; "
+                             "the runner decides and starts it")
+    sp.add_argument("seat_id", nargs="?", default=None, help="the seat id to create")
+    sp.add_argument("--as", dest="as_id", default=None, metavar="AGENT_ID",
+                    help="act as this operator agent id (else the admin key)")
+    sp.add_argument("--harness", default=None,
+                    help="required; `--machines` lists what each runner has")
+    sp.add_argument("--mission", default=None,
+                    help="the operator's standing charge — what this seat is "
+                         "FOR. It rides the join token, so the seat arrives "
+                         "knowing it")
+    sp.add_argument("--machine", default="local",
+                    help="which machine should host it (default: local)")
+    sp.add_argument("--folder", default=None,
+                    help="optional, RELATIVE to the runner's own root; "
+                         "default <root>/<seat-id>")
+    sp.add_argument("--channels", default=None, metavar="A,B",
+                    help="public channels to auto-join on arrival")
+    sp.add_argument("--list", action="store_true", help="show spawn requests")
+    sp.add_argument("--active", action="store_true",
+                    help="--list: drop the finished rows")
+    sp.add_argument("--machines", action="store_true",
+                    help="which machines have a runner, and what each can run")
+    sp.add_argument("--stop", default=None, metavar="SPAWN_ID",
+                    help="ask the runner to stop a seat (records the intent; "
+                         "only the runner can end a process)")
+    sp.add_argument("--url", default=None)
+    sp.add_argument("--admin-key", dest="admin_key", default=None,
+                    help="admin key (default: $AGORA_ADMIN_KEY, then config.json)")
+    sp.set_defaults(func=cmd_spawn)
 
     at = _agent_parser("attachment", "message attachments: put a file / get by id")
     at.add_argument("--channel", required=True)

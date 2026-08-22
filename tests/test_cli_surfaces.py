@@ -682,3 +682,106 @@ def test_post_to_flag_is_repeatable_and_comma_splittable():
     args = build_parser().parse_args(
         ["post", "--as", "op", "--channel", "commons", "body"])
     assert not args.to
+
+
+# ---------------------------------------------------------------------------
+# spawn (operator/admin): the CLI half of laurent's dm#24
+# ---------------------------------------------------------------------------
+
+
+def test_spawn_records_a_request_and_says_the_hub_started_nothing(
+        live_hub, isolated_home, capsys):
+    _run_cli(["spawn", "scribe", "--harness", "claude",
+              "--mission", "write the minutes", "--channels", "commons",
+              "--url", live_hub.url, "--admin-key", live_hub.admin])
+    out = capsys.readouterr().out
+    assert "requested 'scribe' on 'local' (claude) — pending" in out
+    # The one thing this output must never imply is that something started.
+    assert "the hub started nothing" in out
+
+    rows = httpx.get(f"{live_hub.url}/spawns", headers=_bearer(live_hub.admin),
+                     timeout=5).json()
+    assert [r["seat_id"] for r in rows] == ["scribe"]
+    assert rows[0]["mission"] == "write the minutes"
+    assert rows[0]["channels"] == ["commons"]
+    assert rows[0]["state"] == "pending"
+
+
+def test_spawn_without_a_harness_refuses_before_the_round_trip(
+        live_hub, isolated_home, capsys):
+    with pytest.raises(SystemExit) as exc:
+        _run_cli(["spawn", "scribe", "--url", live_hub.url,
+                  "--admin-key", live_hub.admin])
+    assert "--harness is required" in str(exc.value)
+    assert httpx.get(f"{live_hub.url}/spawns", headers=_bearer(live_hub.admin),
+                     timeout=5).json() == []
+
+
+def test_spawn_machines_prints_the_onboarding_sentence_when_empty(
+        live_hub, isolated_home, capsys):
+    """The CLI's version of the empty state both clients agreed on: an honest
+    negative that tells you what to do, not a blank list."""
+    _run_cli(["spawn", "--machines", "--url", live_hub.url,
+              "--admin-key", live_hub.admin])
+    out = capsys.readouterr().out
+    assert "no runner is registered" in out
+    assert "agora runner" in out
+
+
+def test_spawn_machines_shows_what_each_runner_can_actually_run(
+        live_hub, isolated_home, capsys):
+    runner_key = _register(live_hub.url, "runner-mbp")
+    httpx.put(f"{live_hub.url}/admin/machines/local/runner",
+              json={"agent_id": "runner-mbp"},
+              headers=_bearer(live_hub.admin), timeout=5)
+
+    # Named but never started: a DIFFERENT fact from "can run nothing".
+    _run_cli(["spawn", "--machines", "--url", live_hub.url,
+              "--admin-key", live_hub.admin])
+    assert "never started" in capsys.readouterr().out
+
+    httpx.post(f"{live_hub.url}/machines/local/announce",
+               json={"harnesses": ["claude", "codex"]},
+               headers=_bearer(runner_key), timeout=5)
+    _run_cli(["spawn", "--machines", "--url", live_hub.url,
+              "--admin-key", live_hub.admin])
+    out = capsys.readouterr().out
+    assert "claude, codex" in out and "never started" not in out
+
+
+def test_spawn_stop_says_requested_never_stopped(live_hub, isolated_home,
+                                                 capsys):
+    """`stop` records an intent. A CLI printing "stopped" would be asserting
+    an outcome only the runner can produce."""
+    runner_key = _register(live_hub.url, "runner-mbp")
+    httpx.put(f"{live_hub.url}/admin/machines/local/runner",
+              json={"agent_id": "runner-mbp"},
+              headers=_bearer(live_hub.admin), timeout=5)
+    _run_cli(["spawn", "scribe", "--harness", "claude", "--url", live_hub.url,
+              "--admin-key", live_hub.admin])
+    capsys.readouterr()
+
+    claimed = httpx.post(f"{live_hub.url}/spawns/claim", json={"machine": "local"},
+                         headers=_bearer(runner_key), timeout=5).json()
+    spawn_id = claimed["request"]["id"]
+    httpx.post(f"{live_hub.url}/spawns/{spawn_id}/state",
+               json={"state": "running", "detail": "pid 1"},
+               headers=_bearer(runner_key), timeout=5)
+
+    _run_cli(["spawn", "--stop", spawn_id, "--url", live_hub.url,
+              "--admin-key", live_hub.admin])
+    out = capsys.readouterr().out
+    assert "stop requested for 'scribe'" in out
+    assert "stopped" not in out.replace("stop requested", "")
+
+    _run_cli(["spawn", "--list", "--url", live_hub.url,
+              "--admin-key", live_hub.admin])
+    listed = capsys.readouterr().out
+    assert "running" in listed and "(stop requested)" in listed
+
+
+def test_spawn_list_is_empty_without_inventing_a_row(live_hub, isolated_home,
+                                                     capsys):
+    _run_cli(["spawn", "--list", "--url", live_hub.url,
+              "--admin-key", live_hub.admin])
+    assert "no spawn requests" in capsys.readouterr().out
