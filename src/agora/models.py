@@ -101,9 +101,11 @@ class TextTooLong(ValueError):
 
     def __init__(self, field: str, length: int, cap: int) -> None:
         self.field, self.length, self.cap = field, length, cap
+        over = length - cap
         super().__init__(
             f"{field} is {length} characters; the cap is {cap}. Shorten it — "
-            f"the hub will not choose which {length - cap} characters to drop.")
+            f"the hub will not choose which {over} "
+            f"{'character' if over == 1 else 'characters'} to drop.")
         self.detail = str(self)
 
 
