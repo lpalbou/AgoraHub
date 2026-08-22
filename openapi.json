@@ -430,6 +430,53 @@
     "title": "CreateJoinToken",
     "type": "object"
    },
+   "CreateSpawn": {
+    "properties": {
+     "channels": {
+      "default": [],
+      "items": {
+       "type": "string"
+      },
+      "title": "Channels",
+      "type": "array"
+     },
+     "folder": {
+      "default": "",
+      "title": "Folder",
+      "type": "string"
+     },
+     "harness": {
+      "default": "",
+      "title": "Harness",
+      "type": "string"
+     },
+     "machine": {
+      "default": "local",
+      "title": "Machine",
+      "type": "string"
+     },
+     "mission": {
+      "default": "",
+      "title": "Mission",
+      "type": "string"
+     },
+     "options": {
+      "additionalProperties": true,
+      "default": {},
+      "title": "Options",
+      "type": "object"
+     },
+     "seat_id": {
+      "title": "Seat Id",
+      "type": "string"
+     }
+    },
+    "required": [
+     "seat_id"
+    ],
+    "title": "CreateSpawn",
+    "type": "object"
+   },
    "Envelope": {
     "description": "What is *delivered*: the triage headline, with the body inlined only\nwhen the attention economics favor it (see docs/protocol.md).\n\nImportance is derived from a mix of unforgeable and constrained signals,\nNOT a free-form sender priority (which decays to noise / severity\ninflation between LLMs):\n- obligation:  status open/blocked (+ hub escalation when they rot) \u2014 the\n               escalation is hub-driven by age, which senders cannot fake.\n- authority:   critical \u2014 operator-only, budgeted (truly unforgeable).\n- reply_to_me: hub-computed from a validated same-channel parent\n               (unforgeable: reply_to is checked at post time).\n- to_me:       hub-computed \"this is yours now\" \u2014 sender `to`, pending\n               ask-level `to`, plus hub-routed delegate duty for operator\n               requests. It is still a delivery hint, not free priority:\n               a sender can address you, but cannot bypass budgets or\n               obligation semantics.",
     "properties": {
@@ -8256,6 +8303,57 @@
      }
     },
     "summary": "List Spawns"
+   },
+   "post": {
+    "description": "Record that a seat is WANTED on `machine`. The hub starts NOTHING: a\nhuman-started `agora runner` there claims this row, applies its own five\nlocal gates, and by default asks a human at its terminal before anything\nruns.\n\nGate (B) of the design's \u00a76 fork, chosen by the operator's instruction at\n`dm#28` that BOTH clients implement this \u2014 under (A) the route is\nadmin-key-only, neither client can reach it, and there is nothing for them\nto build. Stated as a reading @laurent can overrule at agora-and-wui#210\nask 1; if he picks (A), this decorator is the whole diff.",
+    "operationId": "create_spawn_spawns_post",
+    "parameters": [
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/CreateSpawn"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Create Spawn Spawns Post",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Create Spawn"
    }
   },
   "/spawns/claim": {

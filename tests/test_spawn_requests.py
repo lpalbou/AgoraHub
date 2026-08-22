@@ -674,3 +674,125 @@ def test_an_unrecognised_harness_name_is_stored_verbatim(wire):
               json={"harnesses": ["some-future-harness"]}, headers=runner)
     assert wire.get("/machines", headers=_admin()).json()[0]["harnesses"] == \
         ["some-future-harness"]
+
+
+# -- POST /spawns: fork (B), and the power that must never be delegable ------
+
+def _grant(wire, agent_id: str, powers: list[str]) -> None:
+    payload = {"agent_id": agent_id, "powers": powers}
+    if "proxy" in powers:
+        # `proxy` refuses to be granted without a scope. "*" is the widest
+        # there is — which is the point: if the strongest possible grant still
+        # cannot spawn, no grant can.
+        payload["scope"] = "*"
+    r = wire.put("/admin/delegation", json=payload, headers=_admin())
+    assert r.status_code == 200, r.text
+    wire.app.state.service._delegations_cache_at = 0.0
+
+
+def test_an_operator_can_ask_for_a_seat(wire):
+    op = _register(wire, "boss", operator=True)
+    r = wire.post("/spawns", json={"seat_id": "scribe", "harness": "claude",
+                                   "mission": "write the minutes",
+                                   "channels": ["commons"]}, headers=op)
+    assert r.status_code == 200, r.text
+    row = r.json()
+    assert row["state"] == "pending"
+    assert row["requested_by"] == "boss"
+    assert row["machine"] == "local"          # required, defaulted, v2 seam
+    # And nothing started: the hub records intent, a runner acts on it.
+    assert row["claimed_by"] == "" and row["join_token_id"] == ""
+
+
+def test_the_admin_key_can_too_so_the_cli_is_not_locked_out(wire):
+    r = wire.post("/spawns", json={"seat_id": "scribe", "harness": "claude"},
+                  headers=_admin())
+    assert r.status_code == 200, r.text
+
+
+def test_a_plain_member_cannot_ask_for_a_seat(wire):
+    member = _register(wire, "nobody")
+    r = wire.post("/spawns", json={"seat_id": "scribe", "harness": "claude"},
+                  headers=member)
+    assert r.status_code == 403
+
+
+@pytest.mark.parametrize("powers", [
+    ["proxy"],                                          # "act on my behalf"
+    ["ruling"], ["operational"], ["reporting"], ["moderation"],
+    ["ruling", "operational", "reporting", "moderation", "proxy"],  # all of it
+])
+def test_spawn_is_never_delegable(wire, powers):
+    """§6, and the design says this must be a test and not a comment.
+
+    A delegation lends the operator's authority for JUDGMENT work. Starting a
+    process on a human's machine is not judgment, and `proxy` — the one power
+    with a mechanical consequence, which clears a channel's gated acts without
+    asking — must not reach it either. If this ever goes green for a delegate,
+    an LLM has acquired the ability to start processes on someone's computer,
+    which is the exact thing "never install machine persistence" exists to
+    prevent, laundered through the hub.
+    """
+    # A mission is required before the hub will delegate to a seat at all —
+    # "a delegate that does not know its job is the failure this refuses".
+    r = wire.post("/agents", json={"id": "agency", "mission": "act for laurent"},
+                  headers=_admin())
+    delegate = {"Authorization": f"Bearer {r.json()['api_key']}"}
+    _grant(wire, "agency", powers)
+    r = wire.post("/spawns", json={"seat_id": "scribe", "harness": "claude"},
+                  headers=delegate)
+    assert r.status_code == 403
+    assert "not delegable" in r.json()["detail"]
+    assert wire.get("/spawns", headers=_admin()).json() == []
+
+
+def test_the_refusals_all_happen_before_a_row_exists(wire):
+    op = _register(wire, "boss", operator=True)
+    _register(wire, "taken")
+    for payload, expect in (
+            ({"seat_id": "taken", "harness": "claude"}, 409),
+            ({"seat_id": "scribe", "harness": ""}, 400),
+            ({"seat_id": "scribe", "harness": "claude", "folder": "/etc"}, 400),
+            ({"seat_id": "Not Valid", "harness": "claude"}, 400),
+    ):
+        r = wire.post("/spawns", json=payload, headers=op)
+        assert r.status_code == expect, (payload, r.text)
+    assert wire.get("/spawns", headers=op).json() == []
+
+
+def test_end_to_end_an_operator_asks_and_the_runner_is_handed_the_work(wire):
+    """The whole v1 wire in one pass, minus the process the runner starts."""
+    op = _register(wire, "boss", operator=True)
+    runner = _register(wire, "runner-mbp")
+    wire.put("/admin/machines/local/runner", json={"agent_id": "runner-mbp"},
+             headers=_admin())
+    wire.post("/machines/local/announce", json={"harnesses": ["claude"]},
+              headers=runner)
+
+    spawn_id = wire.post("/spawns", json={"seat_id": "scribe",
+                                          "harness": "claude",
+                                          "mission": "write the minutes"},
+                         headers=op).json()["id"]
+
+    claimed = wire.post("/spawns/claim", json={"machine": "local"},
+                        headers=runner).json()
+    assert claimed["request"]["id"] == spawn_id
+
+    wire.post(f"/spawns/{spawn_id}/state",
+              json={"state": "awaiting_approval",
+                    "detail": "awaiting approval on local"}, headers=runner)
+    wire.post(f"/spawns/{spawn_id}/state",
+              json={"state": "running", "detail": "pid 4123"}, headers=runner)
+
+    joined = wire.post("/join", json={"token": claimed["join_token"],
+                                      "agent_id": "scribe"})
+    assert joined.status_code == 200
+    seat = {"Authorization": f"Bearer {joined.json()['api_key']}"}
+    assert wire.get("/whoami", headers=seat).json()["mission"] == \
+        "write the minutes"
+
+    # The operator asks it to stop; the RUNNER is what ends it.
+    stopped = wire.post(f"/spawns/{spawn_id}/stop", headers=op).json()
+    assert stopped["state"] == "running" and stopped["stop_requested_at"]
+    assert wire.post(f"/spawns/{spawn_id}/state", json={"state": "stopped"},
+                     headers=runner).json()["state"] == "stopped"

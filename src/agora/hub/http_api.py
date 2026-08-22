@@ -310,6 +310,37 @@ def revoke_join_token(
 # is identical under all three options.
 
 
+def require_operator(
+    agent: AgentInfo = Depends(operator_or_admin),
+) -> AgentInfo:
+    """AUTHORIZE, where `operator_or_admin` only AUTHENTICATES.
+
+    That distinction has cost this project twice — `service.py:549-556`
+    records a plain member demoting the operator "the first time this verb was
+    tested" — and the remedy has so far been one hand-written
+    `if not agent.operator` per handler, now on sixteen of them (13 in the
+    build serving this fleet, +3 added by the spawn feature itself: measured
+    by two seats on two builds, agora-and-wui#216 and #217).
+
+    This is the shared form, introduced with the one route where getting it
+    wrong is remote code execution on someone's machine. The sweep of the
+    other sixteen is deliberately NOT part of this change: the boundary test
+    (`test_the_member_boundary_on_every_spawn_surface`) must exist BEFORE the
+    refactor, which is the order that makes it evidence rather than hope.
+
+    It is also, on purpose, NOT delegable. A delegation grants the operator's
+    authority for judgment work; `agent.operator` is false for every delegate,
+    including `proxy`, so starting a process on a human's machine stays with
+    the human. Pinned by a test, because §6 of the design says a comment is
+    not enough.
+    """
+    if not agent.operator:
+        raise HTTPException(
+            403, "this is an operator act: it is not delegable, and a "
+                 "delegation (including proxy) does not confer it")
+    return agent
+
+
 class MachineRunner(BaseModel):
     agent_id: str
 
@@ -407,6 +438,41 @@ def get_spawn(
     if not agent.operator:
         raise HTTPException(403, "spawn requests are an operator view")
     return _run(service.get_spawn_request, spawn_id).model_dump(mode="json")
+
+
+class CreateSpawn(BaseModel):
+    seat_id: str
+    mission: str = ""
+    harness: str = ""
+    machine: str = "local"
+    #: A HINT relative to the runner's own root — never a path the hub uses.
+    folder: str = ""
+    channels: list[str] = []
+    options: dict[str, Any] = {}
+
+
+@router.post("/spawns")
+def create_spawn(
+    payload: CreateSpawn,
+    agent: AgentInfo = Depends(require_operator),
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    """Record that a seat is WANTED on `machine`. The hub starts NOTHING: a
+    human-started `agora runner` there claims this row, applies its own five
+    local gates, and by default asks a human at its terminal before anything
+    runs.
+
+    Gate (B) of the design's §6 fork, chosen by the operator's instruction at
+    `dm#28` that BOTH clients implement this — under (A) the route is
+    admin-key-only, neither client can reach it, and there is nothing for them
+    to build. Stated as a reading @laurent can overrule at agora-and-wui#210
+    ask 1; if he picks (A), this decorator is the whole diff.
+    """
+    row = _run(service.create_spawn_request, agent, seat_id=payload.seat_id,
+               mission=payload.mission, harness=payload.harness,
+               machine=payload.machine, folder=payload.folder,
+               channels=payload.channels, options=payload.options)
+    return row.model_dump(mode="json")
 
 
 class SpawnClaim(BaseModel):
