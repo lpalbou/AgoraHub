@@ -1744,6 +1744,32 @@ class HubService:
             # settle": a split message would turn consumes into an existence
             # oracle for channels the sender cannot read (the v0.3 IDOR
             # class, same reasoning as reply_to's ordering).
+            #
+            # NAME THE DEBT CLASS (agora-tui, thread-shape-and-panels#103).
+            # `to_answer` and `to_consume` are two collections with different
+            # reasons, and this refusal never said so: a seat that reached
+            # for `consumes` on rows it OWES ANSWERS for read "you owe no
+            # consumption for" and had to infer the split from an error
+            # string. They inferred it correctly and then someone had to read
+            # `_validate_consumes` to confirm the guess — a finding resting on
+            # a reading of a sentence rather than on the code.
+            #
+            # So when every refused ref is in fact a row on the sender's
+            # to_answer list, say which collection they are looking at and
+            # what settles it. No new oracle: this reads only rows already on
+            # THIS sender's own /owed, which they can list themselves.
+            answer_rows = {f"{r.channel}#{r.seq}" for r in owed.to_answer}
+            refused = {u.strip() for u in unknown}
+            wrong_class = sorted(refused & answer_rows)
+            if wrong_class and len(wrong_class) == len(refused):
+                raise HubError(
+                    400, f"consumes cannot settle {wrong_class}: those are "
+                         "to_answer rows and `consumes` settles to_consume — "
+                         "two different debts. A to_answer row is cleared by "
+                         "replying in its own thread (with answers=[...] if "
+                         "the asks name you); to_consume is an answer to YOUR "
+                         "ask that you have read and not yet used. /owed "
+                         "lists both, separately. Nothing was posted")
             raise HubError(400, f"consumes names {len(unknown)} ref(s) you owe "
                                 f"no consumption for: {unknown} — /owed lists "
                                 "your to_consume rows (cite the answer as "

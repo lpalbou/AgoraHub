@@ -515,12 +515,26 @@ def test_the_already_read_no_op_is_not_a_free_pass_for_any_message(tmp_path):
     for m in (root, other):
         client.get(f"/channels/story/messages/{m['id']}", headers=asker)
 
-    for ref in (f"story#{root['seq']}", f"story#{other['seq']}"):
-        refused = client.post("/channels/story/messages",
+    # BOTH stay refused — that is this test's invariant and it is untouched.
+    # The WORDING now differs per ref, and the difference is the point of
+    # thread-shape-and-panels#103: `chair` is named in the root's ask, so the
+    # root really is a to_answer row for them and the refusal says which
+    # collection they are looking at. `other` is on neither list, so it keeps
+    # the general refusal — describing it as a to_answer row would be a
+    # confident wrong sentence.
+    root_detail = client.post("/channels/story/messages",
                               json={"body": "x", "status": "fyi",
-                                    "consumes": [ref]}, headers=asker)
-        assert refused.status_code == 400, ref
-        assert "you owe no consumption for" in refused.json()["detail"]
+                                    "consumes": [f"story#{root['seq']}"]},
+                              headers=asker)
+    assert root_detail.status_code == 400
+    assert "to_answer" in root_detail.json()["detail"]
+
+    other_detail = client.post("/channels/story/messages",
+                               json={"body": "x", "status": "fyi",
+                                     "consumes": [f"story#{other['seq']}"]},
+                               headers=asker)
+    assert other_detail.status_code == 400
+    assert "you owe no consumption for" in other_detail.json()["detail"]
     assert reply["seq"]  # the bystander reply exists and settles nothing
 
 
@@ -567,5 +581,86 @@ def test_a_deeper_reply_in_your_own_thread_is_not_a_settleable_debt(tmp_path):
                           json={"body": "x", "status": "fyi",
                                 "consumes": [f"story#{deep['seq']}"]},
                           headers=asker)
+    assert refused.status_code == 400
+    assert "you owe no consumption for" in refused.json()["detail"]
+
+
+def test_consumes_on_a_to_answer_row_names_the_debt_class(tmp_path):
+    """agora-tui, thread-shape-and-panels#103, from the seat that hit it.
+
+    They reached for `consumes` on rows they owed ANSWERS for, got "you owe
+    no consumption for", and had to infer from an error string that
+    `to_answer` and `to_consume` are two collections with different reasons.
+    They inferred it correctly — and then someone had to read
+    `_validate_consumes` to confirm the guess, so the finding rested on a
+    reading of a sentence rather than on the code.
+
+    The refusal now says which collection the ref is in and what clears it.
+    No new oracle: it reads only rows already on THIS sender's own /owed.
+    """
+    client = make_client(tmp_path)
+    alice, bob = register(client, "alice"), register(client, "bob")
+    make_room(client, alice, "room", bob)
+
+    # alice addresses bob: this is a to_answer row for bob, never to_consume.
+    job = client.post("/channels/room/messages",
+                      json={"body": "please do the thing", "title": "thing",
+                            "status": "blocked", "to": ["bob"]},
+                      headers=alice).json()
+
+    refused = client.post("/channels/room/messages",
+                          json={"body": "settling", "status": "fyi",
+                                "consumes": [f"room#{job['seq']}"]},
+                          headers=bob)
+    assert refused.status_code == 400
+    detail = refused.json()["detail"]
+
+    # It names the class, both sides of it, and the gesture that works...
+    assert "to_answer" in detail and "to_consume" in detail
+    assert "replying in its own thread" in detail
+    # ...and it is no longer the sentence that made a seat guess.
+    assert "you owe no consumption for" not in detail
+
+
+def test_a_genuinely_unknown_ref_still_gets_the_general_refusal(tmp_path):
+    """The other direction, and it is why the branch requires EVERY refused
+    ref to be a to_answer row. A ref that is not on either list must not be
+    described as a to_answer row — that would be a confident wrong sentence,
+    which is the failure this whole change is about."""
+    client = make_client(tmp_path)
+    alice, bob = register(client, "alice"), register(client, "bob")
+    make_room(client, alice, "room", bob)
+    stray = client.post("/channels/room/messages",
+                        json={"body": "unrelated", "title": "u",
+                              "status": "fyi"}, headers=alice).json()
+
+    refused = client.post("/channels/room/messages",
+                          json={"body": "x", "status": "fyi",
+                                "consumes": [f"room#{stray['seq']}"]},
+                          headers=bob)
+    assert refused.status_code == 400
+    assert "you owe no consumption for" in refused.json()["detail"]
+    assert "to_answer" not in refused.json()["detail"]
+
+
+def test_a_mixed_batch_does_not_claim_they_are_all_to_answer_rows(tmp_path):
+    """One to_answer row and one stray in the same call. Describing the pair
+    as to_answer rows would be true of half of it — so the specific sentence
+    fires only when it is true of all of them."""
+    client = make_client(tmp_path)
+    alice, bob = register(client, "alice"), register(client, "bob")
+    make_room(client, alice, "room", bob)
+    job = client.post("/channels/room/messages",
+                      json={"body": "yours", "title": "t", "status": "blocked",
+                            "to": ["bob"]}, headers=alice).json()
+    stray = client.post("/channels/room/messages",
+                        json={"body": "unrelated", "title": "u",
+                              "status": "fyi"}, headers=alice).json()
+
+    refused = client.post("/channels/room/messages",
+                          json={"body": "x", "status": "fyi",
+                                "consumes": [f"room#{job['seq']}",
+                                             f"room#{stray['seq']}"]},
+                          headers=bob)
     assert refused.status_code == 400
     assert "you owe no consumption for" in refused.json()["detail"]
