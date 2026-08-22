@@ -376,3 +376,197 @@ def test_claim_owner_must_be_writer_or_unchanged():
     assert client.put("/channels/room/store/claim:other",
                       json={"value": {"note": "ownerless"}},
                       headers=bob).status_code == 200
+
+
+# -- role management (operator ruling, 2026-08-22) ---------------------------
+# Operator-hood was writable ONLY at registration, so a fleet wired by
+# `agora setup` had no operator and no way to appoint one: the human's own
+# seat could not set a mission, and every `from-operator` carve-out in the
+# hub — the listener's, the stop hook's, the SDK's — was unreachable code.
+
+def test_a_seat_can_be_promoted_and_demoted():
+    client = make_client()
+    boss = register(client, "boss", operator=True)
+    alice = register(client, "alice")
+
+    assert client.get("/whoami", headers=alice).json()["operator"] is False
+    r = client.put("/agents/alice/role", json={"operator": True}, headers=boss)
+    assert r.status_code == 200 and r.json()["changed"] is True
+    assert client.get("/whoami", headers=alice).json()["operator"] is True
+    # The closure-authority cache memoizes on the assumption that only
+    # registration writes this column; a promotion the cache never saw would
+    # look exactly like "the ruling did not work".
+    assert "alice" in client.app.state.service.operator_ids()
+
+    again = client.put("/agents/alice/role", json={"operator": True}, headers=boss)
+    assert again.status_code == 200 and again.json()["changed"] is False
+    assert client.put("/agents/alice/role", json={"operator": False},
+                      headers=boss).json()["operator"] is False
+    assert "alice" not in client.app.state.service.operator_ids()
+
+
+def test_only_an_operator_may_change_a_role():
+    """`operator_or_admin` AUTHENTICATES and does not authorize — it returns
+    whichever seat's key was presented. The first cut of this verb trusted it
+    and a plain member demoted the operator."""
+    client = make_client()
+    register(client, "boss", operator=True)
+    member = register(client, "member")
+    r = client.put("/agents/boss/role", json={"operator": False}, headers=member)
+    assert r.status_code == 403, "a member changed a role"
+    assert client.get("/whoami", headers=member).json()["operator"] is False
+
+
+def test_the_last_operator_cannot_demote_itself_but_the_admin_key_can():
+    """Zero operators is recoverable (the admin key still opens every
+    lifecycle verb) but it should be entered on purpose, not by a seat
+    tidying its own roster."""
+    client = make_client()
+    boss = register(client, "boss", operator=True)
+    r = client.put("/agents/boss/role", json={"operator": False}, headers=boss)
+    assert r.status_code == 409 and "last operator" in r.json()["detail"]
+    admin = {"Authorization": f"Bearer {ADMIN_KEY}"}
+    assert client.put("/agents/boss/role", json={"operator": False},
+                      headers=admin).status_code == 200
+
+
+def test_the_roster_says_who_is_who():
+    """Roles are not a secret: a seat that cannot see who the operator is
+    cannot route a ruling to them."""
+    client = make_client()
+    register(client, "boss", operator=True)
+    alice = register(client, "alice")
+    roster = client.get("/agents", headers=alice).json()
+    assert {r["id"]: r["operator"] for r in roster} == {"boss": True, "alice": False}
+
+
+def test_register_can_mint_the_first_operator():
+    client = make_client()
+    r = client.post("/agents", json={"id": "boss", "operator": True},
+                    headers={"Authorization": f"Bearer {ADMIN_KEY}"})
+    assert r.json()["agent"]["operator"] is True
+
+
+def test_a_role_change_is_announced_to_the_room_and_to_the_seat():
+    """Operator-hood is a strictly larger grant than any delegation, and
+    delegations have announced on both edges since 2026-08-06 ("a power the
+    holder cannot discover is not a power"). A silent role change is worse:
+    the seat keeps acting on authority it no longer has."""
+    client = make_client()
+    boss = register(client, "boss", operator=True)
+    alice = register(client, "alice")
+    client.put("/agents/alice/role", json={"operator": True}, headers=boss)
+
+    msgs = client.get("/channels/hub-alerts/messages", headers=boss).json()
+    room = [m for m in msgs if m["body"].startswith("ROLE CHANGED: alice")]
+    assert room, "a role change left no record in hub-alerts"
+    mine = [m for m in msgs if m["to"] == ["alice"]
+            and "YOU ARE NOW AN OPERATOR" in m["body"]]
+    assert mine, "the seat was never told it had been promoted"
+    # Told, but not indebted: a notice the hub cannot discharge must not
+    # mint an obligation (the 0093 class).
+    assert mine[0]["status"] == "fyi"
+    assert not client.get("/owed", headers=alice).json()["to_answer"]
+
+
+def test_demotion_removes_the_seat_from_the_alerts_room():
+    """That room is private BECAUSE its alerts name which seats are behind on
+    what. Membership was one-way: promote added, demote left them reading."""
+    client = make_client()
+    boss = register(client, "boss", operator=True)
+    register(client, "alice")
+    client.put("/agents/alice/role", json={"operator": True}, headers=boss)
+    members = [m["agent_id"] for m in
+               client.get("/channels/hub-alerts/members", headers=boss).json()]
+    assert "alice" in members
+    client.put("/agents/alice/role", json={"operator": False}, headers=boss)
+    members = [m["agent_id"] for m in
+               client.get("/channels/hub-alerts/members", headers=boss).json()]
+    assert "alice" not in members, "a demoted seat still reads the alerts room"
+
+
+# -- a scoped delegate runs the room (operator ruling, 2026-08-22) -----------
+
+def scoped_grant(client, agent_id, powers, scope):
+    """The existing `grant` helper with a scope — it also busts the service's
+    1-second delegation cache, which a hand-rolled POST does not."""
+    return grant(client, agent_id, powers, scope=scope,
+                 mission=f"run {scope}")
+
+
+def test_a_scoped_ruling_delegate_runs_the_room():
+    """Invites, the charter, the `channel:` rows, ownership transfer and
+    closure are one authority: owner, operator, or a delegate the operator
+    scoped to this room. They were written separately and drifted — a
+    delegate could declare a room's phases but not invite the seat needed to
+    work them."""
+    client = make_client()
+    owner = register(client, "owner")
+    deleg = register(client, "deleg")
+    newbie = register(client, "newbie")
+    make_channel(client, owner, "room", deleg, newbie)
+    scoped_grant(client, "deleg", ["ruling"], "room")
+
+    assert client.post("/channels/room/invites", json={}, headers=deleg).status_code == 200
+    assert client.put("/channels/room/store/channel:meta",
+                      json={"value": {"purpose": "ours"}},
+                      headers=deleg).status_code == 200
+    assert client.put("/channels/room/fs/channel/charter.md",
+                      json={"content": "# how we work here"},
+                      headers=deleg).status_code == 200
+    # ...and it can close another seat's thread in this room.
+    q = client.post("/channels/room/messages", headers=owner,
+                    json={"body": "q", "title": "q", "status": "open"}).json()
+    client.post("/channels/room/messages", headers=deleg,
+                json={"body": "settled", "status": "resolved",
+                      "reply_to": q["id"]})
+    assert client.get("/channels/room/digest",
+                      headers=owner).json()["counts"]["open_questions"] == 0
+
+
+def test_delegated_authority_does_not_leak_past_its_scope():
+    """An unscoped grant reaches nothing and a grant scoped elsewhere does not
+    leak in — the rule `has_proxy` already enforced ("fleet-wide authority
+    must be typed, never arrived at by omission")."""
+    client = make_client()
+    owner = register(client, "owner")
+    unscoped = register(client, "unscoped")
+    elsewhere = register(client, "elsewhere")
+    make_channel(client, owner, "room", unscoped, elsewhere)
+    make_channel(client, owner, "other", elsewhere)
+    grant(client, "unscoped", ["ruling", "operational"])          # no scope
+    scoped_grant(client, "elsewhere", ["ruling"], "other")
+
+    for who, label in ((unscoped, "unscoped"), (elsewhere, "scoped elsewhere")):
+        assert client.post("/channels/room/invites", json={},
+                           headers=who).status_code == 403, label
+        assert client.put("/channels/room/store/channel:meta",
+                          json={"value": {"purpose": "mine"}},
+                          headers=who).status_code == 403, label
+        assert client.put("/channels/room/owner", json={"to": "unscoped"},
+                          headers=who).status_code == 403, label
+
+
+def test_channel_ownership_can_be_handed_over():
+    """There was no transfer at all: `created_by` was written once and never
+    again, so ownership was an accident of who typed `create_channel` first."""
+    client = make_client()
+    owner = register(client, "owner")
+    heir = register(client, "heir")
+    stranger = register(client, "stranger")
+    make_channel(client, owner, "room", heir)
+
+    # The heir must already be a member — otherwise they own a room they
+    # cannot read.
+    assert client.put("/channels/room/owner", json={"to": "stranger"},
+                      headers=owner).status_code == 409
+    r = client.put("/channels/room/owner", json={"to": "heir"}, headers=owner)
+    assert r.status_code == 200 and r.json()["previous"] == "owner"
+
+    # Authority moved with it, on BOTH keys the hub reads (created_by and the
+    # members row): the heir can invite, the former owner cannot.
+    assert client.post("/channels/room/invites", json={}, headers=heir).status_code == 200
+    assert client.post("/channels/room/invites", json={}, headers=owner).status_code == 403
+    members = client.get("/channels/room/members", headers=heir).json()
+    roles = {m["agent_id"]: m["role"] for m in members}
+    assert roles["heir"] == "owner" and roles["owner"] == "member", roles

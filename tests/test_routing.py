@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import json
 import time
+
+import pytest
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -762,3 +764,109 @@ def test_noise_report_is_an_operator_instrument(tmp_path):
     seat = register(client, "seat")
     r = client.get("/admin/noise", headers=seat)
     assert r.status_code == 403
+
+
+# -- the hub follows its own addressing rule (operator ruling, 2026-08-22) ----
+# The hub teaches agents that prose names nobody and only `to` creates a
+# tracked row — then wrote "ROUTING — ... @a @b @c" with `to=[]`. Attribution
+# and obligation are DIFFERENT decisions, and the coupling below hid that.
+
+def test_a_hub_to_must_state_its_status_explicitly(tmp_path):
+    """`status or ("open" if to else "fyi")` meant that adding an addressee
+    for correct attribution SILENTLY promoted a notice to an obligation the
+    hub can never discharge (the 0093 class, measured at 8 undischargeable
+    rows on one delegate and 55 on an operator). 509 existing tests passed
+    against a patch that did exactly that, so the invariant was documented in
+    prose and enforced by nothing. Now it is refused at the source."""
+    client = make_client(tmp_path)
+    service = client.app.state.service
+    owner = register(client, "owner")
+    register(client, "seat")
+    make_public_channel(client, owner, "room")
+    client.post("/channels/room/join", json={}, headers=owner)
+
+    with pytest.raises(ValueError, match="must state its `status`"):
+        service._post_system("room", "HUB NOTICE — seat, do the thing.",
+                             to=["owner"])
+    # Both explicit forms still work, and mean different things.
+    quiet = service._post_system("room", "attributed, no debt",
+                                 to=["owner"], status="fyi")
+    assert quiet.to == ["owner"] and quiet.status.value == "fyi"
+    loud = service._post_system("room", "a real debt", to=["owner"],
+                                status="open")
+    assert loud.status.value == "open"
+
+
+def test_the_routing_nudge_names_the_seat_that_must_act(tmp_path):
+    """Six identical ROUTING posts sat in the live #commons, every one
+    `to=[]` — aimed at one seat, addressed to nobody, read by ten. The
+    `@names` in the body are create_group ARGUMENTS; the seat who opens the
+    room is the thread's author, and naming three seats to make one act is
+    the diffusion MAX_ASK_TO exists to prevent."""
+    client = make_client(tmp_path)
+    author = register(client, "author")
+    b = register(client, "bee")
+    c = register(client, "cee")
+    make_public_channel(client, author, "commons", b, c)
+    root = client.post("/channels/commons/messages",
+                       json={"body": "how should we shape the parser?",
+                             "status": "open", "title": "parser"},
+                       headers=author).json()
+    for who in (b, c):
+        client.post("/channels/commons/messages",
+                    json={"body": "a thought", "status": "reply",
+                          "reply_to": root["id"]}, headers=who)
+
+    nudges = [m for m in client.get("/channels/commons/messages",
+                                    headers=author).json()
+              if m["kind"] == "system" and m["body"].startswith("ROUTING")]
+    assert len(nudges) == 1, "the nudge should fire once for the thread"
+    assert nudges[0]["to"] == ["author"], (
+        "the nudge must name the seat who opens the room, not nobody")
+    # ...and naming them must NOT have turned teaching into a debt.
+    assert nudges[0]["status"] == "fyi"
+    owed = client.get("/owed", headers=author).json()
+    assert not [r for r in owed["to_answer"] if r["id"] == nudges[0]["id"]], (
+        "an addressed hub notice minted a debt the hub cannot discharge")
+
+
+def test_the_hub_does_not_teach_mcp_syntax_to_a_human(tmp_path):
+    """Operator ruling, 2026-08-22: "the hub should never say to a human he
+    was wrong and ask him to run MCP commands — a human is not an AI agent...
+    when a human asks several seats a question on any channel, the hub
+    doesn't have to tell him to do it somewhere else."
+
+    The routing nudges prescribe `create_group(...)`; the noticeboard notice
+    prescribes `notice={kind,key}`. Both are written for agents. A human is
+    handed an API they cannot call and told they posted in the wrong place."""
+    client = make_client(tmp_path)
+    human = register(client, "laurent", operator=True)
+    a, b = register(client, "a"), register(client, "b")
+    make_public_channel(client, human, "commons", a, b)
+
+    root = client.post("/channels/commons/messages",
+                       json={"body": "how should we shape the parser?",
+                             "status": "open", "title": "parser"},
+                       headers=human).json()
+    for who in (a, b):
+        client.post("/channels/commons/messages",
+                    json={"body": "a thought", "status": "reply",
+                          "reply_to": root["id"]}, headers=who)
+
+    nudges = [m for m in client.get("/channels/commons/messages",
+                                    headers=human).json()
+              if m["kind"] == "system" and m["body"].startswith("ROUTING")]
+    assert not nudges, "the hub told a human to go run create_group"
+    # The same thread from an AGENT still draws the nudge — the teaching is
+    # useful, it is the audience that was wrong.
+    agent_root = client.post("/channels/commons/messages",
+                             json={"body": "and the codec?", "status": "open",
+                                   "title": "codec"}, headers=a).json()
+    for who in (b, human):
+        client.post("/channels/commons/messages",
+                    json={"body": "thought", "status": "reply",
+                          "reply_to": agent_root["id"]}, headers=who)
+    nudges = [m for m in client.get("/channels/commons/messages",
+                                    headers=human).json()
+              if m["kind"] == "system" and m["body"].startswith("ROUTING")]
+    assert len(nudges) == 1 and nudges[0]["to"] == ["a"]

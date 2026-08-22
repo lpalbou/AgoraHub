@@ -82,10 +82,14 @@ def test_punctuation_after_mention_does_not_eat_it():
     # Only '/' and ':' mark the path shape.
     assert parse_mentions("ship it @seat, thanks") == ["seat"]
     assert parse_mentions("ship it @seat") == ["seat"]
-    # '.' is legal inside a mention token, so a sentence-final dot is
-    # consumed into the match (pre-existing regex behavior, unchanged):
-    # the token still parses rather than being read as a vfs ref.
-    assert parse_mentions("ship it @seat. next") == ["seat."]
+    # A sentence-final dot is PUNCTUATION, not part of the id. Ids end in
+    # [a-z0-9] (`agent_id._AGENT_ID_RE`), so `seat.` can never be a seat —
+    # and reading it as one failed twice over: the member named was not
+    # addressed, and the hub warned the author about a non-member that does
+    # not exist. Measured on a live notify file (commons#54): `@tui.` was
+    # one of five false mention notices out of seven.
+    assert parse_mentions("ship it @seat. next") == ["seat"]
+    assert parse_mentions("cc @seat!") == ["seat"]
 
 
 def test_quoted_block_exclusion_still_holds_around_vfs_refs():
@@ -265,3 +269,28 @@ def test_peer_body_mention_populates_to_without_owing_reply(tmp_path):
 
     owed = client.get("/owed", headers=target).json()
     assert not any(row["id"] == msg["id"] for row in owed.get("to_answer", []))
+
+
+def test_code_is_quoted_text_never_speech():
+    """commons#54/#56: a bug report listing false mentions inside a fenced
+    table ADDRESSED the human named in that table, and the hub then fired a
+    routing nudge for a three-seat room nobody asked for. Code is evidence
+    an author is showing you, never an act of addressing."""
+    fenced = "results:\n```\n| webos#33 | @laurent | TRUE |\n```\nthat is all"
+    assert parse_mentions(fenced) == []
+    assert parse_mentions("the literal string `@laurent` in prose") == []
+    # ...and the fence must not deafen the free text around it.
+    assert parse_mentions(fenced + " @laurent see above") == ["laurent"]
+
+
+def test_a_mention_starts_a_word_so_citations_are_not_seats():
+    """The skill teaches `key@version` store citations, so the hub was
+    minting a mention of `1` every time an agent followed its own
+    documented convention (three in one day, commons#54). Same rule kills
+    email addresses, which are the other half of that finding."""
+    assert parse_mentions("per decision:notice-delivery-state@1") == []
+    assert parse_mentions("audit/annotations.md@1 is the file") == []
+    assert parse_mentions("mail bob@agora.local about it") == []
+    # The word-start rule must not cost a real mention any ground.
+    assert parse_mentions("(@laurent) and [@seat]") == ["laurent", "seat"]
+    assert parse_mentions("line one\n@laurent") == ["laurent"]

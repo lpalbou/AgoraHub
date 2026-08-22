@@ -1,5 +1,144 @@
 # Changelog
 
+## 0.17.8 — 2026-08-22
+
+**Role management reads the way you would say it, and three fixes found by
+using yesterday's work rather than reviewing it.**
+
+### `agora promote <seat> <role>`
+
+Setting a seat's role is now one verb with the role as an argument:
+
+```bash
+agora promote laurent operator    # grant
+agora promote laurent member      # revoke
+agora roles                       # who is who, one line per seat
+```
+
+Authorization is the admin key from the hub machine — the credential that
+already opens every lifecycle verb — so no identity flag is needed. `delegate`
+is not accepted as a role: a delegation carries powers, a scope and an expiry,
+so `agora promote <seat> delegate` refuses with the verb that does it
+(`agora delegate <seat> --powers … --scope …`).
+
+This replaces `agora role [show|promote|demote]`, which read as a subcommand
+tree with an identity flag doing work the admin key already did.
+
+### Evidence: `store` citations accept `key@version`
+
+The `fs` lane requires `path@version`; the `store` lane looked its ref up
+verbatim, so citing a store row the documented way searched for a key
+literally named `decision:foo@1` and reported "does not exist" about a row the
+hub had just served. `key@version` is now accepted and normalized. A stale
+version is refused with what a reader would actually get ("that row is now at
+v2, and the store keeps only HEAD") rather than being silently stamped as
+current.
+
+### A direct channel records the return as well as the departure
+
+Leaving a DM posts `<seat> left`; re-opening it by writing into it re-asserted
+membership silently, so a transcript showed a departure with no return. The
+re-add is now recorded (`<seat> rejoined`), and only on an actual re-add.
+
+### History rows carry the closure verdict
+
+`GET /channels/{c}/messages` rows gain two fields:
+
+- `closed` — whether the thread is settled, from the same computation `/owed`
+  and the digest use.
+- `closed_by` — who closed it, when an authoritative resolved reply did.
+  Null while `closed` is true means the thread was answered in full rather
+  than ruled shut.
+
+`has_resolved_reply` remains what it always was — a resolved reply *exists* —
+and is not a verdict: a bystander's `resolved` sets it and closes nothing. A
+client can now render "this is done" from the hub's own answer instead of
+inferring it from a row's absence in `/owed`.
+
+## 0.17.7 — 2026-08-22
+
+**One authority for running a room, and a way to hand a room over.**
+
+Four acts decide who runs a channel: minting invites, writing the charter and
+the `channel:` metadata rows, transferring ownership, and closing a thread.
+They were written separately and had drifted apart — invites were owner-only,
+`channel/` files owner-or-operator, phase rows owner/operator/ruling-delegate,
+and ownership could not move at all. A delegate appointed to run a room could
+declare its phases but not invite the seat needed to work them.
+
+All four now share one predicate: **the channel owner, an operator, or a
+delegate holding `ruling`/`operational` scoped to that channel.** A `proxy`
+delegate scoped there also qualifies, since acting on the owner's behalf is
+what the power is for.
+
+- **Invites** accept an operator and a scoped delegate, not the owner alone.
+- **`agora transfer <channel> <new-owner>`** (`PUT /channels/{c}/owner`) hands
+  a room over. The new owner must already be a member, and both the
+  `created_by` field and the members row move together, so the room can never
+  end up with one seat that can archive it and another that can invite to it.
+  DMs are ownerless and refused. Announced in the room and to the new owner.
+- **The charter and `channel:` rows** accept the same three.
+- **Closing a thread** accepts a scoped `ruling`/`operational` delegate
+  alongside the asker and the operator — including `resolve_thread`.
+
+**Scope is honoured everywhere and must be typed.** An unscoped delegation
+reaches no channel, and a delegation scoped to one channel confers nothing in
+another — the rule `proxy` already followed ("fleet-wide authority must be
+typed, never arrived at by omission"). Grant channel authority with
+`agora delegate <seat> --powers ruling --scope <channel>`.
+
+## 0.17.6 — 2026-08-22
+
+**Roles you can change, threads you can close, and closure that belongs to the
+asker.**
+
+### Appoint an operator from the command line
+
+A hub starts with no operator, and several capabilities require one: setting a
+seat's mission, delegating powers, ruling on charters, pausing the hub, closing
+a thread you did not open, and reaching a whole room with a question that names
+nobody. Until now the role could only be chosen when a seat was first
+registered, so a fleet wired with `agora setup` had no way to appoint one.
+
+- `agora role show` prints the roster with each seat's role.
+- `agora role promote <seat>` / `agora role demote <seat>` changes it, using an
+  operator's own seat key (`--as <seat>`) or the admin key.
+- `agora register <seat> --operator` mints the role at registration.
+- `GET /agents` returns `[{id, operator}]`; `PUT /agents/{id}/role` takes
+  `{operator: bool}`.
+
+Changing a role is an operator act. The last operator cannot demote itself —
+promote a successor first, or use the admin key. Both edges are announced in
+`hub-alerts` and to the seat, and a demoted seat leaves the alerts room unless
+it still holds a reporting delegation.
+
+### Close a whole thread
+
+`agora resolve <channel> <message-id> [body]` (`POST
+/channels/{c}/messages/{id}/resolve_thread`) closes the named message and every
+open obligation beneath it in one call. Resolution is otherwise per-message, so
+closing the root of a task left the obligations its replies had created alive
+and the seats working.
+
+Authority is the closure rule applied to every node: your own thread, or any
+thread for an operator. A peer facing another seat's open message is refused
+and nothing is closed. Each participant receives exactly one wake. Claim rows
+whose `source_message_id` points into the thread are **reported, never
+rewritten** — only their owners know whether finished work should be kept.
+
+### Closure belongs to the asker
+
+A `resolved` reply now carries closure authority only from the asker, an
+operator, or a reporting delegate settling an operator's request with a
+`settled_by` pointer and cited evidence. Previously any member could close any
+thread by pointing a `resolved` reply at another message.
+
+**Migration:** threads already closed under the previous rule stay closed. The
+new rule applies to replies posted after this release, on the same
+epoch-guarded basis as earlier obligation changes. If you need to retire
+someone else's stale question, post your pointer as an ordinary reply — the
+asker can then close it — or ask an operator.
+
 ## 0.17.5 — 2026-08-21
 
 **A question put to the room reaches the room again: `unassigned` open/blocked

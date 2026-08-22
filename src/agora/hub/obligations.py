@@ -122,25 +122,68 @@ def substantive_answers_of(message: Message) -> list[str]:
     return [a for a in _answers_of(message) if a not in declined]
 
 
-def _closes(parent: Message, reply: Message, operators: frozenset[str]) -> bool:
+def _closes(parent: Message, reply: Message, operators: frozenset[str],
+            delegates: frozenset[str] = frozenset(),
+            closure_rule_epoch: float = 0.0,
+            rulers: frozenset[str] = frozenset()) -> bool:
     """Does this resolved reply carry closure AUTHORITY (ADR-0003)?
-    Asker: always (their own question, closed in the open). Operator: always.
-    Anyone else: only with a `settled_by` supersession pointer (validated at
-    post time to name a real message in the channel)."""
+
+    THE ASKER, ALWAYS — their own question, closed in the open. This is also
+    how every hub self-closer works (`_steward_sweep`, `_phase_sweep`, the
+    fleet and silence closers): the hub closes rows it authored itself, so
+    `hub` needs no standing in `operators` and must not be given any.
+
+    THE OPERATOR, ALWAYS.
+
+    A RULING DELEGATE, always, in the channels its grant reaches — a seat the
+    operator appointed to sign off in scope closes what it signs off on. The
+    caller supplies this set already scoped, so an unscoped grant reaches
+    nothing and a grant scoped elsewhere does not leak here.
+
+    THE REPORTING DELEGATE, on an OPERATOR's request, with a `settled_by`
+    pointer AND cited evidence — the 2026-08-01 ruling that something must be
+    able to settle a commission whose operator has gone quiet, at the price of
+    a completion report.
+
+    NOBODY ELSE (operator ruling, 2026-08-22). `settled_by` used to be an
+    unconditional third-party master key: any member could retire any thread
+    by pointing a `resolved` reply at another message. It was already refused
+    on an operator's request (2026-08-06); this extends the same rule to
+    peers, because a question is the asker's to close and a bystander cannot
+    know whether it was answered.
+
+    ...but SEMANTICS CHANGES MUST NOT REWRITE THE PAST. Threads closed under
+    the old rule stay closed: `closure_rule_epoch` judges only replies posted
+    after it. Without that guard, tightening this reopens every third-party
+    closure in the hub's history AT ONCE, each one instantly SLA-breached —
+    the 132-message storm the sibling epochs in this file were built for."""
     if reply.status.value != "resolved":
         return False
     if reply.sender == parent.sender or reply.sender in operators:
         return True
-    return bool((reply.data or {}).get("settled_by"))
+    if reply.sender in rulers:
+        return True
+    if not (reply.data or {}).get("settled_by"):
+        return False
+    if closure_rule_epoch and reply.created_at < closure_rule_epoch:
+        return True         # closed under the old rule; it stays closed
+    return (reply.sender in delegates
+            and parent.sender in operators
+            and _cites_evidence(reply))
 
 
 def closed_authoritatively(parent: Message, replies: list[Message],
-                           operators: frozenset[str] = frozenset()) -> bool:
+                           operators: frozenset[str] = frozenset(),
+                           delegates: frozenset[str] = frozenset(),
+                           closure_rule_epoch: float = 0.0,
+                           rulers: frozenset[str] = frozenset()) -> bool:
     """True when someone with closure authority resolved the thread (ADR-0003)
     — distinct from mere discharge: a fully-answered question whose asker
     stays silent is discharged but NOT authoritatively closed, and that gap
     is exactly where the asker's consumption debt (0078) lives."""
-    return any(_closes(parent, r, operators) for r in replies)
+    return any(_closes(parent, r, operators, delegates, closure_rule_epoch,
+                       rulers)
+               for r in replies)
 
 
 def _cites_evidence(reply: Message) -> bool:
@@ -194,7 +237,9 @@ def discharge_state(parent: Message, replies: list[Message],
                     operator_rule_epoch: float = 0.0,
                     operator_asks_rule_epoch: float = 0.0,
                     canvass_rule_epoch: float = 0.0,
-                    peer_addressed_rule_epoch: float | None = None) -> DischargeState:
+                    peer_addressed_rule_epoch: float | None = None,
+                    closure_rule_epoch: float = 0.0,
+                    rulers: frozenset[str] = frozenset()) -> DischargeState:
     """Compute whether `parent`'s obligation is discharged and/or closed.
 
     A reply from the asker itself never DISCHARGES the asker's own obligation
@@ -247,14 +292,36 @@ def discharge_state(parent: Message, replies: list[Message],
     )
     non_sender = [r for r in replies if r.sender != parent.sender]
     has_resolved = any(r.status.value == "resolved" for r in replies)
-    closed_by_resolve = any(_closes(parent, r, operators) for r in replies)
+    closed_by_resolve = any(
+        _closes(parent, r, operators, delegates, closure_rule_epoch, rulers)
+        for r in replies)
+    named = set(parent.to) | ask_addressees(parent)
+
     def _operator_settled() -> bool:
-        """Only the operator's own word, or the reporting delegate's cited
-        completion report, settles an operator's request."""
+        """The operator's own word, or a CITED COMPLETION REPORT from a seat
+        the request is actually on: the reporting delegate, or a seat the
+        operator NAMED.
+
+        The addressee's door was missing, and the hole it left was reported
+        by three seats independently: an operator posts `open`, the named
+        seat answers in-thread, and the row stays and escalates against the
+        one seat that did the work. Every exit was shut — `answers=[...]`
+        needs ask ids that an ask-less commission does not have, and
+        `settled_by` is refused on an operator's request. The hub's own
+        advice was "Answer it", and answering was exactly what did not clear
+        it, so a seat that delivered was indistinguishable from a seat that
+        ignored the human.
+
+        The 2026-08-04 lesson is kept whole: a bare "on it" still settles
+        nothing. What clears the row is a `resolved` reply that CITES what
+        was delivered — the same price the delegate pays, asked of the same
+        kind of claim. An UNADDRESSED commission still has no addressee to
+        pay it, so it stays the operator's to close, which is the case that
+        rule was written for."""
         return any(
             r.sender in operators
-            or (r.sender in delegates and r.status.value == "resolved"
-                and _cites_evidence(r))
+            or (r.status.value == "resolved" and _cites_evidence(r)
+                and (r.sender in delegates or r.sender in named))
             for r in replies)
 
     asks = asks_of(parent)

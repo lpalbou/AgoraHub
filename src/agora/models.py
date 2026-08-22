@@ -426,8 +426,23 @@ class MessageRow(Message):
     # ^ ask ids still undischarged (empty list = question fully settled;
     #   null = no statement: retracted row, or a pre-0.12.30 hub).
     has_resolved_reply: bool | None = None
-    # ^ an authoritative closure exists downthread — render the thread as
-    #   settled without fetching the replies. Null = no statement.
+    # ^ a resolved reply EXISTS downthread. It is NOT a verdict: a bystander's
+    #   `resolved` sets this and closes nothing (ADR-0003). A client that
+    #   renders "settled" from this flag states something the hub did not say.
+    closed: bool | None = None
+    # ^ THE VERDICT (agora-wui, 2026-08-22): is this thread settled, by the
+    #   same `_discharge` every other surface consults? Until this existed,
+    #   the only authoritative signal was a row's ABSENCE from /owed — so a
+    #   client showing a message could report "you owe this" but never "this
+    #   is done", and one showing a reference to a message in another room had
+    #   to fetch its replies or stay silent. Null = no statement (retracted
+    #   row, or a hub older than this field).
+    closed_by: str | None = None
+    # ^ WHO closed it, when closure came from an authoritative resolved reply
+    #   (the asker, an operator, a scoped ruling delegate, or a reporting
+    #   delegate's cited report). Null when the thread closed by discharge
+    #   rather than by anyone's word — "answered in full" and "someone ruled
+    #   it done" are different facts and a reader deserves both.
     ratings: RatingTally | None = None
     # ^ standing ±1 tally + the viewer's own rating (agora-0122). Null = no
     #   statement (retracted row, or a pre-0.12.31 hub).

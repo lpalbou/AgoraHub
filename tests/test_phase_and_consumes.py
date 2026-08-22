@@ -221,6 +221,13 @@ def test_registered_path_write_rings_writer_and_steward_and_blocks_nothing(tmp_p
         "HUB NOTICE (advisory — nothing was blocked)")
     assert "you wrote manuscript.md" in mine[0]["preview"]
     assert "v3 OPEN" in mine[0]["preview"]
+    # The TITLE is the whole headline on a tailer, and the body is clamped to
+    # 200 chars — an actionable notice under a bare "hub notice" is one a
+    # human scrolls past. `_deliver_doorbell`'s convention is that a caller
+    # whose notice is actionable NAMES ITSELF; this one did not until a
+    # client author read the hub and said so (agora-tui, commons#28).
+    assert mine[0]["title"] == ("hub notice: you wrote manuscript.md while "
+                                "phase:manuscript is open")
     # Non-waking by construction: an advisory must never spawn a turn.
     assert not qualifies(mine[0], "writer", important_only=True)
     assert str(mine[0]["id"]).startswith("notice:")
@@ -231,6 +238,8 @@ def test_registered_path_write_rings_writer_and_steward_and_blocks_nothing(tmp_p
     assert not qualifies(theirs[0], "reader", important_only=True)
     assert "writer wrote manuscript.md" in theirs[0]["preview"]
     assert "You steward this track" in theirs[0]["preview"]
+    assert theirs[0]["title"] == ("hub notice: phase:manuscript is open and "
+                                  "writer wrote manuscript.md — you steward it")
 
     # An UNREGISTERED path, and a COMPLETE phase, are both silent.
     client.put("/channels/story/fs/notes.md", json={"content": "scratch"},
