@@ -327,6 +327,7 @@ def whoami(
     round-trips. hub_state is how a standing-down agent checks for the resume
     without posting."""
     from .. import PROTOCOL_VERSION, __version__
+    from ..build_info import build_identity
     pause = service.hub_paused()
     hub_state = ({"state": "paused", **pause} if pause is not None
                  else {"state": "open"})
@@ -344,6 +345,12 @@ def whoami(
         # separate stamp list this response used to carry is gone, because
         # its only consumers DIFFED it and a fold makes a diff lie.
         version=__version__, protocol=PROTOCOL_VERSION,
+        # WHICH BUILD, not which release. `version` moves when a human bumps
+        # it; `build.source`/`build.built_at` move when the code does, and
+        # only the second pair can answer "is the fix I shipped actually
+        # running?" — the question nine un-served commits went un-asked
+        # behind on 2026-08-22.
+        build=build_identity(),
         hub_rules=service.hub_rules(),
         # The hub charter (0146) rides as a POINTER, never as text: the role
         # model is stable and long, and re-pushing an authority-labelled

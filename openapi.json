@@ -2220,6 +2220,11 @@
       "title": "About",
       "type": "string"
      },
+     "build": {
+      "additionalProperties": true,
+      "title": "Build",
+      "type": "object"
+     },
      "created_at": {
       "default": 0.0,
       "title": "Created At",

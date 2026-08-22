@@ -969,6 +969,17 @@ class WhoamiReport(BaseModel):
     created_at: float = 0.0
     version: str
     protocol: str
+    #: WHICH BUILD IS ACTUALLY RUNNING — `{version, source, built_at}`, and
+    #: the field `version` above cannot substitute for it. On 2026-08-22 nine
+    #: commits sat un-served for an afternoon while `version` read the same
+    #: `0.17.8` before and after every one of them, so three seats built
+    #: against fields that were committed, green, announced, and not running
+    #: (`decision:a-commit-is-not-a-deployment`). `source`/`built_at` are
+    #: `None` when this hub genuinely cannot tell — never a value derived
+    #: from `version`, because a plausible-but-stale answer ends the
+    #: investigation and a null one starts it. Absent on a hub older than
+    #: this field, which is itself the answer to "is it live?".
+    build: dict[str, Any] = Field(default_factory=dict)
     hub_rules: dict[str, Any] = Field(default_factory=dict)
     #: 0146 — a POINTER to the hub charter (version + this seat's receipt),
     #: never its text. Pre-0146 hubs omit it; a client must treat an absent

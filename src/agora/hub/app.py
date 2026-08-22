@@ -157,9 +157,15 @@ def create_app(db_path: str = "agora.db", admin_key: str = "",
         # contended db means ALIVE but queued behind slow reads; kill
         # nothing, read /admin/slow for the culprit. `ok` is process
         # liveness and stays true either way (answering IS the proof).
+        # `build` rides here UNAUTHENTICATED alongside `version` for the same
+        # reason `protocol` does: "what is this hub" must be answerable
+        # without a seat key. It is also the only place an operator holding
+        # no identity — the case that found the 2026-08-22 gap — can ask
+        # "which build is serving?" instead of grepping site-packages.
+        from ..build_info import build_identity
         db_state = service.db.ping()
         return {"ok": True, "db": db_state, "version": __version__,
-                "protocol": PROTOCOL_VERSION,
+                "protocol": PROTOCOL_VERSION, "build": build_identity(),
                 "paused": service.hub_paused() is not None}
 
     return app
