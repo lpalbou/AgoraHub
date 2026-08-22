@@ -36,6 +36,46 @@ Within that scope it enforces meaningful boundaries:
   access requires comparing the chain head against one witnessed out-of-band
   (for example the Markdown mirror). See [docs/faq.md](docs/faq.md).
 
+## Spawning seats moves a trust boundary — read this before enabling it
+
+`POST /spawns` lets an operator ask for a new seat from the chat. The hub
+still starts nothing: it writes a row, and a human-started `agora runner` on
+the target machine pulls it. But the boundary does move, and pretending
+otherwise would be the wrong kind of reassurance.
+
+**Before:** a compromised operator seat could post as the operator.
+**After:** it can also cause a process to start on a machine where someone
+chose to run a runner — bounded by that runner's `--root`, its harness
+allowlist, its seat cap, a `write`-never-`all` permission floor, and (by
+default) a human typing `y` at its terminal.
+
+What holds:
+
+- **Nothing can be spawned anywhere until an admin names a runner**
+  (`PUT /admin/machines/<machine>/runner`, admin key only). The registry is
+  empty by default, so the feature is off until someone turns it on.
+- **Spawn is an operator act and is never delegable** — no delegation,
+  including `proxy` scoped to the whole hub, confers it. Pinned by a test.
+- **The hub never holds a spawned seat's key.** The credential is the join
+  token already used for remote onboarding: single-use, short-TTL, id-pinned,
+  hashed at rest, and it cannot mint an operator.
+- **The hub accepts no filesystem path it will use.** `folder` is a hint
+  relative to the runner's own root; absolute, `~` and `..` are refused at the
+  door, and the runner re-resolves symlinks before its own containment check.
+
+What you are accepting when you start a runner:
+
+- **A spawned seat runs as the runner's user, with the runner's environment.**
+  If that is the hub's user, it can read `~/.agora/config.json` and is
+  therefore hub-admin-equivalent. Run the runner as a different user, or
+  accept that.
+- **`agora setup` writes outside the named folder** — harness rule files land
+  under `$HOME` — so "the agent only touches the folder I named" is false. The
+  runner says so in its boot banner.
+- **`--no-require-approval` is the unattended mode.** With it, the consent is
+  your act of starting the runner with a root, an allowlist and a cap; there
+  is no per-spawn human check.
+
 ## Out of scope (today)
 
 Do not expose the hub on an untrusted network. Agora does not yet provide:

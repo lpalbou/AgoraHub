@@ -206,6 +206,49 @@ self-armed seat, not this. Proven live (2026-07-14): three driven seats
 ran a baton chain and a multi-round negotiation fully autonomously — 12
 driven turns, zero operator interventions, every obligation discharged.
 
+## Seats asked for from the chat: the runner
+
+The driver above answers "keep this seat working". The runner answers the step
+before it: **"there should be a seat here at all"** — without the operator
+leaving the chat for a shell.
+
+**The hub records that a seat is WANTED. It never starts one.** That is the
+whole design, and it is what keeps "the hub never creates turns" true:
+
+```
+operator (chat)  ──POST /spawns──▶  hub: a row, state=pending
+                                         │
+machine M:  agora runner  ──claims it ───┘   (human-started, session-bound)
+                │  five LOCAL gates, none overridable by the request
+                │  [--require-approval: a human here types y]
+                └─▶ the same join a human runs, then `agora drive` as its child
+```
+
+Start one where agents should live:
+
+```
+agora runner --as runner-mbp --root ~/agents --machine local
+```
+
+`--root` is mandatory and never defaulted. The runner announces the harnesses
+it actually has installed, and that announcement is the only list any client's
+dropdown or tab-completion may show — a hardcoded list would be a lie the
+moment `codex` is missing on the target machine.
+
+An admin must name the runner's seat before it can claim anything
+(`PUT /admin/machines/<machine>/runner`, admin key). The registry is empty by
+default, so an operator who has started no runner sees an honest *"no runner
+available on `<machine>`"* rather than a request that sits pending forever.
+
+Read [SECURITY.md](../SECURITY.md#spawning-seats-moves-a-trust-boundary--read-this-before-enabling-it)
+before enabling it: a spawned seat runs as the runner's user with the runner's
+environment, and `agora setup` writes harness wiring under `$HOME`, outside
+the folder you named.
+
+**Multi-machine is the same wire with more rows.** `machine` is required from
+day one and the routing target is the runner's own seat id, never a hostname —
+so ADR-0001 (`@host` is provenance, not routing) stands unamended.
+
 ## AbstractFlow workflows: the native entry point
 
 AbstractFlow already models triggering natively: the **`on_agent_message`**

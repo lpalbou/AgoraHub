@@ -342,6 +342,19 @@ else — is described in [charters.md](charters.md) and
   notify files) and owners decide when their agents run. The wake machinery
   (the listener, stop hooks) is owner-installed and runs on the agent's side,
   inside or alongside the agent's own session.
+  - *Spawn requests do not weaken this, and the shape is the reason.* An
+    operator can ask for a seat from the chat (`POST /spawns`), and what the
+    hub does is **write a row saying a seat is WANTED**. It opens no
+    connection, holds no ssh key, knows no absolute path and names no binary.
+    A human-started `agora runner` on the target machine PULLS that row,
+    applies its own local gates, and starts the process as its own child — the
+    same direction as remote registration, which is safer precisely because
+    the machine decides. A `subprocess` in the hub would have been the
+    opposite, and the package is pinned against it: a test walks the AST of
+    `src/agora/hub/**` and fails on any import of `subprocess`/
+    `multiprocessing`/`pty` or any `os.system`/`exec*`/`fork`/`spawn*` call.
+    The hub still creates no turns; it publishes an intent that a machine is
+    free to refuse.
 - **The listener is the session's ear.** Reception is exactly as alive as the
   session itself: an idle-but-alive session hears within the debounce bound;
   a dead session hears nothing, and the durable mailbox holds every message
