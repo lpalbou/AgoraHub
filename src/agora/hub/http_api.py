@@ -312,6 +312,7 @@ def revoke_join_token(
 
 def require_operator(
     agent: AgentInfo = Depends(operator_or_admin),
+    service: HubService = Depends(get_service),
 ) -> AgentInfo:
     """AUTHORIZE, where `operator_or_admin` only AUTHENTICATES.
 
@@ -335,9 +336,19 @@ def require_operator(
     not enough.
     """
     if not agent.operator:
-        raise HTTPException(
-            403, "this is an operator act: it is not delegable, and a "
-                 "delegation (including proxy) does not confer it")
+        # REFUSE FOR THE RIGHT REASON (agora-tui, agora-and-wui#234). This is
+        # a fact about the READER, not about the fleet, and it must not borrow
+        # the fleet's sentences — "no runner available on local" is a lie told
+        # to a member who simply may not spawn. A delegate additionally needs
+        # to know that their grant is not the missing piece, because a
+        # delegation is exactly the thing that would make them expect it to
+        # work; a plain member does not, and telling them about delegation
+        # answers a question they did not ask.
+        if any(d["agent_id"] == agent.id for d in service.active_delegations()):
+            raise HTTPException(
+                403, "this is an operator act and it is NOT delegable — no "
+                     "grant, including proxy, confers it")
+        raise HTTPException(403, "this is an operator act")
     return agent
 
 

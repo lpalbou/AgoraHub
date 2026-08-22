@@ -715,6 +715,10 @@ def test_a_plain_member_cannot_ask_for_a_seat(wire):
     r = wire.post("/spawns", json={"seat_id": "scribe", "harness": "claude"},
                   headers=member)
     assert r.status_code == 403
+    # A fact about the READER, not the fleet (agora-tui, #234): it must not
+    # borrow the "no runner available" sentence, and it must not answer a
+    # question about delegation that a plain member never asked.
+    assert r.json()["detail"] == "this is an operator act"
 
 
 @pytest.mark.parametrize("powers", [
@@ -742,7 +746,9 @@ def test_spawn_is_never_delegable(wire, powers):
     r = wire.post("/spawns", json={"seat_id": "scribe", "harness": "claude"},
                   headers=delegate)
     assert r.status_code == 403
-    assert "not delegable" in r.json()["detail"]
+    # A delegate DOES need the extra clause: a grant is exactly the thing that
+    # would make them expect this to work.
+    assert "NOT delegable" in r.json()["detail"]
     assert wire.get("/spawns", headers=_admin()).json() == []
 
 
