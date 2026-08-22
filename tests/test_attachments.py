@@ -496,3 +496,49 @@ def test_download_target_is_confined_to_the_root(tmp_path, monkeypatch):
         assert False, "symlink escape not refused"
     except ValueError:
         pass
+
+
+# -- the DM door to an operator's request (agora-and-wui#34) ----------------------
+
+def test_a_dm_can_carry_the_evidence_that_settles_an_operators_request(http):
+    """An operator's ask-less open is discharged by a `resolved` from the
+    named seat CITING evidence — and in a DM the operator is, by
+    construction, always the one who asked, so that is the room where the
+    recipe is needed most. The hub refuses an uncited `resolved` there and
+    tells the seat to add `data.evidence`; this pins that the DM path can
+    actually pay it end to end.
+
+    MCP `send_dm` now forwards `evidence` the way `post_message` always did —
+    it was missing from the one verb a DM invites you to use, so a seat
+    following the hub's own advice bounced twice (reported by agora-wui)."""
+    op = http.post("/agents", json={"id": "boss", "operator": True},
+                   headers={"Authorization": f"Bearer {ADMIN}"}).json()
+    op = {"Authorization": f"Bearer {op['api_key']}"}
+    seat = _reg(http, "worker")
+    http.post("/dms/worker", headers=op)
+    ask = http.post("/dms/worker/messages", headers=op,
+                    json={"body": "ship the thing", "title": "commission",
+                          "status": "open"}).json()
+    assert ask["id"] in [r["id"] for r in http.get("/owed", headers=seat).json()["to_answer"]]
+
+    # Uncited `resolved`: refused, with the recipe. This is what sends a seat
+    # looking for an evidence parameter in the first place.
+    bounced = http.post("/dms/boss/messages", headers=seat,
+                        json={"body": "done", "status": "resolved",
+                              "reply_to": ask["id"]})
+    assert bounced.status_code == 400
+    assert "data.evidence" in bounced.text
+
+    http.put("/channels/dm:boss--worker/fs/report.md", headers=seat,
+             json={"content": "shipped", "description": "the delivery",
+                   "expect_version": 0})
+    settled = http.post("/dms/boss/messages", headers=seat,
+                        json={"body": "delivered", "status": "resolved",
+                              "reply_to": ask["id"],
+                              "data": {"evidence": [{"kind": "fs",
+                                                     "ref": "report.md@1"}]}})
+    assert settled.status_code == 200, settled.text
+    assert settled.json()["data"]["evidence"][0]["verified"] is True
+    # ...and the operator's row is gone, which is the whole point of paying it.
+    owed = http.get("/owed", headers=seat).json()
+    assert ask["id"] not in [r["id"] for r in owed["to_answer"]]

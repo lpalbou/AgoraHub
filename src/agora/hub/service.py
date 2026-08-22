@@ -5191,7 +5191,8 @@ class HubService:
 
     def fs_write(self, agent: AgentInfo, channel: str, path: str,
                  content: str | None = None, mime: str = "text/markdown",
-                 expect_version: int | None = None, description: str = "",
+                 expect_version: int | None = None,
+                 description: str | None = None,
                  content_b64: str | None = None) -> FsFile:
         """Create or edit a file (compare-and-swap via `expect_version`; 0 means
         'must not exist yet'). Exactly one of `content` (text) or `content_b64`
@@ -5232,6 +5233,30 @@ class HubService:
             size = len(content.encode())
             if size > MAX_STORE_VALUE_BYTES:
                 raise HubError(413, f"fs file exceeds {MAX_STORE_VALUE_BYTES} bytes")
+        # AN EDIT THAT SAYS NOTHING ABOUT THE DESCRIPTION MUST NOT ERASE IT
+        # (agora-and-wui#37/#40). `fs_put` REPLACES the stored value object —
+        # it does not merge — and the description only entered that object
+        # when it was non-empty. So every content-only edit silently blanked
+        # the room's table-of-contents line for that file, and the writer who
+        # set it had no way to know.
+        #
+        # Reported from the far side of the seam by two clients within
+        # minutes: the WUI had been rendering `description` in its Files
+        # drawer while never sending one, and asked what an OMITTED
+        # description does on an update before building an edit door on top
+        # of a guess. It cleared it. That is the answer neither of them
+        # should have had to build around.
+        #
+        # Omitted (None) now PRESERVES what is stored; an explicit "" CLEARS
+        # it. The distinction needs a null default to exist, which is why the
+        # signature changed rather than the body of this branch.
+        if description is None:
+            prior = self.db.fs_get(channel, FS_PREFIX + norm)
+            # A tombstone carries no description to inherit: re-creating a
+            # deleted path is a creation, and a new file starts nameless
+            # rather than wearing the dead one's line.
+            description = ("" if not prior or prior.get("deleted")
+                           else str((prior.get("value") or {}).get("description") or ""))
         # sanitize_text also strips control chars (ESC/BEL survive str.split —
         # they would otherwise reach the operator's terminal; security M1).
         description = sanitize_text(str(description or ""), 200, field="description")

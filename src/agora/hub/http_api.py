@@ -1374,7 +1374,11 @@ class FsWrite(BaseModel):
     content: str | None = None
     content_b64: str | None = None
     mime: str = "text/markdown"        # binary writes default to application/octet-stream
-    description: str = ""              # one line: what this file IS (shown in listings)
+    # One line: what this file IS (shown in listings). OMITTED (null) on an
+    # edit PRESERVES the current one; an explicit "" clears it. The default
+    # had to become None for that distinction to exist at all — see
+    # HubService.fs_write.
+    description: str | None = None
     expect_version: int | None = None  # CAS: 0 = "must not exist yet"
 
 

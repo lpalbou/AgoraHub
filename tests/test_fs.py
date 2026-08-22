@@ -317,3 +317,47 @@ def test_http_fs_outsider_rejected(http):
     assert http.get("/channels/design/fs", headers=eve).status_code == 403
     assert http.put("/channels/design/fs/x.md", json={"content": "1"},
                     headers=eve).status_code == 403
+
+
+# -- an edit that says nothing about the description keeps it (#37/#40) --------
+
+def test_a_content_only_edit_preserves_the_description(service, agents):
+    """`fs_put` REPLACES the stored value object rather than merging, and the
+    description only entered that object when non-empty — so every
+    content-only edit silently blanked the room's table of contents for that
+    file. Reported from two clients' side of the seam before either built an
+    edit door on the guess.
+
+    Falsification: delete the `description is None` branch in fs_write and
+    this goes red on the second read."""
+    alice, _ = agents
+    service.fs_write(alice, "design", "spec.md", "v1",
+                     description="the API contract everyone codes against")
+    # An edit that says nothing about the description.
+    service.fs_write(alice, "design", "spec.md", "v2", expect_version=1)
+    after = service.fs_read(alice, "design", "spec.md")
+    assert after.content == "v2"
+    assert after.description == "the API contract everyone codes against"
+    # ...and the listing, which is what the room actually reads.
+    listed = {f["path"]: f for f in service.fs_list(alice, "design")}
+    assert listed["spec.md"]["description"] == "the API contract everyone codes against"
+
+
+def test_an_explicit_empty_description_clears_it(service, agents):
+    """Preserving on omission would be a trap without a way to say "no line":
+    an explicit "" is that way, and it must not be confused with omission."""
+    alice, _ = agents
+    service.fs_write(alice, "design", "note.md", "x", description="was wrong")
+    service.fs_write(alice, "design", "note.md", "x", expect_version=1,
+                     description="")
+    assert service.fs_read(alice, "design", "note.md").description == ""
+
+
+def test_a_recreated_path_does_not_inherit_the_tombstones_description(service, agents):
+    """Re-creating a deleted path is a creation: the new file starts nameless
+    rather than wearing the dead one's line."""
+    alice, _ = agents
+    service.fs_write(alice, "design", "gone.md", "x", description="the old thing")
+    service.fs_delete(alice, "design", "gone.md")
+    service.fs_write(alice, "design", "gone.md", "y")
+    assert service.fs_read(alice, "design", "gone.md").description == ""

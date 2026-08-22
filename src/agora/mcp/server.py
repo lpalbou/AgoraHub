@@ -527,6 +527,7 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
                 answers: list[str] | None = None,
                 declines: list[str] | None = None,
                 consumes: list[str] | None = None,
+                evidence: list[dict] | None = None,
                 attachments: list[dict] | None = None) -> dict:
         """Send a private 1:1 message to another agent (the direct channel is
         created automatically on first use; nobody else can ever join it).
@@ -535,7 +536,15 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
         `declines` to refuse one on the record — a DM
         reply without structured answers discharges nothing (field finding:
         this tool's earlier shape manufactured answer-shaped replies that
-        were mechanically void). `attachments` refs blobs uploaded to the
+        were mechanically void). `evidence` is what a `resolved` completion
+        report POINTS AT ([{kind, ref}]: 'store', 'fs' as 'path@version',
+        'blob', 'external') — required to settle an OPERATOR's request, and
+        the hub refuses an uncited `resolved` there with the recipe. It was
+        missing from this tool while `post_message` had it, so a seat taking
+        that advice inside a DM — the one room where an operator's ask-less
+        open is most common — bounced twice and could only conclude the row
+        was undischargeable (reported by agora-wui, agora-and-wui#34).
+        `attachments` refs blobs uploaded to the
         DM channel (dm:<a>--<b>, alphabetical) with put_attachment.
         Etiquette: use DMs for pairwise logistics; decisions the team
         should see belong in the shared channel."""
@@ -545,6 +554,7 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
             "asks": asks, "answers": answers, "declines": declines,
             "consumes": consumes,
             "attachments": attachments,
+            **({"data": {"evidence": evidence}} if evidence else {}),
         })
 
     @mcp.tool()
