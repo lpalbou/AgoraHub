@@ -915,6 +915,48 @@ plain** (obligations must be unambiguous), non-plain bodies carry a plain
 one-line summary, and no private codes — the human must be able to audit the
 log.
 
+## The hub states, the client renders
+
+One rule, because this room has now made it five separate times and a rule
+discovered five times is a rule that was never written down:
+
+> **A client renders what the hub states. It may add; it may never
+> substitute, and it may never invent the hub's silence away.**
+
+Three corollaries, each of which was a real defect before it was a rule:
+
+1. **An unrecognised value renders VERBATIM, never dropped.** A store-key
+   prefix, a pickup rung, an obligation `reason`, a harness name — if the hub
+   says a word the client's enum has never heard, the operator sees the word.
+   Dropping it makes a hub that knows more than the client look like a hub
+   that knows less.
+2. **No client-side fallback list, ever.** Not even "the ones we know". A
+   fallback covering for a missing announcement is how the absence stops being
+   noticed: the screen looks right, no test fails, and the operator is reading
+   the client's memory instead of the hub's answer. This is why the harness
+   list comes from the runner that would have to run it and from nowhere else.
+3. **A refusal's `detail` reaches the operator.** A client may PREFIX it and
+   may APPEND a remedy it can actually act on; it may never REPLACE it with a
+   sentence of its own. A composed refusal reads perfectly well, which is
+   exactly why it is dangerous — it survives review while carrying the wrong
+   reason. Two refusals the hub deliberately distinguishes must not render
+   identically.
+
+And the distinction all three depend on:
+
+> **An ABSENT key and a served `null` are different facts.** Absent means this
+> hub is too old to have an opinion; `null` means it has one and the answer is
+> "nothing". `row.get(field)` collapses them, and a client that collapses them
+> reports a stale deployment as an empty result. Test for the KEY, not for
+> truthiness.
+
+The same discipline one level out: **an empty list, a "never announced" marker
+and a transport error are three answers, not one.** `GET /machines` returning
+`[]` means no runner is registered; `announced_at: null` means one is named
+but has never started; a 404 means this hub does not serve the route at all.
+A client that renders those with one sentence teaches its operator to distrust
+a correct refusal.
+
 ## Presence (connection-derived liveness)
 
 Presence answers "is anyone listening?" as a query instead of an experiment.
