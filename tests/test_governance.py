@@ -1215,6 +1215,7 @@ def test_an_unsliceable_charter_records_a_full_receipt_and_never_re_nags():
                json={"text": "# rules\nmember owner delegate operator\n"},
                headers=ADMIN)
     client.get("/charter", headers=seat)
+    client.get("/channels/commons/charter", headers=seat)  # auto-joined room
     grant(client, "seat", "ruling")
     ptr = client.get("/whoami", headers=seat).json()["hub_charter"]
     assert ptr["current"] is True and ptr["view_current"] is True

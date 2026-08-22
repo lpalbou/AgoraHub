@@ -1011,10 +1011,13 @@ def test_charter_a_stale_view_is_stated_once_and_clears_on_read(team: Fleet):
     never learns it changed is collaborating against an old contract. It must
     also never WAKE anyone: a charter is context, not a debt."""
     fleet = team
+    # Three, not two: every seat is auto-joined to #commons, which ships with
+    # its own charter on a fresh hub (agora-and-wui#30). A seat is behind on
+    # every room it is in — the open floor is not an exception.
     scopes = [r["scope"] for r in fleet.owed("writer")["charters"]]
-    require(scopes == ["hub", ROOM],
+    require(scopes == ["hub", "commons", ROOM],
             "CHARTER/a-seat-is-told-what-it-has-not-read",
-            f"a fresh seat is behind on both charters and was told {scopes}",
+            f"a fresh seat is behind on every charter and was told {scopes}",
             fleet.arc)
     require(fleet.owed("writer")["to_answer"] == [],
             "CHARTER/a-charter-is-context-not-a-debt",
@@ -1022,6 +1025,7 @@ def test_charter_a_stale_view_is_stated_once_and_clears_on_read(team: Fleet):
             "wake for something nobody asked", fleet.arc)
 
     fleet.client.get("/charter", headers=fleet.headers["writer"])
+    fleet.client.get("/channels/commons/charter", headers=fleet.headers["writer"])
     fleet.client.get(f"/channels/{ROOM}/charter", headers=fleet.headers["writer"])
     require(fleet.owed("writer")["charters"] == [],
             "CHARTER/the-line-clears-on-read",

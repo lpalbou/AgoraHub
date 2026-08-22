@@ -616,3 +616,49 @@ def test_activity_stats_names_only_seats_you_can_already_see(service, agents):
     everyone = service.activity_stats(alice)
     assert everyone["active_seats"] == ["alice", "hub", "stranger"]
     assert everyone["active_seat_count"] == 3
+
+
+# -- a fresh hub's #commons is born with its charter (agora-and-wui#30) ---------
+
+def test_fresh_hub_commons_has_a_charter(service, agents):
+    """Every other room gets a charter at creation (0146) via create_channel;
+    #commons is built by `_ensure_builtin_channels` straight against the db,
+    so it was the one room on every hub that arrived charterless — and it is
+    the room every seat is auto-joined to, so it is the first charter anyone
+    reads. Falsification: drop the fs_put from `_ensure_builtin_channels` and
+    this goes red on the read."""
+    alice, _ = agents
+    charter = service.fs_read(alice, "commons", "channel/charter.md")
+    assert charter.version == 1
+    assert charter.updated_by == "hub"
+    assert charter.description
+    # Every line must be true on a hub with no operator and no history — so
+    # it must NOT claim an owner (#commons is created_by "hub", and ownership
+    # is created_by == agent_id, so no seat can ever own it as things stand).
+    assert "Owner: the hub itself" in charter.content
+    assert not service._is_channel_owner("commons", "alice")
+    # The hub itself is the owner of record (laurent, agora-and-wui#32) — and
+    # `hub` is a principal no seat can authenticate as, which is what makes
+    # "no seat owns the open floor" true rather than aspirational.
+    assert service._is_channel_owner("commons", "hub")
+    # ...and the authority it states is the authority the hub enforces
+    # (laurent, agora-and-wui#32): operator yes, ordinary member no.
+    op, _ = service.register_agent("operator-seat", "Op", operator=True)
+    assert service.may_administer_channel(op, "commons")
+    assert not service.may_administer_channel(alice, "commons")
+
+
+def test_an_existing_hubs_commons_charter_is_never_overwritten(service, agents):
+    """The seed is create-only. A hub whose operator has already written this
+    file keeps every word of it across restarts — the packaged text seeds hubs
+    that do not exist yet, it does not reformat hubs that do."""
+    alice, _ = agents
+    op, _ = service.register_agent("op", "Op", operator=True)
+    mine = "# commons — charter\n\nOwner: op. Mine, hand-written.\n"
+    service.fs_write(op, "commons", "channel/charter.md", mine,
+                     expect_version=1)
+    # Restart: the same db, a second service instance, bootstrap runs again.
+    again = HubService(service.db, rate_per_minute=600.0)
+    after = again.fs_read(alice, "commons", "channel/charter.md")
+    assert after.content == mine
+    assert after.updated_by == "op"

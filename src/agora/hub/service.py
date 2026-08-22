@@ -25,6 +25,7 @@ from ..db import Database, DuplicateMessage, JoinTokenRefused
 from ..governance import (
     CHANNEL_CHARTER_SEED,
     CHARTER_PATH,
+    COMMONS_CHARTER_SEED,
     DELEGATE_POWERS,
     GROUP_CHARTER_TEMPLATE,
     HUB_CHARTER_SCOPE,
@@ -424,9 +425,35 @@ class HubService:
         already teach. Fresh-hub onboarding should not require an operator to
         hand-create that conventional room before `agora setup --channels
         commons` works.
+
+        AND IT IS BORN WITH ITS CHARTER (operator order, agora-and-wui#30).
+        Every other room gets one at creation (0146) because `create_channel`
+        seeds it; this path calls the db directly, so #commons — the room
+        every seat is auto-joined to, and therefore the first charter anyone
+        reads — was the single room on every hub that arrived charterless.
+        Written through the db rather than `fs_write` because bootstrap has
+        no agent to write as and no membership to check: `hub` is the author,
+        as it is for the channel itself.
+
+        Create-only (`expect_version=0`), so a hub whose operator has already
+        written a charter here keeps every word of it — this seeds hubs that
+        do not exist yet, it does not overwrite hubs that do. Best-effort for
+        the same reason `_seed_charter` is: a charter write must never be the
+        reason a hub fails to start.
         """
         self.db.ensure_channel("commons", private=False, created_by="hub",
                                add_owner=False)
+        try:
+            self.db.fs_put("commons", FS_PREFIX + CHARTER_PATH,
+                           {"content": COMMONS_CHARTER_SEED,
+                            "mime": "text/markdown",
+                            "description": "channel charter: what the open "
+                                           "floor is for, and what belongs "
+                                           "elsewhere"},
+                           "hub", expect_version=0)
+        except Exception:
+            logging.getLogger("agora.hub.charter").debug(
+                "commons charter already present or unwritable", exc_info=True)
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Record the serving event loop. Called by every async entry point
         (WebSocket connect, long-poll wait) so cross-thread wakes are safe."""

@@ -140,14 +140,18 @@ def test_owed_names_every_charter_this_seat_is_behind_on(tmp_path):
     _join(client, owner, member, "design")
 
     owed = client.get("/owed", headers=member).json()
-    assert _scopes(owed) == ["hub", "design"], "a fresh seat is behind on both"
+    # `commons` rides along because every seat is auto-joined to the open
+    # floor and it now ships with a charter (agora-and-wui#30) — a fresh seat
+    # is behind on every room it is in, and that is the whole point.
+    assert _scopes(owed) == ["hub", "commons", "design"], "a fresh seat is behind on all three"
     hub_row = owed["charters"][0]
     assert hub_row["your_receipt"] is None and hub_row["read_with"] == "read_charter()"
-    assert owed["charters"][1]["read_with"] == "read_charter(channel='design')"
+    assert owed["charters"][2]["read_with"] == "read_charter(channel='design')"
 
     # The read IS the clearing gesture — no ack, no extra call.
     client.get("/charter", headers=member)
-    assert _scopes(client.get("/owed", headers=member).json()) == ["design"]
+    assert _scopes(client.get("/owed", headers=member).json()) == ["commons", "design"]
+    client.get("/channels/commons/charter", headers=member)
     client.get("/channels/design/charter", headers=member)
     assert client.get("/owed", headers=member).json()["charters"] == []
 
@@ -163,6 +167,7 @@ def test_a_published_charter_reappears_on_owed_with_the_stale_receipt(tmp_path):
     member = _register(client, "member-b")
     _join(client, owner, member, "design")
     client.get("/charter", headers=member)
+    client.get("/channels/commons/charter", headers=member)
     client.get("/channels/design/charter", headers=member)
     assert client.get("/owed", headers=member).json()["charters"] == []
 
@@ -207,7 +212,7 @@ def test_a_stale_charter_never_enters_the_wake_signature(live_hub, isolated_home
     counts, signature, raw = _owed_snapshot(live_hub.url, "seat-a")
     assert counts == (0, 0), "a charter is not a debt"
     assert signature is None, "nothing to re-ring on"
-    assert [r["scope"] for r in raw["charters"]] == ["hub"]
+    assert [r["scope"] for r in raw["charters"]] == ["hub", "commons"]
 
 
 # ---------------------------------------------------------------------------
@@ -301,10 +306,12 @@ def test_agora_inbox_leads_with_the_charter_block(live_hub, isolated_home, capsy
     assert "CHARTER — the rules you work under CHANGED" in out
     assert "hub charter — who is who: v1 (you have never read it) — read_charter()" in out
 
-    # The seat does what it was told; the line never comes back.
-    httpx.get(f"{live_hub.url}/charter",
-              headers=_bearer(_config.get_cached_key(live_hub.url, "seat-a")),
-              timeout=10)
+    # The seat does what it was told; the line never comes back. Both of
+    # them: a seat is auto-joined to #commons, which ships with its own
+    # charter, so "read what you are behind on" is two reads on a fresh hub.
+    key = _bearer(_config.get_cached_key(live_hub.url, "seat-a"))
+    httpx.get(f"{live_hub.url}/charter", headers=key, timeout=10)
+    httpx.get(f"{live_hub.url}/channels/commons/charter", headers=key, timeout=10)
     _run_cli(["inbox", "--as", "seat-a", "--url", live_hub.url])
     assert "CHARTER" not in capsys.readouterr().out
 

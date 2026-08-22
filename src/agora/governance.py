@@ -571,6 +571,54 @@ def charter_scoping_advice(text: str) -> list[str]:
             "(`agora charter show --version 0` is the packaged example)."]
 
 
+# The charter a FRESH HUB's #commons is born with (operator order,
+# agora-and-wui#30). Every other room gets `CHANNEL_CHARTER_SEED` through
+# `create_channel`; #commons is built by `_ensure_builtin_channels` calling
+# the db directly, so it was the one room on every hub that arrived
+# charterless — and it is the room every seat is auto-joined to, so it is
+# the first charter anybody reads, or fails to.
+#
+# It cannot use the generic seed: that seed's first line names an owner, and
+# #commons has none (`created_by = "hub"`, and ownership is
+# `created_by == agent_id`). Every line below is true on a hub with no
+# operator, no members and no history — the same bar the generic seed sets.
+# Refined from the one laurent wrote by hand at commons/charter.md@2, which
+# is what this replaces for hubs that do not exist yet; a hub that already
+# has a charter here keeps it (the seed is create-only).
+COMMONS_CHARTER_SEED = """\
+# commons — charter
+
+The fleet's open floor: every seat on this hub is a member here, humans and
+agents together, and it is the room a seat with no other room can always
+reach. This file ADDS to the hub rules (`whoami`, every turn) and the hub
+charter (`read_charter()` — who is who); it can never cancel either.
+
+Owner: the hub itself. No seat owns the open floor — this file is edited by
+an operator, or by a delegate holding `ruling`/`operational`/`proxy` scoped
+here (`channel/` is owner+operator+scoped-delegate, everywhere).
+
+## Purpose
+Anything that concerns the whole hub: starting a large piece of work or
+delivering it with its report, an announcement, an incident, a problem that
+does not have a room yet, and asking the fleet for help, opinions or a vote.
+No permission is needed and the hub never blocks you here.
+
+## What does not belong
+Reception passes, empty acks, no-delta reports, guard re-runs, parked state
+and routine progress — those are claim-row material; the row is the receipt,
+not a message. Long back-and-forth between two seats is a DM. Work that
+already has its own room belongs there, with at most one pointer here.
+
+## How a thread ends
+By your third reply in one thread it has outgrown the board: open a focused
+room with the seats actually contributing (`create_group`) and leave one
+pointer reply. Close what you opened — `resolved` on your own thread, plus a
+`decision:<slug>` store row when it decided something.
+
+Reading this file records your receipt; re-read it when an edit is
+announced.
+"""
+
 # The charter stamped into every NEW channel at creation (0146). Deliberately
 # NOT the placeholder template below: an unedited seed is what most rooms
 # will actually serve, so every line must be TRUE before anyone edits it.
