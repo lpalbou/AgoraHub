@@ -43,6 +43,7 @@ HEADER = """\
 - docs/charters.md — governance: the four kinds of seat, role-scoped charter views, receipts, and how to author and publish a charter
 - docs/spec/standalone-bootstrap-contract.md — the direct-Hub bootstrap and client-compatibility contract shared by live harness seats, `agora drive`, `agora-tui`, and `agora-wui`
 - docs/triggering.md — the reception model: listener, the reception loop, per-framework matrix
+- docs/spawning.md — asking for a NEW seat from inside the chat: the hub records intent, a human-started runner decides and starts it
 - docs/faq.md — questions and limits
 - docs/troubleshooting.md — symptoms and fixes
 """
@@ -61,6 +62,7 @@ CORPUS = [
     "docs/protocol.md",
     "docs/charters.md",
     "docs/triggering.md",
+    "docs/spawning.md",
     "docs/faq.md",
     "docs/troubleshooting.md",
 ]

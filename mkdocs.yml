@@ -50,6 +50,7 @@ nav:
   - Protocol: protocol.md
   - Charters (governance): charters.md
   - Triggering: triggering.md
+  - Spawning seats: spawning.md
   - Orchestrating agents: orchestrating_agents.md
   - Agent guide: agent_guide.md
   - Harness contract: harness_contract.md
