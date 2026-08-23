@@ -2419,6 +2419,29 @@ def cmd_spawn(args: argparse.Namespace) -> None:
             seen = ("never started" if row.get("announced_at") is None
                     else ", ".join(row.get("harnesses") or []) or "no harness installed")
             print(f"  {row['machine']:<16} runner={row['runner']:<16} {seen}")
+            # The KNOBS, so `--reasoning` can be typed from what this machine
+            # said rather than from memory. Four states, four sentences: no
+            # capabilities at all is a runner predating the announce (restart
+            # it), an empty vocabulary is a harness that takes no reasoning
+            # setting, and `default_model: null` is an announcement that the
+            # harness resolves its own — not a missing value.
+            caps = row.get("capabilities") or {}
+            if not caps and row.get("harnesses"):
+                print("      (this runner has not announced its knobs — it "
+                      "predates them; restart it to see reasoning levels)")
+            for harness in row.get("harnesses") or []:
+                cap = caps.get(harness)
+                if cap is None:
+                    continue
+                vocab = cap.get("reasoning") or []
+                levels = ("takes no reasoning setting" if not vocab
+                          else "reasoning: " + "|".join(vocab)
+                               + (" (advisory — accepted, not enforced)"
+                                  if cap.get("reasoning_advisory") else ""))
+                default = cap.get("default_model")
+                model = (f", default model: {default}" if default
+                         else ", the harness picks its own model")
+                print(f"      {harness:<14} {levels}{model}")
         return
 
     if args.list:
@@ -2455,7 +2478,13 @@ def cmd_spawn(args: argparse.Namespace) -> None:
                "mission": args.mission or "", "machine": args.machine,
                "folder": args.folder or "",
                "channels": [c.strip() for c in (args.channels or "").split(",")
-                            if c.strip()]}
+                            if c.strip()],
+               # Absent stays ABSENT: "" means the harness resolves its own,
+               # never a model named empty-string. The hub checks `reasoning`
+               # against the vocabulary this machine announced for this
+               # harness (`--machines` prints it), so a refusal here is the
+               # machine's own statement and not a hub-side enum.
+               "model": args.model or "", "reasoning": args.reasoning or ""}
     r = httpx.post(f"{url}/spawns", headers=headers, json=payload, timeout=10.0)
     if r.status_code != 200:
         sys.exit(f"spawn request refused: {r.status_code} {r.text}")
@@ -4626,6 +4655,17 @@ def build_parser() -> argparse.ArgumentParser:
                          "default <root>/<seat-id>")
     sp.add_argument("--channels", default=None, metavar="A,B",
                     help="public channels to auto-join on arrival")
+    sp.add_argument("--model", default=None,
+                    help="optional vendor model; empty lets the harness "
+                         "resolve its own (`--machines` shows each harness's "
+                         "default). Nothing validates it — a model the "
+                         "harness does not have spawns a seat that fails "
+                         "every wake")
+    sp.add_argument("--reasoning", default=None,
+                    help="optional reasoning effort, checked against the "
+                         "vocabulary that machine announced for that harness "
+                         "(`--machines` prints it); a harness with an empty "
+                         "vocabulary takes no reasoning setting at all")
     sp.add_argument("--list", action="store_true", help="show spawn requests")
     sp.add_argument("--active", action="store_true",
                     help="--list: drop the finished rows")

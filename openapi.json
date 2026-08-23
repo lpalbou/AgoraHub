@@ -467,11 +467,21 @@
       "title": "Mission",
       "type": "string"
      },
+     "model": {
+      "default": "",
+      "title": "Model",
+      "type": "string"
+     },
      "options": {
       "additionalProperties": true,
       "default": {},
       "title": "Options",
       "type": "object"
+     },
+     "reasoning": {
+      "default": "",
+      "title": "Reasoning",
+      "type": "string"
      },
      "seat_id": {
       "title": "Seat Id",

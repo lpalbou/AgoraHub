@@ -749,6 +749,79 @@ def test_spawn_machines_shows_what_each_runner_can_actually_run(
     assert "claude, codex" in out and "never started" not in out
 
 
+def test_spawn_machines_prints_the_knobs_so_reasoning_is_not_typed_from_memory(
+        live_hub, isolated_home, capsys):
+    """`--reasoning` is only usable if this surface says what the machine
+    announced. Three states, three sentences, because different people fix
+    them: a runner predating the announce (restart it), a harness that takes
+    no reasoning setting at all, and a harness that resolves its own model.
+    """
+    runner_key = _register(live_hub.url, "runner-mbp")
+    httpx.put(f"{live_hub.url}/admin/machines/local/runner",
+              json={"agent_id": "runner-mbp"},
+              headers=_bearer(live_hub.admin), timeout=5)
+
+    # Announced its harnesses but not its knobs: the older runner.
+    httpx.post(f"{live_hub.url}/machines/local/announce",
+               json={"harnesses": ["claude"]},
+               headers=_bearer(runner_key), timeout=5)
+    _run_cli(["spawn", "--machines", "--url", live_hub.url,
+              "--admin-key", live_hub.admin])
+    out = capsys.readouterr().out
+    assert "has not announced its knobs" in out
+    assert "takes no reasoning setting" not in out   # a gap is not a fact
+
+    httpx.post(f"{live_hub.url}/machines/local/announce",
+               json={"harnesses": ["claude", "cursor", "codex"],
+                     "capabilities": {
+                         "claude": {"reasoning": ["low", "high"]},
+                         "cursor": {"reasoning": []},
+                         "codex": {"reasoning": ["low"],
+                                   "reasoning_advisory": True,
+                                   "default_model": "gpt-5.4"}}},
+               headers=_bearer(runner_key), timeout=5)
+    _run_cli(["spawn", "--machines", "--url", live_hub.url,
+              "--admin-key", live_hub.admin])
+    out = capsys.readouterr().out
+    assert "reasoning: low|high" in out
+    assert "the harness picks its own model" in out
+    assert "cursor" in out and "takes no reasoning setting" in out
+    assert "advisory" in out and "default model: gpt-5.4" in out
+    assert "has not announced its knobs" not in out
+
+
+def test_spawn_forwards_the_knobs_and_the_hub_refuses_an_unannounced_level(
+        live_hub, isolated_home, capsys):
+    """The CLI is the third door to the same knob, and a door that drops the
+    value silently is worse than one that has none: the operator would read
+    `pending` and believe the model was set."""
+    runner_key = _register(live_hub.url, "runner-mbp")
+    httpx.put(f"{live_hub.url}/admin/machines/local/runner",
+              json={"agent_id": "runner-mbp"},
+              headers=_bearer(live_hub.admin), timeout=5)
+    httpx.post(f"{live_hub.url}/machines/local/announce",
+               json={"harnesses": ["claude"],
+                     "capabilities": {"claude": {"reasoning": ["low", "high"]}}},
+               headers=_bearer(runner_key), timeout=5)
+
+    _run_cli(["spawn", "scribe", "--harness", "claude", "--model", "gpt-5.4",
+              "--reasoning", "high", "--url", live_hub.url,
+              "--admin-key", live_hub.admin])
+    capsys.readouterr()
+    rows = httpx.get(f"{live_hub.url}/spawns", headers=_bearer(live_hub.admin),
+                     timeout=5).json()
+    assert rows[0]["model"] == "gpt-5.4" and rows[0]["reasoning"] == "high"
+
+    with pytest.raises(SystemExit) as exc:
+        _run_cli(["spawn", "scribe2", "--harness", "claude",
+                  "--reasoning", "max", "--url", live_hub.url,
+                  "--admin-key", live_hub.admin])
+    assert "low|high" in str(exc.value)
+    rows = httpx.get(f"{live_hub.url}/spawns", headers=_bearer(live_hub.admin),
+                     timeout=5).json()
+    assert [r["seat_id"] for r in rows] == ["scribe"]   # no row for the refusal
+
+
 def test_spawn_stop_says_requested_never_stopped(live_hub, isolated_home,
                                                  capsys):
     """`stop` records an intent. A CLI printing "stopped" would be asserting

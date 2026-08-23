@@ -515,7 +515,8 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
     @mcp.tool()
     def spawn_seat(seat_id: str, harness: str, mission: str = "",
                    machine: str = "local", folder: str = "",
-                   channels: list[str] | None = None) -> dict:
+                   channels: list[str] | None = None,
+                   model: str = "", reasoning: str = "") -> dict:
         """Ask for a NEW SEAT to be started on a machine (OPERATOR only, and
         never delegable — no grant, including proxy, confers it).
 
@@ -532,6 +533,22 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
         refused); empty means `<root>/<seat_id>`. `mission` rides the join
         token, so the seat arrives already knowing what it is FOR.
 
+        `model` and `reasoning` are OPTIONAL and empty means "the harness
+        resolves its own" — never a value named empty-string. Both come from
+        `list_machines`: `capabilities[harness].default_model` is the model
+        this machine would pick, and `capabilities[harness].reasoning` is the
+        ONLY legal set of reasoning levels for that harness. The hub refuses a
+        level the machine did not announce, using the machine's own list and
+        never an enum of its own — so an empty `reasoning` list means that
+        harness takes no reasoning knob at all and any value is refused. Do
+        not offer a level from memory: read it from `list_machines` at call
+        time, because the vocabulary is per harness and per machine.
+
+        There is no model list anywhere, so `model` is passed to the vendor
+        CLI unvalidated. A model that harness does not have does NOT fail the
+        spawn: the seat joins, `agora drive` starts, and it then fails every
+        wake while this row still reads `running`.
+
         Watch it with `list_spawns`: `pending` means no runner has taken it,
         and `awaiting_approval` names the machine whose human has not yet said
         yes. A row is never proof that a process is running — only the
@@ -540,7 +557,8 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
         return _call("POST", "/spawns",
                      json={"seat_id": seat_id, "harness": harness,
                            "mission": mission, "machine": machine,
-                           "folder": folder, "channels": channels or []})
+                           "folder": folder, "channels": channels or [],
+                           "model": model, "reasoning": reasoning})
 
     @mcp.tool()
     def list_spawns(machine: str = "", active_only: bool = False) -> list:

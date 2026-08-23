@@ -1160,6 +1160,20 @@ class SpawnRequest(BaseModel):
     #: the runner owns policy and a hub-side enum would make every new knob a
     #: hub release.
     options: dict[str, Any] = Field(default_factory=dict)
+    #: The vendor model this seat drives with; "" means the harness resolves
+    #: its own. FIRST-CLASS rather than an `options` key (agora-wui #249,
+    #: #275): a free-form dict made each client hardcode the key name, and
+    #: worse, `options` reaches the runner and the runner reads only
+    #: `permissions` out of it — so a model passed that way was accepted,
+    #: stored, echoed back on this row, and never given to `agora drive`.
+    #: A confirmation that lies is worse than an omission that is silent.
+    model: str = ""
+    #: The reasoning effort, validated AT THE DOOR against the vocabulary the
+    #: runner announced for this harness — see `capabilities` on /machines.
+    #: The hub owns no vocabulary of its own here: an unknown level is refused
+    #: because the MACHINE said it cannot express it, never because the hub
+    #: holds a list.
+    reasoning: str = ""
     state: SpawnState = SpawnState.pending
     #: The runner's OWN sentence about this row's state, rendered verbatim by
     #: every client — so a refusal names itself instead of the operator having

@@ -613,6 +613,74 @@ def test_a_runner_announces_what_it_can_run_and_clients_read_it(wire):
     assert row["capabilities"] == {}
 
 
+# -- model/reasoning as first-class fields (agora-wui #275) -------------------
+
+def test_reasoning_the_machine_cannot_express_is_refused_at_the_door(wire):
+    """The hub holds no vocabulary; it refuses using the RUNNER's own.
+
+    A level the harness cannot express does not fail loudly at spawn time —
+    it launches, and then `agora drive` fails every wake. And drive does not
+    EXIT on a harness failure (its one failure mechanism is backoff, and
+    `harness` is a transport stage), so the process stays alive, `reap` never
+    fires, and the row asserts `running` forever. Refusing at the door is the
+    only place this is cheap.
+    """
+    runner = _register(wire, "runner-mbp")
+    wire.put("/admin/machines/local/runner", json={"agent_id": "runner-mbp"},
+             headers=_admin())
+    wire.post("/machines/local/announce", json={
+        "harnesses": ["claude", "cursor"],
+        "capabilities": {"claude": {"reasoning": ["low", "high"]},
+                         "cursor": {"reasoning": []}}}, headers=runner)
+
+    r = wire.post("/spawns", json={"seat_id": "scribe", "harness": "claude",
+                                   "reasoning": "max"}, headers=_admin())
+    assert r.status_code == 400
+    assert "low|high" in r.text and "max" in r.text
+
+    # ...and an announced level is accepted and echoed on the row.
+    ok = wire.post("/spawns", json={"seat_id": "scribe", "harness": "claude",
+                                    "reasoning": "high", "model": "gpt-5.4"},
+                   headers=_admin())
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["reasoning"] == "high"
+    assert ok.json()["model"] == "gpt-5.4"
+
+
+def test_an_empty_vocabulary_refuses_any_reasoning_at_all(wire):
+    """`cursor` announced []. That is a FACT about the harness — it takes no
+    reasoning knob — not a list that failed to load, so any value is refused
+    rather than passed through."""
+    runner = _register(wire, "runner-mbp")
+    wire.put("/admin/machines/local/runner", json={"agent_id": "runner-mbp"},
+             headers=_admin())
+    wire.post("/machines/local/announce", json={
+        "harnesses": ["cursor"], "capabilities": {"cursor": {"reasoning": []}}},
+        headers=runner)
+
+    r = wire.post("/spawns", json={"seat_id": "scribe", "harness": "cursor",
+                                   "reasoning": "low"}, headers=_admin())
+    assert r.status_code == 400
+    assert "no reasoning setting" in r.text
+
+
+def test_a_runner_that_never_announced_cannot_be_used_to_refuse(wire):
+    """Silence is not permission, but it is not grounds for refusal either.
+
+    With no capabilities the hub CANNOT check, and inventing a hub-side
+    vocabulary to fill the gap is the hardcoded-list defect this whole path
+    exists to kill. The value is accepted; the operator finds out from the
+    runner, which is the seat that actually knows.
+    """
+    _register(wire, "runner-mbp")
+    wire.put("/admin/machines/local/runner", json={"agent_id": "runner-mbp"},
+             headers=_admin())
+    r = wire.post("/spawns", json={"seat_id": "scribe", "harness": "claude",
+                                   "reasoning": "whatever"}, headers=_admin())
+    assert r.status_code == 200, r.text
+    assert r.json()["reasoning"] == "whatever"
+
+
 # -- the announced KNOBS, not just the names (laurent, agora-and-wui#258) -----
 
 def test_a_runner_announces_each_harness_s_reasoning_vocabulary(wire):

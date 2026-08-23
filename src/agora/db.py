@@ -357,6 +357,9 @@ CREATE TABLE IF NOT EXISTS spawn_requests (
     folder        TEXT NOT NULL DEFAULT '',       -- relative hint; '' = <root>/<seat_id>
     channels      TEXT NOT NULL DEFAULT '[]',     -- JSON list
     options       TEXT NOT NULL DEFAULT '{}',     -- JSON object: runner-side knobs
+    model         TEXT NOT NULL DEFAULT '',       -- '' = the harness resolves it
+    reasoning     TEXT NOT NULL DEFAULT '',       -- validated against the runner's
+                                  -- announced vocabulary, never a hub-side enum
     state         TEXT NOT NULL DEFAULT 'pending',
     detail        TEXT NOT NULL DEFAULT '',       -- the runner's OWN sentence
     requested_by  TEXT NOT NULL DEFAULT '',
@@ -481,6 +484,20 @@ class Database:
                     "ALTER TABLE agents ADD COLUMN retired_reason TEXT NOT NULL DEFAULT ''")
             if "deleted_at" not in agent_cols:
                 self._conn.execute("ALTER TABLE agents ADD COLUMN deleted_at REAL")
+            # Spawn knobs promoted OUT of `options` (agora-wui #275). They
+            # lived nowhere before: `options` reached the runner, the runner
+            # read only `permissions` from it, so a model sent that way was
+            # accepted, stored, echoed back on the row, and never handed to
+            # the driver. '' on every existing row means "the harness
+            # resolves it", which is what those rows already did.
+            spawn_cols = {r["name"] for r in
+                          self._conn.execute("PRAGMA table_info(spawn_requests)")}
+            if "model" not in spawn_cols:
+                self._conn.execute(
+                    "ALTER TABLE spawn_requests ADD COLUMN model TEXT NOT NULL DEFAULT ''")
+            if "reasoning" not in spawn_cols:
+                self._conn.execute(
+                    "ALTER TABLE spawn_requests ADD COLUMN reasoning TEXT NOT NULL DEFAULT ''")
             # A seat's MISSION is the operator's charge; `about` is the seat's
             # own self-description. They were one column for exactly one hour
             # on 2026-08-06, and in the first driven turn `rt2-critic` called
@@ -1376,6 +1393,8 @@ class Database:
             mission=row["mission"], harness=row["harness"], folder=row["folder"],
             channels=json.loads(row["channels"] or "[]"),
             options=json.loads(row["options"] or "{}"),
+            model=row["model"] if "model" in row.keys() else "",
+            reasoning=row["reasoning"] if "reasoning" in row.keys() else "",
             state=SpawnState(row["state"]), detail=row["detail"],
             requested_by=row["requested_by"], claimed_by=row["claimed_by"],
             join_token_id=row["join_token_id"],
@@ -1386,7 +1405,8 @@ class Database:
     def create_spawn_request(self, *, machine: str, seat_id: str, mission: str,
                              harness: str, folder: str, channels: list[str],
                              options: dict[str, Any],
-                             requested_by: str) -> SpawnRequest:
+                             model: str = "", reasoning: str = "",
+                             requested_by: str = "") -> SpawnRequest:
         """Record that a seat is WANTED. Nothing starts here — this is a row,
         and a runner on `machine` is what turns it into a process."""
         now = time.time()
@@ -1394,10 +1414,11 @@ class Database:
         with self._lock:
             self._conn.execute(
                 "INSERT INTO spawn_requests (id, machine, seat_id, mission,"
-                " harness, folder, channels, options, state, requested_by,"
-                " created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                " harness, folder, channels, options, model, reasoning,"
+                " state, requested_by, created_at, updated_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (spawn_id, machine, seat_id, mission, harness, folder,
-                 json.dumps(channels), json.dumps(options),
+                 json.dumps(channels), json.dumps(options), model, reasoning,
                  SpawnState.pending.value, requested_by, now, now),
             )
             self._conn.commit()

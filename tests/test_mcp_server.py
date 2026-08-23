@@ -166,6 +166,40 @@ def test_spawn_seat_records_a_pending_row_through_the_real_route(hub, monkeypatc
     assert _call_tool(mcp, "list_spawns", {})["id"] == row["id"]
 
 
+def test_spawn_seat_carries_the_knobs_through_the_mcp_door(hub, monkeypatch):
+    """The MCP lane is the door laurent actually asked for — spawning from
+    inside the chat rather than from a shell — so a knob that exists only on
+    the HTTP payload does not exist for the operator who requested it.
+
+    The refusal half is asserted here too, because the two doors must refuse
+    at the SAME standard: a level the machine never announced is refused
+    against the machine's own list, not an enum this hub holds.
+    """
+    import httpx
+
+    key = _make_agent(hub, "boss", operator=True)
+    runner_key = _make_agent(hub, "runner-mbp")
+    httpx.put(f"{hub}/admin/machines/local/runner",
+              json={"agent_id": "runner-mbp"},
+              headers={"Authorization": "Bearer k"}, timeout=5)
+    httpx.post(f"{hub}/machines/local/announce",
+               json={"harnesses": ["claude"],
+                     "capabilities": {"claude": {"reasoning": ["low", "high"]}}},
+               headers={"Authorization": f"Bearer {runner_key}"}, timeout=5)
+
+    mcp = _server_against(hub, monkeypatch, key)
+    row = _call_tool(mcp, "spawn_seat",
+                     {"seat_id": "scribe", "harness": "claude",
+                      "model": "gpt-5.4", "reasoning": "high"})
+    assert row["model"] == "gpt-5.4" and row["reasoning"] == "high"
+
+    out = _call_tool(mcp, "spawn_seat",
+                     {"seat_id": "scribe2", "harness": "claude",
+                      "reasoning": "max"})
+    assert out["ok"] is False and out["error"] == 400
+    assert "low|high" in out["detail"]
+
+
 def test_spawn_seat_from_a_non_operator_fails_loudly(hub, monkeypatch):
     """The MCP lane must not soften a refusal into something an LLM reads as
     success — that is what the `ok: false` shape exists for."""

@@ -996,7 +996,8 @@ class HubService:
                              mission: str = "", harness: str = "",
                              machine: str = "local", folder: str = "",
                              channels: list[str] | None = None,
-                             options: dict[str, Any] | None = None
+                             options: dict[str, Any] | None = None,
+                             model: str = "", reasoning: str = ""
                              ) -> SpawnRequest:
         """Record that a seat is wanted. Every refusal here happens BEFORE the
         row exists, so a request that cannot possibly succeed never becomes a
@@ -1025,10 +1026,57 @@ class HubService:
         preset = [c.strip() for c in (channels or [])
                   if isinstance(c, str) and c.strip()]
         opts = options if isinstance(options, dict) else {}
+        model = (model or "").strip()
+        if len(model) > MAX_SPAWN_MODEL_CHARS:
+            raise TextTooLong("model", len(model), MAX_SPAWN_MODEL_CHARS)
+        reasoning = self._validate_spawn_reasoning(machine, harness, reasoning)
         return self.db.create_spawn_request(
             machine=machine, seat_id=seat_id, mission=mission, harness=harness,
             folder=folder, channels=preset, options=opts,
-            requested_by=actor.id)
+            model=model, reasoning=reasoning, requested_by=actor.id)
+
+    def _validate_spawn_reasoning(self, machine: str, harness: str,
+                                  reasoning: str) -> str:
+        """Refuse a reasoning level THIS MACHINE said it cannot express.
+
+        The hub holds no vocabulary of its own: it checks against what the
+        runner announced for this harness (`capabilities` on /machines), so a
+        refusal is the machine's own statement rather than a hub-side enum
+        that would need a release every time a vendor adds a level.
+
+        The mirror of `drive.py`'s arm-time check, which exists because
+        `--reasoning-effort max` on a harness stopping at `xhigh` used to arm
+        GREEN and then fail every single wake with rc=1. The spawn row is a
+        SECOND door to the same knob and must refuse at the same standard —
+        and it matters more here, because a driver that fails every wake does
+        NOT exit, so `reap` never fires and the row asserts `running` forever
+        (measured, agora-and-wui#280).
+        """
+        reasoning = (reasoning or "").strip()
+        if not reasoning:
+            return ""
+        caps = (self.machine_harnesses(machine).get("capabilities")
+                or {}).get(harness)
+        if caps is None:
+            # This runner predates the capabilities announce, or has not
+            # started. Silence is not permission, but neither is it a reason
+            # to refuse a value that may well be right — the operator is told
+            # the check could not run rather than given a false green.
+            return reasoning
+        vocab = list(caps.get("reasoning") or [])
+        if not vocab:
+            raise HubError(
+                400, f"'{harness}' takes no reasoning setting at all on "
+                     f"'{machine}' — the runner announced an empty vocabulary, "
+                     "which is a fact about the harness rather than a missing "
+                     "list. Drop `reasoning` for this harness.")
+        if reasoning not in vocab:
+            raise HubError(
+                400, f"'{harness}' on '{machine}' cannot express reasoning "
+                     f"'{reasoning}' — it announced {'|'.join(vocab)}. A level "
+                     "it cannot express would launch the seat and then fail "
+                     "every wake, with the spawn row still reading `running`.")
+        return reasoning
 
     def list_spawn_requests(self, *, machine: str = "",
                             active_only: bool = False,

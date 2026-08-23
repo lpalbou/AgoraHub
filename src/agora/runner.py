@@ -242,15 +242,26 @@ def tty_approve(cfg: RunnerConfig, row: dict[str, Any]) -> bool:
 
 
 def default_launcher(cfg: RunnerConfig, seat_id: str, folder: Path,
-                     harness: str, permissions: str) -> Launched:
+                     harness: str, permissions: str,
+                     model: str = "", reasoning: str = "") -> Launched:
     """Start `agora drive` as a CHILD of this process.
 
     A child of the runner and NOT of the hub: a `Popen` from inside uvicorn is
     orphaned the moment `agora up --force` SIGTERMs the hub by pid, which is
     the mechanical half of why the hub does not do this.
+
+    `model`/`reasoning` are forwarded ONLY if the row carries them. Before
+    they were first-class the operator could set them via `options` and the
+    hub would store and echo them while this function never read them — the
+    seat ran at the harness default and the row said otherwise. Passing them
+    here is what makes the field true rather than decorative.
     """
     argv = [sys.executable, "-m", "agora.cli", "drive", "--as", seat_id,
             "--harness", harness, "--permissions", permissions]
+    if model:
+        argv += ["--model", model]
+    if reasoning:
+        argv += ["--reasoning-effort", reasoning]
     if cfg.url:
         argv += ["--url", cfg.url]
     proc = subprocess.Popen(argv, cwd=str(folder), stdin=subprocess.DEVNULL,
@@ -334,7 +345,9 @@ def handle_request(cfg: RunnerConfig, state: RunnerState, row: dict[str, Any],
         return (SpawnState.failed.value,
                 f"joining the hub failed on {cfg.machine}: {e}"[:500])
     try:
-        launched = launcher(cfg, seat_id, folder, row["harness"], permissions)
+        launched = launcher(cfg, seat_id, folder, row["harness"], permissions,
+                            str(row.get("model") or ""),
+                            str(row.get("reasoning") or ""))
     except Exception as e:                       # noqa: BLE001
         return (SpawnState.failed.value,
                 f"the seat joined but its driver would not start on "

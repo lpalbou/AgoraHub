@@ -466,6 +466,12 @@ class CreateSpawn(BaseModel):
     folder: str = ""
     channels: list[str] = []
     options: dict[str, Any] = {}
+    #: Optional, empty by default. FIRST-CLASS rather than `options` keys:
+    #: `options` reaches the runner, which reads only `permissions` out of it,
+    #: so a model passed there was accepted, stored, echoed back and never
+    #: given to the driver (agora-wui #275).
+    model: str = ""
+    reasoning: str = ""
 
 
 @router.post("/spawns")
@@ -488,7 +494,8 @@ def create_spawn(
     row = _run(service.create_spawn_request, agent, seat_id=payload.seat_id,
                mission=payload.mission, harness=payload.harness,
                machine=payload.machine, folder=payload.folder,
-               channels=payload.channels, options=payload.options)
+               channels=payload.channels, options=payload.options,
+               model=payload.model, reasoning=payload.reasoning)
     return row.model_dump(mode="json")
 
 

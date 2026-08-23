@@ -58,9 +58,11 @@ class _FakeProc:
 def _launcher(*, pid: int = 4123, rc: int | None = None):
     calls: list[dict] = []
 
-    def launch(cfg, seat_id, folder, harness, permissions):
+    def launch(cfg, seat_id, folder, harness, permissions,
+               model="", reasoning=""):
         calls.append({"seat_id": seat_id, "folder": folder,
-                      "harness": harness, "permissions": permissions})
+                      "harness": harness, "permissions": permissions,
+                      "model": model, "reasoning": reasoning})
         return R.Launched(seat_id=seat_id, folder=folder, pid=pid,
                           process=_FakeProc(pid, rc))
 
@@ -114,6 +116,82 @@ def test_a_folder_hint_is_honoured_inside_the_root(cfg, monkeypatch):
     R.handle_request(cfg, RunnerState(), _row(folder="projects/minutes"),
                      "t", joiner=_joiner(), launcher=launch)
     assert launch.calls[0]["folder"] == cfg.root / "projects" / "minutes"
+
+
+def test_model_and_reasoning_reach_the_driver(cfg, monkeypatch):
+    """The piece without which first-class fields are decoration.
+
+    Before this, `model` could be sent as an `options` key: the hub accepted
+    it, stored it, and echoed it back on the row — and the runner read only
+    `permissions` out of `options`, so the seat ran at the harness default
+    while the row said otherwise. A confirmation that lies is worse than an
+    omission that is silent, so the assertion is that the value REACHES THE
+    LAUNCHER, not that the field exists.
+    """
+    _installed(monkeypatch, "claude")
+    launch = _launcher()
+    R.handle_request(cfg, RunnerState(),
+                     _row(model="gpt-5.4", reasoning="high"), "t",
+                     joiner=_joiner(), launcher=launch)
+    assert launch.calls[0]["model"] == "gpt-5.4"
+    assert launch.calls[0]["reasoning"] == "high"
+
+
+def test_the_knobs_reach_the_real_argv_not_just_the_injected_launcher(
+        cfg, monkeypatch):
+    """The seam, and it caught me.
+
+    `test_model_and_reasoning_reach_the_driver` exercises the INJECTED
+    launcher, so deleting the argv lines in `default_launcher` leaves it
+    green — measured, not supposed. The value has to be asserted where it
+    becomes a process argument, which is the only place the harness can see
+    it. Same absent-input-passes shape as the capabilities announce earlier.
+    """
+    _installed(monkeypatch, "claude")
+    argv_seen: list[list[str]] = []
+
+    class _P:
+        pid = 77
+        returncode = None
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(R.subprocess, "Popen",
+                        lambda argv, **kw: (argv_seen.append(argv), _P())[1])
+    R.handle_request(cfg, RunnerState(),
+                     _row(model="gpt-5.4", reasoning="high"), "t",
+                     joiner=_joiner())
+
+    argv = argv_seen[0]
+    assert argv[argv.index("--model") + 1] == "gpt-5.4"
+    assert argv[argv.index("--reasoning-effort") + 1] == "high"
+
+
+def test_an_absent_knob_is_not_forwarded_as_empty(cfg, monkeypatch):
+    """`--model ""` is not the same request as no `--model`: the first asks
+    the harness for a model named empty-string, the second lets it resolve its
+    own. A row that carries neither must produce an argv that carries
+    neither."""
+    _installed(monkeypatch, "claude")
+    argv_seen: list[list[str]] = []
+
+    class _P:
+        pid = 99
+        returncode = None
+
+        def poll(self):
+            return None
+
+    def fake_popen(argv, **kw):
+        argv_seen.append(argv)
+        return _P()
+
+    monkeypatch.setattr(R.subprocess, "Popen", fake_popen)
+    R.handle_request(cfg, RunnerState(), _row(), "t", joiner=_joiner())
+
+    argv = argv_seen[0]
+    assert "--model" not in argv and "--reasoning-effort" not in argv
 
 
 # -- 2. the negative twin, without which the above is decoration --------------
