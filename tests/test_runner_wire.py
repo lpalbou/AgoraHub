@@ -280,6 +280,72 @@ def test_a_refused_row_reaches_the_hub_as_rejected_not_as_silence(
     assert "claude" in row["detail"] and MACHINE in row["detail"]
 
 
+def test_the_real_joiner_redeems_the_token_and_wires_a_workspace(
+        wired, tmp_path, monkeypatch):
+    """`default_joiner` for real: the last segment of the spawn path that had
+    never executed under test.
+
+    Everything above ran with an injected `joiner`, so the runner's onboarding
+    call was asserted only by the tests it did not have. That is where
+    `mcp_command=""` shipped: `run_join` probes the command before redeeming
+    the invite, so every spawn died at `mcp-runtime` with *"'' is not
+    executable on PATH"* — a refusal naming no command — while 1828 tests
+    stayed green, because the CLI's own `agora join` resolves the command at
+    its own call site and nothing exercised THIS one.
+
+    `HOME` and `AGORA_HOME` are redirected into the tmp tree: `run_join` caches
+    a key, pins a url and writes harness wiring under `$HOME`, and a test that
+    let that reach the real one would edit the machine it runs on.
+
+    The launcher stays injected. The only thing left unexecuted after this test
+    is `subprocess.Popen` of `agora drive` itself, which is the LLM harness —
+    correctly out of scope for a suite, and covered for its argv by
+    `test_the_knobs_reach_the_real_argv_not_just_the_injected_launcher`.
+    """
+    home = tmp_path / "home"
+    (home / ".agora").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("AGORA_HOME", str(home / ".agora"))
+    for var in ("AGORA_URL", "AGORA_ADMIN_KEY", "AGORA_AGENT_ID",
+                "AGORA_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    _installed(monkeypatch, "claude")
+
+    spawn_id = _wanted(wired.url, wired.operator_key, seat_id="scribe",
+                       mission="keep the minutes")["id"]
+
+    R.run_once(wired.cfg, RunnerState(), wired.hub,
+               launcher=_launcher())          # joiner NOT injected
+
+    # The row says running, which means the joiner did not raise. Under the
+    # empty-mcp_command bug this is `failed` with a refusal naming no command.
+    row = _row(wired.url, spawn_id)
+    assert row["state"] == "running", row["detail"]
+
+    # The SEAT is real on the hub, minted by the token the runner was handed.
+    agents = httpx.get(f"{wired.url}/agents", headers=_admin(),
+                       timeout=10).json()
+    scribe = [a for a in agents if a["id"] == "scribe"]
+    assert scribe, [a["id"] for a in agents]
+    assert scribe[0]["operator"] is False
+
+    # And this machine can now act AS that seat: the key was cached under the
+    # redirected home, against the same url string used to redeem.
+    from agora import config as _cfg
+    key = _cfg.get_cached_key(wired.url, "scribe")
+    assert key, "run_join redeemed but cached no key"
+    who = httpx.get(f"{wired.url}/whoami",
+                    headers={"Authorization": f"Bearer {key}"},
+                    timeout=10).json()
+    assert who["id"] == "scribe"
+    assert who["mission"] == "keep the minutes"    # it rode the join token
+
+    # The workspace was wired inside the runner's root, and nowhere else.
+    folder = wired.cfg.root / "scribe"
+    assert folder.is_dir()
+    assert any(folder.iterdir()), "joined but wrote no harness footprint"
+
+
 def test_a_dead_driver_is_reported_stopped_on_the_next_turn(wired, monkeypatch):
     """`reap` -> `set_state(stopped)` over the wire. A row left at `running`
     after its driver died is the hub asserting a seat that is not there, and
