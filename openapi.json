@@ -58,6 +58,13 @@
       },
       "title": "To",
       "type": "array"
+     },
+     "to_from_text": {
+      "items": {
+       "type": "string"
+      },
+      "title": "To From Text",
+      "type": "array"
      }
     },
     "required": [

@@ -264,6 +264,22 @@ class Ask(BaseModel):
     # so a canvass row can never again be buried by headline scroll (field
     # incident: 70 name-in-TEXT misses in 48h — names in prose flag nobody).
     to: list[str] = Field(default_factory=list)
+    #: Which of `to` the HUB added from this ask's TEXT rather than the author
+    #: passing them (2026-08-23; agora-tui thread-shape-and-panels#142).
+    #: A mention-derived addressee gates the ask's discharge exactly like a
+    #: passed one and means the opposite: "@x wants this" names a SUBJECT,
+    #: "@x, which?" names an ADDRESSEE, and `resolve_mentions` cannot tell
+    #: them apart. Writing an ask that merely REFERS to a third party
+    #: therefore blocks it on someone who was never asked anything — it cost
+    #: agora-wui 25 minutes and an escalation on a row they had answered in
+    #: full, with the name visible on both clients the whole time.
+    #:
+    #: Recorded by the hub instead of re-derived by each client: the
+    #: derivation is deterministic today and would drift the first @-form
+    #: this function learns that a TypeScript or Rust copy does not, with
+    #: every suite green while the two clients disagree about which names on
+    #: a row are advisory. Always a SUBSET of `to`; empty is the normal case.
+    to_from_text: list[str] = Field(default_factory=list)
 
 
 class AttachmentRef(BaseModel):

@@ -1477,6 +1477,13 @@ class HubService:
                                             "who is here; drop the name or leave "
                                             "the ask broadcast")
                 entry["to"] = named
+            # Always present, always a list — never omitted when empty. A
+            # client that must first ask whether the key exists will get it
+            # wrong exactly once, in the direction of reading every addressee
+            # as deliberate, which is the confusion the field exists to end.
+            derived = [s for s in (a.get("to_from_text") or [])
+                       if s in entry.get("to", [])]
+            entry["to_from_text"] = derived
             norm.append(entry)
         return norm
 
@@ -3084,15 +3091,32 @@ class HubService:
                     if o not in ctx.outsiders:
                         ctx.outsiders.append(o)
                 seats = list(ask.to or [])
+                # WHICH names the hub added, recorded at the source (agora-tui
+                # #142, agora-wui #131). An addressee merged from the ask's
+                # TEXT gates the ask's discharge exactly like a passed one, but
+                # means something opposite: "@x wants this" is a subject,
+                # "@x, which?" is an addressee, and the merge cannot tell them
+                # apart. It cost agora-wui 25 minutes and an escalation on a
+                # row they had answered completely.
+                #
+                # Recorded here rather than left to renderers because the
+                # alternative is every client re-deriving `resolve_mentions`
+                # in its own language: deterministic today, drifting the first
+                # @-form this function learns that the copies do not, with
+                # every suite green while the clients disagree about which
+                # names on a row are advisory.
+                derived: list[str] = []
                 for seat in in_ask:
                     if seat == agent.id or seat in seats:
                         continue
                     if len(seats) < self.MAX_ASK_TO:
                         seats.append(seat)
+                        derived.append(seat)
                     elif seat not in ctx.unobliged:
                         ctx.unobliged.append(seat)
                 if seats != list(ask.to or []):
-                    ask = ask.model_copy(update={"to": seats})
+                    ask = ask.model_copy(update={"to": seats,
+                                                 "to_from_text": derived})
                     asks_changed = True
                 new_asks.append(ask)
             if asks_changed:

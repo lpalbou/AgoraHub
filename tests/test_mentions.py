@@ -231,6 +231,71 @@ def test_peer_ask_text_mention_populates_per_ask_to(tmp_path):
     assert any(row["asks_naming_you"] == ["1"] for row in owed["to_answer"])
 
 
+def test_the_row_says_WHICH_addressees_the_hub_added_from_the_text(tmp_path):
+    """agora-tui thread-shape-and-panels#142; the incident is agora-wui's.
+
+    `agora` posted an ask opening "@laurent wants optional model + reasoning"
+    — laurent as the ask's SUBJECT — and passed to=[agora-wui, agora-tui].
+    The hub stored three addressees, `_ask_answered` requires every one, and
+    agora-wui's complete answer left the row pinned on them for 25 minutes
+    until it escalated. The name was on screen in BOTH clients the whole
+    time: a mention-derived addressee and a passed one render identically,
+    though one means "this is about laurent" and the other "laurent must
+    answer".
+
+    Recorded by the hub rather than re-derived per client, because a copy of
+    `resolve_mentions` in TypeScript or Rust is correct only until this
+    function learns an @-form the copy has not — both suites green while the
+    clients disagree about which names are advisory.
+    """
+    client = make_client(tmp_path)
+    op = register(client, "op", operator=True)
+    asker = register(client, "asker")
+    wui = register(client, "wui")
+    tui = register(client, "tui")
+    laurent = register(client, "laurent")
+    make_channel(client, op, "room", asker, wui, tui, laurent)
+
+    r = client.post("/channels/room/messages", json={
+        "body": "form question",
+        "title": "which shape",
+        "status": "open",
+        "asks": [{"id": "1", "text": "@laurent wants model+reasoning — which?",
+                  "to": ["wui", "tui"]}],
+    }, headers=asker)
+    assert r.status_code == 200, r.text
+    ask = r.json()["data"]["asks"][0]
+
+    # The merge still happens — this does not change who is obliged.
+    assert ask["to"] == ["wui", "tui", "laurent"]
+    # ...but the row now says which name the AUTHOR did not write.
+    assert ask["to_from_text"] == ["laurent"]
+    assert set(ask["to_from_text"]) <= set(ask["to"])
+
+
+def test_an_ask_nobody_was_mentioned_in_carries_an_empty_derived_list(tmp_path):
+    """The absent-input case, which must be an empty list rather than a
+    missing key: a client that has to ask whether the field exists before
+    reading it will get it wrong exactly once, in the direction of treating
+    every addressee as deliberate."""
+    client = make_client(tmp_path)
+    op = register(client, "op", operator=True)
+    asker = register(client, "asker")
+    wui = register(client, "wui")
+    make_channel(client, op, "room", asker, wui)
+
+    r = client.post("/channels/room/messages", json={
+        "body": "form question",
+        "title": "which shape",
+        "status": "open",
+        "asks": [{"id": "1", "text": "which shape do you want?",
+                  "to": ["wui"]}],
+    }, headers=asker)
+    ask = r.json()["data"]["asks"][0]
+    assert ask["to"] == ["wui"]
+    assert ask["to_from_text"] == []
+
+
 def test_operator_body_mention_populates_to(tmp_path):
     client = make_client(tmp_path)
     op = register(client, "op", operator=True)
