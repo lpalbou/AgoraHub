@@ -3688,7 +3688,22 @@ class Driver:
         now = self._prune_work_times()
         if now - self._last_initiative < DRIVE_INITIATIVE_COOLDOWN:
             return False
-        if not self._turn_times or max(self._turn_times) <= self._last_initiative:
+        if self._turn_times:
+            if max(self._turn_times) <= self._last_initiative:
+                return False
+        elif self._last_initiative:
+            # NO TURN HISTORY AT ALL: a seat that has just been born. The
+            # traffic gate above reads "a dead room buys zero passes", and it
+            # used to refuse this case too — `not self._turn_times` was the
+            # first thing it checked. That made every spawned seat inert: the
+            # first one ever created (`dm#71`) was given the mission "say hi
+            # when you arrive", had it mirrored into its rule file, and then
+            # armed in silence, because the only lane that authorises speaking
+            # first requires a turn it had never been given a reason to take.
+            # A newborn is not a dead room — an operator made it, with a
+            # mission, seconds ago, which is more warrant than any traffic.
+            # Spent once per process: this pass stamps `_last_initiative`, and
+            # from then on the ordinary traffic rule applies.
             return False
         if len(self._work_times) >= self.work_budget:
             return False
