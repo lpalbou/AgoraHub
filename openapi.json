@@ -791,6 +791,12 @@
    },
    "HarnessAnnouncement": {
     "properties": {
+     "capabilities": {
+      "additionalProperties": true,
+      "default": {},
+      "title": "Capabilities",
+      "type": "object"
+     },
      "harnesses": {
       "default": [],
       "items": {
@@ -7688,7 +7694,7 @@
   },
   "/machines/{machine}/announce": {
    "post": {
-    "description": "A runner declares what it can actually run here. Only the seat an admin\nnamed as this machine's runner may call it \u2014 otherwise any member could\nwrite the list every client's dropdown reads.",
+    "description": "A runner declares what it can actually run here, and with which knobs.\nOnly the seat an admin named as this machine's runner may call it \u2014\notherwise any member could write the list every client's dropdown reads.",
     "operationId": "announce_harnesses_machines__machine__announce_post",
     "parameters": [
      {

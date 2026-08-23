@@ -602,13 +602,91 @@ def test_a_runner_announces_what_it_can_run_and_clients_read_it(wire):
     # them differently — so the hub must distinguish them.
     row = wire.get("/machines", headers=_admin()).json()[0]
     assert row == {"machine": "local", "runner": "runner-mbp",
-                   "harnesses": [], "announced_at": None}
+                   "harnesses": [], "capabilities": {}, "announced_at": None}
 
     wire.post("/machines/local/announce",
               json={"harnesses": ["claude", "codex"]}, headers=runner)
     row = wire.get("/machines", headers=_admin()).json()[0]
     assert row["harnesses"] == ["claude", "codex"]
     assert row["announced_at"] is not None
+    # An older runner announces the list alone: "has not said", not "no knobs".
+    assert row["capabilities"] == {}
+
+
+# -- the announced KNOBS, not just the names (laurent, agora-and-wui#258) -----
+
+def test_a_runner_announces_each_harness_s_reasoning_vocabulary(wire):
+    """The harness list stopped clients inventing HARNESSES; nothing stopped
+    them inventing the harness's KNOBS.
+
+    `agora` hand-transcribed four adapters' vocabularies into `#251` as the
+    source for @agora-wui's dropdown, having argued in the same message that a
+    client restating an unpublished contract is drift no suite can see. The
+    table was already wrong by two — `pi` and `abstractcode-tui` — and laurent
+    caught it. A dropdown built from it would have left those harnesses
+    unspawnable with reasoning, green on both sides.
+    """
+    runner = _register(wire, "runner-mbp")
+    wire.put("/admin/machines/local/runner", json={"agent_id": "runner-mbp"},
+             headers=_admin())
+    wire.post("/machines/local/announce", json={
+        "harnesses": ["claude", "cursor", "pi"],
+        "capabilities": {
+            "claude": {"reasoning": ["low", "medium", "high", "xhigh", "max"],
+                       "default_model": None},
+            # empty vocab: takes NO reasoning knob. Not the same as "any".
+            "cursor": {"reasoning": []},
+            # accepts the knob and enforces nothing.
+            "pi": {"reasoning": ["off", "max"], "reasoning_advisory": True},
+        }}, headers=runner)
+
+    caps = wire.get("/machines", headers=_admin()).json()[0]["capabilities"]
+    assert caps["claude"]["reasoning"] == ["low", "medium", "high", "xhigh",
+                                           "max"]
+    assert caps["cursor"]["reasoning"] == []
+    assert caps["pi"]["reasoning_advisory"] is True
+    assert caps["claude"]["reasoning_advisory"] is False
+    assert caps["claude"]["default_model"] is None
+
+
+def test_the_hub_stores_a_reasoning_value_it_has_never_heard_of(wire):
+    """Shape-checked, never value-checked — the harness rule one level down.
+
+    A hub-side vocabulary enum would need a release every time a vendor adds a
+    level, and the hub cannot know what the harness on someone else's machine
+    accepts. So an unknown level is the runner's truth, stored verbatim, the
+    way an unknown harness name already is.
+    """
+    runner = _register(wire, "runner-mbp")
+    wire.put("/admin/machines/local/runner", json={"agent_id": "runner-mbp"},
+             headers=_admin())
+    r = wire.post("/machines/local/announce", json={
+        "harnesses": ["newthing"],
+        "capabilities": {"newthing": {"reasoning": ["ludicrous"],
+                                      "default_model": "brand-new-9"}}},
+        headers=runner)
+    assert r.status_code == 200, r.text
+    caps = wire.get("/machines", headers=_admin()).json()[0]["capabilities"]
+    assert caps["newthing"] == {"reasoning": ["ludicrous"],
+                                "reasoning_advisory": False,
+                                "default_model": "brand-new-9"}
+
+
+def test_knobs_for_a_harness_that_was_not_announced_are_refused(wire):
+    """Refused, not trimmed. A capability row for a harness nobody can spawn
+    renders as a control that cannot be used — the silent-wrong class this
+    whole announce path exists to end — and trimming it would hide the
+    runner's own inconsistency from the runner."""
+    runner = _register(wire, "runner-mbp")
+    wire.put("/admin/machines/local/runner", json={"agent_id": "runner-mbp"},
+             headers=_admin())
+    r = wire.post("/machines/local/announce", json={
+        "harnesses": ["claude"],
+        "capabilities": {"codex": {"reasoning": ["high"]}}}, headers=runner)
+    assert r.status_code == 400
+    assert "codex" in r.text
+    # and nothing was stored: a refused announce leaves the prior truth alone
+    assert wire.get("/machines", headers=_admin()).json()[0]["harnesses"] == []
 
 
 def test_a_plain_member_can_read_the_machines_list(wire):

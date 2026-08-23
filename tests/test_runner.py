@@ -19,6 +19,7 @@ harness.
 
 from __future__ import annotations
 
+import argparse
 import pathlib
 
 import pytest
@@ -304,6 +305,57 @@ def test_the_announced_set_is_what_is_installed_here(cfg, monkeypatch):
     assert R.accepted_harnesses(cfg) == ()
 
 
+def test_the_announced_knobs_are_read_off_the_adapters_not_transcribed():
+    """The reason this function exists, in one assertion (laurent, #258).
+
+    `agora` hand-typed four adapters' reasoning vocabularies into a message as
+    the source for a client dropdown and omitted `pi` and `abstractcode-tui`.
+    Anything a human or a model retypes drifts; this reads the adapters. The
+    test names the two that were MISSED, so the regression it guards is the
+    one that actually happened rather than a hypothetical one.
+    """
+    from agora.drive import _DRIVE_ADAPTERS
+
+    caps = R.harness_capabilities(("claude", "pi", "abstractcode-tui",
+                                   "cursor"))
+    for name in ("claude", "pi", "abstractcode-tui", "cursor"):
+        assert caps[name]["reasoning"] == list(
+            _DRIVE_ADAPTERS[name].REASONING_VOCAB)
+
+    # cursor takes NO reasoning knob: empty, and that is a fact, not a gap.
+    assert caps["cursor"]["reasoning"] == []
+    # pi accepts the knob and enforces nothing — a client must not imply a
+    # guarantee the harness does not make.
+    assert caps["pi"]["reasoning_advisory"] is True
+    assert caps["claude"]["reasoning_advisory"] is False
+
+
+def test_an_unknown_harness_name_cannot_conjure_a_capability_row():
+    """No hub-side enum here either: a name with no adapter yields no row,
+    rather than an empty row that renders as "this harness has no knobs"."""
+    assert R.harness_capabilities(("nonesuch",)) == {}
+
+
+def test_the_runner_announces_the_knobs_and_not_only_the_names(cfg,
+                                                               monkeypatch):
+    """The seam. Every hub-side test for `capabilities` passes with a runner
+    that never sends them — so without this, the whole feature could go quiet
+    and only the clients would find out, which is the absent-input-passes
+    defect this repo keeps catching one layer at a time.
+    """
+    _installed(monkeypatch, "claude", "cursor")
+    hub = _FakeHub()
+    monkeypatch.setattr(R, "RunnerHub", lambda *a, **k: hub)
+    monkeypatch.setattr(R, "config_from_args", lambda _a: cfg)
+    R.main(argparse.Namespace(once=True))
+
+    machine, harnesses, caps = hub.announced
+    assert machine == cfg.machine
+    assert set(harnesses) == {"claude", "cursor"}
+    assert caps["claude"]["reasoning"], "claude's vocabulary was not announced"
+    assert caps["cursor"]["reasoning"] == []
+
+
 # -- one turn of the loop -----------------------------------------------------
 
 class _FakeHub:
@@ -312,9 +364,12 @@ class _FakeHub:
         self.states: list[tuple[str, str, str]] = []
         self.announced = None
 
-    def announce(self, machine, harnesses):
-        self.announced = (machine, tuple(harnesses))
+    def announce(self, machine, harnesses, capabilities=None):
+        self.announced = (machine, tuple(harnesses), capabilities or {})
         return {}
+
+    def close(self):
+        pass
 
     def claim(self, machine):
         out, self._claimed = self._claimed, None

@@ -1035,6 +1035,12 @@ class AgentInfo(BaseModel):
 MAX_SPAWN_FOLDER_CHARS = 256
 MAX_SPAWN_DETAIL_CHARS = 500   # the runner's own sentence, rendered verbatim
 MAX_SPAWN_HARNESS_CHARS = 64
+# A vendor model id the hub never validates and only ever passes through
+# (`agora-and-wui#251`: no adapter enumerates models, so there is nothing to
+# check against and a hub-side list would be the invented fallback the
+# announce path exists to kill). Bounded so a client renders a field, not a
+# paragraph.
+MAX_SPAWN_MODEL_CHARS = 128
 
 
 class SpawnState(str, Enum):

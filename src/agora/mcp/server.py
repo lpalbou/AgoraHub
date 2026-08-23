@@ -580,6 +580,21 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
         `harnesses` is the RUNNER's announced set and the only list to offer:
         the hub keeps no harness enum, and an unrecognised name renders
         verbatim rather than being dropped.
+
+        `capabilities` is that same rule one level down — what each harness
+        will ACCEPT, announced by the machine that would run it, so no client
+        (and no seat writing a message) ever transcribes a vocabulary again:
+          `reasoning`  the legal --reasoning-effort values. `[]` means the
+                       harness takes NO reasoning knob (cursor) — not "any".
+          `reasoning_advisory`  it accepts the knob and enforces nothing (pi):
+                       a seat can ask for `max` and get whatever the vendor
+                       does, so say so rather than implying a guarantee.
+          `default_model`  what it drives with when nobody names one; `null`
+                       means the harness resolves its own, so print nothing.
+        An EMPTY `capabilities` means the runner is older than this field —
+        "this machine has not said", never "no knobs".
+        There is deliberately no model list: no adapter enumerates models, so
+        `model` is a free-text field the hub passes through unvalidated.
         """
         return _call("GET", "/machines")
 

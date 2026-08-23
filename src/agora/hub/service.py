@@ -68,6 +68,7 @@ from ..models import (
     MAX_FS_PATH_CHARS,
     MAX_SPAWN_DETAIL_CHARS,
     MAX_SPAWN_HARNESS_CHARS,
+    MAX_SPAWN_MODEL_CHARS,
     MAX_STORE_VALUE_BYTES,
     NOTICE_KINDS,
     AgentInfo,
@@ -871,12 +872,25 @@ class HubService:
         return self.db.meta_list_prefix(self.MACHINE_RUNNER_PREFIX)
 
     def announce_harnesses(self, agent: AgentInfo, machine: str,
-                           harnesses: list[str]) -> dict[str, Any]:
-        """The runner says what it can actually run. There is deliberately no
-        hub-side harness enum to validate against: every new harness would
-        then need a hub release, and the hub cannot know what is installed on
-        someone else's machine anyway. Names are stored as sent and every
-        client renders an unrecognised one VERBATIM."""
+                           harnesses: list[str],
+                           capabilities: dict[str, Any] | None = None
+                           ) -> dict[str, Any]:
+        """The runner says what it can actually run, and with which KNOBS.
+
+        There is deliberately no hub-side harness enum to validate against:
+        every new harness would then need a hub release, and the hub cannot
+        know what is installed on someone else's machine anyway. Names are
+        stored as sent and every client renders an unrecognised one VERBATIM.
+
+        `capabilities` extends that rule one level down, to the values each
+        harness ACCEPTS (2026-08-23). The harness list stopped clients
+        inventing harnesses; nothing stopped them inventing reasoning
+        vocabularies, so `agora` hand-transcribed four adapters into a message
+        as the source for a client dropdown and it was wrong by two before it
+        was sent. The hub validates the SHAPE and never the values — an
+        unknown reasoning level is the runner's truth about its own machine,
+        exactly like an unknown harness name.
+        """
         machine = self._require_runner(agent, machine)
         names = sorted({h.strip() for h in harnesses
                         if isinstance(h, str) and h.strip()})
@@ -885,19 +899,73 @@ class HubService:
             raise HubError(400, "harness names must be at most "
                                 f"{MAX_SPAWN_HARNESS_CHARS} characters, at "
                                 "most 32 of them")
+        caps = self._clean_capabilities(capabilities, names)
         self.db.meta_set(self.MACHINE_HARNESS_PREFIX + machine,
-                         json.dumps({"harnesses": names, "at": time.time()}))
-        return {"machine": machine, "harnesses": names}
+                         json.dumps({"harnesses": names, "capabilities": caps,
+                                     "at": time.time()}))
+        return {"machine": machine, "harnesses": names, "capabilities": caps}
+
+    def _clean_capabilities(self, capabilities: dict[str, Any] | None,
+                            names: list[str]) -> dict[str, Any]:
+        """Shape-check the announced knobs; never judge their values.
+
+        Refused rather than trimmed when a harness is described that was not
+        announced: a capability row for a harness nobody can spawn is a client
+        rendering a control that cannot be used, which is the silent-wrong
+        class this whole path exists to end."""
+        if not capabilities:
+            return {}
+        if not isinstance(capabilities, dict):
+            raise HubError(400, "capabilities must be a map of "
+                                "harness -> {reasoning, default_model}")
+        unknown = sorted(set(capabilities) - set(names))
+        if unknown:
+            raise HubError(
+                400, f"capabilities describe {', '.join(unknown)}, which "
+                     f"{'is' if len(unknown) == 1 else 'are'} not in the "
+                     "announced harness list — announce the harness or drop "
+                     "the row; a knob for a harness nobody can spawn renders "
+                     "as a control that cannot be used")
+        out: dict[str, Any] = {}
+        for name, row in capabilities.items():
+            if not isinstance(row, dict):
+                raise HubError(400, f"capabilities['{name}'] must be a map")
+            vocab = row.get("reasoning") or []
+            if not isinstance(vocab, list) or len(vocab) > 32:
+                raise HubError(400, f"capabilities['{name}'].reasoning must "
+                                    "be a list of at most 32 values")
+            levels = [str(v).strip() for v in vocab if str(v).strip()]
+            if any(len(v) > MAX_SPAWN_HARNESS_CHARS for v in levels):
+                raise HubError(400, "a reasoning value must be at most "
+                                    f"{MAX_SPAWN_HARNESS_CHARS} characters")
+            default_model = row.get("default_model")
+            if default_model is not None:
+                # REFUSE, never slice: a truncated model id is a string that
+                # looks like a model and is not one, and the client would
+                # render it as this machine's default. The repo's own
+                # no-silent-truncation guard caught this line as a slice.
+                default_model = str(default_model).strip()
+                if len(default_model) > MAX_SPAWN_MODEL_CHARS:
+                    raise TextTooLong(f"capabilities['{name}'].default_model",
+                                      len(default_model),
+                                      MAX_SPAWN_MODEL_CHARS)
+            out[name] = {
+                "reasoning": levels,
+                "reasoning_advisory": bool(row.get("reasoning_advisory")),
+                "default_model": default_model or None,
+            }
+        return out
 
     def machine_harnesses(self, machine: str) -> dict[str, Any]:
         raw = self.db.meta_get(self.MACHINE_HARNESS_PREFIX + machine)
         if not raw:
-            return {"harnesses": [], "announced_at": None}
+            return {"harnesses": [], "capabilities": {}, "announced_at": None}
         try:
             row = json.loads(raw)
         except ValueError:
-            return {"harnesses": [], "announced_at": None}
+            return {"harnesses": [], "capabilities": {}, "announced_at": None}
         return {"harnesses": list(row.get("harnesses") or []),
+                "capabilities": dict(row.get("capabilities") or {}),
                 "announced_at": row.get("at")}
 
     def list_machines(self) -> list[dict[str, Any]]:

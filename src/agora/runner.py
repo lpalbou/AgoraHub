@@ -123,6 +123,46 @@ def accepted_harnesses(cfg: RunnerConfig) -> tuple[str, ...]:
     return tuple(out)
 
 
+def harness_capabilities(names: tuple[str, ...]) -> dict[str, dict[str, Any]]:
+    """What each announced harness will ACCEPT, read off its own adapter.
+
+    Same rule as `accepted_harnesses`, one level down: the harness list stopped
+    clients inventing harnesses, and this stops them inventing the harness's
+    KNOBS. `agora` hand-transcribed four adapters' vocabularies into a message
+    as the source for a dropdown (`agora-and-wui#251`) and it was already wrong
+    by two — `pi` and `abstractcode-tui` missing — in the same evening it had
+    argued that a client restating an unpublished contract is drift no suite
+    can see. A dropdown built from that message would have made those two
+    harnesses unspawnable with reasoning, green on both sides.
+
+    Per harness:
+      `reasoning`  — the legal `--reasoning-effort` values. EMPTY means the
+                     harness takes no reasoning knob at all (cursor), which is
+                     a different fact from "any value" and renders differently.
+      `reasoning_advisory` — it accepts the knob and enforces NOTHING (pi), so
+                     a seat can ask for `max` and get whatever the vendor does.
+      `default_model` — what it drives with when nobody names a model. `None`
+                     means the harness resolves its own, so a client must not
+                     print a default it does not have.
+    There is deliberately no model LIST: no adapter enumerates models, and an
+    invented one is the fallback list this function exists to kill.
+    """
+    from .drive import _DRIVE_ADAPTERS
+
+    caps: dict[str, dict[str, Any]] = {}
+    for name in names:
+        adapter = _DRIVE_ADAPTERS.get(name)
+        if adapter is None:
+            continue
+        caps[name] = {
+            "reasoning": list(getattr(adapter, "REASONING_VOCAB", ()) or ()),
+            "reasoning_advisory": "reasoning" in (
+                getattr(adapter, "ADVISORY", frozenset()) or frozenset()),
+            "default_model": getattr(adapter, "HARNESS_DEFAULT_MODEL", None),
+        }
+    return caps
+
+
 def check_harness(cfg: RunnerConfig, harness: str) -> None:
     """Gate 2. The negative twin of the whole feature: with the binary absent
     the row must reach `rejected` naming the harness AND the machine — never
@@ -362,9 +402,11 @@ class RunnerHub:
             headers={"Authorization": f"Bearer {api_key}"},
             timeout=timeout)
 
-    def announce(self, machine: str, harnesses: tuple[str, ...]) -> dict[str, Any]:
+    def announce(self, machine: str, harnesses: tuple[str, ...],
+                 capabilities: dict[str, Any] | None = None) -> dict[str, Any]:
         r = self._http.post(f"/machines/{machine}/announce",
-                            json={"harnesses": list(harnesses)})
+                            json={"harnesses": list(harnesses),
+                                  "capabilities": capabilities or {}})
         r.raise_for_status()
         return r.json()
 
@@ -495,7 +537,7 @@ def main(args: argparse.Namespace) -> int:
           "environment, and its harness wiring is written under $HOME — not "
           "only under --root.", flush=True)
     try:
-        hub.announce(cfg.machine, accepted)
+        hub.announce(cfg.machine, accepted, harness_capabilities(accepted))
     except Exception as e:                       # noqa: BLE001
         print(f"  announce  : FAILED ({e}) — clients will not see this "
               "machine's harness list", flush=True)

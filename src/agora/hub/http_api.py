@@ -409,6 +409,11 @@ def list_machines(
 
 class HarnessAnnouncement(BaseModel):
     harnesses: list[str] = []
+    #: harness -> {reasoning: [...], reasoning_advisory: bool,
+    #: default_model: str|None}. Optional: an older runner announces the list
+    #: alone and the hub stores `{}`, which clients render as "this machine
+    #: has not said" rather than as "no knobs".
+    capabilities: dict[str, Any] = {}
 
 
 @router.post("/machines/{machine}/announce")
@@ -418,10 +423,11 @@ def announce_harnesses(
     agent: AgentInfo = Depends(current_agent),
     service: HubService = Depends(get_service),
 ) -> dict[str, Any]:
-    """A runner declares what it can actually run here. Only the seat an admin
-    named as this machine's runner may call it — otherwise any member could
-    write the list every client's dropdown reads."""
-    return _run(service.announce_harnesses, agent, machine, payload.harnesses)
+    """A runner declares what it can actually run here, and with which knobs.
+    Only the seat an admin named as this machine's runner may call it —
+    otherwise any member could write the list every client's dropdown reads."""
+    return _run(service.announce_harnesses, agent, machine, payload.harnesses,
+                payload.capabilities)
 
 
 @router.get("/spawns")
