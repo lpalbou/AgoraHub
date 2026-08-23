@@ -505,8 +505,29 @@ class MessageRow(Message):
     #                         this hub already refuses.
     #     "no"             -> it is not yours to close; post an ordinary reply
     #                         and let the asker close it.
-    #   Null = no statement (a retracted row, a row already closed, or a hub
-    #   older than this field). Never read null as "no".
+    #
+    #   NULL AND ABSENT ARE DIFFERENT STATES, and the first version of this
+    #   comment enumerated null wrongly — corrected 2026-08-23 after
+    #   thread-shape-and-panels#208 made a client's behaviour depend on it:
+    #
+    #     key ABSENT  -> a hub older than this field. NO STATEMENT. A client
+    #                    falls back to whatever it did before the field
+    #                    existed; it must never withdraw an affordance it
+    #                    already offers.
+    #     null        -> THERE IS NO LIVE QUESTION ON THIS ROW. Three ways in,
+    #                    and the FIRST is the common one this comment used to
+    #                    omit: (1) the row is not a question at all — an
+    #                    ordinary `fyi` or `reply`, which is most of any
+    #                    channel; (2) the question is already closed;
+    #                    (3) the row is retracted.
+    #
+    #   So null is NOT "closed or retracted", and a client must not infer
+    #   `closed` from it. Key the verb on the POSITIVE pair the hub already
+    #   serves — `status in (open, blocked)` and `closed is False` — which is
+    #   the same condition this field is computed under. Never read null as
+    #   "no": suppression is invisible to the seat it happens to, so when a
+    #   client cannot tell fall-back from suppress, it falls back
+    #   (agora-tui #208).
     reply_to_seq: int | None = None
     # ^ THE PARENT'S NUMBER (0154): what `reply_to`'s ULID cannot be printed
     #   as. `get_message_by_seq` took seq -> id years ago because "#N is how

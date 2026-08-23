@@ -1195,6 +1195,38 @@ def test_a_row_says_whether_THIS_reader_may_close_it():
     assert row(asker)["may_close"] is None
 
 
+def test_an_ordinary_fyi_row_serves_null_WITH_closed_false():
+    """The case I left out of the field's own contract, and it is the common
+    one (thread-shape-and-panels#207 → #208).
+
+    I documented `null` as "retracted, or already closed" and published a
+    table saying so. Most rows in any channel are neither: an ordinary `fyi`
+    or `reply` is not a question, so there is nothing to close and the field
+    says nothing — while `closed` is `false`, because the row was never a
+    question that could be settled.
+
+    That combination is exactly what a client was about to treat as
+    impossible-therefore-fall-back, which would have run a resolve-verb
+    derivation over every news post in the room. Pinned here so the contract
+    cannot drift back to the two-case story.
+    """
+    client = make_client()
+    op = register(client, "op", operator=True)
+    asker = register(client, "asker")
+    make_channel(client, asker, "room", op)
+    news = post(client, asker, body="just news", title="fyi", status="fyi")
+
+    row = next(m for m in
+               client.get("/channels/room/messages", headers=op).json()
+               if m["id"] == news["id"])
+    assert "may_close" in row, "a current hub always states the key"
+    assert row["may_close"] is None
+    assert row["closed"] is False, (
+        "null must not be read as 'closed' — a non-question is not a settled "
+        "question, and a client keying suppression on `closed` needs that "
+        "distinction to survive")
+
+
 def test_may_close_follows_the_REAL_ladder_when_authority_is_granted():
     """The field must track the rules rather than restate them: a delegation
     granted AFTER the message was posted flips the verb, with no republish
