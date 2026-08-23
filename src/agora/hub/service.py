@@ -4921,6 +4921,7 @@ class HubService:
     def store_set(self, agent: AgentInfo, channel: str, key: str, value: Any,
                   expect_version: int | None = None) -> StoreEntry:
         park_ring = ""
+        undeliverable_ring = ""
         self.require_membership(channel, agent.id)
         self._require_unpaused(agent, channel)
         self._require_not_archived(channel)
@@ -5121,6 +5122,31 @@ class HubService:
                 # hear the new one — the dedupe key is the block's content,
                 # so an unchanged block stays silent.
                 park_ring = str(value.get("needs_from") or "").strip()
+                # ...BUT THE RING MUST MEET THE SAME BAR AS THE TRANSITION
+                # (2026-08-23, agora-and-wui#288). Validation is
+                # transition-only by design; the ring is every-write. So an
+                # ALREADY-parked row could set `needs_from` to anything,
+                # skip `_validate_park`'s member check, and still ring — and
+                # `to=[<not a seat>]` addresses NOBODY, which turns an
+                # addressed nudge into an unaddressed `open` that wakes the
+                # WHOLE ROOM in the second person. Measured: agora-wui
+                # re-parked with `needs_from: "nobody — agora-wui
+                # re-measures this itself"`, and both agora-wui AND agora
+                # read "YOU ARE THE BLOCKER" as being about them; each
+                # answered a nudge that was for neither. The reported
+                # diagnosis was a fallback to the row's owner — there is no
+                # such fallback; the alert simply had no addressee.
+                #
+                # Not fixed by validating every write: that would refuse
+                # updates to rows parked before the rule, which the
+                # transition-only choice above exists to protect. Gate the
+                # DELIVERY instead, on the same two facts the sweep already
+                # checks (in the room, and not the owner).
+                if park_ring:
+                    ring_members = {m.agent_id
+                                    for m in self.db.list_members(channel)}
+                    if park_ring not in ring_members or park_ring == agent.id:
+                        undeliverable_ring, park_ring = park_ring, ""
             # Claim/key consistency (0093): when the claim key's task part
             # parses as a WORK ID and the value carries an `item` field,
             # they must agree — a pointer row that points two ways would
@@ -5159,6 +5185,33 @@ class HubService:
                     dedupe_key="blocking:" + hashlib.sha256(
                         f"{channel}\0{key}\0{park_ring}\0"
                         f"{value.get('needs') or ''}".encode()
+                    ).hexdigest()[:24])
+            except DuplicateMessage:
+                pass
+        # SILENT INABILITY IS THE SAME CLASS AS A SILENT LIMIT. Dropping the
+        # ring above (a `needs_from` naming a non-member, or the owner
+        # itself) must not simply go quiet: the seat believes it named
+        # someone. Tell the OWNER, addressed, so exactly one seat hears it —
+        # never the room, which is the failure being fixed. `needs_from` is
+        # the seat that can UNBLOCK you: "nobody" is spelled by leaving it
+        # out, and the sentence says so.
+        if undeliverable_ring:
+            try:
+                self._post_system(
+                    channel,
+                    f"NOBODY WAS RUNG for `{key}`: `needs_from` reads "
+                    f"\"{elide(undeliverable_ring, 60)}\", which "
+                    + ("names you — a seat cannot be its own unblocker."
+                       if undeliverable_ring == agent.id else
+                       f"is not a member of '{channel}', so there was "
+                       "nobody to address.")
+                    + " `needs_from` holds ONE seat id and nothing else. If "
+                      "no one is being waited on, LEAVE IT OUT — a park with "
+                      "no `needs_from` is a row waiting on a condition, which "
+                      "is honest and rings no one.",
+                    to=[agent.id], status=Status.fyi,
+                    dedupe_key="ring-undeliverable:" + hashlib.sha256(
+                        f"{channel}\0{key}\0{undeliverable_ring}".encode()
                     ).hexdigest()[:24])
             except DuplicateMessage:
                 pass

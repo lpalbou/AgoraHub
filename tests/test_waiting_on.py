@@ -569,6 +569,93 @@ def test_you_cannot_be_blocked_on_yourself_or_a_stranger(hub, rooms):
                        "needs": "someone who is not here"})
 
 
+def test_a_RE_park_cannot_ring_a_needs_from_that_names_no_seat(hub, rooms):
+    """MEASURED 2026-08-23 (agora-and-wui#288), and it hit two seats in one
+    minute.
+
+    `_validate_park` is TRANSITION-only by design — a row parked before the
+    rule keeps updating freely — while the ring follows every write. So an
+    already-parked row could set `needs_from` to prose, skip the member
+    check, and still ring. `to=[<not a seat>]` addresses NOBODY, and an
+    unaddressed `open` from the hub wakes the WHOLE ROOM in the second
+    person: agora-wui wrote `needs_from: "nobody — agora-wui re-measures
+    this itself"`, and both agora-wui and agora read "YOU ARE THE BLOCKER"
+    as being about them. Each answered a nudge meant for neither.
+
+    The reported diagnosis was a fallback to the row's owner. There is no
+    such fallback — the alert simply had no addressee, which is worse,
+    because it reaches everyone rather than one wrong seat.
+    """
+    lead, _ = rooms
+    row = {"owner": "lead", "status": "blocked", "blocked_on": "seat",
+           "needs_from": "worker", "needs": "the capture path"}
+    hub.store_set(lead, "open-room", "claim:x", row)          # legitimate ring
+    before = len(hub.db.get_messages("open-room", limit=99))
+
+    # Still parked, so no re-validation — and now `needs_from` is prose.
+    hub.store_set(lead, "open-room", "claim:x",
+                  dict(row, blocked_on="runtime",
+                       needs_from="nobody — lead re-measures this itself",
+                       needs="a hub restart"))
+
+    after = hub.db.get_messages("open-room", limit=99)
+    new = after[before:]
+    assert not [m for m in new if "YOU ARE THE BLOCKER" in (m.body or "")], \
+        "a needs_from naming no seat rang the room in the second person"
+    # ...and the drop is not silent: exactly ONE seat hears it, the owner.
+    told = [m for m in new if m.sender == "hub" and "NOBODY WAS RUNG" in m.body]
+    assert len(told) == 1
+    assert told[0].to == ["lead"]
+    assert told[0].status.value == "fyi"     # a correction, not a new debt
+    assert "LEAVE IT OUT" in told[0].body
+
+    # No unaddressed hub `open` anywhere in the new traffic — that is the
+    # exact shape that woke every member.
+    assert not [m for m in new
+                if m.sender == "hub" and not m.to and m.status.value == "open"]
+
+
+def test_a_ring_naming_the_writer_itself_is_dropped_the_same_way(hub, rooms):
+    """The transition path refuses `needs_from: <self>` outright ("that is
+    work, not a block"). The re-park path skipped that check too, so a row
+    could ring its own owner. Same gate, same owner-addressed correction."""
+    lead, _ = rooms
+    row = {"owner": "lead", "status": "blocked", "blocked_on": "seat",
+           "needs_from": "worker", "needs": "the capture path"}
+    hub.store_set(lead, "open-room", "claim:x", row)
+    before = len(hub.db.get_messages("open-room", limit=99))
+
+    hub.store_set(lead, "open-room", "claim:x",
+                  dict(row, needs_from="lead", needs="myself"))
+    new = hub.db.get_messages("open-room", limit=99)[before:]
+
+    assert not [m for m in new if "YOU ARE THE BLOCKER" in (m.body or "")]
+    told = [m for m in new if "NOBODY WAS RUNG" in (m.body or "")]
+    assert len(told) == 1 and told[0].to == ["lead"]
+    assert "its own unblocker" in told[0].body
+
+
+def test_a_valid_re_park_STILL_rings_the_named_seat(hub, rooms):
+    """The negative twin. The guard above must not buy its safety by
+    silencing the delivery this whole mechanism exists for: a re-park whose
+    `needs_from` names a real member still reaches them."""
+    lead, worker = rooms
+    hub.store_set(lead, "open-room", "claim:x",
+                  {"owner": "lead", "status": "blocked", "blocked_on": "seat",
+                   "needs_from": "worker", "needs": "the capture path"})
+    before = len(hub.db.get_messages("open-room", limit=99))
+
+    hub.store_set(lead, "open-room", "claim:x",
+                  {"owner": "lead", "status": "blocked", "blocked_on": "seat",
+                   "needs_from": "worker", "needs": "a frame dump as well"})
+    new = hub.db.get_messages("open-room", limit=99)[before:]
+
+    rung = [m for m in new if "YOU ARE THE BLOCKER" in (m.body or "")]
+    assert len(rung) == 1 and rung[0].to == ["worker"]
+    assert "a frame dump as well" in rung[0].body
+    assert not [m for m in new if "NOBODY WAS RUNG" in (m.body or "")]
+
+
 def test_a_block_written_before_the_hook_is_still_delivered(hub, rooms):
     """THE GENERAL DEFECT (2026-08-07). Every delivery mechanism on this hub
     was write-triggered, so a coordination fact was lost for every row
