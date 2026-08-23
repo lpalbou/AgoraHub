@@ -480,6 +480,33 @@ class MessageRow(Message):
     #   delegate's cited report). Null when the thread closed by discharge
     #   rather than by anyone's word — "answered in full" and "someone ruled
     #   it done" are different facts and a reader deserves both.
+    may_close: str | None = None
+    # ^ MAY *YOU* CLOSE IT — the second closure question, and a different one
+    #   from `closed` (agora-tui, thread-shape-and-panels#189). Both clients
+    #   were about to derive a resolve-verb gate from delegation scopes read
+    #   once at load, which is precisely the client-side verdict
+    #   `decision:closure-is-a-hub-verdict-not-a-client-inference` rules
+    #   against — with no oracle to tell either of them they had it wrong
+    #   until an operator hit a refusal, and the dangerous direction being the
+    #   quiet one: a verb HIDDEN from a seat the hub would have allowed.
+    #
+    #   Computed for the READER of this page, by running the real closure
+    #   ladder against a prospective `resolved` from them — never by
+    #   restating today's exits, so it cannot drift from what post_message
+    #   enforces (the `resolved_settles_nothing` discipline).
+    #
+    #   THREE values, because the reporting delegate's door is real but
+    #   conditional, and collapsing it either way lies:
+    #     "yes"            -> a bare `resolved` reply from you closes this.
+    #     "with_evidence"  -> you are the reporting delegate on an OPERATOR's
+    #                         request: it closes only with `settled_by` and
+    #                         cited `data.evidence`. Offering a bare verb here
+    #                         produces the accepted-but-settles-nothing reply
+    #                         this hub already refuses.
+    #     "no"             -> it is not yours to close; post an ordinary reply
+    #                         and let the asker close it.
+    #   Null = no statement (a retracted row, a row already closed, or a hub
+    #   older than this field). Never read null as "no".
     reply_to_seq: int | None = None
     # ^ THE PARENT'S NUMBER (0154): what `reply_to`'s ULID cannot be printed
     #   as. `get_message_by_seq` took seq -> id years ago because "#N is how

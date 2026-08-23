@@ -3491,6 +3491,15 @@ class HubService:
                 row.closed_by = next(
                     (r.sender for r in replies
                      if self._closes_one(m, r)), None) if ds.closed else None
+                # ...and the OTHER closure question: may THIS reader close it
+                # (thread-shape-and-panels#189). Only on a live question — a
+                # closed row has nothing to offer a verb for, and `null`
+                # there says "no statement" rather than "you may not".
+                row.may_close = (
+                    self._may_close(m, viewer_id)
+                    if viewer_id and not ds.closed
+                    and m.status in (Status.open, Status.blocked)
+                    else None)
                 ratings = by_rated.get(m.id, [])
                 row.ratings = RatingTally(
                     up=sum(1 for r in ratings if r["value"] > 0),
@@ -4373,6 +4382,48 @@ class HubService:
                        self.reporting_delegate_ids(),
                        self._closure_rule_epoch,
                        self.ruling_delegate_ids(m.channel))
+
+    def _may_close(self, m: Message, viewer_id: str) -> str:
+        """May `viewer_id` close `m`, and on what terms? "yes" / "no" /
+        "with_evidence" (thread-shape-and-panels#189, agora-tui).
+
+        `closed` answers *is this thread settled*; this answers *may I settle
+        it*, which no surface served. Both clients were about to derive it
+        from delegation scopes read once at load — a client-side authority
+        verdict, from a grant the hub can narrow or revoke afterwards, with
+        no oracle to catch the drift until an operator hits a refusal. The
+        quiet direction is the dangerous one: a resolve verb HIDDEN from a
+        seat the hub would have allowed suppresses a real act, and nobody
+        ever sees the error.
+
+        IT RUNS THE REAL LADDER rather than restating today's exits —
+        `resolved_settles_nothing`'s discipline, for the same reason. The
+        authority rules in `_closes` move (they moved twice this month), and
+        a spelled-out copy here would answer for last week's hub while
+        `post_message` enforced this week's. A prospective `resolved` from
+        the viewer is fed to the same predicate the write path uses, so this
+        field cannot disagree with the refusal it is meant to predict.
+        """
+        def _asks(data: dict[str, Any] | None) -> Message:
+            return m.model_copy(update={
+                "id": "", "sender": viewer_id, "status": Status.resolved,
+                "reply_to": m.id, "created_at": time.time(), "data": data})
+
+        if self._closes_one(m, _asks(None)):
+            return "yes"
+        # The reporting delegate's door on an OPERATOR's request is real but
+        # PRICED: `settled_by` plus cited evidence. Answering "no" would hide
+        # the one exit that seat has; answering "yes" would offer a bare verb
+        # the hub then refuses as settling nothing. So it is its own word.
+        # The probe carries a VERIFIED-shaped ref on purpose: that is what
+        # `_validate_evidence` stamps for a citation it resolved, and an
+        # all-`external` report (stamped `verified: false`) does NOT satisfy
+        # the gate. Probing with the weaker shape would answer for a report
+        # the hub would refuse.
+        if self._closes_one(m, _asks({"settled_by": m.id, "evidence": [
+                {"kind": "store", "ref": "probe", "verified": True}]})):
+            return "with_evidence"
+        return "no"
 
     def _closed_authoritatively(self, m: Message,
                                 replies: list[Message]) -> bool:

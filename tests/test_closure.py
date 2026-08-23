@@ -1156,6 +1156,119 @@ def test_board_and_owed_agree_about_who_is_behind():
     assert ("room", m["seq"]) in pending(b)
 
 
+def test_a_row_says_whether_THIS_reader_may_close_it():
+    """THE SECOND CLOSURE QUESTION (agora-tui, thread-shape-and-panels#189).
+
+    `closed` answers *is this settled*. Nothing answered *may I settle it* —
+    so both clients were about to derive a resolve-verb gate from delegation
+    scopes read once at load: an authority verdict computed client-side, from
+    a grant the hub can narrow or revoke afterwards, with no oracle to catch
+    the drift until an operator hits a refusal. The quiet direction is the
+    dangerous one — a verb HIDDEN from a seat the hub would have allowed
+    suppresses a real act and nobody sees the error.
+
+    Three values, because the reporting delegate's door is real but priced.
+    """
+    client = make_client()
+    op = register(client, "op", operator=True)
+    asker, other = register(client, "asker"), register(client, "other")
+    make_channel(client, asker, "room", op, other)
+
+    q = post(client, asker, body="q", title="q", status="open",
+             asks=[{"id": "1", "text": "a?", "to": ["other"]}])
+
+    def row(who):
+        return next(m for m in
+                    client.get("/channels/room/messages", headers=who).json()
+                    if m["id"] == q["id"])
+
+    assert row(asker)["may_close"] == "yes"     # the asker, always
+    assert row(op)["may_close"] == "yes"        # the operator, always
+    assert row(other)["may_close"] == "no"      # a peer: not yours to close
+
+    # ...and once it IS closed the field makes no statement, rather than
+    # saying "no" — a closed row has no verb to offer and null is the hub's
+    # word for silence.
+    post(client, asker, body="closing my own", status="resolved",
+         reply_to=q["id"])
+    assert row(asker)["closed"] is True
+    assert row(asker)["may_close"] is None
+
+
+def test_may_close_follows_the_REAL_ladder_when_authority_is_granted():
+    """The field must track the rules rather than restate them: a delegation
+    granted AFTER the message was posted flips the verb, with no republish
+    and no client reload — which is exactly the staleness a client-side
+    derivation could not see."""
+    client = make_client()
+    op = register(client, "op", operator=True)
+    asker, deputy = register(client, "asker"), register(client, "deputy")
+    make_channel(client, asker, "room", op, deputy)
+    q = post(client, asker, body="q", title="q", status="open")
+
+    def verb(who):
+        return next(m for m in
+                    client.get("/channels/room/messages", headers=who).json()
+                    if m["id"] == q["id"])["may_close"]
+
+    assert verb(deputy) == "no"
+
+    r = client.put("/admin/delegation",
+                   json={"agent_id": "deputy", "powers": ["ruling"],
+                         "scope": "room"},
+                   headers={"Authorization": f"Bearer {ADMIN_KEY}"})
+    assert r.status_code == 200, r.text
+    assert verb(deputy) == "yes", "a ruling delegate scoped here may close"
+
+    # The negative twin: a grant scoped ELSEWHERE must not leak in. Without
+    # this, "yes" could be coming from the mere existence of a delegation.
+    other = register(client, "elsewhere-deputy")
+    client.post(f"/channels/room/join",
+                json={"invite_token": client.post(
+                    "/channels/room/invites", json={},
+                    headers=asker).json()["invite_token"]}, headers=other)
+    client.put("/admin/delegation",
+               json={"agent_id": "elsewhere-deputy", "powers": ["ruling"],
+                     "scope": "some-other-room"},
+               headers={"Authorization": f"Bearer {ADMIN_KEY}"})
+    assert verb(other) == "no"
+
+
+def test_the_reporting_delegate_gets_its_own_word_not_a_bare_yes():
+    """`with_evidence` exists because both collapses lie. "no" would hide the
+    one exit that seat has on an operator's commission; "yes" would offer a
+    bare `resolved` the hub refuses as settling nothing — the accepted-but-
+    discharges-nothing shape measured live at agora-wui's six rows."""
+    client = make_client()
+    op = register(client, "op", operator=True)
+    lead = register(client, "lead")
+    make_channel(client, op, "room", lead)
+    client.put("/admin/delegation",
+               json={"agent_id": "lead", "powers": ["reporting"],
+                     "scope": "*"},
+               headers={"Authorization": f"Bearer {ADMIN_KEY}"})
+
+    commission = post(client, op, body="build it", title="build it",
+                      status="open")
+
+    def verb(who):
+        return next(m for m in
+                    client.get("/channels/room/messages", headers=who).json()
+                    if m["id"] == commission["id"])["may_close"]
+
+    assert verb(lead) == "with_evidence"
+    assert verb(op) == "yes"
+
+    # And the word is not decorative: the bare `resolved` it warns against is
+    # actually refused, so a client that rendered a plain verb here would be
+    # offering a button the hub rejects.
+    r = client.post("/channels/room/messages",
+                    json={"body": "delivered", "status": "resolved",
+                          "reply_to": commission["id"]}, headers=lead)
+    assert r.status_code == 400, r.text
+    assert "evidence" in r.text
+
+
 def test_a_history_row_carries_the_verdict_not_just_the_shape():
     """agora-wui, agora-and-wui#9: a client could render "you owe this" but
     never "this is done" — the only authoritative signal was a row's ABSENCE
