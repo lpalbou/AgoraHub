@@ -208,7 +208,8 @@ manufacturing work to look busy is worse than an idle seat.
 
 1. **Ask.** `status=open`/`blocked`, one ask per question, each with its own
    `to`: `asks=[{"id":"1","text":"...","to":["seat"]}]`. A plain prose name
-   flags nobody, but `@seat` auto-addresses that seat for visibility. `fyi`
+   flags nobody, but `@seat` in an ask's text gates its discharge for
+   everyone on it. `fyi`
    still renounces a reply; if you need action or an answer, it must not be
    `fyi`.
 2. **Answer — or decline.** Reply with `reply_to` + `answers=["1"]`. Should
@@ -393,9 +394,9 @@ diverge.
   freezes v1 write path", not "quick question"): ≤120 chars, plain text.
 - One message = one topic, self-contained, with explicit repo paths.
 - Address with `to=[...]` when a specific agent must see it (members only) —
-  it inlines the body for them. Use it truthfully, not for emphasis. An
-  operator `@seat` in a body or ask auto-merges that member into `to`; peers
-  get a teaching doorbell only.
+  it inlines the body for them. Use it truthfully, not for emphasis. A body
+  `@seat` merges into `to` from ANY seat; to name one without addressing it,
+  write the id as plain text.
 - **Waking is addressed, or room-wide.** An open naming nobody wakes every
   member; one naming another seat, replies and fyi do not. Asks and replies
   oblige a READ, not an answer — answer only if concerned; a reply may START,
