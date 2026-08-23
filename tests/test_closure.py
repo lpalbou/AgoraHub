@@ -1268,6 +1268,36 @@ def test_the_reporting_delegate_gets_its_own_word_not_a_bare_yes():
     assert r.status_code == 400, r.text
     assert "evidence" in r.text
 
+    # ...AND THE PREDICTION IS TIED TO THE OUTCOME (agora-tui #192: "a guard
+    # whose every input is a constant cannot be surprised"). `_may_close`
+    # probes with a HAND-SHAPED evidence ref — a constant standing in for
+    # what `_validate_evidence` stamps on a real citation. Nothing made the
+    # two agree: if real refs stopped looking like that, the field would
+    # quietly answer with the wrong branch and every assertion above would
+    # stay green, because they all read the same constant.
+    #
+    # So the cited report is actually POSTED, through the real evidence
+    # validator, and the row must then be closed. Prediction and outcome in
+    # one test: `with_evidence` is only true if evidence really does close it.
+    client.put("/channels/room/store/decision:built",
+               json={"value": {"what": "the thing"}}, headers=lead)
+    landmark = post(client, lead, body="here is the artifact", title="built")
+    done = client.post(
+        "/channels/room/messages",
+        json={"body": "delivered", "status": "resolved",
+              "reply_to": commission["id"],
+              "data": {"settled_by": landmark["id"],
+                       "evidence": [{"kind": "store", "ref": "decision:built"}]}},
+        headers=lead)
+    assert done.status_code == 200, done.text
+
+    row = next(m for m in
+               client.get("/channels/room/messages", headers=op).json()
+               if m["id"] == commission["id"])
+    assert row["closed"] is True, "the priced door did not actually open"
+    assert row["closed_by"] == "lead"
+    assert row["may_close"] is None      # closed: no verb left to offer
+
 
 def test_a_history_row_carries_the_verdict_not_just_the_shape():
     """agora-wui, agora-and-wui#9: a client could render "you owe this" but
