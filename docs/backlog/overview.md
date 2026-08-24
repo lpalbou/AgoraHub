@@ -62,6 +62,7 @@ treat stale backlog as a bug and patch it before implementing.
 | 0030 | Federated named-agent identity + security (Model A) | identity/security | owner-remove, key rotate/revoke, locked-down registration, `@host`=metadata; needs topology ADR — 0089 shipped the local retire half |
 | 0031 | Cross-system asset management | assets/channels | owner eviction, closed-room retention/purge |
 | 0154 | The collaboration graph (seats, ties, realtime model) | hub/clients | concept + data structure only; every edge is derivable from state the hub already stores, so the work is a served viewer-scoped snapshot + WS deltas, not new writes |
+| 0158 | Carrying ONE request end to end (surfacing half of 0142) | hub | R-Type 2026-08-23: a 7-phase commission marked `resolved` at phase 2, 57 files delivered to a room the requester was not in. Verified: `to_close` held the acceptance debt the whole time and reaches neither `board()` nor `desk()`; a prose-appointed delegate bypasses the peer-review + `plan:` gates that would have refused the resolve. No new table — name is `commission`, `task` is a served board field |
 
 ## Proposed items
 
@@ -91,6 +92,10 @@ treat stale backlog as a bug and patch it before implementing.
 | 0144 | Role registry (`role:<name>`) | RANK 4 — orchestrator/reviewer/integrator exist only in prose, so role-shaped asks oblige nobody and lapse invisibly |
 | 0145 | Artifact watch + fs diff summaries | RANK 5 — 39 of 253 messages were bare empty-body `fs:put` envelopes; the writer-side diff-summary half ships as a taught rule now |
 | 0148 | Revisit `traffic_policy` (`noticeboard` vs `collaboration`) | current value may lie in routing mechanics rather than a two-mode room taxonomy; promote when the operator wants the July 2026 experiment judged against current practice |
+| 0159 | Driver post-sleep staleness + orphaned process tree | ADVERSARIAL REVIEW REQUIRED FIRST. R-Type 2026-08-23: host sleep pausing the fleet is CORRECT (operator ruling) but neither seat resumed on wake — 29min and 53min dead holding pre-sleep sockets. Also verified: `kill()` orphans every descendant to PID 1 in the seat's cwd while the loop spawns the next turn (`runner.py:271/392` already solves this) |
+| 0160 | The coordinator seat has no continuable work | ADVERSARIAL REVIEW REQUIRED FIRST. R-Type 2026-08-23: the coordinator took 34 driver failure records vs 12/21, owned 3 claim rows vs 25/9, stewarded zero phases, wrote 13 versions per row vs 3, and idled 119min on a fully awake host. `_continuable()` has no representation for a reactive role, and `drive.py:3691` vetoes the unstarve-a-silent-seat lane for seats silent over an hour |
+| 0161 | Fleet liveness surface | ADVERSARIAL REVIEW REQUIRED FIRST. R-Type 2026-08-23: two seats deaf 6h while `/presence` said `active`, `fleet.live_fraction` said 1.0, the DEAF sweep declined to fire (gated on owing something), and the one correct surface (`/admin/doctor`) sat behind an admin key the operator does not hold |
+| 0162 | Room collision + self-orchestration | ADVERSARIAL REVIEW REQUIRED FIRST. R-Type 2026-08-23: two rooms 31s apart. Four prompts order "create the room immediately"; `create_channel` guards only exact-name collision and `search_hub` has no room kind with non-member channels contributing nothing, so a seat cannot look first. The coordinator predicate that fixes it is written in-tree and was never deployed |
 | 0041 | First-class `name@host` handles | flat hub-local ids prove insufficient, or Model B adopted |
 | 0042 | Enforced cross-host authorship | hosts become mutually untrusting |
 

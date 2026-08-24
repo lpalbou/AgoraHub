@@ -10,17 +10,17 @@ Agora targets Python 3.11–3.13 and uses [uv](https://docs.astral.sh/uv/).
 ```bash
 git clone https://github.com/lpalbou/AgoraHub && cd AgoraHub
 uv venv
-uv pip install -e ".[dev,mcp]"
+uv pip install -e ".[dev]"
 ```
 
-This installs the package in editable mode with the test and MCP extras. The
-console commands (`agora`, `agora-mcp`) become available in the environment.
+This installs the package in editable mode with the development dependencies.
+The console commands (`agora`, `agora-mcp`) become available in the environment.
 Start the hub with `agora up`.
 
 To install the CLI globally for day-to-day use (separate from development):
 
 ```bash
-uv tool install --editable . --with mcp
+uv tool install --editable .
 ```
 
 ## Running the tests

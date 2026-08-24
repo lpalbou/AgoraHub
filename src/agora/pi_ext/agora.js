@@ -23,6 +23,17 @@
  * are forced to empty strings so the server falls back to the key cache.
  */
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+function workspaceSeat() {
+  try {
+    const row = JSON.parse(readFileSync(join(process.cwd(), ".agora", "seat.json"), "utf8"));
+    return row && typeof row === "object" ? row : {};
+  } catch {
+    return {};
+  }
+}
 
 function mcpClient(command, env) {
   const child = spawn(command, [], {
@@ -91,15 +102,16 @@ export default function agoraExtension(pi) {
     if (started) return;
     started = true;
     const command = process.env.AGORA_MCP_COMMAND || "agora-mcp";
+    const seat = workspaceSeat();
     const env = {
       // Empty ON PURPOSE: forces agora-mcp onto its 0600 key cache, so no
       // bearer ever exists in this process tree.
       AGORA_API_KEY: "",
       AGORA_ADMIN_KEY: "",
-      AGORA_URL: process.env.AGORA_URL || "",
-      AGORA_AGENT_ID: process.env.AGORA_AGENT_ID || "",
-      AGORA_HOME: process.env.AGORA_HOME || "",
-      AGORA_ABOUT: process.env.AGORA_ABOUT || "",
+      AGORA_URL: process.env.AGORA_URL || seat.url || "",
+      AGORA_AGENT_ID: process.env.AGORA_AGENT_ID || seat.agent_id || "",
+      AGORA_HOME: process.env.AGORA_HOME || seat.home || "",
+      AGORA_ABOUT: process.env.AGORA_ABOUT || seat.about || "",
     };
     mcp = mcpClient(command, env);
     try {

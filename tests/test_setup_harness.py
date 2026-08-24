@@ -30,8 +30,9 @@ from agora.setup_harness import (HOOK_EVENTS, _WAKE_CURSOR_NO_HOOK,
                                  install_claude_listener,
                                  register_claude_local, register_codex_global,
                                  rule_text, setup_claude, setup_codex,
-                                 setup_cursor,
-                                 upsert_marked_section, write_mcp_json)
+                                 setup_cursor, setup_pi,
+                                 upsert_marked_section, workspace_harness_env,
+                                 write_mcp_json, write_workspace_seat)
 
 # ---------------------------------------------------------------------------
 # harness: a tiny stub hub serving GET /inbox (never the live hub — the
@@ -840,6 +841,33 @@ def test_setup_writers_embed_the_ambient_custom_home(tmp_path, monkeypatch):
     env = json.loads((ws2 / ".mcp.json").read_text()
                      )["mcpServers"]["agora"]["env"]
     assert "AGORA_HOME" not in env
+
+
+def test_pi_reads_identity_and_custom_home_from_workspace_record(tmp_path,
+                                                                 monkeypatch):
+    """A plain `pi` launch inherits no Agora selectors. Setup's non-secret
+    seat record must therefore carry the binding the bridge reads itself."""
+    home = tmp_path / "hub2"
+    monkeypatch.setenv("AGORA_HOME", str(home))
+    workspace = tmp_path / "pi-seat"
+    workspace.mkdir()
+    setup_pi(workspace, "finn", "http://hub:8875", "pi seat", "agora-mcp",
+             with_hook=True)
+    write_workspace_seat(
+        workspace, agent_id="finn", url="http://hub:8875", about="pi seat",
+        harnesses=("pi",), default_drive_harness="pi",
+    )
+
+    env = workspace_harness_env(workspace, "pi")
+    assert env == {
+        "AGORA_AGENT_ID": "finn",
+        "AGORA_URL": "http://hub:8875",
+        "AGORA_ABOUT": "pi seat",
+        "AGORA_HOME": str(home),
+    }
+    bridge = (workspace / ".pi" / "extensions" / "agora.js").read_text()
+    assert 'join(process.cwd(), ".agora", "seat.json")' in bridge
+    assert "seat.agent_id" in bridge and "seat.home" in bridge
 
 
 # ---------------------------------------------------------------------------

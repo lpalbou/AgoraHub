@@ -368,10 +368,30 @@ def test_a_dead_driver_is_reaped_rather_than_left_running(cfg, monkeypatch):
 
     state.live["01SPAWN"].process._rc = 1   # the driver exited
     state.live["01SPAWN"].process.returncode = 1
-    done = R.reap(state)
+    events: list[str] = []
+    done = R.reap(state, event_log=events.append)
     assert [d[0] for d in done] == ["01SPAWN"]
     assert "exited with code 1" in done[0][1]
     assert state.live == {}
+    assert any("event=agent-decommissioned" in row
+               and "seat=scribe" in row and "returncode=1" in row
+               for row in events)
+
+
+def test_explicit_stop_logs_agent_decommission(cfg, monkeypatch):
+    state = RunnerState(live={
+        "01SPAWN": R.Launched("scribe", cfg.root / "scribe", 4123,
+                               _FakeProc(pid=4123, rc=0))
+    })
+    monkeypatch.setattr(R.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(R.os, "killpg", lambda pid, sig: None)
+    events: list[str] = []
+    R.stop_seat(state, "01SPAWN", reason="operator-request",
+                event_log=events.append)
+    assert events == [
+        "AGORA_RUNNER event=agent-decommissioned spawn=01SPAWN "
+        "seat=scribe pid=4123 reason=operator-request returncode=0"
+    ]
 
 
 # -- the announced set --------------------------------------------------------
@@ -459,11 +479,26 @@ class _FakeHub:
 
 def test_run_once_claims_acts_and_reports(cfg, monkeypatch):
     _installed(monkeypatch, "claude")
-    hub = _FakeHub({"request": _row(), "join_token": "agora-join_a.b"})
+    request = _row(folder="projects/minutes", channels=["design", "ops"],
+                   options={"permissions": "all"}, model="gpt-5.4",
+                   reasoning="high", mission="write the minutes\nbe concise")
+    hub = _FakeHub({"request": request, "join_token": "agora-join_SECRET"})
+    events: list[str] = []
     line = R.run_once(cfg, RunnerState(), hub, joiner=_joiner(),
-                      launcher=_launcher())
+                      launcher=_launcher(), event_log=events.append)
     assert hub.states[-1][:2] == ("01SPAWN", "running")
     assert "scribe" in line
+    request_log = next(row for row in events if "event=spawn-received" in row)
+    assert 'harness="claude"' in request_log
+    assert 'folder="projects/minutes"' in request_log
+    assert 'model="gpt-5.4"' in request_log and 'reasoning="high"' in request_log
+    assert 'permissions_requested="all"' in request_log
+    assert "permissions_effective=write" in request_log
+    assert 'channels=["design","ops"]' in request_log
+    assert "mission_chars=28" in request_log and "mission_preview=" in request_log
+    launched = next(row for row in events if "event=agent-spawned" in row)
+    assert "pid=4123" in launched and "permissions=write" in launched
+    assert "agora-join_SECRET" not in "\n".join(events)
 
 
 def test_run_once_with_nothing_pending_says_so_and_writes_nothing(cfg):

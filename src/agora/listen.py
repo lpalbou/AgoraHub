@@ -13,15 +13,18 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import json
 import os
 import re
 import sys
+import textwrap
 import time
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from . import config as _config
+from .logfmt import emit_log
 
 DEFAULT_DEBOUNCE = 15.0
 DEFAULT_HEARTBEAT = 300.0
@@ -71,8 +74,32 @@ def _safe_channel(name: str) -> str:
     return _UNSAFE_CHANNEL.sub("?", name)[:64] or "?"
 
 
+_DRIVER_LOG_ACTIVE = contextvars.ContextVar("agora_driver_log_active",
+                                            default=False)
+
+
+@contextlib.contextmanager
+def _driver_log_output() -> Iterator[None]:
+    """Format an embedded listener as part of the surrounding drive log."""
+    token = _DRIVER_LOG_ACTIVE.set(True)
+    try:
+        yield
+    finally:
+        _DRIVER_LOG_ACTIVE.reset(token)
+
+
 def _emit(line: str) -> None:
-    print(line, flush=True)  # harness regexes match line-by-line: never buffer
+    if _DRIVER_LOG_ACTIVE.get():
+        emit_log(line)
+    else:
+        print(line, flush=True)  # standalone wake regexes require column 1
+
+
+def _emit_stderr(line: str) -> None:
+    if _DRIVER_LOG_ACTIVE.get():
+        emit_log(line, stream=sys.stderr)
+    else:
+        print(line, file=sys.stderr, flush=True)
 
 
 # The one failure the live integration test surfaced (TEST_REPORT §3 S4) was
@@ -104,7 +131,7 @@ def _announce_armed(source: str, agent_id: str, hub: str, *, once: bool,
     adaptive ceiling in seconds) is appended so the operator and the agent's
     own shell can see the chosen idle window."""
     if not once:
-        print(ARM_BANNER, file=sys.stderr, flush=True)
+        _emit_stderr(ARM_BANNER)
     tail = f" window={int(window)}" if window is not None else ""
     _emit(f"AGORA_LISTEN armed source={source} agent={agent_id} hub={hub}{tail}")
 
@@ -195,10 +222,11 @@ def parse_line(raw: str) -> dict[str, Any] | None:
                 and "event" not in obj and isinstance(obj.get("from"), str)):
             _pre_0_4_line_warned = True
             from . import PROTOCOL_VERSION
-            print(f"agora listen: notify lines carry the pre-0.4 `from` field "
-                  f"— that hub speaks an older protocol than this client "
-                  f"({PROTOCOL_VERSION}); those lines are IGNORED. Upgrade "
-                  f"the hub to the same agorahub release.", file=sys.stderr)
+            _emit_stderr(
+                f"agora listen: notify lines carry the pre-0.4 `from` field "
+                f"— that hub speaks an older protocol than this client "
+                f"({PROTOCOL_VERSION}); those lines are IGNORED. Upgrade "
+                f"the hub to the same agorahub release.")
         return None
     try:
         obj["seq"] = int(obj["seq"])
@@ -314,6 +342,51 @@ def wake_line(events: list[dict[str, Any]], agent_id: str, *, preview: bool = Fa
             clean = elide(sanitize_text(_neutralize(title), 4096), 80).replace('"', "'")
             parts.append(f'preview="{clean}"')
     return " ".join(parts)
+
+
+_ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
+_REQUEST_PREVIEW_LINES = 3
+_REQUEST_PREVIEW_WIDTH = 120
+
+
+def _emit_request_preview(events: list[dict[str, Any]]) -> None:
+    """Show at most three safe, readable lines from the triggering requests."""
+    if not _DRIVER_LOG_ACTIVE.get():
+        return
+    # The caller supplies only the triggering batch (or explicit /owed rows),
+    # so every non-notice item is relevant. This also keeps title-only rows
+    # from older hubs visible even when they lack today's `reason` field.
+    candidates = [event for event in events if not _is_hub_notice(event)]
+
+    rendered: list[tuple[str, str, str]] = []
+    upstream_truncated = False
+    for event in candidates:
+        raw = str(event.get("preview") or event.get("title") or "")
+        if not raw:
+            continue
+        upstream_truncated = upstream_truncated or len(raw) >= 200
+        raw = _ANSI_ESCAPE.sub("", raw)
+        physical = raw.splitlines() or [raw]
+        for source_line in physical:
+            clean = re.sub(r"[\x00-\x1f\x7f-\x9f]+", " ", source_line).strip()
+            if not clean:
+                continue
+            wrapped = textwrap.wrap(clean, width=_REQUEST_PREVIEW_WIDTH,
+                                    replace_whitespace=True,
+                                    drop_whitespace=True) or [clean]
+            for preview_line in wrapped:
+                ref = (f"{_safe_channel(str(event.get('channel', '?')))}"
+                       f"#{event.get('seq', '?')}")
+                sender = _safe_channel(str(event.get("sender", "?")))
+                rendered.append((ref, sender, preview_line))
+    omitted = len(rendered) > _REQUEST_PREVIEW_LINES or upstream_truncated
+    visible = rendered[:_REQUEST_PREVIEW_LINES]
+    if omitted and visible:
+        ref, sender, text = visible[-1]
+        visible[-1] = (ref, sender, text.rstrip(" …") + " …")
+    for number, (ref, sender, preview_line) in enumerate(visible, 1):
+        _emit(f"AGORA_DRIVE request-preview ref={ref} from={sender} "
+              f"line={number} | {preview_line}")
 
 
 REWAKE_BAND_SECONDS = 4 * 3600.0
@@ -616,11 +689,12 @@ def _backlog_wake_at_arm(hub: str, agent_id: str, *, once: bool) -> int | None:
     line += _owed_wake_suffix(counts, owed_raw)
     _emit(line)
     lead = (_sharpest_debt_digest_clause(owed_raw) if owed_raw else "") or ""
-    print(f"AGORA: {lead}you OWE {counts[0]} answer(s) and {counts[1]} "
-          "unconsumed answer(s) that arrived while no listener was watching. "
-          "check_inbox lists them; settle before new work — DO or claim "
-          "what is yours, reply where owed, then ack.",
-          file=sys.stderr, flush=True)
+    _emit_request_preview(list((owed_raw or {}).get("to_answer") or []))
+    _emit_stderr(
+        f"AGORA: {lead}you OWE {counts[0]} answer(s) and {counts[1]} "
+        "unconsumed answer(s) that arrived while no listener was watching. "
+        "check_inbox lists them; settle before new work — DO or claim "
+        "what is yours, reply where owed, then ack.")
     return 2
 
 
@@ -647,22 +721,62 @@ def once_digest(events: list[dict[str, Any]],
             "your own asks; reply where a reply is owed; then ack. Ack means "
             "seen, not done.")
     text += _charter_digest_clause(owed_raw)
+    def _shared_room(ev: dict[str, Any]) -> bool:
+        return not str(ev.get("channel", "")).startswith("dm:")
+
     operator_room_task = any(
         str(ev.get("status", "")) in ("open", "blocked")
+        and _shared_room(ev)
         and (bool(ev.get("from_operator"))
              or "from-operator" in str(ev.get("flags", "")))
         for ev in events
     )
+    def _operator_address(ev: dict[str, Any]) -> str | None:
+        flags = {f for f in str(ev.get("flags", "")).split(",") if f}
+        if (str(ev.get("status", "")) not in ("open", "blocked")
+                or not _shared_room(ev)
+                or not (bool(ev.get("from_operator"))
+                        or "from-operator" in flags)
+                or "addressed" not in flags):
+            return None
+        return "me" if "to-me" in flags else "other"
+
+    operator_task_to_me = any(_operator_address(ev) == "me" for ev in events)
+    operator_task_to_other = any(
+        _operator_address(ev) == "other" for ev in events)
     # A room-wide question from a PEER wakes too (`qualifies`), and the wake
     # is worth nothing if the digest then tells the seat to stay silent.
     room_task = any(
-        str(ev.get("status", "")) in ("open", "blocked") for ev in events
+        str(ev.get("status", "")) in ("open", "blocked")
+        and _shared_room(ev)
+        for ev in events
     )
     if owed and (owed[0] or owed[1]):
         text += (f" You currently owe {owed[0]} answer(s) and {owed[1]} "
                  "unconsumed answer(s) to your own asks — check_inbox lists "
                  "them; settle those before new work.")
-    elif operator_room_task:
+    if operator_task_to_me:
+        text += (" Human task(s) in this batch EXPLICITLY NAME YOU. You own "
+                 "the assignment, but addressing alone does not make you the "
+                 "coordinator. Read the task: if it explicitly assigns you "
+                 "coordination, or formal/claimed state does, say so on the "
+                 "original thread and create or reuse the ONE canonical "
+                 "focused room before implementation. Otherwise do only your "
+                 "named slice and do not create the room. If multi-seat work "
+                 "later needs routing and no coordinator exists, claim that "
+                 "role on the source thread first; re-check for an existing "
+                 "claim before creating anything.")
+    if operator_task_to_other:
+        text += (" Human task(s) in this batch EXPLICITLY NAME ANOTHER SEAT. "
+                 "Your wake is contribution-only unless explicit formal/claimed "
+                 "state makes YOU the coordinator: DO NOT claim the whole commission, "
+                 "create_group, create a competing plan, or choose the "
+                 "canonical room. If you have one relevant slice, offer "
+                 "exactly that slice on the original thread; otherwise stay "
+                 "silent. Wait for the task coordinator's room invitation "
+                 "before moving shared work; the addressed seat owns routing "
+                 "only when the task explicitly says so.")
+    if operator_room_task and not (operator_task_to_me or operator_task_to_other):
         text += (" This wake includes a human open/blocked task in a shared "
                  "room: evaluate it against what you own; if you can help, "
                  "reply once with the ONE slice you own and how you will "
@@ -679,7 +793,7 @@ def once_digest(events: list[dict[str, Any]],
                  "work chunk that follows. Expect a peer to adversarially "
                  "review your slice before the delegate reports completion "
                  "— deliver it checkable.")
-    elif room_task:
+    elif room_task and not operator_room_task:
         # Lighter than the operator branch on purpose: no plan row is
         # mandated for peer room traffic. The seat still needs a reason to
         # have woken, or it manufactures one (0140: 50% ceremony).
@@ -689,7 +803,8 @@ def once_digest(events: list[dict[str, Any]],
                  "concerned — one reply naming the slice you own — else ack "
                  "and end your turn. A receipt that only proves you woke is "
                  "the failure mode here.")
-    else:
+    elif (not operator_room_task
+          and not (owed and (owed[0] or owed[1]))):
         # Never let an empty wake read as "say something". A seat that woke
         # owing nothing and posted a receipt anyway is 50% of the traffic a
         # measured fleet produced in that state (0140 field test 2).
@@ -735,6 +850,8 @@ def _deliver_wake(batch, agent_id, *, preview: bool, once: bool,
     if owed and (owed[0] or owed[1]):
         line += _owed_wake_suffix(owed, owed_raw)
     _emit(line)
+    if classify_driver_wake:
+        _emit_request_preview(batch)
     if once:
         # This wake delivers the current debt too (its digest names it), so
         # record the signature: the loop re-arms ~5s later, usually before
@@ -742,8 +859,7 @@ def _deliver_wake(batch, agent_id, *, preview: bool, once: bool,
         # must not re-fire for debt this wake already announced.
         if hub:
             _record_owed_signature(hub, agent_id, sig)
-        print(once_digest(batch, owed, owed_raw=owed_raw),
-              file=sys.stderr, flush=True)
+        _emit_stderr(once_digest(batch, owed, owed_raw=owed_raw))
         if classify_driver_wake:
             flags = {
                 token
@@ -1100,10 +1216,11 @@ def run_listen(*, agent_id: str | None = None, url: str | None = None,
             dpid, dage = 0, float("inf")
         if (dpid > 0 and dpid != os.getpid() and pid_alive(dpid)
                 and dage < 7200.0):
-            print(f"a watcher (agora drive, pid {dpid}) owns reception for "
-                  f"'{aid}': STOP this listener/loop shell and END your "
-                  "turn — wakes arrive as driven turns; do not retry or "
-                  "re-arm.", file=sys.stderr, flush=True)
+            _emit_stderr(
+                f"a watcher (agora drive, pid {dpid}) owns reception for "
+                f"'{aid}': STOP this listener/loop shell and END your "
+                "turn — wakes arrive as driven turns; do not retry or "
+                "re-arm.")
             _emit("AGORA_LISTEN ended reason=driver-owns-reception")
             return 0
     src = resolve_source(source, hub, home, aid)

@@ -95,7 +95,11 @@ def test_resolve_key_no_credential_error_is_surface_aware(isolated_home):
     with pytest.raises(SystemExit) as exc:
         _config.resolve_key("http://127.0.0.1:8765", "castor")
     local_msg = str(exc.value)
-    assert "agora up" in local_msg              # the hub-machine remedy
+    assert str(isolated_home / "config.json") in local_msg
+    assert str(isolated_home / "keys.json") in local_msg
+    assert "--home <that-home>" in local_msg
+    assert "--url http://127.0.0.1:8765" in local_msg
+    assert "Only run `agora up`" in local_msg
 
 
 def test_cached_key_wins_over_registration(isolated_home):

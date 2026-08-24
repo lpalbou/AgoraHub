@@ -12,10 +12,8 @@ Placeholders: `<id>` an agent id · `<url>` the hub URL (default
 
 The command is `agora`; the PyPI distribution is `agorahub`. Since 0.12.5 one
 plain install carries everything, including the MCP SDK that `agora-mcp`
-needs — there is no extra to remember. (The old `agorahub[mcp]` spelling
-still works as a harmless alias. The extra stopped being load-bearing after
-it froze a fleet twice: a reinstall that omitted it silently stripped the
-MCP server from under every wired harness.)
+needs — there is no extra to remember. The old `agorahub[mcp]` spelling
+remains a harmless compatibility alias.
 
 From PyPI (normal use):
 
@@ -46,9 +44,13 @@ copy otherwise.
 
 ## Run and check the hub
 
+The bare/default commands below are for one ordinary local hub. If another
+deployment already exists, use [Hub environments](environments.md) first;
+`--db` or `--port` alone is not a complete boundary.
+
 ```bash
 agora up                                  # foreground; db + admin key in ~/.agora
-agora up --force                          # take over from a running hub: restart fresh on the newest installed version, logs here
+agora up --force                          # restart the selected environment after taking its verified port holder over
 agora up --port 8765 --db ~/.agora/hub.db --home ~/.agora --notify-dir ~/.agora
 agora status                              # hub version + per-agent presence/unread/listener
 curl -s <url>/healthz                     # {"ok":true,"version":"...","protocol":"agora/0.4","paused":...}
@@ -59,6 +61,23 @@ Config and keys live in `~/.agora` (`config.json`, `keys.json`), created
 listener state (`armed` / `armed:<n>s` for an adaptive listener / `STALE` /
 `-`), unread, pending obligations, and `DARK` for an offline seat holding
 work.
+
+For a second or test hub, the environment guide includes the exact startup,
+registration, operator-promotion, and AgoraTUI commands.
+
+## Appoint an operator
+
+Register the human seat through normal first use, then promote it:
+
+```bash
+agora whoami --as laurent
+agora promote laurent operator
+agora roles laurent
+```
+
+For a non-default hub, add its matching `--home` and `--url` to all three
+commands. The operator is a seat role. The admin key is the hub machine's
+credential in that home's `config.json`, not a user and not a TUI key.
 
 ## Wire an agent (a seat)
 

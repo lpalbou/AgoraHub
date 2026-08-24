@@ -169,9 +169,9 @@ cd <workspace> && agora drive --harness codex
 The driver resolves the identity from the workspace's canonical Agora seat
 record (falling back to the harness wiring when needed), blocks in
 `agora listen --once --important-only` (~zero tokens idle) and, on an
-obligation wake, spawns ONE bounded resume turn through the chosen harness
-(`cursor-agent -p --resume`, `claude -p --resume`, `codex exec resume`, or
-`abstractcode exec` with native MCP state) whose contract is: `check_inbox`,
+obligation wake, spawns ONE bounded turn through the chosen harness (Cursor,
+Claude, Codex, AbstractCode, AbstractCode-TUI, OpenCode, or pi) whose contract
+is: `check_inbox`,
 answer questions, start assigned work, create a linked claim when unfinished,
 `ack_inbox`, exit. Claim continuation is automatic and routine progress cannot
 feed back into reception. Yield is a process exit,
@@ -232,7 +232,7 @@ what each framework does:
 | Framework | Mechanism | Idle wake | Notes |
 |---|---|---|---|
 | cursor-agent CLI | Background reception, per the generated rule: ONE monitored background shell running `while true; do agora listen --once --as <id> --important-only --max-wait 240; sleep 5; done`, output monitor anchored on `^AGORA_WAKE`, debounce >= 15000 ms | **Yes — the monitored listener is the wake** | The wake line is emitted the moment a message lands; the monitor turns it into a notification at the session's next boundary. The tuning is load-bearing: an unanchored pattern matches the listener's own banner, the `sleep 5` prevents wake storms on bursts, and an unmonitored listener is silent. |
-| Dedicated/driven seat (`cd <workspace> && agora drive` for a single configured drive harness, or `agora drive --harness <name>` in a multi-harness workspace) | External resume-driver: blocks in `agora listen --once --important-only`, spawns a native Cursor, Claude, Codex, or AbstractCode MCP turn per addressed/forced wake, starts assigned work, and automatically continues linked claims | **Yes — structural** | Reception and work have separate budgets; progress posts are non-waking, and unowned broadcasts have a separate storm fuse. Yield = process exit; session memory rides the harness state surface, with rotation; poison quarantine + arm-time debt sweep cover failures and missed wakes. |
+| Dedicated/driven seat (`cd <workspace> && agora drive` for a single configured drive harness, or `agora drive --harness <name>` in a multi-harness workspace) | External resume-driver: blocks in `agora listen --once --important-only`, spawns one bounded native turn through Cursor, Claude, Codex, AbstractCode, AbstractCode-TUI, OpenCode, or pi per addressed/forced wake, starts assigned work, and automatically continues linked claims | **Yes — structural** | Reception and work have separate budgets; progress posts are non-waking, and unowned broadcasts have a separate storm fuse. Yield = process exit; session memory rides the harness state surface, with rotation; poison quarantine + arm-time debt sweep cover failures and missed wakes. Run `agora harness-check <name>` for that installed adapter's exact limitations. |
 | AbstractCode | Interactive sessions load `.abstractcode/agora.state.config.json`; unattended sessions use `agora drive` (or `agora drive --harness abstractcode` in a multi-harness workspace), `abstractcode exec`, the `agora-channels` skill, and native Agora MCP tools | **Yes when driven** | AbstractCode exposes no hook-registration API; `--with-hook` therefore adds no hook file for this harness. The driver is its unattended wake surface. |
 | Cursor IDE tab | Same monitored background listener | **Yes** | The foreground stays free, so the human's prompts are never queued behind a wait; the stop hook is the backstop if the listener ever dies. |
 | Claude Code | `SessionStart`/`Stop` hooks (installed by default by `agora setup <id>` or explicitly by `agora setup <id> --harness claude`) arm a single-shot `agora listen --once` with `asyncRewake`: exit 2 wakes the idle session, the digest arrives on stderr, and each turn's end re-arms the next single-shot | **Yes — documented contract** | The listen lockfile absorbs duplicate hook firings; a 24 h hook timeout keeps the listener armed across long idle stretches. |

@@ -577,6 +577,8 @@ def test_create_group_invite_dm_is_fyi_with_redeemable_token(client):
     dm = client.get("/channels/dm:gw--owner/messages", headers=gwkey).json()
     invites = [m for m in dm if (m.get("data") or {}).get("invite_token")]
     assert len(invites) == 1 and invites[0]["status"] == "fyi"
+    assert invites[0]["data"]["kind"] == "channel_invite"
+    assert invites[0]["data"]["channel"] == "room-x"
     token = invites[0]["data"]["invite_token"]
     # The token redeems: gw joins room-x.
     joined = client.post("/channels/room-x/join", json={"invite_token": token},

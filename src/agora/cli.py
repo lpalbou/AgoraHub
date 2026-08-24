@@ -25,6 +25,7 @@ import shlex
 import sys
 import time
 from pathlib import Path
+from typing import Any, Callable
 
 from . import config as _config
 from . import is_agora_protocol
@@ -48,6 +49,7 @@ def _smoke_check_mcp(
     hint: str = "then re-run this setup.",
     *,
     required: bool = False,
+    event_log: Callable[[str], None] | None = None,
 ):
     """Run the entry point's real, side-effect-free MCP API self-check.
 
@@ -70,7 +72,10 @@ def _smoke_check_mcp(
     diagnostic = format_probe_failure(probe, action=action)
     if required:
         raise SystemExit("agora setup: required MCP runtime failed preflight\n" + diagnostic)
-    print("AGORA_MCP_CHECK status=error\n" + diagnostic, file=sys.stderr)
+    if event_log is not None:
+        event_log("AGORA_HUB component=mcp status=error\n" + diagnostic)
+    else:
+        print("AGORA_MCP_CHECK status=error\n" + diagnostic, file=sys.stderr)
     return probe
 
 
@@ -95,6 +100,19 @@ DEFAULT_PORT = 8765
 
 def _default_url(port: int) -> str:
     return f"http://127.0.0.1:{port}"
+
+
+def _up_admin_key(args: argparse.Namespace, cfg: dict) -> str:
+    """Resolve the hub credential without making an isolated launch inherit it.
+
+    `$AGORA_ADMIN_KEY` remains the deployment-compatible default.  A caller
+    starting a genuinely separate environment can say `--new-admin-key`,
+    which deliberately wins over both the environment and remembered config.
+    """
+    if getattr(args, "new_admin_key", False):
+        return secrets.token_hex(16)
+    return (os.environ.get("AGORA_ADMIN_KEY") or cfg.get("admin_key")
+            or secrets.token_hex(16))
 
 
 # How many times `agora up --force` will re-resolve a port that changes
@@ -301,6 +319,9 @@ def cmd_up(args: argparse.Namespace) -> None:
     import uvicorn
 
     from .hub.app import create_app
+    from .logfmt import emit_log
+
+    hub_log = emit_log
 
     # Observability under supervision (framework dm#21, 2026-07-25): when
     # stdout is a PIPE (supervisor, `| tee log`), Python block-buffers it —
@@ -328,7 +349,7 @@ def cmd_up(args: argparse.Namespace) -> None:
         config_exists=(home / "config.json").exists())
     db_path = resolved.path
     _preflight_foreign_hub(db_path, cfg, _default_url(args.port))
-    admin_key = os.environ.get("AGORA_ADMIN_KEY") or cfg.get("admin_key") or secrets.token_hex(16)
+    admin_key = _up_admin_key(args, cfg)
     url = _default_url(args.port)
 
     # Hub-written notify files: the hub maintains <id>-inbox.log for every
@@ -336,29 +357,37 @@ def cmd_up(args: argparse.Namespace) -> None:
     # are ever needed on the hub's machine. --notify-dir '' disables.
     notify_dir = args.notify_dir if args.notify_dir is not None else str(home)
 
-    print(f"agora hub → {url}")
-    print(f"  db:     {db_path}")
+    hub_log(f"AGORA_HUB event=starting url={url}")
+    hub_log("AGORA_HUB config db=" + json.dumps(str(db_path)))
     for notice in db_notices:
-        print(f"  {notice}")
-    print(f"  config: {_config.home() / 'config.json'} (admin key saved; agents self-register)")
+        hub_log(f"AGORA_HUB notice | {notice}")
+    hub_log("AGORA_HUB config file="
+            + json.dumps(str(_config.home() / "config.json"))
+            + " admin_key=saved registration=self-service")
     if notify_dir:
-        print(f"  notify: {notify_dir}/<agent>-inbox.log (hub-written; nothing to run)")
+        hub_log("AGORA_HUB config notify="
+                + json.dumps(f"{notify_dir}/<agent>-inbox.log")
+                + " owner=hub")
     if args.cors_origins:
-        print(f"  cors:   {', '.join(origin.strip() for origin in args.cors_origins if origin.strip())}")
+        hub_log("AGORA_HUB config cors="
+                + ",".join(origin.strip() for origin in args.cors_origins
+                           if origin.strip()))
     # Paste-safe hints (no <angle brackets>: the shell reads `<x>` as a
     # redirect). Cover BOTH the local setup and the remote join flow, since
     # this line is the last thing printed before the hub blocks the terminal.
-    print("  local agent:   agora setup AGENT_ID --harness FRAMEWORK   "
-          "(cursor|claude|codex|abstractcode|abstractcode-tui; run in its\n           workspace)")
-    print(f"  remote agent:  agora invite AGENT_ID --url {url}   "
-          "(mints a one-paste `agora join ...` line for the other machine)")
+    selected_home = shlex.quote(str(_config.home()))
+    hub_log(f"AGORA_HUB hint local='agora setup AGENT_ID --harness FRAMEWORK "
+            f"--home {selected_home} --url {url}'")
+    hub_log(f"AGORA_HUB hint remote='agora invite AGENT_ID "
+            f"--home {selected_home} --url {url}'")
     # Guard the seats, not just the hub: a venv swap under already-wired
     # agora-mcp binaries (reinstall without [mcp]) freezes every NEW session
     # on this machine while old processes keep working — invisible until
     # forensics. Probe at launch, warn loudly, never block the hub.
     _smoke_check_mcp(_resolve_mcp_command(),
                      hint="then restart affected agent sessions (running "
-                          "ones keep the old code in memory).")
+                          "ones keep the old code in memory).",
+                     event_log=hub_log)
     # Refuse a squatted port with a NAMED diagnosis instead of a raw bind
     # error or (worse) letting a look-alike squatter answer politely while
     # the room goes deaf (agora-0096, the 16h-deaf-room incident).
@@ -378,7 +407,7 @@ def cmd_up(args: argparse.Namespace) -> None:
                      # Boot SEED only (meta wins; agora-0137): first enable
                      # adopts it, a live hub's durable choice never yields
                      # to a hand-edited file.
-                     embedding=cfg.get("embedding"))
+                     embedding=cfg.get("embedding"), event_log=hub_log)
     # Persist config only AFTER the db opened and migrated successfully.
     # Saving earlier planted remembered lies twice over: a crashed boot
     # re-blessed the very path it failed on, and a no-op double launch
@@ -391,8 +420,8 @@ def cmd_up(args: argparse.Namespace) -> None:
     # was ever told. Silent until now: the 0.14.0 field test upgraded a hub
     # that kept serving a v8 snapshot of an OLDER packaged default, and the
     # whole fleet ran a session without phase rows or consumes batching.
-    _warn_stale_hub_rules(app)
-    _warn_stale_hub_charter(app)
+    _warn_stale_hub_rules(app, event_log=hub_log)
+    _warn_stale_hub_charter(app, event_log=hub_log)
     # Pin WS keepalive explicitly: connection-derived presence relies on dead
     # sockets being detected within a bounded window (audit M4). Defaults can
     # differ per uvicorn/ws backend; make the bound deliberate.
@@ -400,7 +429,8 @@ def cmd_up(args: argparse.Namespace) -> None:
                 ws_ping_interval=20.0, ws_ping_timeout=20.0)
 
 
-def _warn_stale_hub_rules(app: Any) -> None:
+def _warn_stale_hub_rules(
+        app: Any, event_log: Callable[[str], None] | None = None) -> None:
     """Say so, once at boot, when the SERVED hub rules never mention a
     mechanism this build enforces. Version 0 (the packaged default) is
     always current by construction; only a stored operator text can fall
@@ -419,14 +449,18 @@ def _warn_stale_hub_rules(app: Any) -> None:
         return                          # never let a warning break a boot
     if not missing:
         return
-    print(f"  WARNING: hub rules v{rules['version']} (operator-set) never "
-          f"mention {len(missing)} mechanism(s) this build enforces:")
+    lines = [f"WARNING: hub rules v{rules['version']} (operator-set) never "
+             f"mention {len(missing)} mechanism(s) this build enforces:"]
     for why in missing:
-        print(f"    - {why}")
-    print("    Agents are served THESE rules at every whoami, so they will "
-          "never be taught the above.\n"
-          "    Merge the packaged default into your text and publish it: "
-          "`agora rules --set FILE`.")
+        lines.append(f"- {why}")
+    lines.append("Agents are served THESE rules at every whoami, so they will "
+                 "never be taught the above. Merge the packaged default into "
+                 "your text and publish it: `agora rules --set FILE`.")
+    for line in lines:
+        if event_log is not None:
+            event_log(f"AGORA_HUB warn=stale-rules | {line}")
+        else:
+            print(f"  {line}")
 
 
 def _stale_charter_lines(version: int, text: str) -> list[str]:
@@ -465,7 +499,8 @@ def _stale_charter_lines(version: int, text: str) -> list[str]:
     return out
 
 
-def _warn_stale_hub_charter(app: Any) -> None:
+def _warn_stale_hub_charter(
+        app: Any, event_log: Callable[[str], None] | None = None) -> None:
     """Boot-time half of the charter-drift warning. Best-effort like its
     rules twin: a diagnostic must never be the reason a hub fails to boot."""
     try:
@@ -474,7 +509,10 @@ def _warn_stale_hub_charter(app: Any) -> None:
     except Exception:
         return
     for line in lines:
-        print(line)
+        if event_log is not None:
+            event_log(f"AGORA_HUB warn=stale-charter | {line.strip()}")
+        else:
+            print(line)
 
 
 def _setup_key(url: str, agent_id: str, about: str,
@@ -1131,7 +1169,7 @@ def cmd_embedding(args: argparse.Namespace) -> None:
 
 
 def cmd_backup(args: argparse.Namespace) -> None:
-    """Operator verb: `agora backup [OUT]` — verified point-in-time snapshot
+    """Hub-machine verb: `agora backup [OUT]` — verified point-in-time snapshot
     of the ENTIRE hub (messages, channel files, store, agents: it is one
     SQLite file). Safe against a LIVE hub (SQLite online backup API); the
     copy is integrity-checked after writing, so what you hold is a verified
@@ -1160,7 +1198,7 @@ def cmd_backup(args: argparse.Namespace) -> None:
 
 
 def cmd_restore(args: argparse.Namespace) -> None:
-    """Operator verb: `agora restore SNAPSHOT` — replace the hub db with a
+    """Hub-machine verb: `agora restore SNAPSHOT` — replace the hub db with a
     verified snapshot. Refuses while a hub is RUNNING (stop it first); the
     current db is preserved aside as <db>.pre-restore-<ts>, so a restore can
     never destroy the only copy of anything."""
@@ -1936,7 +1974,7 @@ def cmd_promote(args: argparse.Namespace) -> None:
     """`agora promote <seat> <member|operator>` — set a seat's role.
 
     A hub has no operator until one is appointed, and several things need
-    one: missions, delegation, charter rulings, pausing the hub, closing a
+    one: missions, delegation, charter rulings, closing a
     thread you did not open, and reaching a whole room with a question that
     names nobody."""
     import httpx
@@ -1964,7 +2002,7 @@ def cmd_promote(args: argparse.Namespace) -> None:
     print(f"'{args.agent}' is now {role} (by {out.get('by')})")
     if role == "operator":
         print("  they may now: set missions, delegate, rule on charters, "
-              "pause/resume the hub, and close any thread. Their room-wide "
+              "promote seats, and close any thread. Their room-wide "
               "open/blocked also wakes every member of a channel.")
 
 
@@ -2568,7 +2606,9 @@ def cmd_group(args):
                            f"{title}. Join with join_channel(channel={name!r}, "
                            f"invite_token={token!r}), read the opening post, "
                            "and work the topic THERE (not in commons).",
-                           title=f"invite to {name}: {title}")
+                           title=f"invite to {name}: {title}",
+                           data={"kind": "channel_invite", "channel": name,
+                                 "invite_token": token})
                 invited.append(peer)
             except Exception as exc:
                 print(f"  {peer}: invite failed — {exc}")
@@ -2598,7 +2638,9 @@ async def _invite_to_channel(c, name: str, invitee: str, public: bool) -> str:
                f"You are invited to channel '{name}'. Join with "
                f"join_channel(channel={name!r}, "
                f"invite_token={token!r}).",
-               title=f"invite to {name}")
+               title=f"invite to {name}",
+               data={"kind": "channel_invite", "channel": name,
+                     "invite_token": token})
     return f"  invited {invitee} (invite token DM'd)"
 
 
@@ -3900,6 +3942,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="hub db file (default: config.json db_path, else "
                          "~/.agora/agora.db; $AGORA_DB is honored but may "
                          "only point at an EXISTING db)")
+    up.add_argument("--new-admin-key", action="store_true",
+                    help="generate a new admin credential for this start, "
+                         "overriding $AGORA_ADMIN_KEY and any key remembered "
+                         "in the selected home (use for a new isolated hub; "
+                         "on an existing hub this rotates its admin key)")
     up.add_argument("--rate-per-minute", type=float, default=60.0)
     up.add_argument("--notify-dir", default=None,
                     help="dir for hub-written <agent>-inbox.log files "
@@ -4043,7 +4090,8 @@ def build_parser() -> argparse.ArgumentParser:
                          "seed-key paste)")
     rg.add_argument("--operator", action="store_true",
                     help="register this seat as an OPERATOR (may set "
-                         "missions, delegate, rule on charters, pause the "
+                         "missions, delegate, rule on charters, promote "
+                         "seats, "
                          "hub, and close any thread; its room-wide "
                          "open/blocked wakes every member)")
     rg.set_defaults(func=cmd_register)
@@ -4059,8 +4107,8 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--admin-key", dest="admin_key", default=None,
                     help="admin key (default: $AGORA_ADMIN_KEY, then config.json)")
     pr.add_argument("--as", dest="as_agent", default=None,
-                    help=argparse.SUPPRESS)   # an operator seat's key, if you
-    #                                           prefer it to the admin key
+                    help="act as this existing operator seat (otherwise use "
+                         "the admin key from the selected home)")
     pr.set_defaults(func=cmd_promote)
 
     rl = sub.add_parser("roles", help="who is who: one line per seat")
@@ -4069,7 +4117,9 @@ def build_parser() -> argparse.ArgumentParser:
     rl.add_argument("--url", default=None)
     rl.add_argument("--admin-key", dest="admin_key", default=None,
                     help="admin key (default: $AGORA_ADMIN_KEY, then config.json)")
-    rl.add_argument("--as", dest="as_agent", default=None, help=argparse.SUPPRESS)
+    rl.add_argument("--as", dest="as_agent", default=None,
+                    help="act as this operator seat (otherwise use the admin "
+                         "key from the selected home)")
     rl.set_defaults(func=cmd_roles)
 
     mi = sub.add_parser("mission", help="operator: set what a seat is FOR "
@@ -4118,7 +4168,7 @@ def build_parser() -> argparse.ArgumentParser:
     pa.add_argument("--admin-key", dest="admin_key", default=None)
     pa.set_defaults(func=cmd_pause, pause_action="pause")
 
-    rs = sub.add_parser("resume", help="lift the operator pause")
+    rs = sub.add_parser("resume", help="lift the admin-key hub pause")
     rs.add_argument("--url", default=None)
     rs.add_argument("--admin-key", dest="admin_key", default=None)
     rs.set_defaults(func=cmd_pause, pause_action="resume")
@@ -4341,8 +4391,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="override the harness model for driven turns "
                          "(default: use the harness's configured/default model)")
     dr.add_argument("--provider", default=None,
-                    help="AbstractCode provider override (for example openai "
-                         "or ollama); rejected by other harnesses")
+                    help="provider override where supported (AbstractCode, "
+                         "AbstractCode-TUI, OpenCode, pi); rejected by other "
+                         "harnesses")
     # The UNION of every harness's own vocabulary; each adapter then validates
     # against its own (DriveAdapter.REASONING_VOCAB), so an unsupported value is
     # refused at arm time naming the legal set. `max` used to be offered here

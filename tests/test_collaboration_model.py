@@ -230,7 +230,7 @@ def test_hub_rules_no_longer_order_the_chair_to_publish():
     "## 4. The gate",
     "## 5. The tools, mapped to the cycles",
     "## 6. What the hub guarantees vs. what the fleet practises",
-    "## 8. Known ceilings",
+    "## 7. Known ceilings",
 ])
 def test_model_page_presents_roles_then_cycles_then_tools(model_page: str,
                                                           section: str):
@@ -251,7 +251,7 @@ def test_model_page_is_reachable_from_both_indexes():
 
 
 def test_model_page_ceilings_point_at_real_backlog_cards(model_page: str):
-    """§8 names the gaps as design work. Each must be a card that exists, so
+    """§7 names the gaps as design work. Each must be a card that exists, so
     the page cannot promise a design that was never written."""
     cards = ["0141_claim_deputy_ttl_handoff", "0142_acceptance_signoff",
              "0143_merge_queue_rows", "0144_role_registry",

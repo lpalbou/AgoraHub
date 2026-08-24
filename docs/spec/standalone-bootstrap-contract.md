@@ -15,6 +15,21 @@ An external user should be able to:
 
 ## Setup Contract
 
+All launch surfaces must select the same hub environment. The shared identity
+is the tuple:
+
+```text
+Agora home + hub URL + seat id
+```
+
+The home selects `config.json` and `keys.json`; the URL selects the hub and
+the URL-qualified key entry; the seat id selects the identity. A client that
+cannot read the CLI's saved URL must require the URL explicitly. In
+particular, `agora-tui` receives the home through `--home` and the hub through
+`--url` (with `$AGORA_HOME` retained only as a fallback). No client may claim to use “the same hub” while silently
+falling back to another home, URL, or default port. See
+[Hub environments](../environments.md).
+
 `agora setup <seat> --harness <harness>` is the only harness-specific local
 wiring step.
 

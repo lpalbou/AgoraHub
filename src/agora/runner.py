@@ -31,6 +31,7 @@ The five gates, all local, none overridable by the hub or by a request:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import signal
@@ -42,6 +43,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import config as _config
+from .logfmt import emit_log
 from .models import SpawnState, validate_spawn_folder
 
 #: The floor a request can never raise. `all` means "no sandbox" on every
@@ -233,11 +235,12 @@ def tty_approve(cfg: RunnerConfig, row: dict[str, Any]) -> bool:
             f"--require-approval is on and {cfg.machine} has no tty to ask — "
             "start the runner in a terminal, or run it with "
             "--no-require-approval if this machine is meant to be unattended")
-    print(f"\nagora runner: spawn '{row['seat_id']}' on {cfg.machine}?\n"
-          f"  harness : {row['harness']}\n"
-          f"  folder  : {row.get('folder') or '<root>/' + row['seat_id']}\n"
-          f"  mission : {(row.get('mission') or '')[:200]}\n"
-          f"  asked by: {row.get('requested_by') or '?'}", flush=True)
+    emit_log(f"AGORA_RUNNER event=approval-request seat={row['seat_id']} "
+             f"machine={cfg.machine} harness={row['harness']} "
+             f"folder={row.get('folder') or '<root>/' + row['seat_id']} "
+             f"requested_by={row.get('requested_by') or '?'}")
+    emit_log("AGORA_RUNNER request-preview | mission="
+             + json.dumps(str(row.get("mission") or "")[:200]))
     return input("  approve? [y/N] ").strip().lower() in {"y", "yes"}
 
 
@@ -359,7 +362,31 @@ def handle_request(cfg: RunnerConfig, state: RunnerState, row: dict[str, Any],
             f"{launched.folder}")
 
 
-def reap(state: RunnerState) -> list[tuple[str, str]]:
+def _runner_log(event_log: Callable[[str], None] | None, line: str) -> None:
+    """Best-effort runner telemetry: logging must never break supervision."""
+    if event_log is None:
+        return
+    try:
+        event_log(line)
+    except Exception:
+        pass
+
+
+def _json_value(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=True, separators=(",", ":"))
+
+
+def _mission_preview(row: dict[str, Any], limit: int = 160) -> tuple[int, str]:
+    mission = str(row.get("mission") or "")
+    preview = " ".join(mission.split())
+    if len(preview) > limit:
+        preview = preview[:limit - 1] + "…"
+    return len(mission), preview
+
+
+def reap(state: RunnerState, *,
+         event_log: Callable[[str], None] | None = None
+         ) -> list[tuple[str, str]]:
     """Children that have exited since the last look, as (spawn_id, detail).
 
     A driver that dies is a seat that is gone, and a row left at `running`
@@ -374,12 +401,19 @@ def reap(state: RunnerState) -> list[tuple[str, str]]:
         if proc is None or proc.poll() is None:
             continue
         del state.live[spawn_id]
+        _runner_log(
+            event_log,
+            f"AGORA_RUNNER event=agent-decommissioned spawn={spawn_id} "
+            f"seat={launched.seat_id} pid={launched.pid} "
+            f"reason=driver-exited returncode={proc.returncode}")
         done.append((spawn_id, f"driver for '{launched.seat_id}' exited with "
                                f"code {proc.returncode}"))
     return done
 
 
-def stop_seat(state: RunnerState, spawn_id: str, *, grace: float = 5.0) -> str:
+def stop_seat(state: RunnerState, spawn_id: str, *, grace: float = 5.0,
+              reason: str = "stop-requested",
+              event_log: Callable[[str], None] | None = None) -> str:
     """End one seat's driver and everything it started."""
     launched = state.live.pop(spawn_id, None)
     if launched is None or launched.process is None:
@@ -397,7 +431,13 @@ def stop_seat(state: RunnerState, spawn_id: str, *, grace: float = 5.0) -> str:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
         except (ProcessLookupError, PermissionError, OSError):
             proc.kill()
-    return f"stopped '{launched.seat_id}' (pid {launched.pid})"
+    detail = f"stopped '{launched.seat_id}' (pid {launched.pid})"
+    _runner_log(
+        event_log,
+        f"AGORA_RUNNER event=agent-decommissioned spawn={spawn_id} "
+        f"seat={launched.seat_id} pid={launched.pid} reason={reason} "
+        f"returncode={proc.poll() if proc.poll() is not None else 'unknown'}")
+    return detail
 
 
 # -- the hub conversation --------------------------------------------------------
@@ -448,12 +488,13 @@ class RunnerHub:
         self._http.close()
 
 
-def run_once(cfg: RunnerConfig, state: RunnerState, hub: RunnerHub, **kw) -> str:
+def run_once(cfg: RunnerConfig, state: RunnerState, hub: RunnerHub, *,
+             event_log: Callable[[str], None] | None = None, **kw) -> str:
     """One turn of the loop: reap, claim, act, report. Returns a one-line
     summary for the runner's own stdout — the human who started it is the only
     audience, and they should be able to read what it did."""
     lines = []
-    for spawn_id, detail in reap(state):
+    for spawn_id, detail in reap(state, event_log=event_log):
         hub.set_state(spawn_id, SpawnState.stopped.value, detail)
         lines.append(detail)
 
@@ -461,10 +502,55 @@ def run_once(cfg: RunnerConfig, state: RunnerState, hub: RunnerHub, **kw) -> str
     if claimed is None:
         return "; ".join(lines) or "nothing to do"
     row = claimed["request"]
+    options = row.get("options") if isinstance(row.get("options"), dict) else {}
+    asked_permissions = str(options.get("permissions") or PERMISSION_FLOOR)
+    effective_permissions = permission_for(options)
+    mission_chars, mission_preview = _mission_preview(row)
+    _runner_log(
+        event_log,
+        f"AGORA_RUNNER event=spawn-received spawn={row['id']} "
+        f"seat={row['seat_id']} machine={cfg.machine} "
+        f"harness={_json_value(row['harness'])} "
+        f"folder={_json_value(row.get('folder') or '')} "
+        f"model={_json_value(row.get('model') or '')} "
+        f"reasoning={_json_value(row.get('reasoning') or '')} "
+        f"permissions_requested={_json_value(asked_permissions)} "
+        f"permissions_effective={effective_permissions} "
+        f"approval={'required' if cfg.require_approval else 'off'} "
+        f"channels={_json_value(row.get('channels') or [])} "
+        f"requested_by={row.get('requested_by') or '?'} "
+        f"mission_chars={mission_chars} "
+        f"mission_preview={_json_value(mission_preview)}")
+
+    def report_state(spawn_state: str, detail: str) -> None:
+        hub.set_state(row["id"], spawn_state, detail)
+        _runner_log(
+            event_log,
+            f"AGORA_RUNNER event=spawn-state spawn={row['id']} "
+            f"seat={row['seat_id']} state={spawn_state} "
+            f"detail={_json_value(detail)}")
+
     result, detail = handle_request(
         cfg, state, row, claimed["join_token"],
-        report=lambda s, d: hub.set_state(row["id"], s, d), **kw)
+        report=report_state, **kw)
     hub.set_state(row["id"], result, detail)
+    launched = state.live.get(row["id"])
+    if result == SpawnState.running.value and launched is not None:
+        _runner_log(
+            event_log,
+            f"AGORA_RUNNER event=agent-spawned status=running "
+            f"spawn={row['id']} seat={row['seat_id']} pid={launched.pid} "
+            f"machine={cfg.machine} harness={_json_value(row['harness'])} "
+            f"folder={_json_value(str(launched.folder))} "
+            f"model={_json_value(row.get('model') or '')} "
+            f"reasoning={_json_value(row.get('reasoning') or '')} "
+            f"permissions={effective_permissions}")
+    else:
+        _runner_log(
+            event_log,
+            f"AGORA_RUNNER event=spawn-finished status={result} "
+            f"spawn={row['id']} seat={row['seat_id']} "
+            f"detail={_json_value(detail)}")
     lines.append(f"{row['seat_id']}: {result} — {detail}")
     return "; ".join(lines)
 
@@ -536,24 +622,24 @@ def main(args: argparse.Namespace) -> int:
     hub = RunnerHub(cfg.url, cfg.api_key)
     accepted = accepted_harnesses(cfg)
 
-    print(f"agora runner — machine '{cfg.machine}', seat '{cfg.agent_id}'\n"
-          f"  root      : {cfg.root}\n"
-          f"  harnesses : {', '.join(accepted) or 'NONE INSTALLED — nothing '
-                                                  'can be spawned here'}\n"
-          f"  max seats : {cfg.max_seats}\n"
-          f"  approval  : {'on (a human types y per spawn)' if cfg.require_approval else 'OFF'}",
-          flush=True)
+    emit_log(f"AGORA_RUNNER event=starting machine={cfg.machine} "
+             f"seat={cfg.agent_id} root={json.dumps(str(cfg.root))}")
+    emit_log("AGORA_RUNNER config harnesses="
+             + (",".join(accepted) or "NONE-INSTALLED")
+             + f" max_seats={cfg.max_seats} "
+               f"approval={'on' if cfg.require_approval else 'off'}")
     # Say the true thing here rather than only in the docs: `agora setup` also
     # writes OUTSIDE the named folder (harness rule files under $HOME), so
     # "the agent only touches the folder I named" would be false.
-    print("  note      : a spawned seat runs as this user, with this "
-          "environment, and its harness wiring is written under $HOME — not "
-          "only under --root.", flush=True)
+    emit_log("AGORA_RUNNER notice | spawned seats run as this user with this "
+             "environment; harness wiring may also be written under $HOME")
     try:
         hub.announce(cfg.machine, accepted, harness_capabilities(accepted))
+        emit_log(f"AGORA_RUNNER event=announced status=ok "
+                 f"machine={cfg.machine} harnesses={len(accepted)}")
     except Exception as e:                       # noqa: BLE001
-        print(f"  announce  : FAILED ({e}) — clients will not see this "
-              "machine's harness list", flush=True)
+        emit_log(f"AGORA_RUNNER event=announced status=failed "
+                 f"machine={cfg.machine} detail={json.dumps(str(e))}")
 
     stopping = False
 
@@ -567,11 +653,12 @@ def main(args: argparse.Namespace) -> int:
     try:
         while not stopping:
             try:
-                line = run_once(cfg, state, hub)
+                line = run_once(cfg, state, hub, event_log=emit_log)
                 if line != "nothing to do":
-                    print(f"  {line}", flush=True)
+                    emit_log(f"AGORA_RUNNER event=activity | {line}")
             except Exception as e:               # noqa: BLE001
-                print(f"  hub call failed: {e}", flush=True)
+                emit_log("AGORA_RUNNER event=hub-call status=failed detail="
+                         + json.dumps(str(e)))
             if args.once:
                 break
             for _ in range(max(1, int(cfg.poll_seconds * 10))):
@@ -580,11 +667,14 @@ def main(args: argparse.Namespace) -> int:
                 time.sleep(0.1)
     finally:
         for spawn_id in list(state.live):
-            detail = stop_seat(state, spawn_id)
+            detail = stop_seat(state, spawn_id, reason="runner-shutdown",
+                               event_log=emit_log)
             try:
                 hub.set_state(spawn_id, SpawnState.stopped.value, detail)
             except Exception:                    # noqa: BLE001
                 pass
-            print(f"  {detail}", flush=True)
+            emit_log(f"AGORA_RUNNER event=stopped | {detail}")
         hub.close()
+        emit_log(f"AGORA_RUNNER event=shutdown machine={cfg.machine} "
+                 f"live_seats={len(state.live)}")
     return 0

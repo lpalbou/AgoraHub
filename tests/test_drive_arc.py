@@ -364,10 +364,10 @@ def test_the_arc_transcript_names_every_state(hub, tmp_path, monkeypatch,
                                to=["delegate"])
     fleet.pump(rounds=6)
     lines = [line for line in capsys.readouterr().out.splitlines()
-             if line.startswith("AGORA_DRIVE state=")]
+             if "AGORA_DRIVE state=" in line]
     states = {line.split("state=", 1)[1].split()[0] for line in lines}
     assert {"armed", "turn", "chunk"} <= states
     # Every armed/held line carries the next transition time.
     for line in lines:
-        if line.startswith("AGORA_DRIVE state=armed"):
+        if "AGORA_DRIVE state=armed" in line:
             assert "next=" in line and "reason=" in line

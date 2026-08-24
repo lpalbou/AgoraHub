@@ -82,7 +82,8 @@ from pathlib import Path
 
 from . import config as _config
 from .listen import (_DRIVER_BROADCAST_WAKE, _DRIVER_UNOWNED_WAKE,
-                     _owed_snapshot, pid_alive, run_listen)
+                     _driver_log_output, _owed_snapshot, pid_alive, run_listen)
+from .logfmt import emit_log
 from .mcp.runtime import (MCPBinding, MCPRuntimeProbe, format_probe_failure,
                           probe_mcp_runtime, resolve_mcp_command)
 from .setup_harness import resolve_workspace_identity
@@ -114,10 +115,20 @@ WAKE_PROMPT = (
     "If the human posted an open/blocked task in a shared room, treat it as "
     "a contribution call: evaluate it against what you own; if you can help, "
     "reply once with the slice you own and how you will contribute; if not, "
-    "say nothing. "
-    "If the work now clearly needs 3+ seats speaking over multiple turns, "
-    "create the focused room immediately with create_group and move the "
-    "working thread there; if it only needs one peer, use a DM. In that "
+    "say nothing. EXPLICIT COORDINATION OWNERSHIP DECIDES WHO ROUTES: if the "
+    "human names another seat as coordinator, that seat owns routing. If the "
+    "human merely assigns another seat a slice, addressing does not create an "
+    "open leadership role. Unless explicit, formal, or claimed state makes "
+    "you the coordinator, do not claim the whole commission, create_group, "
+    "write a competing whole plan, or choose a canonical room; offer at most "
+    "your one slice on the original thread and wait for the coordinator's "
+    "invitation. If the human names YOU as the "
+    "coordinator, say so on the original thread and create or reuse the ONE "
+    "focused room before work moves. If nobody is named, contributors state "
+    "their slices on the original thread; one seat may re-check and claim "
+    "coordination there, and only a formal delegate or an agreed/claimed "
+    "coordinator routes them, so concurrent volunteers never "
+    "create competing rooms. If routed work only needs one peer, use a DM. In that "
     "focused room, planning comes BEFORE implementation: agree the plan, the "
     "phases if any, and the ownership split before building. "
     "Finish and answer with "
@@ -129,7 +140,8 @@ WAKE_PROMPT = (
     "if an ask should not be done or is not yours, decline it on the record "
     "(declines=[ids], why in the body) rather than answering thinly. "
     "ack_inbox, then END. If check_inbox shows nothing owed BY YOU and no "
-    "ask names you, that is a COMPLETE and correct turn: ack_inbox and END "
+    "ask names you, and no human contribution call matches a slice you own, "
+    "that is a COMPLETE and correct turn: ack_inbox and END "
     "THE TURN WITHOUT POSTING ANYTHING. Posting an acknowledgement, a "
     "status line, a 'nothing for me' note, or any other receipt on an empty "
     "reception pass is the anti-pattern this instruction exists to stop — "
@@ -160,7 +172,8 @@ BOOT_PROMPT = (
     "store row (owner, status, source_message_id, next_step), complete one "
     "useful slice, then ack and END. Use answers only on completion; refuse "
     "with declines=[ids] when the work should not be done. Nothing "
-    "owed by you and no ask naming you is a complete turn: ack and END "
+    "owed by you, no ask naming you, and no relevant human contribution call "
+    "is a complete turn: ack and END "
     "WITHOUT POSTING — an empty reception pass that posts anyway is the "
     "anti-pattern. Do not "
     "advance unrelated claims or post routine progress receipts; the driver "
@@ -191,8 +204,10 @@ WORK_PROMPT = (
     "may have canceled, refined, or superseded it (the record outranks "
     "your memory) — if so, adjust or park on the record instead of "
     "continuing blind. If the task has outgrown #commons or another open "
-    "floor and 3+ seats now need to coordinate, create the focused room "
-    "before continuing the multi-seat work. If the room still lacks a shared "
+    "floor and 3+ seats now need to coordinate, create or reuse the focused "
+    "room before continuing ONLY when you are the task's named/formal/claimed "
+    "coordinator; otherwise stop shared work and ask that coordinator to "
+    "route it. If the room still lacks a shared "
     "plan or phase order, do that planning work first. Otherwise do ONE bounded slice "
     "toward completion, "
     "stop at a safe checkpoint (workspace consistent: commit or stash), "
@@ -489,7 +504,7 @@ def _one_line(text: str, *, limit: int = 500) -> str:
 
 
 def _emit(line: str) -> None:
-    print(line, flush=True)
+    emit_log(line)
 
 
 def _harness_environment() -> dict[str, str]:
@@ -3042,16 +3057,45 @@ class Driver:
                         harness=self.harness,
                         session=session_id, model=self.model)
         try:
-            # KNOWN, MEASURED LIMIT: this timeout kills the direct child, then
-            # blocks in communicate() while any grandchild still holds the
-            # pipes. Live record 2026-07-30..08-03: 3 turns out of 1338 outran
-            # their cap that way (worst: a work chunk capped at 3600s ran
-            # 5069s; a reception turn capped at 600s ran 3052s). The seat is
-            # deaf for the overrun, so _long_turn_notice announces every turn
-            # at LONG_TURN_NOTICE intervals. Closing it for real means giving
-            # the child a file instead of a pipe, which changes capture for
-            # every adapter — a deliberate change, not a side effect of this
-            # pass.
+            # KNOWN LIMIT — and NOT the one this comment used to name. It
+            # claimed the cap was defeated by a grandchild holding the pipes,
+            # citing 3 turns of 1338 (worst: 5069s against a 3600s cap). Both
+            # halves were wrong, and the wrong half cost a later investigator
+            # an hour; re-measured 2026-08-24 on CPython 3.12.7 / macOS:
+            #
+            # 1. THE CAP IS HONOURED. run()'s TimeoutExpired handler takes
+            #    process.wait(); the re-communicate() that could block is
+            #    `if _mswindows`. Child dead + 20 descendants holding
+            #    stdout/stderr, 3s cap: +0.01s. The described block needs
+            #    timeout=None, which this call site can never pass
+            #    (work_timeout/reception_timeout are both floored non-zero).
+            # 2. WHAT LEAKS IS THE PROCESS TREE. kill() signals the direct
+            #    child only; every descendant reparents to PID 1 and keeps
+            #    running — in this cwd, with this seat's credentials —
+            #    while the loop starts the next turn, so one seat can end
+            #    up with two live turns writing one workspace. Worse than an
+            #    overrun: an overrun shows up in dur_s, a live orphan does
+            #    not. runner.py already solves exactly this for the drivers
+            #    it spawns (start_new_session=True + os.killpg); doing it
+            #    here is the same pair and changes signal delivery for every
+            #    adapter — a deliberate change, not a side effect of a pass.
+            # 3. THE OTHER REAL OVERRUN IS CAPTURE VOLUME, not pipes. The
+            #    read loop stops at the cap, but the b''.join() inside
+            #    TimeoutExpired and the .decode() below run after it: 30MB
+            #    costs +0.02s, 7.9GB costs +14.8s and ~16GB resident. THAT
+            #    is what spooling to a file would bound; a process-group
+            #    kill would not.
+            # 4. BEWARE dur_s. It is time.time() (wall); the cap is
+            #    time.monotonic() = mach_absolute_time() on macOS, which
+            #    FREEZES while the host sleeps. A turn straddling a lid-close
+            #    logs dur_s = cap + sleep with nothing wrong. The two cited
+            #    "overruns" are +1469s and +2452s on a host measured 51%
+            #    asleep — ordinary lid-closes, not a defect. Host sleep
+            #    pausing the fleet is intended (operator, 2026-08-24), so
+            #    this shape is expected and must not be read as a hang.
+            #
+            # The seat is deaf for the whole window either way, which is why
+            # _long_turn_notice announces every turn at LONG_TURN_NOTICE.
             proc = subprocess.run(cmd, capture_output=True, text=True,
                                   timeout=self._turn_timeout, cwd=str(self.cwd),
                                   stdin=subprocess.DEVNULL,
@@ -4080,10 +4124,11 @@ class Driver:
                     self._state("armed", reason=reason, next_s=window,
                                 row=(f"{snap[0]}/{snap[1]}@{snap[2]}"
                                      if snap else ""))
-                rc = run_listen(agent_id=self.agent_id, url=self.hub,
-                                once=True, important_only=True,
-                                max_wait=window, source="auto",
-                                signal_passthrough=True, driver_call=True)
+                with _driver_log_output():
+                    rc = run_listen(agent_id=self.agent_id, url=self.hub,
+                                    once=True, important_only=True,
+                                    max_wait=window, source="auto",
+                                    signal_passthrough=True, driver_call=True)
                 if rc == _DRIVER_UNOWNED_WAKE:
                     # A WAKE MUST CARRY WORK. This batch named nobody and the
                     # hub says the seat owes nothing, so a turn here has

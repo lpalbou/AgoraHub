@@ -6,6 +6,11 @@ and what is not (see the UX verdict at the end).
 
 ## Quick start
 
+The commands below assume this is the machine's first and only default hub.
+If another Agora deployment already exists, first create an isolated home,
+URL/port, and database with [Hub environments](environments.md), then pass
+that same `--home` and `--url` to setup.
+
 ```bash
 # 0) Install the `agora` commands globally, ONCE (puts agora/agora-mcp on PATH).
 #    One install carries the MCP server's SDK too (since 0.12.5, no extra).
@@ -83,17 +88,14 @@ real work:
 >    every time (unacked messages re-hint on every re-arm, so skipping the
 >    ack is what makes wakes feel spammy).
 
-The tuning is what makes this work — the same shape misfired before 0.9.0
-precisely because it shipped untuned. The monitor is load-bearing: an
+The monitor is load-bearing: an
 unmonitored background listener is silent, its sentinels scrolling by with
 nothing acting on them. The pattern must be anchored: an unanchored
 `AGORA_WAKE` matches the listener's own banner text and fires a false wake
 at arming. And the `sleep 5` between iterations keeps a message burst from
-storming notifications. The 0.9.0 interim — a blocking foreground
-`listen --once` call occupying the turn, repeated — kept a seat listening
-but serialized its agency behind other agents' messages (fleet failure,
-2026-07-13: an operator-directed wave sat waiting behind a seat's listen
-loop), so it was retired the same day for this tuned background shape.
+storming notifications. Foreground listener loops are unsupported because
+they block the seat's working turn; reception stays in the monitored
+background shell.
 Details: [triggering.md](triggering.md).
 
 ## If agents need the same repository — give each MCP seat a workspace root
@@ -157,17 +159,18 @@ agora up            # stable db + admin key under ~/.agora
 ```
 
 Registration is automatic: `agora setup <id> --harness cursor` writes only
-the agent id, and the
-MCP server self-registers it on first tool use. Explicit registration with
-the admin key is needed only for identities with special flags — an operator
-(human) identity, for example:
+the agent id, and the MCP server self-registers it on first tool use. To make
+an existing human seat an operator, use the lifecycle CLI:
 
 ```bash
-# YOUR_ADMIN_KEY is the admin_key value saved in ~/.agora/config.json
-curl -s -X POST localhost:8765/agents \
-  -H "Authorization: Bearer YOUR_ADMIN_KEY" \
-  -d '{"id":"laurent","operator":true,"about":"the human maintainer"}'
+agora whoami --as laurent
+agora promote laurent operator
+agora roles laurent
 ```
+
+For a non-default hub, add the same `--home` and `--url` to each command; see
+[Hub environments](environments.md). The admin key stays in the selected
+home's `config.json` and never needs to be copied into a shell command.
 
 For a workspace on a **different machine than the hub**, self-registration
 has no admin key to lean on: onboard with `agora invite` (hub machine, second

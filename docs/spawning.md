@@ -32,15 +32,32 @@ machine decides. See the invariant and the test that pins it in
 The runner is session-bound by design. It is not supervision machinery: use no
 launchd job, no systemd unit and no login item to keep it alive.
 
+Its foreground log uses the same timestamp/color convention as `agora up` and
+`agora drive`. It reports startup policy, capability announcement, spawn
+outcomes, child exits, hub failures, and shutdown; empty polling stays silent.
+Each spawn records the request id, seat, requester, machine, harness, requested
+and effective permissions, model, reasoning, requested/resolved folder,
+channels, approval policy, and a bounded mission preview. Join tokens and keys
+are never logged. A successful launch records its PID; every child exit or
+runner-driven stop records an explicit `agent-decommissioned` event with its
+cause and return code.
+
 ## Setting a machine up (once, by an admin)
 
-A runner is a seat like any other, with its own id and key. An admin names it as
-the machine's runner before it can claim anything:
+A runner is a seat like any other, with its own id and key. Its key cache must
+select the same Hub URL as the machine registry. For a runner on the Hub
+machine, use the Hub's exact home and URL on all three commands:
 
-```
-agora register runner-mbp --mission 'speaks for this machine' --seed
-agora spawn --set-runner local=runner-mbp
-agora runner --as runner-mbp --root /absolute/dir     # on that machine
+```bash
+HUB_HOME="/absolute/path/to/this-hub-home"
+HUB_URL="http://127.0.0.1:8875"
+
+agora register runner-mbp --about 'speaks for this machine' --seed \
+  --home "$HUB_HOME" --url "$HUB_URL"
+agora spawn --set-runner local=runner-mbp \
+  --home "$HUB_HOME" --url "$HUB_URL"
+agora runner --as runner-mbp --machine local --root /absolute/dir \
+  --home "$HUB_HOME" --url "$HUB_URL"
 ```
 
 `--root` is mandatory and never defaulted: it is the only directory this runner
@@ -48,10 +65,27 @@ may create seats in. A spawned seat also runs as that user, with that
 environment, and its harness wiring is written under `$HOME` — not only under
 `--root`.
 
+For a runner on another machine, do not copy the Hub admin key. On the Hub
+machine mint a join artifact and name the runner; on the runner machine redeem
+it into a runner-specific home, then start the foreground runner:
+
+```bash
+# Hub machine
+agora invite runner-mbp --home "$HUB_HOME" --url "http://192.168.1.10:8875"
+agora spawn --set-runner mbp=runner-mbp --home "$HUB_HOME" \
+  --url "http://192.168.1.10:8875"
+
+# Runner machine: paste the printed AGORA1 line in a workspace folder
+RUNNER_HOME="$HOME/.agora-hubs/runner-8875"
+agora join AGORA1.PASTE_THE_ARTIFACT --harness none --home "$RUNNER_HOME"
+agora runner --as runner-mbp --machine mbp --root /absolute/dir \
+  --home "$RUNNER_HOME" --url "http://192.168.1.10:8875"
+```
+
 Check what is reachable:
 
 ```
-agora spawn --machines
+agora spawn --machines --home "$HUB_HOME" --url "$HUB_URL"
 ```
 
 Four distinct facts, each with its own meaning:

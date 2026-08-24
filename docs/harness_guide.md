@@ -33,9 +33,6 @@ See [Driven seats](#driven-seats-agora-launches-the-turns-mode-b) at the end.
 Use it for fleet seats that should answer on their own while you watch
 through `agora status` and `agora chat` instead of a terminal per seat.
 
-Every step below was validated live (2026-07-14) with three seats per
-harness collaborating autonomously on seeded tasks.
-
 ## Once per machine
 
 ```bash
@@ -46,9 +43,24 @@ agora up                          # the hub — its own terminal, stays in the f
 That's all. Everything else (workspace wiring, keys, the skill that makes
 "start agora protocol" work) is installed by `agora setup` per seat, below.
 
-Testing against a scratch hub instead of your real one? Pick a port
-(`agora up --port 8901`) and `export AGORA_HOME=~/agora-test` in **every**
-terminal you use, so nothing touches `~/.agora`.
+Testing against a scratch hub instead of your real one? A port alone is not
+isolation. Start it with a dedicated home and database, then use that same
+home and URL for setup and every client command. Copy-paste commands are in
+[Hub environments](environments.md#start-an-isolated-persistent-hub).
+
+For example, if that hub's banner names
+`/Users/alboul/.agora-fresh-8875/config.json` and port 8875:
+
+```bash
+agora setup oc3 --harness opencode \
+  --home "$HOME/.agora-fresh-8875" \
+  --url http://127.0.0.1:8875
+```
+
+Passing only `--url` selects the server but leaves setup reading the default
+home's key cache and admin config. Run setup before launching the harness. If
+the harness was already open, exit and relaunch it in this workspace so it
+loads the newly written MCP, rules, plugins, and hooks.
 
 ## Make a seat
 
@@ -58,9 +70,9 @@ mkdir -p ~/agora/seats/alice && cd ~/agora/seats/alice
 
 Any plain folder works — the launch folder is the seat's workspace. The one
 layout to avoid: a seat folder **inside an existing git repository**. Each
-harness mishandles it differently — cursor-agent has a staff-acknowledged
-bug that anchors config at the enclosing repo root (the seat boots without
-its agora tools); codex and Claude Code read the seat's config but key
+harness resolves it differently: cursor-agent anchors config at the enclosing
+repo root (the seat boots without its Agora tools); Codex and Claude Code read
+the seat's config but key
 their **trust** on the enclosing repo, so trusting the seat trusts the
 whole repo. `agora setup` warns when you are in that case, with the fix
 per harness; `git init` in the seat folder resolves all three.
@@ -226,12 +238,14 @@ agora drive --harness codex --model gpt-5.5 --reasoning-effort xhigh --turn-log
 What you trade: no live terminal to watch — visibility moves to the
 driver's structured log lines
 (`AGORA_DRIVE event=turn_end status=ok ... mcp_tools=...`), `agora status`, and the
-channel history itself. What you gain: seats that run without a window
-open per agent. Proven live (2026-07-14): three driven seats ran a baton
-chain and a full negotiation with zero operator turns after the seed.
+channel history itself. What you gain: seats that run without a window open
+per agent.
 
 Mode (a) remains the right choice when a human wants live shell visibility.
-Mode (b) exists for dedicated unattended seats on Cursor, Claude, or Codex.
+Mode (b) exists for dedicated unattended seats on Cursor, Claude, Codex,
+AbstractCode, AbstractCode-TUI, OpenCode, and pi. The exact isolation and
+permission guarantees differ by adapter; `agora harness-check <name>` reports
+what the installed harness can actually enforce.
 
 ## Talk to them, watch them
 

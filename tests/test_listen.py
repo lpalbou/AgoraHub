@@ -247,6 +247,53 @@ def test_operator_room_task_digest_names_the_contribution_decision():
     assert "Nothing is owed by you" not in text
 
 
+def test_named_operator_task_gives_one_seat_the_routing_lane():
+    named = [_event(channel="commons", seq=19, status="open",
+                    flags="open,addressed,to-me,from-operator")]
+    text = once_digest(named, (1, 0))
+    assert "EXPLICITLY NAME YOU" in text
+    assert "ONE canonical focused room" in text
+    assert "addressing alone does not make you the coordinator" in text
+    assert "Otherwise do only your named slice" in text
+    # Routing guidance must survive the owed-count branch: the named seat is
+    # normally indebted, which was precisely why a mutually-exclusive elif
+    # would hide the coordination instruction from it.
+    assert "owe 1 answer(s)" in text
+
+
+def test_operator_task_bystander_is_forbidden_from_creating_a_second_room():
+    bystander = [_event(channel="commons", seq=19, status="open",
+                        flags="open,addressed,from-operator")]
+    text = once_digest(bystander, (0, 0))
+    assert "EXPLICITLY NAME ANOTHER SEAT" in text
+    assert "DO NOT claim the whole commission, create_group" in text
+    assert "competing plan" in text
+    assert "Wait for the task coordinator's room invitation" in text
+    assert "addressed seat owns routing only when the task explicitly says so" in text
+    assert "PLAN COMES FIRST AND IS MANDATORY" not in text
+
+
+def test_mixed_operator_batch_scopes_both_routing_instructions():
+    mixed = [
+        _event(channel="commons", seq=19, status="open",
+               flags="open,addressed,to-me,from-operator"),
+        _event(channel="commons", seq=20, status="open",
+               flags="open,addressed,from-operator"),
+    ]
+    text = once_digest(mixed, (1, 0))
+    assert "EXPLICITLY NAME YOU" in text
+    assert "EXPLICITLY NAME ANOTHER SEAT" in text
+
+
+def test_operator_dm_never_teaches_the_recipient_to_create_a_group():
+    dm = [_event(channel="dm:laurent--oc1", seq=3, status="open",
+                 flags="open,addressed,to-me,from-operator")]
+    text = once_digest(dm, (1, 0))
+    assert "ONE canonical focused room" not in text
+    assert "create_group" not in text
+    assert "owe 1 answer(s)" in text
+
+
 def test_wake_line_carries_hub_age_from_ulid():
     """Attribution armor (the phantom 11-minute-latency incident): the wake
     states its own hub->wake age, decoded from the message ULID the notify

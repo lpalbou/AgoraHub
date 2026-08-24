@@ -165,10 +165,16 @@ def resolve_key(url: str, agent_id: str, *, admin_key: str | None = None,
         # Surface-aware remedy: `agora up` is only correct where the hub runs.
         # Telling a REMOTE user to run it would start a wrong local hub.
         if is_loopback_url(url):
+            selected_home = home()
             raise SystemExit(
-                f"no cached key for '{agent_id}' and no admin key to "
-                "self-register. Run `agora up` first (writes "
-                "~/.agora/config.json); agents then self-register.")
+                f"no cached key for '{agent_id}' at {url} in "
+                f"{selected_home / 'keys.json'} and no admin key in "
+                f"{selected_home / 'config.json'} to self-register. "
+                "This invocation selected the wrong home if the running "
+                "hub's banner named a different config path; rerun the "
+                "command with `--home <that-home> --url "
+                f"{url}`. Only run `agora up` when no hub is already "
+                "serving that URL.")
         raise SystemExit(
             f"no cached key for '{agent_id}' at {url} (a hub on another "
             "machine). Ask the hub operator for a join artifact and run "

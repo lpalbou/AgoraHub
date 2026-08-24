@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,7 +24,8 @@ def create_app(db_path: str = "agora.db", admin_key: str = "",
                max_attachment_bytes: int | None = None,
                max_channel_attachment_bytes: int | None = None,
                embedding: dict[str, str] | None = None,
-               cors_origins: list[str] | None = None) -> FastAPI:
+               cors_origins: list[str] | None = None,
+               event_log: Callable[[str], None] | None = None) -> FastAPI:
     if not admin_key:
         raise ValueError("an admin key is required (set AGORA_ADMIN_KEY)")
     sink = None
@@ -38,7 +39,7 @@ def create_app(db_path: str = "agora.db", admin_key: str = "",
         extra["max_channel_attachment_bytes"] = max_channel_attachment_bytes
     service = HubService(Database(db_path), rate_per_minute=rate_per_minute,
                          notify_sink=sink, db_path=db_path,
-                         embedding=embedding, **extra)
+                         embedding=embedding, event_log=event_log, **extra)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -52,8 +53,12 @@ def create_app(db_path: str = "agora.db", admin_key: str = "",
         # point means the process died, never that it is grinding. (Two
         # healthy hubs were SIGKILLed in one evening on empty-log evidence;
         # the emptiness was stdout block-buffering, fixed in cmd_up.)
-        print(f"agora hub ready — serving {__version__} ({PROTOCOL_VERSION}); "
-              "probe /healthz for liveness, never the log", flush=True)
+        if event_log is not None:
+            event_log(f"AGORA_HUB event=ready version={__version__} "
+                      f"protocol={PROTOCOL_VERSION} health=/healthz")
+        else:
+            print(f"agora hub ready — serving {__version__} ({PROTOCOL_VERSION}); "
+                  "probe /healthz for liveness, never the log", flush=True)
         # Dark-episode watchdog (0067): one operator alert per (agent, episode)
         # when a seat is offline holding SLA-breached obligations. 0 disables.
         watchdog = (asyncio.create_task(service.dark_watchdog(dark_watch_seconds))
@@ -66,6 +71,8 @@ def create_app(db_path: str = "agora.db", admin_key: str = "",
         try:
             yield
         finally:
+            if event_log is not None:
+                event_log("AGORA_HUB event=stopping")
             for task in (watchdog, votewatch):
                 if task is not None:
                     task.cancel()
@@ -112,8 +119,13 @@ def create_app(db_path: str = "agora.db", admin_key: str = "",
             row = {"method": request.method, "path": request.url.path,
                    "seconds": round(elapsed, 1), "at": t0}
             slow_ring.append(row)
-            print(f"SLOW REQUEST {row['seconds']}s {row['method']} "
-                  f"{row['path']}", flush=True)
+            if event_log is not None:
+                event_log(f"AGORA_HUB event=slow-request "
+                          f"duration={row['seconds']}s method={row['method']} "
+                          f"path={row['path']}")
+            else:
+                print(f"SLOW REQUEST {row['seconds']}s {row['method']} "
+                      f"{row['path']}", flush=True)
         return response
 
     @app.get("/admin/slow")

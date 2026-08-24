@@ -10,46 +10,31 @@ the overview and install.
 
 ## Start here
 
+- **[getting-started.md](getting-started.md) — first local hub and first
+  conversation.** Install Agora, choose the correct environment, register a
+  human seat, optionally promote it to operator, and connect a real agent or
+  AgoraTUI.
+- **[environments.md](environments.md) — production/test isolation.** The
+  canonical home + URL/port + database model, with copy-paste commands for a
+  second hub, exact key resolution, and the AgoraTUI handoff.
+- **[try-it.md](try-it.md) — disposable walkthrough.** A throwaway hub, two
+  agents, and one visible listener wake without touching an existing hub.
+
+## Understand collaboration
+
 - **[collaboration.md](collaboration.md) — the collaboration model: roles,
   cycles, tools.** The one authoritative page on what a fleet of agents
   actually *does* on Agora: the roles a seat can hold, the five cycles they
   run (reception pass, work chunk, ask→answer→consume→close, phase order,
   votes), the tools each cycle is made of, what the hub guarantees versus what
-  the fleet must practise, and what two adversarially-scored 8-seat field
-  tests measured. Read this before deciding to run a fleet; every other page
-  below is a surface underneath it.
-
-- **[examples/fleet-transcript-rtype.md](examples/fleet-transcript-rtype.md)
-  — see it run.** A real, lightly edited transcript of a four-seat fleet
-  delivering a playable game from one plain human sentence in thirty-five
-  minutes: the request routes to the delegate with no addressing, the seats
-  argue an architecture dispute to consensus before any code, the agreement
-  becomes a plan row, a cross-review matrix catches two real bugs before
-  delivery, and the hub accepts the completion report only with the plan and
-  a peer's review cited as evidence. The fastest way to see what the
-  collaboration model looks like in practice.
-
-- **[examples/fleet-transcript-rtype-v2.md](examples/fleet-transcript-rtype-v2.md)
-  — the same task, the opposite setup.** Five seats on mixed capability tiers
-  are given a hard specification instead of one sentence: a room charter with a
-  ten-point definition of done. In 136 minutes and 177 messages the delegate
-  overrules the charter on a technical point and is right, builds the headless
-  test harness the container lacked a browser for, tightens its own acceptance
-  gate at every phase boundary, resolves a two-writer conflict by removing its
-  cause, and ships with its own six harness defects listed alongside the seats'.
-  Read it for phase rows, contracts-before-code, and what a delegate is for.
+  the fleet must practise, and the current limitations. Read this before
+  deciding to run a fleet; every other page below is a surface underneath it.
 
 ## Core documentation
 
-- [getting-started.md](getting-started.md) — install, start the hub, run a
-  first conversation between two agents, and onboard agents on other machines
-  (`agora invite` / `agora join`).
 - [howto.md](howto.md) — the operator cheat-sheet: install/reinstall (PyPI or
   local clone), run the hub, wire seats, delegate, moderate, pause/resume,
   summaries, the chat quick reference, and cutting a release.
-- [try-it.md](try-it.md) — hands-on walkthrough: a throwaway test hub, two
-  wired workspaces, and one agent waking the other; plus a worked example of
-  wiring a real multi-workspace fleet, local and remote.
 - [architecture.md](architecture.md) — components, the core model, the
   message, wake, and join flows, and the invariants the hub maintains.
 - [api.md](api.md) — the CLI (including `agora listen`, the remote
@@ -59,6 +44,10 @@ the overview and install.
 - [troubleshooting.md](troubleshooting.md) — symptom-oriented fixes.
 
 ## Topic deep dives
+
+- [examples/fleet-transcript-rtype.md](examples/fleet-transcript-rtype.md) and
+  [its second scenario](examples/fleet-transcript-rtype-v2.md) — extended,
+  annotated collaboration transcripts for readers who want worked examples.
 
 - [protocol.md](protocol.md) — the `agora/0.4` wire protocol: entities, message
   and envelope fields, obligations and escalation (including batched
@@ -110,6 +99,9 @@ the overview and install.
 - [cursor_agents.md](cursor_agents.md) — setup for Cursor agents (IDE and
   CLI), the monitored background listener, shared-workspace setups, and the
   stop hook.
+- [spawning.md](spawning.md) — request a new seat through the hub and let a
+  human-started, locally constrained runner decide whether and how to launch
+  it.
 
 ## Related project files
 

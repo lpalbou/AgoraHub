@@ -618,13 +618,17 @@ def read_workspace_seat(workspace: Path) -> dict | None:
     agent_id = data.get("agent_id")
     url = data.get("url")
     about = data.get("about", "")
+    selected_home = data.get("home")
     if not isinstance(agent_id, str) or not isinstance(url, str) or not isinstance(about, str):
+        return None
+    if selected_home is not None and not isinstance(selected_home, str):
         return None
     return {
         "schema": _SEAT_SCHEMA,
         "agent_id": agent_id,
         "url": url.rstrip("/"),
         "about": about,
+        "home": selected_home,
         "harnesses": tuple(h for h in harnesses if h in SUPPORTED_HARNESSES),
         "default_drive_harness": default_drive,
     }
@@ -640,6 +644,7 @@ def write_workspace_seat(workspace: Path, *, agent_id: str, url: str, about: str
         "agent_id": agent_id,
         "url": url.rstrip("/"),
         "about": about,
+        "home": custom_home_env(),
         "harnesses": list(harnesses),
         "default_drive_harness": default_drive_harness,
     }
@@ -751,8 +756,11 @@ def workspace_harness_env(workspace: Path, harness: str) -> dict[str, str] | Non
         seat = read_workspace_seat(workspace)
         if not seat or harness not in tuple(seat.get("harnesses") or ()):
             return None
-        return {"AGORA_AGENT_ID": seat["agent_id"], "AGORA_URL": seat["url"],
-                "AGORA_ABOUT": seat["about"]}
+        env = {"AGORA_AGENT_ID": seat["agent_id"], "AGORA_URL": seat["url"],
+               "AGORA_ABOUT": seat["about"]}
+        if seat.get("home"):
+            env["AGORA_HOME"] = seat["home"]
+        return env
     return None
 
 
@@ -831,8 +839,11 @@ def resolve_workspace_identity(cwd: Path, *,
                           if h in SUPPORTED_HARNESSES)
         if harness and harness not in harnesses:
             return None
-        return {"AGORA_AGENT_ID": seat["agent_id"], "AGORA_URL": seat["url"],
-                "AGORA_ABOUT": seat["about"]}
+        env = {"AGORA_AGENT_ID": seat["agent_id"], "AGORA_URL": seat["url"],
+               "AGORA_ABOUT": seat["about"]}
+        if seat.get("home"):
+            env["AGORA_HOME"] = seat["home"]
+        return env
     if harness:
         return workspace_harness_env(cwd, harness)
     envs = [env for env in (workspace_harness_env(cwd, name)
@@ -1730,8 +1741,9 @@ def setup_pi(workspace: Path, agent_id: str, url: str, about: str,
     pi ships no MCP client by design, so agora ships one: the extension spawns
     `agora-mcp` (session_start), registers every agora tool natively, and
     disposes on session_shutdown. The copy written here bakes NOTHING per-seat
-    — identity rides the environment (non-secret), so the file's bytes are
-    stable across seats and agora versions.
+    — identity comes from the non-secret `.agora/seat.json` written by setup,
+    with the process environment retained as an explicit override. The bridge
+    never stores or receives a bearer.
 
     NOTE: pi trusts project resources only interactively (or with a prior
     trust decision); `agora drive` passes `--approve` explicitly and loads the

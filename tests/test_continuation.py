@@ -51,6 +51,8 @@ def test_prompts_are_static_and_reception_starts_assigned_work():
     assert "BARE promise" in WAKE_PROMPT
     assert "SAY SO" in WAKE_PROMPT          # advertise starts and milestones
     assert "Never write 'claiming' only in prose" in WAKE_PROMPT
+    assert "EXPLICIT COORDINATION OWNERSHIP DECIDES WHO ROUTES" in WAKE_PROMPT
+    assert "concurrent volunteers never create competing rooms" in WAKE_PROMPT
     assert "routine progress receipts" in BOOT_PROMPT
     assert "ONLY per-slice receipt" in WORK_PROMPT
     assert "addressed structured ask" in WORK_PROMPT

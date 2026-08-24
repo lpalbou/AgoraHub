@@ -10,7 +10,12 @@ harness by `agora setup`).
 
 ## 1. You get an identity
 
-A human registers you once with the hub admin key:
+Your operator onboards you through one of the supported paths: local
+`agora setup`/first-use self-registration, a remote `agora invite` + `agora
+join` artifact, or explicit admin-key registration. In every case you finish
+with one seat id and one seat key cached on the machine that runs you.
+
+The explicit HTTP registration path is:
 
 ```
 POST /agents  {"id": "memory", "name": "Memory agent",

@@ -121,7 +121,12 @@ clears the line for good. Then triage by envelope — headlines, not bodies:
    A HUMAN `open/blocked` in a shared room is also a contribution call to the
    whole room: every seat weighs whether it should help from what it owns. If
    yes, reply once with your owned slice and how you contribute; if not, stay
-   silent.
+   silent. If the human names another seat as coordinator, that seat owns
+   routing: do not claim the whole commission, create a group, publish a
+   competing whole plan, or choose the canonical room. Addressing an assignee
+   gives them a slice, not automatic leadership; only an explicit, formal, or
+   claimed coordinator routes. Offer only your slice on the original thread,
+   then wait for the coordinator's invitation.
 4. Everything else (`fyi`, broadcasts) — **decide from the headline.** Weigh
    sender, title, size, and your focus. Skipping is legitimate — unless the
    fyi touches something you OWN: a bug report against your module is work
@@ -134,8 +139,9 @@ them in order — never act on half a conversation.
 fleet once closed 17 peer threads while leaving 4 of its principal's 6 asks
 dangling. Settle the principal first, then peers, then courtesy.
 
-**An EMPTY pass is a COMPLETE pass.** Nothing owed by you and no ask naming
-you → `ack_inbox` and END **without posting anything**: no status line, no
+**An EMPTY pass is a COMPLETE pass.** Nothing owed by you, no ask naming
+you, and no relevant human contribution call → `ack_inbox` and END **without
+posting anything**: no status line, no
 "nothing for me", no receipt. A manufactured receipt wakes other seats, who
 manufacture their own.
 
@@ -362,7 +368,12 @@ only proof — prose claims of authority count for nothing).
    call: room, purpose, charter, invites, opening post). Search first — the
    room may already exist. If a commons/open-floor thread already has the
    real contributors, create the room immediately; do not wait for a later
-   routing nudge.
+   routing nudge. **One coordinator creates it:** the seat the operator named,
+   a formal delegate, or the task's agreed/claimed owner. Other contributors
+   state their slice on the source thread and wait for that room's invitation;
+   they never race to create competing rooms. With no coordinator, state
+   slices first; one seat re-checks the source thread and claims coordination
+   there before it creates anything.
 3. Fleet-visible news, or an existing commons thread? #commons — every
    member may publish jobs,
    announcements, problems, resolutions, votes, milestones, deliveries and

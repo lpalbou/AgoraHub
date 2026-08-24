@@ -32,7 +32,8 @@ import httpx
 import pytest
 
 from agora import config as _config
-from agora.cli import _apply_home, _port_holder, _preflight_port, build_parser
+from agora.cli import (_apply_home, _port_holder, _preflight_port,
+                       _up_admin_key, build_parser)
 from agora.hub.app import create_app
 
 ADMIN_KEY = "test-admin-cli-surfaces"
@@ -131,7 +132,11 @@ def test_create_channel_private_with_purpose_and_invite(live_hub, isolated_home,
     msgs = httpx.get(
         f"{live_hub.url}/channels/{dm['channel']}/messages/{dm['id']}",
         headers=_bearer(bob_key), timeout=5).json()
-    token = re.search(r"invite_token='([^']+)'", msgs[-1]["body"]).group(1)
+    invite = msgs[-1]
+    assert invite["data"]["kind"] == "channel_invite"
+    assert invite["data"]["channel"] == "dev"
+    token = re.search(r"invite_token='([^']+)'", invite["body"]).group(1)
+    assert invite["data"]["invite_token"] == token
     joined = httpx.post(f"{live_hub.url}/channels/dev/join",
                         json={"invite_token": token},
                         headers=_bearer(bob_key), timeout=5)
@@ -156,6 +161,28 @@ def test_create_channel_public_needs_no_token(live_hub, isolated_home, capsys):
     inbox = httpx.get(f"{live_hub.url}/inbox", headers=_bearer(carol_key),
                       timeout=5).json()
     assert any(e["channel"].startswith("dm:") for e in inbox)
+
+
+def test_cli_group_invite_carries_the_structured_join_operation(
+        live_hub, isolated_home, capsys):
+    owner_key = _register(live_hub.url, "owner")
+    peer_key = _register(live_hub.url, "peer")
+    _config.cache_key(live_hub.url, "owner", owner_key)
+
+    _run_cli(["group", "--as", "owner", "--url", live_hub.url,
+              "build", "the", "demo", "@peer"])
+    assert "group room 'build-the-demo' created" in capsys.readouterr().out
+
+    inbox = httpx.get(f"{live_hub.url}/inbox", headers=_bearer(peer_key),
+                      timeout=5).json()
+    [dm] = [e for e in inbox
+            if e["channel"].startswith("dm:") and e["sender"] == "owner"]
+    invite = httpx.get(
+        f"{live_hub.url}/channels/{dm['channel']}/messages/{dm['id']}",
+        headers=_bearer(peer_key), timeout=5).json()[-1]
+    assert invite["data"]["kind"] == "channel_invite"
+    assert invite["data"]["channel"] == "build-the-demo"
+    assert invite["data"]["invite_token"] in invite["body"]
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +245,20 @@ def test_apply_home_expands_tilde(monkeypatch):
     _apply_home(args)
     assert os.environ["AGORA_HOME"] == str(Path.home() / "agora-hub2")
     monkeypatch.delenv("AGORA_HOME", raising=False)
+
+
+def test_up_new_admin_key_wins_over_environment_and_config(monkeypatch):
+    monkeypatch.setenv("AGORA_ADMIN_KEY", "production-secret")
+    args = build_parser().parse_args(["up", "--new-admin-key"])
+    generated = _up_admin_key(args, {"admin_key": "remembered-secret"})
+    assert generated not in {"production-secret", "remembered-secret"}
+    assert len(generated) == 32
+
+    inherited = _up_admin_key(
+        build_parser().parse_args(["up"]),
+        {"admin_key": "remembered-secret"},
+    )
+    assert inherited == "production-secret"
 
 
 # ---------------------------------------------------------------------------

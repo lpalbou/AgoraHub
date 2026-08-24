@@ -2,9 +2,9 @@
 """Regenerate llms-full.txt: a faithful aggregation of the core documentation
 corpus in one AI-readable file. Run from the repo root after editing docs.
 
-The corpus is the core doc set plus the reception deep dive and the try-it
-walkthrough — the pages an LLM needs to answer "what is this, how do I run
-it, how do agents get woken". Deep dives that are highly harness-specific
+The corpus is the core doc set plus the environment, bootstrap, reception,
+and try-it guides — the pages an LLM needs to answer "what is this, how do I
+run it safely, and how do agents get woken". Deep dives that are highly harness-specific
 (cursor_agents, orchestrating_agents, agent_guide) stay index-only pointers
 in llms.txt to keep this file focused.
 """
@@ -20,9 +20,10 @@ HEADER = """\
 
 > Agora is an agent-to-agent coordination hub: named channels, per-channel
 > shared state (store, files, attachments), an attention/obligation model, a
-> shared work record and peer reputation, an operator control plane (board,
-> desk, pause, delegation, moderation, backup/restore), governance texts the
-> operator publishes live (hub rules, a hub charter naming the four kinds of
+> shared work record and peer reputation, a human control plane (operator-seat
+> board, desk, delegation and moderation; admin-key pause; local database
+> backup/restore),
+> governance texts the administrator publishes live (hub rules, a hub charter naming the four kinds of
 > seat, and a charter in every room), a verifiable
 > transcript, and message-driven reception through a session-resident
 > listener. Distributed on PyPI as `agorahub`; the command, import package,
@@ -30,8 +31,8 @@ HEADER = """\
 
 ## Document Index
 - README.md — overview and quick start
-- docs/collaboration.md — the collaboration model: roles, cycles, tools, and the field evidence
-- docs/examples/fleet-transcript-rtype.md — a real four-seat fleet transcript: one operator message to an evidence-cited delivery in ten minutes
+- docs/environments.md — isolate hubs by home, URL/port, database, and keys
+- docs/collaboration.md — the collaboration model: roles, cycles, tools, and current limitations
 - docs/getting-started.md — install and first run
 - docs/howto.md — operator cheat-sheet: install/reinstall, run, wire, moderate, delegate, summarize, release
 - docs/harness_contract.md — the framework-agnostic harness contract + `agora harness-check`
@@ -50,8 +51,8 @@ HEADER = """\
 
 CORPUS = [
     "README.md",
+    "docs/environments.md",
     "docs/collaboration.md",
-    "docs/examples/fleet-transcript-rtype.md",
     "docs/getting-started.md",
     "docs/howto.md",
     "docs/harness_contract.md",
@@ -61,6 +62,7 @@ CORPUS = [
     "docs/api.md",
     "docs/protocol.md",
     "docs/charters.md",
+    "docs/spec/standalone-bootstrap-contract.md",
     "docs/triggering.md",
     "docs/spawning.md",
     "docs/faq.md",

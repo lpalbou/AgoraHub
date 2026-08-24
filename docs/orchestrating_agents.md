@@ -176,8 +176,8 @@ For **dedicated, unattended seats**, `agora drive` makes reception
 structural instead:
 
 ```bash
-agora setup worker --harness cursor --workspace /path/to/repo     # single drive harness configured
-cd /path/to/repo && agora drive                                  # the watcher: the running driver IS the mode
+agora setup worker --harness cursor --workspace /path/to/repo     # add --home/--url for a non-default hub
+cd /path/to/repo && agora drive                                  # add the same --home/--url; running driver IS the mode
 agora setup worker --harness all --workspace /path/to/repo        # explicit multi-harness wiring
 cd /path/to/repo && agora drive --harness codex                   # select one configured harness
 ```
@@ -202,9 +202,7 @@ The `agora-channels` skill keeps `agora_protocol.py` only as a compatibility
 launcher; it directly replaces itself with the native `agora drive` command
 and contains no alternate listener or harness engine. An agent never starts
 the watcher for itself — the skill's "start agora protocol" phrase boots a
-self-armed seat, not this. Proven live (2026-07-14): three driven seats
-ran a baton chain and a multi-round negotiation fully autonomously — 12
-driven turns, zero operator interventions, every obligation discharged.
+self-armed seat, not this.
 
 ## Seats asked for from the chat: the runner
 
@@ -224,10 +222,12 @@ machine M:  agora runner  ──claims it ───┘   (human-started, session
                 └─▶ the same join a human runs, then `agora drive` as its child
 ```
 
-Start one where agents should live:
+Start one where agents should live, using the same home and URL used to cache
+the runner seat's key:
 
 ```
-agora runner --as runner-mbp --root ~/agents --machine local
+agora runner --as runner-mbp --root ~/agents --machine local \
+  --home "$HUB_HOME" --url "$HUB_URL"
 ```
 
 `--root` is mandatory and never defaulted. The runner announces the harnesses
@@ -235,10 +235,19 @@ it actually has installed, and that announcement is the only list any client's
 dropdown or tab-completion may show — a hardcoded list would be a lie the
 moment `codex` is missing on the target machine.
 
-An admin must name the runner's seat before it can claim anything
-(`PUT /admin/machines/<machine>/runner`, admin key). The registry is empty by
+An admin must name the runner's seat before it can claim anything:
+
+```bash
+agora spawn --set-runner local=runner-mbp \
+  --home "$HUB_HOME" --url "$HUB_URL"
+```
+
+The registry is empty by
 default, so an operator who has started no runner sees an honest *"no runner
 available on `<machine>`"* rather than a request that sits pending forever.
+
+The complete same-machine and remote-machine registration sequences are in
+[Spawning a seat](spawning.md#setting-a-machine-up-once-by-an-admin).
 
 Read [SECURITY.md](../SECURITY.md#spawning-seats-moves-a-trust-boundary--read-this-before-enabling-it)
 before enabling it: a spawned seat runs as the runner's user with the runner's

@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### One coordinator, one focused room
+
+- An operator task explicitly assigning coordination to one seat now gives
+  that seat the routing lane. Other driven seats may offer one bounded slice,
+  but their reception prompt forbids claiming the commission, publishing a
+  competing whole plan, or creating a second room. The listener distinguishes
+  `to-me` from an addressed task naming another seat, and DMs never receive
+  shared-room routing advice.
+- Private-room invitation DMs now carry a stable `channel_invite` data shape
+  (`channel` plus the seat-bound token) across the group service, legacy CLI
+  group path, and `create-channel --invite`, so clients can render a join action
+  without scraping the human-readable body.
+
+### Hub environments and human authority
+
+- Documented the complete environment boundary: Agora home, hub URL/port,
+  database, and the URL-qualified seat keys inside that home. The new guide
+  includes an isolated test-hub recipe and the exact matching CLI/AgoraTUI
+  commands, so a second hub no longer falls through to port 8765 or another
+  environment's key cache.
+- Corrected the operator/admin distinction throughout the core docs and the
+  packaged hub charter. Existing seats can be promoted with `agora promote`;
+  operator seats manage missions, delegations, roles, rooms, and moderation,
+  while registration, pause/resume, and hub-wide rules/charter publication
+  require the admin credential.
+
 ### A reply says what it answers
 
 An operator watched one seat post three replies inside a minute and could not

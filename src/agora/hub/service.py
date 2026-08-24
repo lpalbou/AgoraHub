@@ -18,7 +18,7 @@ import re
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from ..agent_id import validate_agent_id
 from ..db import (
@@ -274,8 +274,10 @@ class HubService:
                  max_attachment_bytes: int = MAX_ATTACHMENT_BYTES,
                  max_channel_attachment_bytes: int = MAX_CHANNEL_ATTACHMENT_BYTES,
                  db_path: str = "",
-                 embedding: dict[str, str] | None = None) -> None:
+                 embedding: dict[str, str] | None = None,
+                 event_log: Callable[[str], None] | None = None) -> None:
         self.db = db
+        self._event_log = event_log
         self._ensure_builtin_channels()
         self.max_attachment_bytes = max_attachment_bytes
         self.max_channel_attachment_bytes = max_channel_attachment_bytes
@@ -473,6 +475,27 @@ class HubService:
         (WebSocket connect, long-poll wait) so cross-thread wakes are safe."""
         self._binder.bind(loop)
 
+    def _log_event(self, event: str, **fields: Any) -> None:
+        """Best-effort operator log; lifecycle recording must never fail work."""
+        if self._event_log is None:
+            return
+        parts = [f"AGORA_HUB event={event}"]
+        for key, value in fields.items():
+            if value is None or value == "":
+                continue
+            if isinstance(value, bool):
+                value = str(value).lower()
+            elif isinstance(value, str) and any(
+                    char.isspace() or ord(char) < 32 or 127 <= ord(char) <= 159
+                    for char in value):
+                value = json.dumps(value, ensure_ascii=True)
+            parts.append(f"{key}={value}")
+        try:
+            self._event_log(" ".join(parts))
+        except Exception:
+            logging.getLogger("agora.hub.events").debug(
+                "operator event log failed", exc_info=True)
+
     # -- auth -----------------------------------------------------------------
 
     @staticmethod
@@ -508,6 +531,8 @@ class HubService:
                                       sanitize_text(about, MAX_ABOUT_CHARS, field="about"))
         if mission.strip():
             self.db.set_mission(agent_id, sanitize_block(mission, MAX_MISSION_CHARS))
+        self._log_event("seat-registered", seat=agent_id,
+                        role="operator" if operator else "member")
         self._auto_join_commons(info)
         self._op_gen += 1
         self._operators = None  # bust the closure-authority cache
@@ -522,6 +547,8 @@ class HubService:
         self._post_system("commons", f"{agent.id} joined"
                                      + (f" — {about}" if about else ""))
         self.db.set_cursor(agent.id, "commons", self.db.last_seq("commons"))
+        self._log_event("channel-joined", channel="commons", seat=agent.id,
+                        source="registration")
 
     def operator_ids(self) -> frozenset[str]:
         """Operator agent ids (closure authority, ADR-0003). Cached: it is
@@ -637,6 +664,9 @@ class HubService:
              "you were carrying on that authority stops — say so where you "
              "were carrying it rather than letting it look done."),
             to=[target_id], status=Status.fyi)
+        self._log_event("role-changed", seat=target_id,
+                        role="operator" if operator else "member",
+                        by=agent.id)
         return {"agent": target_id, "operator": operator, "changed": True,
                 "by": agent.id}
 
@@ -790,6 +820,8 @@ class HubService:
                 about=sanitize_text(about, MAX_ABOUT_CHARS, field="about"))
         except JoinTokenRefused as e:
             raise HubError(e.status_code, e.detail) from e
+        self._log_event("seat-registered", seat=info.id, role="member",
+                        source="join-token")
         self._auto_join_commons(info)
         joined: list[str] = []
         for channel in preset:
@@ -859,11 +891,15 @@ class HubService:
                                 "seat with its own key, registered like any "
                                 "other")
         self.db.meta_set(self.MACHINE_RUNNER_PREFIX + machine, agent_id)
+        self._log_event("runner-assigned", machine=machine, runner=agent_id)
         return {"machine": machine, "runner": agent_id}
 
     def clear_machine_runner(self, machine: str) -> bool:
         machine = self._validate_machine(machine)
-        return self.db.meta_delete(self.MACHINE_RUNNER_PREFIX + machine)
+        changed = self.db.meta_delete(self.MACHINE_RUNNER_PREFIX + machine)
+        if changed:
+            self._log_event("runner-cleared", machine=machine)
+        return changed
 
     def machine_runner(self, machine: str) -> str:
         return self.db.meta_get(self.MACHINE_RUNNER_PREFIX + machine) or ""
@@ -903,6 +939,8 @@ class HubService:
         self.db.meta_set(self.MACHINE_HARNESS_PREFIX + machine,
                          json.dumps({"harnesses": names, "capabilities": caps,
                                      "at": time.time()}))
+        self._log_event("runner-announced", machine=machine, runner=agent.id,
+                        harnesses=len(names))
         return {"machine": machine, "harnesses": names, "capabilities": caps}
 
     def _clean_capabilities(self, capabilities: dict[str, Any] | None,
@@ -1030,10 +1068,13 @@ class HubService:
         if len(model) > MAX_SPAWN_MODEL_CHARS:
             raise TextTooLong("model", len(model), MAX_SPAWN_MODEL_CHARS)
         reasoning = self._validate_spawn_reasoning(machine, harness, reasoning)
-        return self.db.create_spawn_request(
+        row = self.db.create_spawn_request(
             machine=machine, seat_id=seat_id, mission=mission, harness=harness,
             folder=folder, channels=preset, options=opts,
             model=model, reasoning=reasoning, requested_by=actor.id)
+        self._log_event("spawn-requested", spawn=row.id, seat=seat_id,
+                        machine=machine, harness=harness, by=actor.id)
+        return row
 
     def _validate_spawn_reasoning(self, machine: str, harness: str,
                                   reasoning: str) -> str:
@@ -1119,6 +1160,8 @@ class HubService:
                                     detail=str(e.detail), by=agent.id)
             raise
         row = self.db.attach_spawn_token(row.id, token["token_id"])
+        self._log_event("spawn-claimed", spawn=row.id, seat=row.seat_id,
+                        machine=machine, runner=agent.id)
         return {"request": row.model_dump(mode="json"),
                 "join_token": token["token"]}
 
@@ -1135,10 +1178,13 @@ class HubService:
                                 f"{sorted(s.value for s in SpawnState)}") from e
         detail = sanitize_text(detail, MAX_SPAWN_DETAIL_CHARS, field="detail")
         try:
-            return self.db.set_spawn_state(spawn_id, target, detail=detail,
-                                           by=agent.id)
+            changed = self.db.set_spawn_state(spawn_id, target, detail=detail,
+                                              by=agent.id)
         except SpawnTransitionRefused as e:
             raise HubError(e.status_code, e.detail) from e
+        self._log_event("spawn-state", spawn=spawn_id, seat=row.seat_id,
+                        state=target.value, runner=agent.id)
+        return changed
 
     def request_spawn_stop(self, agent: AgentInfo, spawn_id: str) -> SpawnRequest:
         """Record that the operator wants this seat stopped. The hub does not
@@ -1185,6 +1231,8 @@ class HubService:
         channel = self.db.create_channel(name, private, agent.id)
         self._post_system(name, f"channel created by {agent.id}")
         self._seed_charter(agent, name, charter)
+        self._log_event("channel-created", channel=name, owner=agent.id,
+                        private=private)
         # No channel — `commons` included — is born with a `traffic_policy`.
         # A board is an operator's deliberate opt-in via channel:meta, not a
         # name the hub recognises and restricts.
@@ -1271,7 +1319,8 @@ class HubService:
                             "and work the topic THERE (not in commons)."),
                     title=f"invite to {name}",
                     status=Status.fyi,
-                    data={"invite_token": token, "channel": name}))
+                    data={"kind": "channel_invite",
+                          "invite_token": token, "channel": name}))
                 invited.append(peer)
             except HubError as e:
                 failed.append({"agent": peer, "error": e.detail})
@@ -1407,6 +1456,7 @@ class HubService:
             # History is deliberately readable (get_messages), but must not
             # flood the newcomer's inbox: start their triage cursor at head.
             self.db.set_cursor(agent.id, channel, self.db.last_seq(channel))
+            self._log_event("channel-joined", channel=channel, seat=agent.id)
         # One-call onboarding: metadata + members with abouts, so the joiner
         # knows the channel's norms and who to ask what before posting.
         return {"joined": True, **self.channel_info(agent, channel)}
@@ -1452,6 +1502,7 @@ class HubService:
         self.db.rating_clear_rater(channel, agent.id)
         self.db.remove_member(channel, agent.id)
         self._post_system(channel, f"{agent.id} left")
+        self._log_event("channel-left", channel=channel, seat=agent.id)
 
     # -- messages -----------------------------------------------------------------
 
@@ -2360,6 +2411,8 @@ class HubService:
             self._post_system(channel, f"channel archived by {agent.id} — "
                                        f"{len(evicted)} member(s) evicted; "
                                        "history preserved, room delisted")
+            self._log_event("channel-archived", channel=channel, by=agent.id,
+                            evicted=len(evicted))
         return {"channel": channel, "archived": True, "evicted": sorted(evicted),
                 "already_archived": already}
 
@@ -2390,6 +2443,8 @@ class HubService:
         self._post_system(channel, f"channel reopened by {agent.id} — owner "
                                    f"{info.created_by} restored; prior members "
                                    "must rejoin")
+        self._log_event("channel-reopened", channel=channel, by=agent.id,
+                        owner=info.created_by)
         return {"channel": channel, "archived": False, "owner": info.created_by}
 
     def retire_agent(self, agent: AgentInfo, target_id: str,
@@ -2408,6 +2463,8 @@ class HubService:
             raise HubError(403, "operators cannot be retired (lifecycle safety)")
         reason = sanitize_text(str(reason or ""), 200, field="reason")
         evicted = self.db.retire_agent(target_id, reason)
+        self._log_event("seat-retired", seat=target_id, by=agent.id,
+                        evicted=len(evicted))
         return {"agent": target_id, "retired": True, "reason": reason,
                 "evicted_from": sorted(evicted)}
 
@@ -2423,6 +2480,7 @@ class HubService:
         if self.db.agent_retirement(target_id) is None:
             return {"agent": target_id, "retired": False, "already_active": True}
         self.db.unretire_agent(target_id)
+        self._log_event("seat-restored", seat=target_id, by=agent.id)
         return {"agent": target_id, "retired": False}
 
     def delete_agent(self, agent: AgentInfo, target_id: str) -> dict[str, Any]:
@@ -7108,6 +7166,8 @@ class HubService:
             "`channel:` metadata rows, minting invites, and archiving the "
             "room when the work is done.",
             to=[new_owner], status=Status.fyi)
+        self._log_event("ownership-transferred", channel=channel,
+                        previous=previous, owner=new_owner, by=agent.id)
         return {"channel": channel, "owner": new_owner, "previous": previous,
                 "changed": True, "by": agent.id}
 
