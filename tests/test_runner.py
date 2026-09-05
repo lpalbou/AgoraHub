@@ -289,6 +289,62 @@ def test_no_tty_refuses_rather_than_self_approving(cfg, monkeypatch):
     assert "no tty" in str(exc.value) and "build-box" in str(exc.value)
 
 
+def test_the_operators_own_request_is_not_re_asked_at_the_shell(cfg, monkeypatch):
+    """laurent, commons#290: "when the human operator request the spawn, you
+    should never ask again in the shell".
+
+    This gate collects a HUMAN's consent. When the human who asked is the hub
+    operator, a second yes at this terminal adds nothing and costs everything:
+    `codex-seat-spawn` sat at `awaiting_approval` because nobody was watching
+    the shell it was asking in.
+
+    RED CASE: drop the `requested_by_operator` branch and this fails — the
+    approver is called and the row reports `awaiting_approval`.
+    """
+    _installed(monkeypatch, "claude")
+    cfg.require_approval = True
+    reported: list[tuple[str, str]] = []
+    join, launch = _joiner(), _launcher()
+
+    def must_not_be_asked(cfg_, row):        # pragma: no cover - the assertion
+        raise AssertionError("the operator was asked to approve twice")
+
+    result, _ = R.handle_request(
+        cfg, RunnerState(), _row(requested_by_operator=True), "t",
+        joiner=join, launcher=launch, approver=must_not_be_asked,
+        report=lambda s, d: reported.append((s, d)))
+
+    assert result == "running"
+    assert launch.calls, "the seat must actually start"
+    assert not any(s == "awaiting_approval" for s, _ in reported)
+
+
+def test_a_non_operator_request_is_still_gated(cfg, monkeypatch):
+    """The skip is scoped to the operator's OWN request and nothing wider.
+
+    Spawning is operator-only today and will not stay that way; when a
+    delegate or a peer can ask, the human at this machine must still get to
+    refuse. Absent authority is never read as authority either — an older hub
+    sends no flag at all, which lands here.
+    """
+    _installed(monkeypatch, "claude")
+    cfg.require_approval = True
+    asked: list[str] = []
+
+    def approver(cfg_, row):
+        asked.append(row["seat_id"])
+        return False
+
+    for row in (_row(requested_by_operator=False), _row()):   # explicit, absent
+        result, detail = R.handle_request(
+            cfg, RunnerState(), row, "t", joiner=_joiner(),
+            launcher=_launcher(), approver=approver,
+            report=lambda s, d: None)
+        assert result == "rejected" and "declined" in detail
+
+    assert asked == ["scribe", "scribe"], "both must reach the human"
+
+
 # -- the other gates ----------------------------------------------------------
 
 def test_a_folder_escaping_the_root_is_refused(cfg):
@@ -428,6 +484,65 @@ def test_the_announced_knobs_are_read_off_the_adapters_not_transcribed():
     assert caps["claude"]["reasoning_advisory"] is False
 
 
+def test_no_adapter_may_conjure_a_model_menu(monkeypatch):
+    """The menu comes from the HUMAN at this machine and from nowhere else.
+
+    laurent asked for a per-harness model list (`commons#296`). The one source
+    that must never appear is a list hardcoded in the package: no adapter
+    enumerates models, so a constant here would be exactly the invented
+    dropdown `harness_capabilities` was written to kill. An un-configured
+    harness therefore carries NO `models` key — absent means *nobody has
+    said*, which a client renders as free text."""
+    caps = R.harness_capabilities(("claude", "cursor"))
+    assert "models" not in caps["claude"]
+    assert "models" not in caps["cursor"]
+
+    caps = R.harness_capabilities(("claude", "cursor"),
+                                  {"claude": ("m-1", "m-2")})
+    assert caps["claude"]["models"] == ["m-1", "m-2"]
+    assert "models" not in caps["cursor"], "one harness's menu is not another's"
+
+
+@pytest.mark.parametrize("spec,expected", [
+    ("claude=a,b", {"claude": ("a", "b")}),
+    ("claude= a , b ,", {"claude": ("a", "b")}),      # typed by a human
+    ("claude=a,a", {"claude": ("a",)}),               # one entry, one option
+    ("claude=", {"claude": ()}),                      # constrains nothing
+])
+def test_a_model_menu_is_parsed_as_typed(spec, expected):
+    assert R.parse_model_menus([spec]) == expected
+
+
+@pytest.mark.parametrize("spec", ["claude", "=a,b", ""])
+def test_a_malformed_menu_exits_rather_than_being_skipped(spec):
+    """Loud at config time: the operator is at this terminal now, and a
+    silently dropped `--models` is discovered as a missing dropdown an hour
+    later, on a machine nobody is sitting at."""
+    with pytest.raises(SystemExit) as exited:
+        R.parse_model_menus([spec])
+    assert "HARNESS=ID,ID" in str(exited.value)
+
+
+def test_a_menu_for_a_harness_this_machine_cannot_run_is_dropped_and_named(
+        cfg, monkeypatch, capsys):
+    """The hub refuses capabilities for an un-announced harness — correctly,
+    since a knob for an unspawnable harness is a dead control. But it refuses
+    the WHOLE announce, so one typo here would make the machine report no
+    harnesses at all. Drop it before it is sent, and say so by name."""
+    _installed(monkeypatch, "claude")
+    hub = _FakeHub()
+    monkeypatch.setattr(R, "RunnerHub", lambda *a, **k: hub)
+    monkeypatch.setattr(R, "config_from_args", lambda _a: cfg)
+    cfg.models = {"claude": ("m-1",), "codex": ("m-2",)}
+    R.main(argparse.Namespace(once=True))
+
+    _machine, _harnesses, caps = hub.announced
+    assert caps["claude"]["models"] == ["m-1"]
+    assert "codex" not in caps, "an unannounced harness would 400 the announce"
+    logged = capsys.readouterr().out
+    assert "--models codex=" in logged and "does not announce codex" in logged
+
+
 def test_an_unknown_harness_name_cannot_conjure_a_capability_row():
     """No hub-side enum here either: a name with no adapter yields no row,
     rather than an empty row that renders as "this harness has no knobs"."""
@@ -462,8 +577,10 @@ class _FakeHub:
         self.states: list[tuple[str, str, str]] = []
         self.announced = None
 
-    def announce(self, machine, harnesses, capabilities=None):
+    def announce(self, machine, harnesses, capabilities=None,
+                 poll_seconds=None):
         self.announced = (machine, tuple(harnesses), capabilities or {})
+        self.announced_poll_seconds = poll_seconds
         return {}
 
     def close(self):

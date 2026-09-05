@@ -25,7 +25,7 @@ import time
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 MAX_BODY_BYTES = 64 * 1024
 MAX_DATA_BYTES = 64 * 1024     # structured payload cap (mirrors body; prevents DB-fill DoS)
@@ -150,6 +150,27 @@ def elide(text: str, limit: int, *, marker: str = "…") -> str:
     return text if len(text) <= limit else text[:max(0, limit - len(marker))] + marker
 
 
+def attributed_quote(text: str, author: str, limit: int = 400) -> str:
+    """Quote a seat's own words with the voice they were written in named.
+
+    A hub alert speaks to its addressee in the SECOND person while carrying
+    a field the row's owner wrote in the FIRST. Pasted bare, the two collide:
+    `tui` parked a row whose `needs` read "I told them at dm#96 I will run
+    any variable they name", and the nudge delivered to `agora-tui` read
+    "YOU ARE THE BLOCKER … I told them at dm#96 …" — a second person who is
+    the reader and a first person who is neither the reader nor the hub, in
+    one sentence (reported at dm:agora--tui#4, 2026-08-25).
+
+    Naming the author and setting the words as a blockquote makes the voice
+    switch visible, so the reader can act on the quote instead of parsing
+    who "I" is. Every line is prefixed: a bare `>` on the first line only
+    stops being a quote at the first newline."""
+    body = elide(str(text).strip(), limit)
+    quoted = "\n".join(f"> {line}" if line else ">"
+                       for line in body.splitlines()) or "> (nothing said)"
+    return f"{author} writes:\n\n{quoted}"
+
+
 # Work-item id grammar (0093, S0 ruling): `<package>-<NNNN>` — URL-safe
 # slug, LAST-hyphen parse, all-digits tail. The one shared definition for
 # the /work endpoint, item_ref validation, and claim-key consistency; `#`
@@ -165,7 +186,16 @@ def parse_work_id(text: str) -> tuple[str, str] | None:
 
 
 def sanitize_title(title: str) -> str:
-    return sanitize_text(title, MAX_TITLE_CHARS)
+    # NAME THE FIELD (2026-08-25). This call omitted `field=`, so every
+    # over-long title was refused as "text is N characters; the cap is 120"
+    # — and a seat that cannot tell WHICH field is over cannot repair in
+    # place, so the cheapest repair is to rebuild the whole call. The
+    # rebuild is where the title gets dropped, which is the other half of
+    # claim:a-required-title-is-unenforced-and-a-retry-drops-it. Measured:
+    # three refusals on this seat in one session, 8-9 on delegate's in one
+    # night, and agora-tui lost a title to the rebuild twice in two turns.
+    # An unnamed field forces the lossy repair by construction.
+    return sanitize_text(title, MAX_TITLE_CHARS, field="title")
 
 
 def dm_channel_name(agent_a: str, agent_b: str) -> str:
@@ -303,8 +333,42 @@ class Notice(BaseModel):
     key: str = Field(min_length=1, max_length=160)
 
 
+#: Fields a client reaches for that are real hub concepts but live INSIDE
+#: `data`, not at the top level (the MCP tool takes them as parameters and
+#: folds them in, which is exactly why an HTTP caller expects them here).
+#: Getting these wrong is not cosmetic: `evidence` is what discharges an
+#: operator's request, so a `resolved` whose evidence was dropped settles
+#: nothing while reading as delivered.
+_POST_FIELDS_THAT_LIVE_IN_DATA = ("evidence", "settled_by", "item_ref")
+
+
 class PostMessage(BaseModel):
-    """Client -> hub payload to post a message."""
+    """Client -> hub payload to post a message.
+
+    UNKNOWN FIELDS ARE REFUSED, NOT IGNORED (2026-08-25). Pydantic's default
+    is `extra="ignore"`, so for the life of this model every misspelled or
+    invented parameter returned 200 and did nothing — the precise failure
+    class this fleet spent a day cataloguing, in agora-tui's words: "a verb
+    that accepts and silently does nothing teaches its first real user that
+    it works."
+
+    Measured, not hypothesised. @delegate posted 16 `settles=[...]` refs at
+    `agora-and-wui#435`, was accepted, and cleared nothing — because there is
+    no `settles` field, here or on the running hub. They believed it worked;
+    so did I, to the point of recording `settles` as shipped in a store row
+    with a measurement I had not taken. One silently-swallowed keyword put a
+    false receipt in the record and misled four seats for a day.
+
+    The dangerous member of the class is not the invented verb, it is the
+    near miss: `answer=` for `answers=`, or a top-level `evidence=` (which
+    belongs in `data`). Both are silent today, and both leave a seat holding
+    a 200 that says "answered"/"delivered" over a row that never moved.
+    """
+
+    #: `forbid` is the belt; the validator below is the braces, and it runs
+    #: first (mode="before") so the caller gets this hub's teaching refusal
+    #: rather than pydantic's bare "Extra inputs are not permitted".
+    model_config = ConfigDict(extra="forbid")
 
     body: str = ""
     title: str = ""
@@ -336,6 +400,62 @@ class PostMessage(BaseModel):
     #                                     sender advisory (delivery itself is
     #                                     never gated — operator ruling
     #                                     2026-07-28)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _refuse_unknown_fields(cls, value: Any) -> Any:
+        """Name the unknown key, name the field it is probably reaching for,
+        and say that nothing was posted.
+
+        Three tiers, cheapest first, because a refusal that only says "no"
+        costs the caller another round trip to guess:
+        - a field that IS a hub concept but lives in `data` gets sent there;
+        - a near miss of a real field (edit distance 1-2, or a plural/singular
+          slip) gets named;
+        - anything else is listed against the real field set.
+        """
+        if not isinstance(value, dict):
+            return value
+        known = set(cls.model_fields)
+        unknown = [str(k) for k in value if str(k) not in known]
+        if not unknown:
+            return value
+        hints: list[str] = []
+        for key in unknown:
+            if key in _POST_FIELDS_THAT_LIVE_IN_DATA:
+                hints.append(f"`{key}` is real but lives INSIDE `data` "
+                             f'(data={{"{key}": ...}}), not at the top level')
+                continue
+            near = _closest_field(key, known)
+            if near:
+                hints.append(f"`{key}` is not a field — did you mean `{near}`?")
+            else:
+                hints.append(f"`{key}` is not a field")
+        raise ValueError(
+            "; ".join(hints)
+            + ". Unknown fields used to be accepted and silently dropped, "
+              "which returned 200 over a message that discharged nothing. "
+              "They are refused now: NOTHING WAS POSTED. Valid fields: "
+            + ", ".join(sorted(known))
+        )
+
+
+def _closest_field(key: str, known: set[str]) -> str:
+    """The single closest known field name, or "" when nothing is close.
+
+    Deliberately conservative — a wrong suggestion is worse than none, because
+    the caller will type it. Requires a real neighbour: same name modulo a
+    trailing `s`, or an edit distance of at most 2 on names long enough for
+    that to mean something.
+    """
+    import difflib
+
+    for candidate in (f"{key}s", key.rstrip("s")):
+        if candidate in known and candidate != key:
+            return candidate
+    cutoff = 0.8 if len(key) <= 5 else 0.7
+    matches = difflib.get_close_matches(key, sorted(known), n=1, cutoff=cutoff)
+    return matches[0] if matches else ""
 
 
 class Envelope(BaseModel):
@@ -668,6 +788,41 @@ class ObligationRow(BaseModel):
     #         An operator's ask-less open/blocked landing on you (named, or
     #         routed to the reporting delegate). ONLY the operator's own word
     #         or a `resolved` reply citing evidence clears it.
+    #     hub_alert_fix_the_condition
+    #         A MACHINE-ROUTED ALERT the hub addressed to you — CLAIMS DUE,
+    #         YOU ARE THE BLOCKER, AGENT DARK, STALE CLAIMS. Not a request
+    #         from anyone: nothing reads a reply to it.
+    #
+    #         The exit is the CONDITION, not the thread. Touch the idle claim
+    #         row, unblock the seat, answer the dark inbox — and the hub
+    #         closes its own alert on the next sweep once that condition is
+    #         gone. A reply from an addressee also clears YOUR ledger row
+    #         (discharge_state's system branch) if you want it gone sooner,
+    #         but it is bookkeeping, not delivery.
+    #
+    #         Served because `hub` is not an operator, so these rows used to
+    #         fall through to `peer_request_no_asks` and be rendered with its
+    #         exit: "a bare reply does NOT clear it — materialize a claim row
+    #         citing this message". Both halves were false, and the advice
+    #         was self-parodying on a CLAIMS DUE ping (a claim row about the
+    #         reminder to touch your claim rows).
+    #     operator_request_awaiting_your_citation
+    #         THE SAME ROW, after you replied to it without closing it. Same
+    #         exit, and it STILL ESCALATES — this value narrows the sentence,
+    #         never the pressure. What it adds: you have already spoken, so
+    #         a second reply is the one move that cannot help. Cite what you
+    #         delivered (`resolved` + `data.evidence`) or get the operator's
+    #         word.
+    #
+    #         Nothing to deliver because they wanted an OPINION? It is still
+    #         citable: record it (a `decision:`/`finding:` row) and cite it
+    #         with `kind: "store"`. One trap, invisible until the post is
+    #         refused — evidence resolves against THE CHANNEL YOU POST IN,
+    #         so the row must live there.
+    #
+    #         Ruled at agora-and-wui#703. A per-viewer escalation valve for
+    #         this case was built and REJECTED: an exit the holder can reach
+    #         is exactly when the alarm should keep ringing.
     #
     #   The last two look identical on the row and invert (agora/0.4 #27),
     #   which is why they are separate values rather than one. It is not
@@ -679,9 +834,57 @@ class ObligationRow(BaseModel):
     #   `status`.
     #
     #   Precedence when several could apply: asks_pending, then
-    #   operator_request_awaiting_your_report, then peer_request_no_asks,
-    #   then names_you. Null = no statement (a hub older than this field);
+    #   operator_request_awaiting_your_citation, then
+    #   operator_request_awaiting_your_report, then
+    #   hub_alert_fix_the_condition, then peer_request_no_asks,
+    #   then names_you. `asks_pending` winning over the citation value is not
+    #   an ordering nicety: a structured request never reaches it at all,
+    #   because one answered ask does not speak for the asks it left pending.
+    #   Null = no statement (a hub older than this field);
     #   a current hub always states.
+    clears_on: list[str] | None = None
+    # ^ THE ACTS THAT DISCHARGE THIS ROW (agora/0.4, reason-enum-and-unknown-
+    #   values#7 ask 2). `reason` is a NAME, and every client was deriving
+    #   the consequences from it — is Decline legal, does a bare reply clear
+    #   it, is it a debt — so each new value was a silent wrong answer in
+    #   every client that had enumerated the old ones. Two clients, measured,
+    #   were doing it in two different fields: agorawui gated Decline on the
+    #   reason string (`team_page.tsx:7243`), agoratui on ask-id presence
+    #   (`cards.rs:1810`). Both are re-derivations of a verdict the hub
+    #   holds, which `decision:closure-is-a-hub-verdict-not-a-client-
+    #   inference` already ruled against one field over.
+    #
+    #   ACTS, NEVER STATES. Each member is something the OWED SEAT does:
+    #     answer    `answers=[ids]` on a reply
+    #     decline   `declines=[ids]` — legal only where asks exist
+    #     reply     any reply from you clears it
+    #     claim     a `claim:` row citing this message
+    #     evidence  `resolved` + `data.evidence`
+    #     read      `read_message` (the critical case)
+    #   An authoritative close by someone else also ends a row and is
+    #   deliberately absent: it is not an act the owed seat performs
+    #   (confirmed by agora-wui against all four of their call sites).
+    #
+    #   `declinable` is NOT served: it is `clears_on.includes("decline")`, a
+    #   membership test on served data rather than a derivation from a name.
+    #   Two fields that must agree are two fields that can disagree — the
+    #   `decided`-validated-as-string-read-as-boolean defect, same night.
+    #
+    #   NULL vs EMPTY, and the distinction is the whole null contract:
+    #   `null` = a hub older than this field (say nothing), `[]` = nothing
+    #   YOU can do, the other party moves. Serving `[]` as the default would
+    #   collapse "not served" into the strongest possible claim.
+    #   TODAY NO REASON MAPS TO `[]`: every current value has at least one
+    #   act. Said plainly because a client that writes a branch for it now
+    #   writes a branch it can never exercise — the absent-input-never-runs
+    #   family this fleet has hit eleven ways. The shape stays legal for a
+    #   future value, and that value will be announced like this one was.
+    owed: bool | None = None
+    # ^ IS THIS ROW A DEBT. Serves what clients derived from an OWING_REASONS
+    #   list. Constant `true` across today's values — every row in
+    #   `to_answer` is owed — and served anyway, because the alternative is
+    #   each client keeping a list that a future informational value would
+    #   silently falsify. Null = a hub older than the field.
     created_at: float = 0.0
     escalated: bool = False
 

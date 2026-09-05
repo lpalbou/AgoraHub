@@ -100,3 +100,38 @@ def test_ack_all_delivered_sends_pending_and_clears():
     asyncio.run(client.ack_all_delivered())
     assert posted == [{"path": "/inbox/ack", "json": {"cursors": {"design": 7}}}]
     assert client._pending_acks == {}
+
+
+def test_connect_is_bounded_separately_from_the_long_poll_read():
+    """CONNECT and READ are different failures and one number cannot serve
+    both (2026-08-25, `claim:pristine-head-has-two-reds`).
+
+    The read timeout is 70s on purpose — it must clear the /inbox long-poll
+    cap of 55s. Applying that same 70s to CONNECT is what made a host that is
+    up but not ACCEPTING (firewall drop, laptop asleep, wrong port) cost the
+    caller a full OS TCP-retransmit give-up per attempt instead of failing
+    fast. Measured on Darwin against a bound-but-unlistened port: **25.94s
+    for one `list_channels()`**, which is why `agora listen --once --max-wait
+    1.5` returned at 31.3s and `tests/test_listen.py::
+    test_ws_hub_unreachable_once_max_wait_ends_hub_unreachable_exit_0` was red
+    on a pristine HEAD checkout.
+
+    Asserted on the CONFIGURATION rather than by timing a real black-holing
+    socket, because that behaviour is not portable: a bound-but-unlistened
+    port RSTs instantly on Linux and black-holes on Darwin, so a timing test
+    would pass vacuously on the platform CI runs. Every seat's reception and
+    every CLI call goes through this client.
+
+    Mutant: collapse it back to `httpx.Timeout(70.0)` — `connect` becomes
+    70.0 and both assertions fire.
+    """
+    client = AgoraClient("http://127.0.0.1:1", "k", agent_id="bob")
+    try:
+        timeout = client._http.timeout
+        assert timeout.read == 70.0, "the long-poll read budget moved"
+        assert timeout.connect is not None and timeout.connect <= 15.0, \
+            f"connect is unbounded or too slow to honour a wake window: {timeout.connect}"
+        assert timeout.connect < timeout.read, \
+            "a connect that outlives the read budget cannot fail fast"
+    finally:
+        asyncio.run(client._http.aclose())

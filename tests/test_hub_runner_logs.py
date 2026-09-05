@@ -89,7 +89,12 @@ def test_hub_ready_and_shutdown_use_timestamped_operator_sink(
 
 
 class _RunnerHub:
-    def announce(self, machine, harnesses, capabilities=None):
+    # Signature tracks the real RunnerHub deliberately: `main` swallows every
+    # exception from announce into `status=failed`, so a double that drifts
+    # from the interface reports a plausible runtime failure instead of a
+    # TypeError, and the test reads as a behaviour change.
+    def announce(self, machine, harnesses, capabilities=None,
+                 poll_seconds=None):
         return {}
 
     def claim(self, machine):
@@ -111,7 +116,8 @@ def test_runner_startup_announce_and_shutdown_are_timestamped(
     monkeypatch.setattr(runner_mod, "RunnerHub", lambda *_a, **_kw: _RunnerHub())
     monkeypatch.setattr(runner_mod, "accepted_harnesses",
                         lambda _cfg: ("claude", "codex"))
-    monkeypatch.setattr(runner_mod, "harness_capabilities", lambda _names: {})
+    monkeypatch.setattr(runner_mod, "harness_capabilities",
+                        lambda _names, _menus=None: {})
 
     assert runner_mod.main(argparse.Namespace(once=True)) == 0
     lines = capsys.readouterr().out.splitlines()

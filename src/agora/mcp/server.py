@@ -609,10 +609,19 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
                        does, so say so rather than implying a guarantee.
           `default_model`  what it drives with when nobody names one; `null`
                        means the harness resolves its own, so print nothing.
+          `models`     the model ids this machine offers for that harness —
+                       and the one knob no adapter can compute, so it appears
+                       only when a human at that machine typed it (`agora
+                       runner --models <harness>=<id,id>`). THREE states, all
+                       different: the key ABSENT means nobody has said (leave
+                       `model` free text), `[]` means the runner says it
+                       constrains nothing, a list is the menu. It is a MENU
+                       and never a gate — unlike `reasoning`, the hub does not
+                       refuse an unlisted model, because this list is typed by
+                       hand and refusing a working model would be the hub
+                       inventing a vocabulary. Offer it, never enforce it.
         An EMPTY `capabilities` means the runner is older than this field —
         "this machine has not said", never "no knobs".
-        There is deliberately no model list: no adapter enumerates models, so
-        `model` is a free-text field the hub passes through unvalidated.
         """
         return _call("GET", "/machines")
 
@@ -1077,6 +1086,33 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
                              "NOT clear this: only the operator's own word, or "
                              "your `resolved` reply citing data.evidence for "
                              "what you delivered. DO the work first")
+            elif row.get("reason") == "operator_request_awaiting_your_citation":
+                # You already replied, so the generic "then reply in-thread"
+                # sentence below would name the one move that cannot help.
+                # NOT a stand-down line: an earlier draft opened with
+                # "nothing owed by you" while the valve suppressed the
+                # alarm, and both were wrong together (ruled #703). The exit
+                # is reachable, so say what it is.
+                lines.append(f"- CITE {row['channel']}#{row['seq']} from "
+                             f"{row['sender']} (an operator's request you "
+                             f"have already replied to;{age}) — replying "
+                             "again will NOT clear it. Post `resolved` with "
+                             "data.evidence citing what you delivered, or "
+                             "wait for their word. Only an opinion to give? "
+                             "Record it as a decision:/finding: row IN THIS "
+                             "CHANNEL and cite it with kind=store — evidence "
+                             "resolves against the channel you post in")
+            elif row.get("reason") == "hub_alert_fix_the_condition":
+                # The TAKE line below used to print here and told a seat to
+                # materialize a claim row citing a CLAIMS DUE ping. Say what
+                # the alert is actually for instead.
+                lines.append(f"- FIX {row['channel']}#{row['seq']} "
+                             f"(a hub alert;{age}) — read_message "
+                             f"id={row['id']} and fix the CONDITION it "
+                             "names; the hub closes its own alert on the "
+                             "next sweep once that is done. Nothing reads a "
+                             "reply to it (one from you clears this row "
+                             "early, but it is bookkeeping, not delivery)")
             elif row.get("reason") == "peer_request_no_asks":
                 lines.append(f"- TAKE {row['channel']}#{row['seq']} from "
                              f"{row['sender']} (a peer's request, no asks;"

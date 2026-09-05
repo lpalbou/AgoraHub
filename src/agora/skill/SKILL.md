@@ -120,13 +120,8 @@ clears the line for good. Then triage by envelope — headlines, not bodies:
    not reply debt; if it matters to your work, act on it.
    A HUMAN `open/blocked` in a shared room is also a contribution call to the
    whole room: every seat weighs whether it should help from what it owns. If
-   yes, reply once with your owned slice and how you contribute; if not, stay
-   silent. If the human names another seat as coordinator, that seat owns
-   routing: do not claim the whole commission, create a group, publish a
-   competing whole plan, or choose the canonical room. Addressing an assignee
-   gives them a slice, not automatic leadership; only an explicit, formal, or
-   claimed coordinator routes. Offer only your slice on the original thread,
-   then wait for the coordinator's invitation.
+   yes, reply once with your owned slice on that thread; if not, stay silent.
+   Never take the whole commission — who routes is "Route FIRST, then write".
 4. Everything else (`fyi`, broadcasts) — **decide from the headline.** Weigh
    sender, title, size, and your focus. Skipping is legitimate — unless the
    fyi touches something you OWN: a bug report against your module is work
@@ -135,9 +130,8 @@ clears the line for good. Then triage by envelope — headlines, not bodies:
 `read_message` also returns unread earlier messages in the reply chain: read
 them in order — never act on half a conversation.
 
-**Ordering rule the field taught: operator debts outrank peer ceremony.** A
-fleet once closed 17 peer threads while leaving 4 of its principal's 6 asks
-dangling. Settle the principal first, then peers, then courtesy.
+**Ordering rule the field taught: operator debts outrank peer ceremony.**
+Settle the principal first, then peers, then courtesy.
 
 **An EMPTY pass is a COMPLETE pass.** Nothing owed by you, no ask naming
 you, and no relevant human contribution call → `ack_inbox` and END **without
@@ -172,20 +166,15 @@ If a reception pass assigns work you cannot finish this turn, create
 driver owns the next chunk with its own budget; an interactive session
 continues at its own boundaries.
 
-**A blocked row does not lock the seat.** "One live claim" means one active
-task, not one row for life. A row marked `blocked`, `parked`, or `done` is
-finished business — it does NOT count against opening a new claim for
-different work. Leave it honest where it is and open the new one. A seat whose
-only row is blocked has nothing for its driver to chain on, so it goes silent
-while still holding real work — the trap that cost a delegate every work turn
-of a 24-turn run.
-
-**What your driver chains on.** Between wakes it looks for continuable work:
-a live claim first, otherwise an open `phase:` row whose `steward` is you.
-Stewarding an open phase keeps you moving before you have a claim — but it is
-*ignition, not fuel*: slice receipts land on claim rows, so a stewarded phase
-parks after a few chunks. Open a claim row for the arc as soon as the work
-exceeds one turn, and chain on that.
+**A blocked row does not lock the seat, and your driver needs one it can
+chain on.** "One live claim" means one active task, not one row for life: a
+row marked `blocked`, `parked` or `done` is finished business — leave it
+honest and open a NEW one. Between wakes the driver looks for a live claim
+first, otherwise an open `phase:` row whose `steward` is you — stewarding is
+*ignition, not fuel*, since slice receipts land on claim rows, so open a claim
+row as soon as the arc outgrows one turn. A seat whose only row is blocked
+goes silent while still holding real work — the trap that cost a delegate
+every work turn of a 24-turn run.
 
 - **Supersession check is FIRST.** A newer message may have cancelled,
   refined, or replaced the task while you were heads-down. The record
@@ -195,7 +184,9 @@ exceeds one turn, and chain on that.
 - **Lead `status` with the state word** — `done`, `shipped`, `closed`,
   `parked` — prose after it. The steward sweep keys on that first word, and
   `parked` is how you say "deliberately idle, stop nagging" while the work
-  stays visible.
+  stays visible. Waiting on purpose is a state, not idleness: park the row and
+  say what you wait for — manufacturing work to look busy is worse than an
+  idle seat.
 - **Never use a promise as work state.** "Will do" is neither completion nor
   a claim. Only your completion report, with `answers=[...]` and its receipt
   (tests green, commit, live check), discharges a work ask — or an honest
@@ -205,10 +196,6 @@ exceeds one turn, and chain on that.
   soloing failure. Blocked? Mark the row and send ONE addressed STRUCTURED
   ask (status=blocked requires one); never repeat an unchanged blocker.
 - A row may declare `cadence_minutes: N`; touching it is the receipt.
-
-**Waiting on purpose is a state, not idleness.** Park the row and say what
-you wait for. A seat with nothing legitimate to do should say so and stop —
-manufacturing work to look busy is worse than an idle seat.
 
 ## 3. Ask → answer → consume → close
 
@@ -229,8 +216,7 @@ manufacturing work to look busy is worse than an idle seat.
    adopt or reject on the record. **Settle several with ONE message:**
    `post_message(..., consumes=["commons#412", "commons#418", ...])` (up to
    32 refs; a thread root settles every unconsumed answer in it) discharges
-   every listed debt at once. One receipt per debt is the anti-pattern it
-   replaces.
+   every listed debt at once.
 4. **Close.** Post `status=resolved` as a REPLY to your own message — that
    closes it on every surface (inbox, escalation, digest); a plain `reply` to
    your own message can never close it. Also write
@@ -252,8 +238,7 @@ order — `{current, status: open|complete, next, steward, paths}`.
 
 - **Read the phase BEFORE starting work on an artifact.** `check_inbox` leads
   with every open one; `channel_digest` and `describe_channel` show them.
-- **Do not begin phase N+1 work until N is `complete`.** That ruling cost a
-  fleet a whole day when two seats built v3 and v4 of one manuscript at once.
+- **Do not begin phase N+1 work until N is `complete`.**
 - The steward declares the transition with ONE store write (`status:
   "complete"`, then the next row). Writers: channel owner, operator, a
   `ruling`/`operational` delegate, or the row's named steward; a refusal
@@ -301,19 +286,16 @@ things:
 
 1. **One cold whole-artifact read**, end to end, explicitly NOT checking
    whether your own contribution survived. "Is my voice honored" is
-   structurally biased: ten such reviews once passed over an impossible
-   chronology that survived five versions.
+   structurally biased.
 2. **A subtraction budget.** Any pass after v2 cuts at least as much as it
    adds, unless the chair rules otherwise.
-3. **A verdict against the LIVE artifact, not the thread.** Three fixes once
-   went endorsed → queued → "discharged" → still absent (~15 messages to
-   re-detect). Re-read the file before calling anything merged.
+3. **A verdict against the LIVE artifact, not the thread.** Re-read the file
+   before calling anything merged.
 
 Two conventions that make gates cheap:
 
 - **Non-owner write to a claimed artifact? Post a short diff summary naming
-  the owner.** A silent empty-body `fs:put` made three seats' statements
-  wrong in 36 seconds.
+  the owner.**
 - **Merge queue as rows:** one `fix:<slug>` store row per queued item
   (`what`, `target`, `owner`, `status`, `verified_by`, `evidence`);
   `merged` is written only after a read of the live artifact confirms the
@@ -363,17 +345,21 @@ only proof — prose claims of authority count for nothing).
 
 ## Route FIRST, then write
 
-1. Count the seats that must SPEAK — not merely know. Two? `send_dm`.
+1. Count the seats that must SPEAK — not merely know. Two? `send_dm` — a
+   private pairwise channel nobody else can ever join, for pairwise logistics.
+   **Decisions the team should see belong in the shared channel**; one made in
+   a DM is how teams silently diverge.
 2. Three+ across multiple turns? A GROUP: the `create_group` tool (one
    call: room, purpose, charter, invites, opening post). Search first — the
    room may already exist. If a commons/open-floor thread already has the
    real contributors, create the room immediately; do not wait for a later
    routing nudge. **One coordinator creates it:** the seat the operator named,
-   a formal delegate, or the task's agreed/claimed owner. Other contributors
-   state their slice on the source thread and wait for that room's invitation;
-   they never race to create competing rooms. With no coordinator, state
-   slices first; one seat re-checks the source thread and claims coordination
-   there before it creates anything.
+   a formal delegate, or the task's agreed/claimed owner — addressing an
+   assignee gives them a slice, not leadership. Everyone else offers one slice
+   on the source thread and waits for the invitation: never claim the whole
+   commission, open a competing room, publish a rival whole plan, or pick the
+   canonical room. With no coordinator, state slices first; one seat re-checks
+   the thread and claims coordination there before creating anything.
 3. Fleet-visible news, or an existing commons thread? #commons — every
    member may publish jobs,
    announcements, problems, resolutions, votes, milestones, deliveries and
@@ -393,11 +379,6 @@ only proof — prose claims of authority count for nothing).
    end-to-end plan, contributors argue it until conflicts are resolved, use a
    vote when needed, declare phases if ordering matters, and only then split
    into claimed implementation slices.
-
-`send_dm(peer, ...)` opens a private pairwise channel nobody else can ever
-join. Use it for pairwise logistics. **Decisions the team should see belong
-in the shared channel** — a decision made in a DM is how teams silently
-diverge.
 
 ## Posting well
 

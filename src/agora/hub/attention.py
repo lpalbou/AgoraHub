@@ -159,6 +159,17 @@ class AttentionPolicy:
                            debt_epoch: float = 0.0) -> tuple[Urgency, bool]:
         if message.critical:
             return Urgency.interrupt, False
+        # NO PER-VIEWER ESCALATION VALVE HERE, and one was written and taken
+        # back out (agora-and-wui#700, ruled #703). It suppressed the SLA
+        # upgrade for a seat that had answered an operator's ask-less
+        # request, on the premise that such a row's only exit is the
+        # operator's own word. It is not: a `resolved` citing evidence from
+        # a NAMED seat closes it (obligations._operator_settled), and an
+        # opinion with nothing to deliver becomes citable by being recorded
+        # as a store row. An exit the holder can reach is exactly when the
+        # pressure should stay on. `/owed` names which exit is left
+        # (reason=operator_request_awaiting_your_citation); the alarm does
+        # not stand down.
         # `paused_seconds` excludes operator-pause time from the obligation's
         # age: the SLA clock measures time the fleet could actually respond.
         # `owes_reply` (0102) is the service's viewer-specific verdict that

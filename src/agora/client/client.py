@@ -52,7 +52,19 @@ class AgoraClient:
                      # staleness detection; the hub's stale-client inbox
                      # notice targets header-less (pre-handshake) callers.
                      "X-Agora-Client": _client_version},
-            timeout=httpx.Timeout(70.0),  # must exceed the /inbox long-poll cap (55s)
+            # READ must exceed the /inbox long-poll cap (55s). CONNECT must
+            # NOT: they are different failures and one number cannot serve
+            # both (2026-08-25, claim:pristine-head-has-two-reds).
+            #
+            # A single Timeout(70.0) applies to connect too, and a host that
+            # is up but not ACCEPTING — firewall drop, laptop asleep, wrong
+            # port — black-holes the SYN instead of refusing it. Measured on
+            # Darwin against a bound-but-unlistened port: 25.94s per attempt,
+            # the OS giving up on TCP retransmit, and `agora listen --once
+            # --max-wait 1.5` therefore returned at 31.3s. A seat's reception
+            # window is a promise to its driver; a connect that outlives it
+            # by 20x makes the flag decorative.
+            timeout=httpx.Timeout(70.0, connect=10.0),
         )
         self._ws: websockets.ClientConnection | None = None
         self._listener: asyncio.Task | None = None

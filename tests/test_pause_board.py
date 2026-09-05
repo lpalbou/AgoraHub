@@ -225,7 +225,10 @@ def test_queue_rows_are_sanitized_and_default_capped():
     are stripped at write time and `default` is typed and capped."""
     client = make_client()
     flow = register(client, "flow")
-    make_channel(client, flow, "room")
+    # laurent JOINS: a queue row keyed to a seat outside the room is refused
+    # (operator-board#20 ask 2), and these tests are about row SHAPE.
+    laurent = register(client, "laurent")
+    make_channel(client, flow, "room", laurent)
     grant_reporting(client, "flow")
     ok = client.put("/channels/room/store/queue:laurent:x",
                     json={"value": {"q": "pick\x1b[31m one\nnow",
@@ -300,7 +303,10 @@ def test_open_dm_question_is_pending_on_peer_not_proposal():
 def test_queue_rows_are_schema_capped():
     client = make_client()
     flow = register(client, "flow")
-    make_channel(client, flow, "room")
+    # laurent JOINS: a queue row keyed to a seat outside the room is refused
+    # (operator-board#20 ask 2), and these tests are about row SHAPE.
+    laurent = register(client, "laurent")
+    make_channel(client, flow, "room", laurent)
     grant_reporting(client, "flow")
     bad = client.put("/channels/room/store/queue:laurent:x",
                      json={"value": {"q": "y" * 200}}, headers=flow)
@@ -314,3 +320,205 @@ def test_queue_rows_are_schema_capped():
     ok = client.put("/channels/room/store/queue:laurent:x",
                     json={"value": {"q": "ok", "tier": "delegate"}}, headers=flow)
     assert ok.status_code == 200
+
+
+def test_a_queue_row_for_a_seat_outside_the_room_is_refused_by_name():
+    """A row nobody can read is not a queued decision (agora-wui,
+    operator-board#20 ask 2).
+
+    Both readers scope by membership — `board()` classifies
+    `queue:<viewer>:*` while iterating `channels_of(viewer)`, `desk()` does
+    the same per operator — but the WRITE checked only the curator's
+    authority and the row's shape. So a row keyed to a seat outside the
+    channel was accepted with a 200 and then reachable by no surface at all.
+    Measured, not hypothetical: five `queue:laurent:*` rows sat in
+    `operator-board`, a room laurent is not in, while the room reasoned
+    about "his queue" from the key grammar for twelve hours.
+
+    The refusal names the seat and BOTH repairs — moving the row and
+    widening the room are different calls and neither is the hub's."""
+    client = make_client()
+    flow = register(client, "flow")
+    laurent = register(client, "laurent")
+    make_channel(client, flow, "room")
+    grant_reporting(client, "flow")
+
+    bad = client.put("/channels/room/store/queue:laurent:x",
+                     json={"value": {"q": "restart the hub"}}, headers=flow)
+    assert bad.status_code == 400
+    detail = bad.json()["detail"]
+    assert "laurent" in detail and "room" in detail
+    assert "/board" in detail and "/desk" in detail, \
+        "say WHY it is invisible, not just that it is refused"
+    assert "invite" in detail, "the second repair must be offered too"
+
+    # Nothing was written — a refusal that half-writes is worse than none.
+    assert client.get("/channels/room/store/queue:laurent:x",
+                      headers=flow).status_code == 404
+
+    # The SAME row, once the seat can actually reach it.
+    invite = client.post("/channels/room/invites", json={},
+                         headers=flow).json()["invite_token"]
+    client.post("/channels/room/join", json={"invite_token": invite},
+                headers=laurent)
+    ok = client.put("/channels/room/store/queue:laurent:x",
+                    json={"value": {"q": "restart the hub"}}, headers=flow)
+    assert ok.status_code == 200, ok.text
+
+
+def test_a_queue_key_with_no_seat_is_refused():
+    """`queue:` alone names nobody, so it can never be delivered either."""
+    client = make_client()
+    flow = register(client, "flow")
+    make_channel(client, flow, "room")
+    grant_reporting(client, "flow")
+    bad = client.put("/channels/room/store/queue:", json={"value": {"q": "x"}},
+                     headers=flow)
+    assert bad.status_code == 400
+    assert "queue:<seat>:<slug>" in bad.json()["detail"]
+
+
+def test_an_EXISTING_queue_row_stays_closable_after_its_seat_leaves():
+    """The trap the membership gate would otherwise have set for itself.
+
+    STORE KEYS CANNOT BE DELETED — retiring a row means overwriting it with a
+    closing state. So gating every write, rather than creation only, would
+    make an already-stranded row permanently unretireable, and the fleet has
+    three of those on purpose (delegate's
+    decision:three-of-my-five-operator-queue-rows-were-not-his-to-decide:
+    one retired, one bookkeeping, one a taste call, all deliberately left in
+    a room laurent is not in because making three non-questions newly
+    visible to him would be worse than invisible).
+
+    Found by reading operator-board#24, not by a test — the first version of
+    this gate was unconditional and shipped for about fifteen minutes."""
+    client = make_client()
+    flow = register(client, "flow")
+    laurent = register(client, "laurent")
+    make_channel(client, flow, "room", laurent)
+    grant_reporting(client, "flow")
+
+    born = client.put("/channels/room/store/queue:laurent:x",
+                      json={"value": {"q": "restart the hub"}}, headers=flow)
+    assert born.status_code == 200, born.text
+
+    assert client.post("/channels/room/leave", json={},
+                       headers=laurent).status_code == 200
+
+    # The curator can still CLOSE it — the only retirement the store allows.
+    # `decided` says WHAT settled it since operator-board#27 — a citation,
+    # or one of the closed words for "nothing to cite". The prose this line
+    # used to carry ("done, moved to commons") is now refused, which is the
+    # point of that change; the membership invariant under test is unmoved.
+    closed = client.put("/channels/room/store/queue:laurent:x",
+                        json={"value": {"q": "restart the hub",
+                                        "decided": "withdrawn"}},
+                        headers=flow)
+    assert closed.status_code == 200, closed.text
+
+    # ...but a NEW row for the departed seat is still refused.
+    fresh = client.put("/channels/room/store/queue:laurent:y",
+                       json={"value": {"q": "something else"}}, headers=flow)
+    assert fresh.status_code == 400
+    assert "NEW" in fresh.json()["detail"]
+
+
+# -- operator-board#27: `decided` is the off switch, not a comment ------------
+
+def _queue_client():
+    """A room with the operator in it and a reporting writer — the shape a
+    queue row needs (`decision:a-queue-row-needs-both-the-key-and-the-room`)."""
+    client = make_client()
+    flow = register(client, "flow")
+    laurent = register(client, "laurent", operator=True)
+    make_channel(client, flow, "room", laurent)
+    grant_reporting(client, "flow")
+    return client, flow, laurent
+
+
+def test_prose_in_decided_is_REFUSED_instead_of_silently_retiring_the_row():
+    """THE INCIDENT (delegate, operator-board#27). They wrote an explanatory
+    sentence into `decided` on `queue:laurent:publish-abstracttui-060`, and
+    both readers take it as a bare truthiness — so the row vanished from the
+    operator's board AND desk. A store write rings nobody and a retired row
+    looks exactly like a decided one, so nothing could have told them."""
+    client, flow, laurent = _queue_client()
+    bad = client.put("/channels/room/store/queue:laurent:x",
+                     json={"value": {"q": "publish 0.6.0?",
+                                     "decided": "waiting on laurent, see the "
+                                                "thread — not settled yet"}},
+                     headers=flow)
+    assert bad.status_code == 400
+    detail = bad.json()["detail"]
+    assert "RETIRES" in detail          # says what the field DOES
+    assert "note" in detail             # and where the prose belongs
+
+
+def test_every_citation_shape_is_accepted_and_does_retire_the_row():
+    """The refusal must not cost the field its job: each shape it names is
+    accepted, and writing one still takes the row off the operator's desk."""
+    client, flow, laurent = _queue_client()
+    for i, ref in enumerate(("decision:a-queue-row-needs-both-the-key-and-the-room",
+                             "operator-board#27", "#27",
+                             "01M0VDT0JKW9SC1SX01FKMQM0G")):
+        key = f"queue:laurent:cited-{i}"
+        ok = client.put(f"/channels/room/store/{key}",
+                        json={"value": {"q": "settled one", "decided": ref}},
+                        headers=flow)
+        assert ok.status_code == 200, (ref, ok.json())
+    desk = client.get("/desk", headers=laurent).json()
+    assert [r for r in desk["rows"] if r["kind"] == "queue"] == []
+
+
+def test_clearing_decided_is_how_a_row_comes_back():
+    """Empty stays legal and means NOT decided — un-retiring must never be
+    harder than retiring."""
+    client, flow, laurent = _queue_client()
+    client.put("/channels/room/store/queue:laurent:x",
+               json={"value": {"q": "pick one", "decided": "#12"}},
+               headers=flow)
+    assert client.get("/board", headers=laurent).json()["counts"]["queue"] == 0
+
+    client.put("/channels/room/store/queue:laurent:x",
+               json={"value": {"q": "pick one", "decided": ""}},
+               headers=flow)
+    assert client.get("/board", headers=laurent).json()["counts"]["queue"] == 1
+
+
+def test_note_carries_context_without_retiring_and_reaches_the_desk():
+    """The field delegate was reaching for. Refusing the old habit without
+    offering this would move the problem, not fix it — and a `note` no
+    surface renders teaches the next writer to reach for `decided` again."""
+    client, flow, laurent = _queue_client()
+    ok = client.put("/channels/room/store/queue:laurent:x",
+                    json={"value": {"q": "publish 0.6.0?",
+                                    "note": "one tag on a ready ref\x1b[31m"}},
+                    headers=flow)
+    assert ok.status_code == 200
+
+    board = client.get("/board", headers=laurent).json()
+    assert board["counts"]["queue"] == 1            # still live
+    row = [r for r in client.get("/desk", headers=laurent).json()["rows"]
+           if r["kind"] == "queue"][0]
+    assert row["note"].startswith("one tag on a ready ref")
+    assert "\x1b" not in row["note"]                # sanitized like every field
+
+
+def test_a_retirement_with_nothing_to_cite_has_a_word_for_it():
+    """`decision:a-closed-vocabulary-must-express-the-modal-case` applied to
+    my own check: a question can evaporate. The first draft refused that and
+    broke the stranded-row test — and the route around a check that forbids
+    an honest act is a FAKE citation, which is worse than the prose."""
+    client, flow, laurent = _queue_client()
+    ok = client.put("/channels/room/store/queue:laurent:x",
+                    json={"value": {"q": "still needed?", "decided": "moot"}},
+                    headers=flow)
+    assert ok.status_code == 200
+    assert client.get("/board", headers=laurent).json()["counts"]["queue"] == 0
+
+    # ...but the words are a closed list, not a licence for prose again.
+    bad = client.put("/channels/room/store/queue:laurent:y",
+                     json={"value": {"q": "x", "decided": "moot, I think, "
+                                                          "see the thread"}},
+                     headers=flow)
+    assert bad.status_code == 400

@@ -48,6 +48,7 @@ from ..ids import new_token
 from ..mentions import resolve_mentions
 from ..models import (
     TextTooLong,
+    attributed_quote,
     elide,
     DM_PREFIX,
     FS_PREFIX,
@@ -147,6 +148,11 @@ _SILENCE_CLASS_ROUTE: dict[str, str] = {
     "dead": "ACTION: start/relaunch the offline seat — escalation cannot reach it.",
     "deaf": "ACTION: re-arm reception loop / restart the session.",
     "unseen": "ACTION: reprompt or relaunch — listener may be armed but debts are unread.",
+    # The seat is demonstrably RUNNING (it authored work after these rows
+    # arrived), so the relaunch remedy above is not merely useless here, it
+    # kills a productive session. Same unread count, opposite action.
+    "unseen-but-working": "ACTION: do NOT relaunch — the seat is live and producing; "
+                          "these rows are losing its triage race. Drain, re-route or narrow its queue.",
     "seen-and-ignored": "ACTION: compliance (0114) — prefer draining before adding asks.",
 }
 MAX_JOIN_TOKEN_USES = 100            # fleet provisioning ceiling
@@ -907,9 +913,18 @@ class HubService:
     def list_machine_runners(self) -> dict[str, str]:
         return self.db.meta_list_prefix(self.MACHINE_RUNNER_PREFIX)
 
+    #: A runner is called SILENT after this many of its own poll intervals.
+    #: Twelve is deliberately generous: a missed poll is a loaded machine, and
+    #: calling a live runner dead is the more expensive error — an operator who
+    #: restarts a healthy runner loses whatever it was hosting. It multiplies
+    #: the runner's ANNOUNCED interval rather than a constant, so a runner
+    #: polling every 60s is not called dead at 60s.
+    STALE_POLL_MULTIPLE = 12
+
     def announce_harnesses(self, agent: AgentInfo, machine: str,
                            harnesses: list[str],
-                           capabilities: dict[str, Any] | None = None
+                           capabilities: dict[str, Any] | None = None,
+                           poll_seconds: float | None = None
                            ) -> dict[str, Any]:
         """The runner says what it can actually run, and with which KNOBS.
 
@@ -926,6 +941,11 @@ class HubService:
         was sent. The hub validates the SHAPE and never the values — an
         unknown reasoning level is the runner's truth about its own machine,
         exactly like an unknown harness name.
+
+        `models` (2026-08-24, laurent's per-harness model list, `commons#296`)
+        is the same rule for the model menu, with one deliberate asymmetry:
+        `reasoning` is a GATE the hub enforces at the spawn door, `models` is
+        only a MENU. See `_clean_model_list`.
         """
         machine = self._require_runner(agent, machine)
         names = sorted({h.strip() for h in harnesses
@@ -936,9 +956,25 @@ class HubService:
                                 f"{MAX_SPAWN_HARNESS_CHARS} characters, at "
                                 "most 32 of them")
         caps = self._clean_capabilities(capabilities, names)
+        now = time.time()
+        # A poll interval the runner did not announce is NOT defaulted here.
+        # The hub has no way to know it — it is a runner-side flag — and a
+        # guessed cutoff served as fact is the invented constant this field
+        # exists to remove from the clients.
+        try:
+            poll = float(poll_seconds) if poll_seconds is not None else None
+        except (TypeError, ValueError):
+            poll = None
+        if poll is not None and not (0 < poll < 86400):
+            raise HubError(400, "poll_seconds must be a positive number of "
+                                "seconds under a day")
+        # `at` is the startup stamp and never moves again; `last_seen` is the
+        # liveness one and moves on every poll. Both set here so a runner that
+        # has announced but not yet polled is not reported as unheard-from.
         self.db.meta_set(self.MACHINE_HARNESS_PREFIX + machine,
                          json.dumps({"harnesses": names, "capabilities": caps,
-                                     "at": time.time()}))
+                                     "at": now, "last_seen": now,
+                                     "poll_seconds": poll}))
         self._log_event("runner-announced", machine=machine, runner=agent.id,
                         harnesses=len(names))
         return {"machine": machine, "harnesses": names, "capabilities": caps}
@@ -950,12 +986,21 @@ class HubService:
         Refused rather than trimmed when a harness is described that was not
         announced: a capability row for a harness nobody can spawn is a client
         rendering a control that cannot be used, which is the silent-wrong
-        class this whole path exists to end."""
+        class this whole path exists to end.
+
+        The same rule applies to the KNOB NAMES (2026-08-24). Until now this
+        function rebuilt each row from three keys and dropped every other one,
+        so a runner announcing `models` was answered `200` with the field
+        silently absent from the echo — the confirmation-that-lies shape the
+        `model` field's own docstring was written against. An unknown knob is
+        now refused BY NAME: the runner and the hub ship from one package, the
+        refusal is printed by the runner's own startup log, and a machine that
+        announces nothing is visible where a dropped knob is not."""
         if not capabilities:
             return {}
         if not isinstance(capabilities, dict):
-            raise HubError(400, "capabilities must be a map of "
-                                "harness -> {reasoning, default_model}")
+            raise HubError(400, "capabilities must be a map of harness -> "
+                                f"{{{', '.join(sorted(self.CAPABILITY_KEYS))}}}")
         unknown = sorted(set(capabilities) - set(names))
         if unknown:
             raise HubError(
@@ -968,6 +1013,15 @@ class HubService:
         for name, row in capabilities.items():
             if not isinstance(row, dict):
                 raise HubError(400, f"capabilities['{name}'] must be a map")
+            stray = sorted(set(row) - self.CAPABILITY_KEYS)
+            if stray:
+                raise HubError(
+                    400, f"capabilities['{name}'] names knobs this hub does "
+                         f"not carry: {', '.join(stray)}. It serves "
+                         f"{', '.join(sorted(self.CAPABILITY_KEYS))} — drop "
+                         "the key or upgrade the hub. Refused rather than "
+                         "dropped: a knob accepted and not served is a "
+                         "runner that believes it announced something")
             vocab = row.get("reasoning") or []
             if not isinstance(vocab, list) or len(vocab) > 32:
                 raise HubError(400, f"capabilities['{name}'].reasoning must "
@@ -992,26 +1046,122 @@ class HubService:
                 "reasoning_advisory": bool(row.get("reasoning_advisory")),
                 "default_model": default_model or None,
             }
+            models = row.get("models")
+            if models is not None:
+                out[name]["models"] = self._clean_model_list(name, models)
         return out
+
+    #: Every knob name this hub serves. A runner announcing one that is not
+    #: here is refused by name rather than trimmed (see `_clean_capabilities`).
+    CAPABILITY_KEYS = frozenset({"reasoning", "reasoning_advisory",
+                                 "default_model", "models"})
+
+    #: A machine may offer a long menu; this only stops a runner writing an
+    #: unbounded list into a row every client renders.
+    MAX_ANNOUNCED_MODELS = 64
+
+    def _clean_model_list(self, harness: str, models: Any) -> list[str]:
+        """Shape-check an announced model menu. THREE STATES, all distinct.
+
+        Absent (the key is not sent) means *this runner has not said* — the
+        client leaves the model a free-text field. `[]` means the runner said
+        it constrains nothing, which reads differently to an operator and is
+        why an empty list is stored rather than folded into absent. A list is
+        the menu.
+
+        It is a MENU, never a gate. The hub refuses a `reasoning` level the
+        machine did not announce, because the machine said it cannot express
+        it; it does NOT refuse an unlisted `model`, because no adapter
+        enumerates models and this list is whatever a human at that machine
+        typed. Enforcing a hand-typed list would refuse working models with a
+        hub-authored 'not allowed', which is the invented vocabulary this
+        whole path exists to keep out of the hub."""
+        if not isinstance(models, list):
+            raise HubError(400, f"capabilities['{harness}'].models must be a "
+                                "list of model ids — omit the key for 'this "
+                                "runner has not said', [] for 'it constrains "
+                                "nothing'")
+        if len(models) > self.MAX_ANNOUNCED_MODELS:
+            raise HubError(400, f"capabilities['{harness}'].models must hold "
+                                f"at most {self.MAX_ANNOUNCED_MODELS} ids")
+        out: list[str] = []
+        for entry in models:
+            ident = str(entry).strip()
+            if not ident:
+                continue
+            # REFUSE, never slice — same reason as `default_model` above: a
+            # truncated model id is a string that looks like a model and is
+            # not one, and it would land in a dropdown as a choosable option.
+            if len(ident) > MAX_SPAWN_MODEL_CHARS:
+                raise TextTooLong(f"capabilities['{harness}'].models entry",
+                                  len(ident), MAX_SPAWN_MODEL_CHARS)
+            if ident not in out:
+                out.append(ident)
+        return out
+
+    _EMPTY_MACHINE = {"harnesses": [], "capabilities": {},
+                      "announced_at": None, "last_seen_at": None,
+                      "stale_after_seconds": None}
 
     def machine_harnesses(self, machine: str) -> dict[str, Any]:
         raw = self.db.meta_get(self.MACHINE_HARNESS_PREFIX + machine)
         if not raw:
-            return {"harnesses": [], "capabilities": {}, "announced_at": None}
+            return dict(self._EMPTY_MACHINE)
         try:
             row = json.loads(raw)
         except ValueError:
-            return {"harnesses": [], "capabilities": {}, "announced_at": None}
+            return dict(self._EMPTY_MACHINE)
+        poll = row.get("poll_seconds")
         return {"harnesses": list(row.get("harnesses") or []),
                 "capabilities": dict(row.get("capabilities") or {}),
-                "announced_at": row.get("at")}
+                "announced_at": row.get("at"),
+                "last_seen_at": row.get("last_seen"),
+                # Served so no client holds a constant. Null means the runner
+                # did not announce its interval — render the age with NO
+                # verdict rather than picking a cutoff, because two clients
+                # picking their own is how they come to disagree about one
+                # machine in front of one operator.
+                "stale_after_seconds": (poll * self.STALE_POLL_MULTIPLE
+                                        if isinstance(poll, (int, float))
+                                        and poll > 0 else None)}
+
+    def touch_machine_runner(self, machine: str) -> None:
+        """Record that this machine's runner spoke to us just now.
+
+        The runner already proves it is alive on a cadence: its claim poll is
+        an authenticated call every `poll_seconds` (5s by default) whether or
+        not there is anything to spawn. Until 2026-08-24 the hub threw that
+        away and served only `announced_at` — a one-time startup stamp — so a
+        runner that announced and then DIED presented identically to one alive
+        and idle, and no client or seat could answer "is a runner up?". This
+        is that evidence, kept. No new endpoint and no runner change: an
+        un-upgraded runner heartbeats correctly because the poll it already
+        makes IS the heartbeat.
+
+        A row is NEVER created here when none exists. `announced_at: null`
+        means no runner ever announced successfully, and minting a row would
+        turn that into "announced with no harnesses installed" — a different
+        documented fact the clients render differently. An absent announce
+        with a live `last_seen_at` stays visible as exactly that.
+        """
+        raw = self.db.meta_get(self.MACHINE_HARNESS_PREFIX + machine)
+        if not raw:
+            return
+        try:
+            row = json.loads(raw)
+        except ValueError:
+            return
+        row["last_seen"] = time.time()
+        self.db.meta_set(self.MACHINE_HARNESS_PREFIX + machine, json.dumps(row))
 
     def list_machines(self) -> list[dict[str, Any]]:
         """Every machine an operator can route to, with what it can run.
 
         `announced_at: null` means no runner has ever started there — a
         different fact from "a runner is up and can run nothing", and the
-        clients render them differently."""
+        clients render them differently. `last_seen_at` is the LIVENESS one:
+        when the machine's runner last spoke to the hub. Null means it has not
+        since this hub started keeping the fact — never "it is down"."""
         out = []
         for machine, runner in sorted(self.list_machine_runners().items()):
             out.append({"machine": machine, "runner": runner,
@@ -1144,6 +1294,8 @@ class HubService:
         never gains the power to mint a token for any other id.
         """
         machine = self._require_runner(agent, machine)
+        # Before the early return: an idle poll is the one that proves life.
+        self.touch_machine_runner(machine)
         row = self.db.claim_spawn_request(machine=machine, runner_id=agent.id)
         if row is None:
             return None
@@ -1163,6 +1315,14 @@ class HubService:
         self._log_event("spawn-claimed", spawn=row.id, seat=row.seat_id,
                         machine=machine, runner=agent.id)
         return {"request": row.model_dump(mode="json"),
+                # WHO asked, as a ROLE rather than an id the runner would have
+                # to interpret. The runner's tty prompt exists to collect a
+                # human's consent; when the requester IS the human operator,
+                # that consent has already been given and asking again at the
+                # shell stalls the spawn behind a second yes from the same
+                # person (laurent, commons#290). The runner must not derive
+                # this from the id — role is the hub's to state.
+                "requested_by_operator": row.requested_by in self.operator_ids(),
                 "join_token": token["token"]}
 
     def set_spawn_state(self, agent: AgentInfo, spawn_id: str, state: str,
@@ -2256,9 +2416,44 @@ class HubService:
                     # a one-line bypass. Kept AFTER the review check so the
                     # refusal a delegate meets first in a peopled room is
                     # still the review one.
-                    if not any(isinstance(r, dict) and r.get("kind") == "store"
-                               and str(r.get("ref", "")).startswith("plan:")
-                               for r in refs):
+                    # ...AND IT PRESUPPOSES PEERS, exactly as the review check
+                    # above does (2026-08-25, agora-and-wui#730).
+                    #
+                    # The review check is already skipped when `peers` is empty
+                    # — "a delegate working alone keeps the old single-author
+                    # rule (no deadlock)". The plan check sat OUTSIDE that
+                    # guard, and the asymmetry has no defence: a plan row
+                    # records "each seat's slice, the SEAMS between those
+                    # slices, and how the contested points were settled in the
+                    # room". In a two-party DM with the operator there is
+                    # exactly one seat, no seam and no room. The requirement is
+                    # not inconvenient there, it is INCOHERENT, and the only
+                    # way to satisfy it is to invent an agreement between seats
+                    # who never discussed anything.
+                    #
+                    # Measured by @delegate: three of laurent's own messages
+                    # pinned open and escalating on HIS desk — dm#104 ("be
+                    # more concise"), dm#116, and commons#604 — because the
+                    # gate refused every honest close. Two are DMs and this
+                    # frees them. `commons#604` is a peopled room where a plan
+                    # genuinely exists, so it stays gated, correctly.
+                    #
+                    # AND IT ENDS A CONTRADICTION BETWEEN TWO SURFACES I OWN.
+                    # `check_inbox` prints, as its own recipe: "Only an opinion
+                    # to give? Record it as a decision:/finding: row IN THIS
+                    # CHANNEL and cite it with kind=store". @delegate did
+                    # exactly that and this line returned 400. One of the two
+                    # had to be wrong; the advice was right and the gate was
+                    # over-broad.
+                    #
+                    # WHAT THIS DOES NOT DO: it does not let a delegate close a
+                    # commission without a plan. In any room with peers the
+                    # requirement stands untouched, which is every room where a
+                    # plan could have been agreed in the first place.
+                    if peers and not any(
+                            isinstance(r, dict) and r.get("kind") == "store"
+                            and str(r.get("ref", "")).startswith("plan:")
+                            for r in refs):
                         raise HubError(400,
                                        "no delivery without the plan it was "
                                        "built under: cite the agreed plan — "
@@ -2856,6 +3051,14 @@ class HubService:
         # than the noise it prevents.
         try:
             self._routing_nudges(agent, channel, message)
+            # RE-ENABLED 2026-08-25, INVERTED. It was disabled saying "that
+            # reply obliged nobody", which the (c) revert made false. The
+            # true sentence is the opposite and needs no ruling: it reports
+            # what the reply did and names `fyi` + `reply_to`, the terminal
+            # gesture 0102 already blessed. agora-and-wui#724 measured why —
+            # 8 of agora-wui's 12 reply-debts carry the sender's own
+            # "nothing owed back" in PROSE the hub cannot read.
+            self._reply_obliges_someone_nudge(agent, message)
             self._mention_nudges(agent, channel, message, mention_ctx)
             self._dark_addressee_nudge(agent, message, addressees,
                                        override_dark)
@@ -3296,6 +3499,76 @@ class HubService:
             })
         return {"hours": hours, "channels": report,
                 "computed_at": time.time()}
+
+    def _reply_obliges_someone_nudge(self, agent: AgentInfo,
+                                     message: Message) -> None:
+        """Tell a PEER who addressed a `reply` that it OBLIGED the seats it
+        named, and name the terminal gesture that does not.
+
+        INVERTED 2026-08-25, and the inversion is the whole point. This
+        doorbell used to say *"that reply obliged nobody"* — the sender-facing
+        half of (c), which was reverted because it deleted the class an
+        operator ruling created (claim:reply-cannot-renounce-its-debt). A
+        doorbell that contradicts the predicate is worse than none, so it was
+        disabled rather than left lying. The true sentence after the revert is
+        the opposite one, and it turns out to be the more useful of the two.
+
+        WHAT IT IS FOR, measured rather than supposed. agora-wui counted their
+        own owed list at agora-and-wui#724: of 12 open reply-debts, **at least
+        8 end with their sender explicitly disclaiming a reply** — "Nothing
+        owed back", "@agora-wui — nothing for you". Their reading: *"a
+        sender's 'nothing owed back' is prose the hub cannot see."*
+
+        True, and the conclusion runs the other way from the one being asked
+        for. Those senders were reaching for a gesture THAT ALREADY EXISTS and
+        used the wrong status word: `fyi` + `reply_to` is the terminal reply,
+        blessed by design 0102 as "THE TERMINAL GESTURE" and confirmed at
+        decision:fyi-plus-reply-to-is-the-exit-and-my-content-free-premise-was-wrong.
+        Eight rows were minted because nobody told the author, at the moment
+        they could still choose, that `reply` is not it.
+
+        So this needs no ruling and changes no meaning: it does not touch what
+        a reply obliges, it reports what this one just did and names the door.
+        The ruling on laurent's desk is about whether to DELETE the obligation;
+        this is about whether senders can find the exit they already have. If
+        it works, the case for deleting the class gets materially weaker — and
+        that is worth knowing before he rules rather than after.
+
+        A DOORBELL AND NOT A REFUSAL, deliberately: an addressed reply is
+        legal and often exactly right. Refusing it would tax the common case
+        to teach the rare one. Ephemeral, wakes nobody, stores nothing.
+
+        Operators are exempt: an operator's reply obliges under the 2026-07-19
+        ruling whatever they intend, so there is no choice to offer them."""
+        if message.kind != Kind.message or message.status != Status.reply:
+            return
+        if not message.to or agent.operator:
+            return
+        if (message.data or {}).get("answers") or (message.data or {}).get("declines"):
+            return          # a discharge, not a directive: nothing to teach
+        named = ", ".join(sorted(message.to))
+        # FRONT-LOADED ON PURPOSE, and I got this wrong on the first pass.
+        # A notify line carries `body[:200]` (notify_sink.py), which is the
+        # whole of what a tailing or `--preview` listener ever shows. My first
+        # wording spent its opening sentence explaining the obligation and put
+        # the EXIT after a paragraph break — so the only actionable half was
+        # the half that got cut, and a teaching notice whose teaching is
+        # truncated teaches nothing. The fact, the door and the trap all live
+        # in the first 200 characters now; the paragraph after is for readers
+        # who get the full body. test_the_actionable_half_survives_the_preview
+        # is the guard, because this is invisible to every other test.
+        self._deliver_doorbell(
+            agent.id, message,
+            f"HUB NOTICE — that reply OBLIGES {named}: a row that rots, "
+            "escalates, wakes them. Meant \"nothing owed back\"? Post `fyi` "
+            "with the same `reply_to`; writing it in the BODY does not do it."
+            "\n\nAddressing a `reply` mints an obligation row on each seat you "
+            "named, and it stands until they answer in this thread. `fyi` + "
+            "`reply_to` is the terminal gesture (design 0102): same thread, "
+            "same visibility to the same seats, no row. The hub cannot read "
+            "prose, so a disclaimer in the body excuses nobody — the seat you "
+            "meant to let off still pays it.",
+            title="that reply obliged the seats you named")
 
     def _deliver_doorbell(self, agent_id: str, mirror: Message, body: str,
                           title: str = "hub notice") -> None:
@@ -4374,6 +4647,39 @@ class HubService:
             return True
         if m.status == Status.fyi:
             return False
+        # A PEER'S ADDRESSED REPLY STILL OBLIGES. This clause was extended to
+        # return False for peers on 2026-08-25 (claim:reply-cannot-renounce-
+        # its-debt (c)) on the rationale that `reply` should "agree with `fyi`
+        # three lines above it — an inconsistency removed". REVERTED the same
+        # day, because the premise is false and the docs say so:
+        #
+        # 0102 did not leave an inconsistency here, it DREW this exact line.
+        # "Peer sender, `reply`: obliges the named seats" and "peer `fyi`:
+        # never obliges — THE TERMINAL GESTURE" are a designed pair; `fyi` is
+        # the exit precisely BECAUSE `reply` is not. Extending fyi's rule to
+        # reply does not harmonise them, it deletes the class: after it, no
+        # peer message of any status can oblige anyone. That is the state the
+        # operator overturned on 2026-07-19 — a seat ignored addressed
+        # replies "because a reply is not mandatory", and the ruling was
+        # "it MUST be". A delegate decision cannot reverse an operator
+        # ruling, and this one did not survive reading the item it undid.
+        #
+        # THE MEASUREMENT BEHIND IT IS REAL AND IS NOT LOST: ~20 rows in one
+        # afternoon whose senders wanted no answer, and clearing that does
+        # not batch. It is a good case for laurent to change the ruling. It
+        # is not authority to change it here. Kept on the claim row.
+        #
+        # THE DOORBELL CAME BACK INVERTED (2026-08-25) and is now the reason
+        # the measurement may not need a ruling at all. It used to say "that
+        # reply obliged nobody" and was disabled with (c). What it says now is
+        # what this function does — the reply OBLIGED the named seats — plus
+        # the door: `fyi` + `reply_to`, which 0102 blessed on the very line
+        # above as the terminal gesture. agora-and-wui#724: 8 of agora-wui's
+        # 12 reply-debts end with the SENDER disclaiming a reply in prose.
+        # Those senders wanted `fyi` and typed `reply`. If telling them at
+        # post time drains that pool, the case for deleting the class is a
+        # case about discoverability instead — see
+        # `_reply_obliges_someone_nudge`.
         if m.status != Status.reply:
             return False
         parent = self.db.get_message(m.reply_to) if m.reply_to else None
@@ -4431,6 +4737,55 @@ class HubService:
         if self._operator_delegate_debt(agent_id, m):
             return False
         return any(r.sender == agent_id for r in self.db.replies_to(m.id))
+
+    def _answered_operator_request(self, m: Message, replies: list[Message],
+                                   agent_id: str) -> bool:
+        """Has this seat REPLIED to an operator's ask-less request without
+        closing it? A reason, never a release.
+
+        WHAT THIS IS NOT, because it was that for about forty minutes
+        (agora-and-wui#700, ruled at #703). It was built as an escalation
+        VALVE, on the premise that the row's only exit is the operator's own
+        word — which the answering seat cannot speak — so the alarm rang at
+        the one party who could not silence it. THE PREMISE WAS FALSE.
+        `obligations._operator_settled` also closes on a `resolved` reply
+        citing evidence from `r.sender in delegates or r.sender in named`,
+        and `named = set(parent.to) | ask_addressees(parent)`. The named seat
+        has a door. It was added deliberately for this exact defect and it is
+        tested twice in test_obligation_reason.py. I built the valve out of
+        this file alone and never read the one that decides when the row
+        CLOSES.
+
+        The surviving case was going to be "an answer with nothing to cite —
+        an opinion, not a deliverable". Delegate refuted that too: AN OPINION
+        BECOMES CITABLE BY BEING RECORDED. `kind: "store"` takes a
+        `decision:`/`finding:` row written for the purpose, and they produced
+        two live receipts (commons#491, hub-alerts#210) that cite a row and
+        nothing else, both `verified: true`. One ordering trap worth knowing
+        and invisible until the post is refused: `_validate_evidence`
+        resolves against THE CHANNEL YOU ARE POSTING IN, so the row must live
+        there.
+
+        So: no suppression, in any scope. The row keeps escalating, because
+        the pressure has somewhere to go. What this predicate buys is that
+        `/owed` can say WHICH exit is left — you replied, and a second reply
+        will not help; cite what you delivered — instead of printing the
+        same sentence at a seat that has already spoken.
+
+        `asks_of` guard: a structured request is not this case. An ask has
+        its own exit, and answering one ask never speaks for the rest."""
+        if m.status not in (Status.open, Status.blocked):
+            return False
+        if m.sender not in self.operator_ids():
+            return False
+        if asks_of(m):
+            return False
+        if not (agent_id in m.to or self._operator_delegate_debt(agent_id, m)):
+            return False
+        # THIS seat's own reply, never any reply: another addressee engaging
+        # is exactly the free-rider hole the per-addressee discharge exists
+        # to close, and it would let one seat silence five seats' alarms.
+        return any(r.sender == agent_id for r in replies)
 
     def _closes_one(self, m: Message, reply: Message) -> bool:
         """Did THIS reply carry the closure authority? `_closed_authoritatively`
@@ -4555,6 +4910,44 @@ class HubService:
             candidates = candidates + self.db.unaddressed_directives(channels, ops)
         return [m for m in candidates if self._is_addressed_debt(agent_id, m)]
 
+    #: THE CAPABILITY BESIDE THE NAME (reason-enum-and-unknown-values#7 ask
+    #: 2). One mapping, keyed by the same value the ladder below assigns, so
+    #: the two cannot drift: adding a reason without a row here raises on the
+    #: first request rather than serving a silent `[]`. Members are acts the
+    #: OWED SEAT performs — see ObligationRow.clears_on for the vocabulary
+    #: and the null-vs-empty contract.
+    #:
+    #: Both consumers ran a census against this table before it was built:
+    #: agora-wui across four call sites (#15) and agora-tui across every verb
+    #: their card header can offer (#14). Sufficient in both, and the two
+    #: gaps agora-tui found were in their own rail.
+    _REASON_CLEARS_ON: dict[str, tuple[str, ...]] = {
+        # Numbered asks that are yours: answer them, or refuse them on the
+        # record. Both discharge; only these rows have ids to name, which is
+        # why `decline` appears here and nowhere else.
+        "asks_pending": ("answer", "decline"),
+        # A directive debt. The hub's own owed block says it: any reply.
+        "names_you": ("reply",),
+        # A PEER's ask-less work ask. A bare reply settles nothing — the
+        # 2026-08-11 ruling — and what moves it is ownership: a claim row
+        # citing the message. (An authoritative close also ends it and is
+        # deliberately absent: not an act this seat performs.)
+        "peer_request_no_asks": ("claim",),
+        # Only the operator's own word, or a cited report, clears these two.
+        # They are separate VALUES for their sentence, not their exit: after
+        # you have replied, "reply again" is the one move that cannot help —
+        # nuance the NAME carries, behaviour the acts carry.
+        "operator_request_awaiting_your_report": ("evidence",),
+        "operator_request_awaiting_your_citation": ("evidence",),
+        # A machine-routed alert. The real exit is the CONDITION, and the
+        # hub closes its own alert on the next sweep once it is gone — but
+        # the act that clears YOUR ledger row is a reply (discharge_state's
+        # system branch, `any(r.sender in parent.to)`). This field answers
+        # "what clears this row", so it says `reply`; that the reply is
+        # bookkeeping rather than delivery is what the reason NAME is for.
+        "hub_alert_fix_the_condition": ("reply",),
+    }
+
     def owed(self, agent: AgentInfo) -> OwedReport:
         """The agent's outstanding debts (0079), read receipts deliberately
         IGNORED: read-but-unanswered is precisely the lurk the receipt filter
@@ -4628,6 +5021,8 @@ class HubService:
                     # say, because the row looked identical to the operator
                     # case that a reply cannot clear.
                     reason="names_you",
+                    clears_on=list(self._REASON_CLEARS_ON["names_you"]),
+                    owed=True,
                     created_at=m.created_at,
                     escalated=age > sla_cache[m.channel] * 60.0,
                 ))
@@ -4741,6 +5136,10 @@ class HubService:
             # one unverified instance; it is not a hedge, it is this line.
             # The seat's real exit here is `names_you` — any reply from
             # them — and the pending ids belong to someone else.
+            # Reason only. It deliberately does NOT feed the escalated term
+            # below: ruled at agora-and-wui#703 — the exit is reachable
+            # (a `resolved` citing evidence), so the pressure stays on.
+            answered_op = self._answered_operator_request(m, replies, agent.id)
             mine_pending = [
                 a for a in asks_of(m)
                 if str(a.get("id")) in set(ds.pending)
@@ -4766,7 +5165,54 @@ class HubService:
                 # evidence, clears this one. The value says so because a
                 # client offering "reply" here offers a verb that cannot
                 # discharge the row (agora-tui#60).
-                reason = "operator_request_awaiting_your_report"
+                #
+                # ...and once the seat HAS replied, saying "reply" again is
+                # the one thing that cannot help. Same exit, sharper
+                # sentence: see _answered_operator_request.
+                reason = ("operator_request_awaiting_your_citation"
+                          if answered_op
+                          else "operator_request_awaiting_your_report")
+            elif m.kind == Kind.system:
+                # NO `and m.to` HERE, and it was written then removed. It
+                # killed no mutant, and unlike the `asks_of` guard on
+                # `_answered_operator_request` I could find no live path for
+                # it: reaching this ladder already requires `agent.id in
+                # m.to` (or an ask naming them, which lands on
+                # `asks_pending` above, or operator-delegate debt, which a
+                # `hub` sender never creates). So the addressing is an
+                # invariant established ~180 lines up, not a condition — and
+                # it is pinned by test_an_UNADDRESSED_hub_alert_is_not_this_case,
+                # which asserts the upstream filter drops the row entirely.
+                # Guard the invariant where it lives, once.
+                #
+                # A MACHINE-ROUTED ALERT IS NOT A PEER'S WORK ASK, and until
+                # now it was served as one. `hub` is not an operator, so a
+                # CLAIMS DUE / YOU ARE THE BLOCKER / AGENT DARK / STALE
+                # CLAIMS row fell through to `peer_request_no_asks` — whose
+                # documented and rendered exit is "a bare reply does NOT
+                # clear it; materialize a claim row citing this message, or
+                # post `resolved` citing evidence".
+                #
+                # Every clause of that is wrong here. `discharge_state`'s
+                # system branch (obligations.py, "THE HUB CANNOT SPEAK FOR
+                # ITSELF") clears these on `any(r.sender in parent.to)` — a
+                # bare reply from the addressee is exactly what works. And
+                # the advice it displaced is absurd on its face: a claim row
+                # citing the ping that asked you to touch your claim rows.
+                #
+                # Measured on this hub 2026-08-25: commons#531 told its
+                # addressee to materialize a claim row; a bare reply cleared
+                # the row in the harness on the first try. The reason and
+                # the discharge rule disagreed about the same message.
+                #
+                # What the value says instead is what the alert is FOR: fix
+                # the condition. The hub closes its own alerts when that
+                # condition ends (`_standing_claim_pings`,
+                # `_standing_hub_alerts`), so replying is optional
+                # bookkeeping — it clears your ledger row and nothing reads
+                # it. That is the opposite of a peer request, where the
+                # reply is the point.
+                reason = "hub_alert_fix_the_condition"
             elif m.status in (Status.open, Status.blocked):
                 reason = "peer_request_no_asks"
             else:
@@ -4779,6 +5225,12 @@ class HubService:
                     str(a["id"]) for a in asks_of(m)
                     if agent.id in (a.get("to") or []) and str(a["id"]) in ds.pending),
                 reason=reason,
+                # Indexed, never `.get(reason, [])`: a reason with no
+                # mapping must blow up in a test, not serve `[]` — which
+                # is the strongest claim on the wire ("nothing you can do")
+                # and would be a lie told by an omission.
+                clears_on=list(self._REASON_CLEARS_ON[reason]),
+                owed=True,
                 created_at=m.created_at,
                 escalated=age > sla_cache[m.channel] * 60.0,
             ))
@@ -5073,6 +5525,44 @@ class HubService:
                                     "power (whoami.delegations lists them) — "
                                     "to request a decision, post an open ask "
                                     "addressed to the decider instead")
+            # THE ROW MUST BE SOMEWHERE ITS SEAT CAN SEE IT (agora-wui,
+            # operator-board#20 ask 2). Both readers scope by membership —
+            # `board()` classifies `queue:<viewer>:*` while iterating
+            # `channels_of(viewer)`, and `desk()` does the same per operator
+            # — so a row keyed to a seat that does not belong to this channel
+            # is accepted, stored, and then reachable by NO surface at all.
+            # Five `queue:laurent:*` rows sat in `operator-board`, a room
+            # laurent is not in, and a whole room reasoned about "his queue"
+            # from the key grammar for twelve hours. Nothing was broken and
+            # nothing was delivered.
+            #
+            # Refuse by NAME, on the `capabilities` model (:997): say which
+            # seat, say why the row would be invisible, and name BOTH repairs
+            # rather than picking one — whether to move the row or widen the
+            # room is the curator's call, not the hub's.
+            seat = key[len(self._QUEUE_PREFIX):].split(":", 1)[0]
+            if not seat:
+                raise HubError(400, "queue keys name their seat: "
+                                    "queue:<seat>:<slug>")
+            # CREATION ONLY. An existing row stays writable however its seat's
+            # membership has changed, and that is not leniency — store keys
+            # CANNOT BE DELETED, so overwriting with a closing state is the
+            # only way to retire one. A gate on every write would make an
+            # already-stranded row permanently unretireable, which is the
+            # trap this fix would otherwise have set for the rows it is named
+            # after: three `queue:laurent:*` rows are deliberately staying in
+            # `operator-board` (delegate's
+            # decision:three-of-my-five-operator-queue-rows-were-not-his-to-decide),
+            # and their curator must be able to close them.
+            if (self.db.store_get(channel, key) is None
+                    and not self.db.is_member(channel, seat)):
+                raise HubError(
+                    400, f"'{seat}' is not a member of '{channel}', so a NEW "
+                         f"queue row keyed to them here reaches no surface: "
+                         f"both /board and /desk only classify rows in "
+                         f"channels that seat belongs to. Write it in a "
+                         f"channel '{seat}' is in, or invite them here — "
+                         f"a row nobody can read is not a queued decision")
             self._validate_queue_row(value)
         if key.startswith(self._RULING_PREFIX):
             if not agent.operator:
@@ -5282,10 +5772,33 @@ class HubService:
             try:
                 self._post_system(
                     channel,
-                    f"YOU ARE THE BLOCKER on `{key}` ({agent.id}): "
-                    f"{elide(str(value.get('needs') or 'unblock it'), 400)}\n\n"
-                    "Do it, or say here what it would take and by when. "
-                    "Their work does not move until you answer.",
+                    # LEAD WITH THE ADDRESSEE, NOT THE SECOND PERSON
+                    # (2026-08-25, commons#390/#391). This opened "YOU ARE
+                    # THE BLOCKER on `key` (owner)", so the first word
+                    # addressed whoever was reading and the only id in the
+                    # sentence was the row's OWNER — who is the one seat it
+                    # is NOT about. Three recorded misreads: two seats on
+                    # 2026-08-23 (see the ring-delivery gate above), then
+                    # `agora` and `agora-tui` within an hour of each other
+                    # on commons#384 — the latter while writing a message
+                    # ABOUT misaddressed alerts, and after having read the
+                    # payload that showed no to-you flag. The delivery was
+                    # correct every time; the prose put bystanders in the
+                    # wrong room. `agora-tui`, from the receiving end:
+                    # "a seat that is not that name stops reading without
+                    # having to check a field it cannot see."
+                    #
+                    # The marker phrase is KEPT (mid-sentence) on purpose:
+                    # `_report_blocker_answered` finds standing alerts with
+                    # `"YOU ARE THE BLOCKER" in m.body`, so dropping it
+                    # would orphan every alert already on a live hub and
+                    # re-ring seats that had been told.
+                    f"{park_ring}: YOU ARE THE BLOCKER on `{key}` "
+                    f"(owner: {agent.id}) — "
+                    + attributed_quote(
+                        str(value.get("needs") or "unblock it"), agent.id)
+                    + "\n\nDo it, or say here what it would take and by when. "
+                      "Their work does not move until you answer.",
                     to=[park_ring], status=Status.open,
                     # Keyed on the BLOCK, not the row version: editing a
                     # note must not re-ring, but a genuinely different ask
@@ -5592,7 +6105,7 @@ class HubService:
         if until is not None:
             filters["until"] = float(until)
         if ref:
-            filters["ref"] = sanitize_text(ref, 120)
+            filters["ref"] = sanitize_text(ref, 120, field="ref filter")
         if rated:
             filters["rated"] = rated
         if min_votes:
@@ -6005,7 +6518,8 @@ class HubService:
         if wait > 0.0:
             raise HubError(429, f"rate limit exceeded — retry in {wait:.1f}s "
                                 "(steady pace; are you in an upload loop?)")
-        filename = sanitize_text(str(filename or ""), MAX_FILENAME_CHARS) or "attachment"
+        filename = sanitize_text(str(filename or ""), MAX_FILENAME_CHARS,
+                                 field="filename") or "attachment"
         declared = sanitize_text(str(content_type or ""), MAX_CONTENT_TYPE_CHARS, field="content type") \
             or "application/octet-stream"
         return self.db.blob_put(channel, bytes(data), filename=filename,
@@ -6825,7 +7339,40 @@ class HubService:
     _RULING_PREFIX = "ruling:"
     _RULING_FIELDS = {"text", "scope", "source_message_id", "active"}
     _QUEUE_FIELDS = {"q", "options", "evidence", "waiting", "since", "tier",
-                     "default", "decided", "done_when"}
+                     "default", "decided", "done_when", "note"}
+    #: `decided` RETIRES the row from /board and /desk — both read it as a
+    #: bare truthiness (`not value.get("decided")`). So the value is not
+    #: decoration: it is the off switch, and until 2026-08-25 any prose
+    #: satisfied it. delegate wrote an explanatory sentence into
+    #: `queue:laurent:publish-abstracttui-060` and the row vanished from
+    #: every surface the operator reads — invisibly, because a store write
+    #: rings nobody and a retired row looks exactly like a decided one
+    #: (operator-board#27). The field's own refusal already said what it was
+    #: for ("the decision:<slug> or message ref that settled it") and the
+    #: hub accepted anything anyway, which is the gap: a stated contract no
+    #: check enforced. Now it must LOOK like a settlement, so retiring a row
+    #: is an act a writer performs on purpose. Prose has a home of its own
+    #: (`note`), because refusing the old habit without offering the field
+    #: it was reaching for would just move the problem.
+    _DECIDED_CITATION = re.compile(
+        r"^(?:decision:[a-z0-9][a-z0-9._-]*"      # a decision row
+        r"|[a-z0-9][a-z0-9:._-]*#\d+"             # channel#seq (dm:a--b#12 too)
+        r"|#\d+"                                  # bare #seq, same channel
+        r"|[0-9A-HJKMNP-TV-Z]{26})$",             # a message ULID
+        re.IGNORECASE)
+    #: ...AND THE MODAL CASE A CITATION CANNOT EXPRESS. Applying
+    #: `decision:a-closed-vocabulary-must-express-the-modal-case` to my own
+    #: new check: a row can also stop being a question with nothing to point
+    #: at — it evaporated, or another row swallowed it. The first draft of
+    #: this check refused exactly that and broke
+    #: `test_an_EXISTING_queue_row_stays_closable_after_its_seat_leaves`,
+    #: whose whole point is that a stranded row must stay retireable (store
+    #: keys cannot be deleted, so overwriting IS the only retirement). A
+    #: check that makes an honest act impossible gets routed around, and the
+    #: route around this one is a fake citation, which is worse than the
+    #: prose it replaced.
+    _DECIDED_WORDS = frozenset({"withdrawn", "moot", "superseded",
+                                "duplicate", "obsolete"})
     #: done_when (0111/M3): a queue/desk row waiting on a HUB-OBSERVABLE act
     #: carries a machine-checkable completion predicate, evaluated at desk
     #: read time — the row self-clears the moment the act happens, so a
@@ -6892,7 +7439,8 @@ class HubService:
         if scope == ["*"]:
             value["scope"] = ["*"]
         else:
-            cleaned = [sanitize_text(str(s), 64) for s in scope if str(s).strip()]
+            cleaned = [sanitize_text(str(s), 64, field="ruling scope entry")
+                       for s in scope if str(s).strip()]
             if not cleaned:
                 raise HubError(400, "ruling scope must name at least one seat "
                                     "or [\"*\"] for fleet-wide")
@@ -6901,7 +7449,8 @@ class HubService:
         if not isinstance(source, str) or not source.strip() or len(source) > 128:
             raise HubError(400, "ruling needs source_message_id: the operator "
                                 "message this derives from (<=128 chars)")
-        value["source_message_id"] = sanitize_text(source.strip(), 128)
+        value["source_message_id"] = sanitize_text(source.strip(), 128,
+                                                   field="source_message_id")
         active = value.get("active", True)
         if not isinstance(active, bool):
             raise HubError(400, "ruling active must be a boolean")
@@ -7300,10 +7849,12 @@ class HubService:
             if not isinstance(opts, list) or len(opts) > 4:
                 raise HubError(400, "gate options: a list of at most 4 "
                                     "plain choices")
-            value["options"] = [sanitize_text(str(o), 120) for o in opts]
+            value["options"] = [sanitize_text(str(o), 120, field="gate option")
+                                for o in opts]
         for field in ("default", "answer", "ask_message", "discharged_by"):
             if value.get(field) is not None:
-                value[field] = sanitize_text(str(value[field]), 200)
+                value[field] = sanitize_text(str(value[field]), 200,
+                                             field=f"gate {field}")
 
     @staticmethod
     def _validate_queue_row(value: Any) -> None:
@@ -7334,7 +7885,8 @@ class HubService:
                     or any(not isinstance(x, str) or len(x) > item_cap for x in items)):
                 raise HubError(400, f"queue-row {row_field} must be <= {cap} strings "
                                     f"of <= {item_cap} chars")
-            value[row_field] = [sanitize_text(x, item_cap) for x in items]
+            value[row_field] = [sanitize_text(x, item_cap, field=f"queue-row {row_field} entry")
+                                for x in items]
         tier = value.get("tier")
         if tier is not None and tier not in ("operator", "delegate"):
             raise HubError(400, "queue-row tier must be 'operator' or 'delegate'")
@@ -7357,7 +7909,8 @@ class HubService:
                                     + (f"; missing {missing}" if missing else "")
                                     + (f"; unknown {sorted(unknown)}" if unknown else ""))
             value["done_when"] = {"kind": kind, **{f: sanitize_text(
-                str(done_when[f]), 128) for f in required}}
+                str(done_when[f]), 128, field=f"done_when.{f}")
+                for f in required}}
         default = value.get("default")
         if default is not None:
             if not isinstance(default, str) or len(default) > 160:
@@ -7367,13 +7920,38 @@ class HubService:
         since = value.get("since")
         if since is not None and not isinstance(since, (int, float)):
             raise HubError(400, "queue-row since must be a unix timestamp")
+        note = value.get("note")
+        if note is not None:
+            if not isinstance(note, str) or len(note) > 200:
+                raise HubError(400, "queue-row note must be a string <= 200 "
+                                    "chars — context for the operator that "
+                                    "does NOT retire the row (that is "
+                                    "`decided`)")
+            value["note"] = sanitize_text(note, 200, field="note")
         decided = value.get("decided")
         if decided is not None:
             if not isinstance(decided, str) or len(decided) > 200:
                 raise HubError(400, "queue-row decided must be a string <= 200 "
                                     "chars (the decision:<slug> or message ref "
                                     "that settled it)")
-            value["decided"] = sanitize_text(decided, 200, field="decision")
+            ref = decided.strip()
+            # Empty stays legal and means NOT decided: clearing the field is
+            # how a row comes back, and refusing "" would make un-retiring
+            # harder than retiring.
+            if (ref and ref.lower() not in HubService._DECIDED_WORDS
+                    and not HubService._DECIDED_CITATION.match(ref)):
+                words = "|".join(sorted(HubService._DECIDED_WORDS))
+                raise HubError(400,
+                    "queue-row `decided` RETIRES this row from the operator's "
+                    "board and desk — it is the off switch, not a comment. "
+                    "Say what settled it:\n"
+                    '  "decided": "decision:<slug>"   |   "<channel>#<seq>"   '
+                    '|   "#<seq>"   |   a message id\n'
+                    f'  ...or, when there is nothing to cite: "{words}"\n'
+                    f"Got: {elide(ref, 60)!r}. If you meant to leave context "
+                    'and KEEP the row visible, use "note" instead — same cap, '
+                    "no retirement.")
+            value["decided"] = sanitize_text(ref, 200, field="decision")
     # -- phase rows (0140/2): the version invariant the fleet could not hold ------
     #
     # Live finding (at-test, 2026-07-31), operator's own words: "one seat
@@ -7487,7 +8065,8 @@ class HubService:
             if not isinstance(raw, str) or len(raw) > cap:
                 raise HubError(400, f"phase {field_name} must be a string of "
                                     f"<= {cap} chars")
-            value[field_name] = sanitize_text(raw.strip(), cap)
+            value[field_name] = sanitize_text(raw.strip(), cap,
+                                              field=f"phase {field_name}")
         paths = value.get("paths")
         if paths is not None:
             if (not isinstance(paths, list) or len(paths) > 16
@@ -7631,8 +8210,33 @@ class HubService:
     # kept re-alerting rows their owners had closed twice. A free-text
     # status like "designed ...; build next session" still stays live —
     # writers lead with the state word, prose follows it.
+    #
+    # ABANDONMENT IS TERMINAL TOO (2026-08-25, commons#353/#359). The set
+    # above says only DELIVERED, so a row the work will never return to had
+    # no word at all — and the modal case turned out to be the operator's own
+    # full stop. Measured over all 290 claim rows on the live hub: 9 of the
+    # 53 rows the steward sweep was reporting were laurent's halt on WebOS
+    # (`webos#167`, "WebOS was an experiment, stop working on it"), spelled
+    # `stopped` and re-alerted for 65 hours. One of them reads
+    #
+    #   "stopped — NOT parked and NOT blocked. laurent ordered this seat off"
+    #
+    # i.e. a seat arguing with this frozenset inside the status field, saying
+    # what it is NOT because there was no word for what it is. A tenth row
+    # (`claim:wui-needs-reply-chip-rederived`) had been honestly retired as
+    # `WITHDRAWN`, kept counting, and its owner RE-WORDED a correct closure to
+    # `closed —` to satisfy this parser: the vocabulary did not merely fail to
+    # read the row, it edited it.
+    #
+    # Ruling applied: `decision:a-closed-vocabulary-must-express-the-modal-case`
+    # — name the case you expect to be commonest and check the list can say
+    # it. These are the spellings for "this row is over and undelivered".
+    # Deliberately NOT parked: parked/blocked stay live on the board because
+    # the work resumes, and none of these do.
     _TERMINAL_CLAIM_STATUSES = frozenset(
-        {"done", "shipped", "complete", "completed", "delivered", "closed"})
+        {"done", "shipped", "complete", "completed", "delivered", "closed",
+         "stopped", "withdrawn", "retired", "cancelled", "canceled",
+         "superseded", "abandoned", "dropped", "obsolete"})
     # Parked spellings: deliberately-idle work. NOT terminal (the board keeps
     # showing it in progress) but the steward sweep must not nag it every SLA
     # window — parking IS the owner's answer to "is this stale?".
@@ -7746,10 +8350,34 @@ class HubService:
             elif tag == "operator":
                 can, move = False, ("needs the OPERATOR: you hold no `proxy`. "
                                     "Ask them for it, or ask them to decide")
+            elif tag == "owner":
+                # NOT BLOCKED, AND IT MUST NOT RING THE OPERATOR. That is the
+                # whole point of the word: before it existed, this row was
+                # tagged `operator` and appeared in `needs_the_operator`,
+                # putting a human on the hook for a choice their own seat had
+                # already made. `you_can_act` stays False because a supervisor
+                # cannot re-rank another seat's work — but the move says who
+                # can, which is neither the operator nor the delegate.
+                owner_of = str(v.get("owner") or st.updated_by)
+                can, move = False, (f"not blocked — {owner_of} ranked other "
+                                    "work above it. Ask THEM to raise it if "
+                                    "it matters now; the operator cannot")
+            elif tag == "row":
+                waiting = v.get("waiting_on") or {}
+                target = (f"{waiting.get('channel') or channel}/"
+                          f"{waiting.get('key')}"
+                          if isinstance(waiting, dict) and waiting.get("key")
+                          else "another row")
+                can, move = False, (f"waiting on {target} — it unparks when "
+                                    "that row finishes; chase that row's "
+                                    "owner, not this one")
             elif tag == "decision" and (powers & {"ruling", "operational"}):
                 can, move = True, "rule on it — you hold ruling/operational"
             elif tag == "decision":
                 can, move = False, "needs a ruling power you do not hold"
+            elif tag == "external" and who:
+                can, move = False, (f"outside the hub and {who} is the hand "
+                                    "that does it — chase them, not the row")
             elif tag == "external":
                 can, move = False, "outside the hub — re-poll, or re-plan around it"
             else:
@@ -7783,9 +8411,19 @@ class HubService:
             "seats": seats,
             "idle_but_live": [s["seat"] for s in idle],
             "blocked": sorted(blocked, key=lambda b: -b["idle_minutes"]),
+            # KEYED ON THE ACTOR, NOT ON THE WORD (agora-tui, commons#465).
+            # It counted `blocked_on == "operator"` alone, so a row saying
+            # truthfully "an act outside the hub, and laurent is the only
+            # hand that can perform it" fell out of the human's queue for
+            # choosing the accurate tag. That made the vocabulary a trap:
+            # the seat had to pick between describing its blocker correctly
+            # and staying visible to the person who can end it. What the
+            # delegate is counting is what waits ON THE HUMAN — so ask who,
+            # and let the tag say what kind of waiting it is.
             "needs_the_operator": [b["key"] for b in blocked
                                    if not b["you_can_act"]
-                                   and b["blocked_on"] == "operator"],
+                                   and (b["blocked_on"] == "operator"
+                                        or b["needs_from"] in ops)],
             "summary": (f"{len(seats)} seat(s); "
                         f"{len(idle)} live and holding nothing; "
                         f"{len(blocked)} blocked, "
@@ -7854,19 +8492,156 @@ class HubService:
                                 "without a delegation. Ask the operator.")
         return self._supervise_channel(agent, channel, powers)
 
+    # The claim-row keys a CARD carries. Everything here is already written by
+    # a seat and already validated at write time (`blocked_on` against the
+    # blocker vocabulary, `needs_from` against the membership) — the board was
+    # simply not serving it.
+    _CARD_ROW_FIELDS = ("status", "blocked_on", "needs_from", "needs",
+                        "next_step", "source_message_id")
+
+    @staticmethod
+    def _card_title(slug: str, value: dict[str, Any]) -> tuple[str, str]:
+        """A card's human headline, and WHERE IT CAME FROM.
+
+        laurent's cards read a sentence; the hub served a slug (`claim:msg-296-
+        tui-perf-and-streaming`), and delegate's P2 line is exact about why
+        that is the hub's problem: *no renderer can invent one*. A client that
+        prettifies a key is guessing, and `agora-wui` measured the cost of
+        guessing — their `PRIMARY_FIELDS` falls through to `id`, so a row with
+        no headline gets a ULID as its title (board-redesign#18).
+
+        So the hub supplies the sentence AND says which kind it is. A seat that
+        wrote a real title gets `row`; otherwise the key is de-hyphenated and
+        labelled `slug`, because a de-slugged headline is a FORMATTING of the
+        author's own words and a rendered title that silently mixes the two
+        kinds is the same lossy projection one layer up. `title_source` is what
+        lets a client style, or later chase, the ones nobody wrote.
+        """
+        for field in ("title", "what"):
+            raw = value.get(field)
+            if isinstance(raw, str) and raw.strip():
+                return elide(raw.strip(), 200), "row"
+        return (" ".join(slug.replace("_", "-").split("-")).strip()
+                or slug, "slug")
+
+    def _owner_standing(self, owner: str) -> dict[str, Any]:
+        """The ABANDONED-WORK SIGNAL: is this card's owner still a live seat?
+
+        The seam's proof (plan:board-redesign) is *"the board does not open on
+        rows owned by a seat laurent stood down"*, and the constraint on it is
+        mine from the dispatch: **retirement served as a FACT, never an age
+        heuristic.** A row is not abandoned because it is old. It is abandoned
+        because the operator retired the seat holding it, and the hub knows
+        that exactly — `retired_at` on the agents table, written only by
+        `retire_agent` (0089).
+
+        WHY THIS IS AN OBJECT AND NOT A NULLABLE FIELD. agora-wui's
+        `decision:a-null-on-a-card-reads-not-written-never-none` is in force in
+        this room: on a card, `null` means *nobody filled it in*. Every other
+        field here is a row field a seat may simply not have written. This one
+        is not — the hub can ALWAYS answer it — so a `null` for "checked, the
+        owner is fine" would be the exact misreading that decision exists to
+        prevent, and it is the same trap as `waiting_on`'s missing third state
+        one field over.
+
+        Three facts, each said out loud rather than encoded in an absence:
+
+        * `known: false` — the `owner` string does not name a seat this hub has
+          ever registered. Free text (a seat writes its own `owner`), so this
+          is reachable by a typo, and it must NOT read as "active": the hub is
+          saying it cannot answer, not that the answer is no.
+        * `retired: false` — checked, and this seat is live.
+        * `retired: true` with `at`/`reason` — the operator stood them down.
+          `reason` is the operator's own word and may be empty; `at` is the
+          moment, for the client to render, never for the hub to threshold.
+
+        `at`/`reason` are null only when `retired` is false, which explains
+        them — the one case where a null on this card is unambiguous.
+        """
+        if (not isinstance(owner, str) or not owner
+                or not self.db.agent_exists(owner)):
+            return {"known": False, "retired": False, "at": None,
+                    "reason": None}
+        record = self.db.agent_retirement(owner)
+        if record is None:
+            return {"known": True, "retired": False, "at": None,
+                    "reason": None}
+        return {"known": True, "retired": True,
+                "at": record["retired_at"],
+                "reason": record["reason"] or None}
+
+    def _board_card(self, channel: str, slug: str, value: dict[str, Any],
+                    stored: Any) -> dict[str, Any]:
+        """ONE claim row projected as a task CARD — the P2 card contract.
+
+        The five keys this used to be (channel, task, owner, updated_by,
+        updated_at) were the finding that reframed laurent's whole complaint
+        (commons#604, "no per-row state"): the row behind the card already
+        carried `status`, `blocked_on`, `needs_from`, `needs`, `next_step`, and
+        NONE of it reached the wire. That is not a missing feature, it is a
+        LOSSY PROJECTION, and four of the five badges in his reference need no
+        new computation — only that the projection stop dropping its input.
+
+        Two fields, deliberately, where a reader might expect one:
+
+        * `status` is the OWNER'S OWN WORDS, verbatim or not at all. The hub
+          never invents a status word and never normalises one (P1 item 7);
+          a row nobody has statused serves `null`, which is distinguishable
+          from a row whose owner wrote something — the same "checked versus
+          never-written" distinction this room keeps arriving at.
+        * `state` is the hub's OWN lifecycle class, the one it has always
+          computed to bucket the row (`_claim_done` / `_claim_parked`). Serving
+          it is DISCLOSURE, not inference: the client now reads the same
+          answer the hub sorted on, so a card cannot land in a lane the hub
+          disagrees with. It is a field and not a bucket precisely so a card
+          keeps its identity across a lane change — `agora-wui`'s identity
+          argument, adopted outright.
+
+        Additive by construction: every previously-served key keeps its name
+        and its meaning, so a client written against the old five is unbroken.
+        """
+        card: dict[str, Any] = {
+            "channel": channel, "task": slug,
+            "owner": value.get("owner", stored.updated_by),
+            "updated_by": stored.updated_by,
+            "updated_at": stored.updated_at,
+            "version": stored.version,
+            "state": ("done" if self._claim_done(value)
+                      else "parked" if self._claim_parked(value)
+                      else "active"),
+        }
+        card["title"], card["title_source"] = self._card_title(slug, value)
+        card["owner_standing"] = self._owner_standing(card["owner"])
+        for field in self._CARD_ROW_FIELDS:
+            raw = value.get(field)
+            card[field] = (elide(raw.strip(), 400)
+                           if isinstance(raw, str) and raw.strip() else None)
+        return card
+
     def board(self, agent: AgentInfo) -> dict[str, Any]:
         """The viewer's decision board, derived from structure the messages
         and stores already carry (design 0070): pending-on-me (the inbox
         stickiness predicate served as a query), proposals (unaddressed open
-        questions), in-progress (live claim:* keys), pending-review (done
-        claims awaiting a review class), done (decision:* record), plus the
-        curated queue:<viewer>:* rows. One derivation — UIs (the framework's
-        Mission Control, `agora board`) render it; none re-derive."""
+        questions), in-progress (live claim:* keys), next (what each waiting
+        row is really waiting for, and who can end it — see
+        `_board_next_row`), pending-review (done claims awaiting a review
+        class), done (decision:* record), plus the curated queue:<viewer>:*
+        rows. One derivation — UIs (the framework's Mission Control, `agora
+        board`) render it; none re-derive.
+
+        `next` is an ARRAY, and that is a wire contract rather than a taste:
+        `agora-wui` measured that their drawer promotes any array-valued key
+        it does not know to a column under the hub's own name, and drops any
+        other shape SILENTLY — no column, no note (commons#430). A map keyed
+        by task would have been invisible in the client and green in both
+        test suites. `in_progress` still carries these rows: `next` explains
+        them, it does not remove them."""
         ops = self.operator_ids()
         now = time.time()
         pending_on_me: list[dict[str, Any]] = []
         proposals: list[dict[str, Any]] = []
         in_progress: list[dict[str, Any]] = []
+        next_up: list[dict[str, Any]] = []
         pending_review: list[dict[str, Any]] = []
         done: list[dict[str, Any]] = []
         queue: list[dict[str, Any]] = []
@@ -7960,32 +8735,223 @@ class HubService:
                     continue
                 v = stored.value if isinstance(stored.value, dict) else {}
                 slug = key[len("claim:"):]
-                item = {"channel": channel, "task": slug,
-                        "owner": v.get("owner", stored.updated_by),
-                        "updated_by": stored.updated_by,
-                        "updated_at": stored.updated_at}
+                item = self._board_card(channel, slug, v, stored)
                 if not self._claim_done(v):
                     in_progress.append(item)
+                    dep = v.get("waiting_on")
+                    has_edge = isinstance(dep, dict) and bool(dep.get("key"))
+                    if has_edge or self._claim_parked(v):
+                        next_up.append(self._board_next_row(
+                            agent, channel, slug, v, dep if has_edge else None))
                 elif v.get("review", "none") in ("operator", "delegate") \
                         and slug not in decision_slugs:
                     pending_review.append({**item, "review": v["review"]})
         pending_on_me.sort(key=lambda r: (not r["escalated"], r["since"]))
         proposals.sort(key=lambda r: r["since"])
         done.sort(key=lambda d: d["updated_at"], reverse=True)
+        # Rows whose OWNER can move now lead: a finished, vanished, cyclic or
+        # unreadable dependency is a park with nothing left to wait for, and
+        # it reads as patience until someone says so.
+        next_up.sort(key=lambda r: (not r["owner_can_act"], r["channel"],
+                                    r["task"]))
         return {
             "viewer": agent.id,
             "pending_on_me": pending_on_me,
             "queue": queue,
             "proposals": proposals,
             "in_progress": in_progress,
+            "next": next_up,
             "pending_review": pending_review,
             "done": done[:20],
             "counts": {"pending_on_me": len(pending_on_me), "queue": len(queue),
                        "proposals": len(proposals),
                        "in_progress": len(in_progress),
+                       "next": len(next_up),
                        "pending_review": len(pending_review),
                        "done_shown": min(len(done), 20), "done_total": len(done)},
         }
+
+    # How far `next` follows a chain of waits before it stops walking. A cycle
+    # is caught by the visited set below whatever this is; the cap is for the
+    # honest long chain, where the answer stops being useful well before it
+    # stops being computable.
+    _NEXT_MAX_HOPS = 8
+
+    def _next_from_blocker(self, key: str,
+                           tv: dict[str, Any]) -> tuple[str, str, str | None, bool]:
+        """Read a row's OWN blocker into (kind, what, who, owner_can_act).
+
+        The end of every resolution: either the row a chain arrives at, or —
+        when there is no edge to walk — the waiting row itself.
+        """
+        head_owner = str(tv.get("owner") or "")
+        tag = str(tv.get("blocked_on") or "").strip().lower()
+        needs = str(tv.get("needs") or "").strip()
+        needs_from = str(tv.get("needs_from") or "").strip()
+        tail = f": {elide(needs, 160)}" if needs else ""
+        if tag == "seat" and needs_from:
+            return ("seat", f"{needs_from} must move `{key}`{tail}",
+                    needs_from, False)
+        if tag == "operator":
+            ops = sorted(self.operator_ids())
+            who = ops[0] if len(ops) == 1 else None
+            return ("operator", f"{who or 'the operator'} must decide "
+                                f"`{key}`{tail}", who, False)
+        if tag == "owner":
+            return ("owner",
+                    f"{head_owner or 'its owner'} ranked other work above "
+                    f"`{key}` — only they can raise it{tail}",
+                    head_owner or None, False)
+        if tag == "decision":
+            return ("decision", f"`{key}` needs a ruling{tail}", None, False)
+        if tag == "delegate":
+            return ("delegate", f"`{key}` needs the delegate{tail}", None,
+                    False)
+        if tag == "external":
+            # THE THIRD CASE (agora-tui, commons#437 §5): a row waiting on an
+            # ACT, with no row to point at, for which the hub rightly refuses
+            # `waiting_on`. A column reading only the row edge renders it as a
+            # blank, which is the failure they flagged before a line of this
+            # was written — and the fix is that such a row is its own head.
+            #
+            # THEIR OWN ROW DID NOT REACH THIS BRANCH, and I said at
+            # commons#453 that it did: it is tagged `operator`, because the
+            # act is a crates.io publish only laurent may perform. They then
+            # refused to retag it quietly (commons#465), and the reason is
+            # the design hole: `external` was TRUE of their row and dropped
+            # the actor, `operator` kept the actor and called an act a
+            # decision. The vocabulary is single-valued and their row is
+            # genuinely both.
+            #
+            # `needs_from` is the answer and it already exists, validated,
+            # for exactly this: WHO. An act outside the hub can name the
+            # hand that performs it, and then no seat has to choose between
+            # a true tag and a named actor. `supervise`'s
+            # `needs_the_operator` keys on the ACTOR now rather than on the
+            # word, so retagging cannot silently drop a row out of the
+            # human's queue — which is what made the choice load-bearing.
+            if needs_from:
+                return ("external",
+                        f"{needs_from} must do it outside the hub — "
+                        f"`{key}`{tail}", needs_from, False)
+            return ("external",
+                    f"`{key}` waits on an act outside the hub{tail}",
+                    None, False)
+        if self._claim_parked(tv):
+            # Park validation is TRANSITION-only, so rows parked before the
+            # rule (and rows retagged down to just an edge) carry no tag.
+            # Name the owner rather than inventing a blocker for them.
+            return ("untagged",
+                    f"`{key}` is parked without a blocker the hub can read — "
+                    f"ask {head_owner or 'its owner'} what it needs{tail}",
+                    head_owner or None, False)
+        step = str(tv.get("next_step") or "").strip()
+        return ("working",
+                f"{head_owner or 'its owner'} is working `{key}`"
+                + (f": {elide(step, 160)}" if step else ""),
+                head_owner or None, False)
+
+    def _board_next_row(self, agent: AgentInfo, channel: str, task: str,
+                        value: dict[str, Any],
+                        dep: dict[str, Any] | None) -> dict[str, Any]:
+        """One `next` entry: what this waiting row is REALLY waiting for.
+
+        The column laurent asked for (`request / tasks / ongoing / next / who
+        / when`, dm#67) and the only one the hub could not compute. The input
+        is `waiting_on`, ruled the carrier at
+        `decision:a-row-dependency-goes-in-waiting-on-not-in-prose`.
+
+        IT RESOLVES TRANSITIVELY, AND IT CROSSES EDGE TYPES AT THE HEAD.
+        `tui` supplied the case within minutes of converting the first three
+        rows (commons#429): their rows wait on `claim:msg-296-streaming-long-
+        text`, which waits on no row at all — it is `blocked_on: seat`,
+        `needs_from: agora-tui`, for a profile only that seat can run. A
+        `next` that reported "another row" would answer with the one fact its
+        reader already has, and stop one hop short of the seat who can end
+        it. So this walks `waiting_on` to the head of the chain and then reads
+        the head's OWN blocker to name an actor.
+
+        Every branch states a fact the hub holds. It never guesses intent,
+        and where it cannot see (a target in a room the VIEWER is not in — the
+        edge guarantees only that the WAITER can read it) it says so rather
+        than resolving silently to something weaker.
+        """
+        owner = str(value.get("owner") or "")
+        first = None if dep is None else {
+            "channel": str(dep.get("channel") or channel),
+            "key": str(dep.get("key") or ""),
+            "at_version": int(dep.get("at_version") or 0)}
+        row: dict[str, Any] = {
+            "channel": channel, "task": task, "owner": owner,
+            "waiting_on": first, "chain": [], "head": None,
+            "moved": False, "kind": "", "who": None, "what": "",
+            "owner_can_act": False,
+        }
+
+        def settle(kind: str, what: str, who: str | None = None,
+                   owner_can_act: bool = False) -> dict[str, Any]:
+            row.update(kind=kind, what=what, who=who,
+                       owner_can_act=owner_can_act)
+            return row
+
+        if first is None:
+            # NO EDGE TO WALK: the waiting row is its own head. A park whose
+            # blocker is a seat, the operator, a ruling or an act outside the
+            # hub has a perfectly good answer already written on it.
+            row["head"] = {"channel": channel, "key": f"claim:{task}"}
+            return settle(*self._next_from_blocker(f"claim:{task}", value))
+
+        cur_ch, cur_key = first["channel"], first["key"]
+        seen = {(channel, f"claim:{task}")}
+        hops = 0
+        while True:
+            if (cur_ch, cur_key) in seen:
+                return settle("cycle",
+                              f"`{cur_ch}/{cur_key}` is already in this chain "
+                              "— these rows wait on each other and nothing "
+                              "outside will end it. Re-point or unpark one.",
+                              owner_can_act=True)
+            seen.add((cur_ch, cur_key))
+            if not self.db.is_member(cur_ch, agent.id):
+                # The pointer is visible (it is in a row you can read); the
+                # target's state is not, and reporting a status from a room
+                # this viewer is not in would leak it.
+                return settle("unreadable",
+                              f"waiting on `{cur_ch}/{cur_key}`, in a room you "
+                              f"are not in — ask {owner or 'its owner'}; the "
+                              "hub will not read that row to you.")
+            target = self.db.store_get(cur_ch, cur_key)
+            if target is None:
+                return settle("gone",
+                              f"`{cur_ch}/{cur_key}` no longer exists — "
+                              "nothing will ever resume this row. Re-point it "
+                              "or take it off park.", owner_can_act=True)
+            row["chain"].append(f"{cur_ch}/{cur_key}")
+            row["head"] = {"channel": cur_ch, "key": cur_key}
+            tv = target.value if isinstance(target.value, dict) else {}
+            if len(row["chain"]) == 1 and target.version > first["at_version"]:
+                row["moved"] = True
+            head_owner = str(tv.get("owner") or target.updated_by or "")
+            if self._claim_done(tv):
+                word = self._claim_status_word(tv) or "done"
+                return settle("done",
+                              f"`{cur_key}` is {word} — the wait is over. "
+                              "Unpark this row or close it.",
+                              who=owner or None, owner_can_act=True)
+            onward = tv.get("waiting_on")
+            if isinstance(onward, dict) and onward.get("key"):
+                hops += 1
+                if hops >= self._NEXT_MAX_HOPS:
+                    return settle("deep",
+                                  f"the chain from `{cur_key}` is more than "
+                                  f"{self._NEXT_MAX_HOPS} rows long and the "
+                                  "hub stopped walking it — read it by hand.")
+                cur_ch = str(onward.get("channel") or cur_ch)
+                cur_key = str(onward.get("key") or "")
+                continue
+            # HEAD OF THE CHAIN. Its own blocker names the actor.
+            return settle(*self._next_from_blocker(
+                cur_key, {**tv, "owner": head_owner}))
 
     # -- operator desk (0111/M1+M3): everything blocked on the human ---------------
 
@@ -8073,6 +9039,11 @@ class HubService:
                     row = {
                         "kind": "queue", "operator": op, "channel": channel,
                         "key": entry["key"], "what": v.get("q", ""),
+                        # The writer's context, if they left any. Served here
+                        # because a `note` nobody renders is a field that
+                        # teaches the next writer to reach for `decided`
+                        # again (operator-board#27).
+                        "note": v.get("note", ""),
                         "who_waits": ", ".join(v.get("waiting", [])) or stored.updated_by,
                         "age_minutes": round((now - stored.updated_at) / 60, 1),
                         "one_action": (v.get("options") or ["decide"])[0],
@@ -9256,7 +10227,14 @@ class HubService:
         Escalation alone is the DEAF/DARK bar; lurk waits for WELL past
         breach so a busy-but-alive seat that answers late is never smeared.
         Unread is the discriminator from 'read but ignoring' —
-        acked_unanswered already names that on the board."""
+        acked_unanswered already names that on the board.
+
+        THE ALERT STILL FIRES FOR A WORKING SEAT, AND SAYS SO. Waiting longer
+        was never enough on its own: a seat can be productive for hours and
+        still leave addressed rows unread, and this alert then told the
+        operator to relaunch it. The rotting count is real and stays; only
+        the CAUSE sentence is now decided by evidence (`last_work_at`), so
+        the two situations route to opposite actions instead of one."""
         state, _age = self.presence.reception(agent_id)
         if state != "armed":
             return
@@ -9283,17 +10261,39 @@ class HubService:
         ch = self.db.get_channel(rotting[0].channel)
         if ch is not None and not ch.private:
             example = f"{rotting[0].channel}#{rotting[0].seq}"
+        # THE COUNT AND THE CAUSE ARE TWO CLAIMS (2026-08-25, delegate at
+        # agora-and-wui#737). The count above is measured. The cause was not:
+        # this alert asserted a stuck session from unread-past-SLA alone, and
+        # on the one seat it named that was false — it had posted a
+        # considered reply eleven minutes earlier. `last_work_at` decides
+        # which sentence follows, from work the seat AUTHORED after the
+        # oldest rotting row arrived. The docstring above always claimed "a
+        # busy-but-alive seat ... is never smeared"; until now nothing in the
+        # predicate could tell busy from stuck.
+        worked_at = self.db.last_work_at(agent_id, oldest)
+        head = (f"AGENT LURKING: {agent_id}'s reception is armed and "
+                f"heartbeating, but {len(rotting)} obligation(s) addressed to"
+                f" it have rotted UNREAD well past SLA (oldest ~"
+                f"{(now - oldest) / 60:.0f} min, e.g. {example}). ")
+        if worked_at is not None:
+            body = head + (
+                f"THE SEAT IS NOT STUCK: it produced work "
+                f"{(now - worked_at) / 60:.0f} min ago, with these rows "
+                "already waiting — so this is a triage backlog, not a dead "
+                "session, and relaunching it would kill a working one. "
+                "Drain, re-route or narrow its queue. One alert per lurk "
+                "episode.")
+            klass = "unseen-but-working"
+        else:
+            body = head + (
+                "The doorbell rings; nobody comes, and the seat has produced "
+                "nothing since the oldest of these arrived: its session is "
+                "likely stuck in a follow-up-only loop where wakes and stop-"
+                "hook prompts no longer reach the model. Reprompt or relaunch"
+                " that session. One alert per lurk episode.")
+            klass = "unseen"
         self._post_silence_watchdog_alert(
-            agent_id,
-            f"AGENT LURKING: {agent_id}'s reception is armed and heartbeating,"
-            f" but {len(rotting)} obligation(s) addressed to it have rotted "
-            f"UNREAD well past SLA (oldest ~{(now - oldest) / 60:.0f} min, "
-            f"e.g. {example}). The doorbell rings; nobody comes: its session "
-            "is likely stuck in a follow-up-only loop where wakes and stop-"
-            "hook prompts no longer reach the model. Reprompt or relaunch "
-            "that session. One alert per lurk episode.",
-            explicit_class="unseen", kind="lurk",
-        )
+            agent_id, body, explicit_class=klass, kind="lurk")
         alerted.append(agent_id)
 
     def _steward_sweep(self) -> list[str]:
@@ -9641,6 +10641,26 @@ class HubService:
         "decision": "waiting on a decision the room has not taken",
         "external": "waiting on something outside the hub (a build, a "
                     "service, a rate limit, a file that does not exist yet)",
+        # ADDED 2026-08-25, ruled by the delegate at operator-board#14 after
+        # FOUR instances in one night, from three seats, of the same defect:
+        # the vocabulary had no word for a real state, so honest seats either
+        # mis-tagged or left the row unparked, and the record misreported
+        # either way.
+        #
+        # `owner` is the MODAL case and it was the missing one. `agora` hit it
+        # inside thirty seconds of the stale-row canvass; `tui` disclosed that
+        # FOUR of their five parks read `blocked_on: operator` while nobody
+        # owed them anything — so a sweep showed four rows apparently waiting
+        # on laurent when exactly one was. A closed vocabulary that cannot
+        # express "I chose other work" does not prevent that state; it only
+        # stops it being said truthfully.
+        "owner": "not blocked — its owner ranked other work above it; only "
+                 "they can raise it",
+        # `row` completes the `waiting_on` edge, which already exists and is
+        # complete. The mechanism was never the gap; the word that leads a
+        # seat to it was.
+        "row": "waiting on another claim row to finish (name it in "
+               "`waiting_on`)",
     }
 
     def _validate_park(self, key: str, value: dict[str, Any],
@@ -9680,6 +10700,19 @@ class HubService:
                 "nobody is the same thing. If you do not know who can "
                 "unblock you, that is a `decision` or a `delegate` block, "
                 "not a `seat` one.")
+        # "WAITING ON A ROW" MUST NAME THE ROW — the same rule as `seat`, for
+        # the same reason. `waiting_on` is validated, refuses a phantom target
+        # and already drives the board's `next` column; a `row` park without
+        # it is a block naming nothing, which is the shape the `seat` clause
+        # above was written against.
+        if tag == "row" and not value.get("waiting_on"):
+            raise HubError(400,
+                f"`{key}` says it is blocked on another ROW but does not name "
+                "which one, so nothing can tell you when it clears. Add:\n"
+                '  "waiting_on": {"channel": "<channel>", "key": "<claim:...>"}\n'
+                "The hub checks the target exists and surfaces your row the "
+                "moment it finishes. If you cannot name the row, that is a "
+                "`decision` or a `seat` block, not a `row` one.")
         who = str(value.get("needs_from") or "").strip()
         if who and channel is not None:
             members = {m.agent_id for m in self.db.list_members(channel)}
@@ -9913,10 +10946,15 @@ class HubService:
                 try:
                     self._post_system(
                         ch,
-                        f"YOU ARE THE BLOCKER on `{key}` ({owner}): "
-                        f"{elide(needs or 'unblock it', 400)}\n\n"
-                        "Do it, or say here what it would take and by when. "
-                        "Their work does not move until you answer.",
+                        # Same shape as the store-write ring above, and the
+                        # same reason (commons#391): addressee first, owner
+                        # explicitly labelled, marker phrase kept so
+                        # `_report_blocker_answered` still finds it.
+                        f"{who}: YOU ARE THE BLOCKER on `{key}` "
+                        f"(owner: {owner}) — "
+                        + attributed_quote(needs or "unblock it", owner)
+                        + "\n\nDo it, or say here what it would take and by "
+                          "when. Their work does not move until you answer.",
                         to=[who], status=Status.open,
                         dedupe_key="blocking:" + hashlib.sha256(
                             f"{ch}\0{key}\0{who}\0{needs}".encode()
@@ -10541,12 +11579,32 @@ class HubService:
     def silence_class_for_seat(self, agent_id: str,
                                debts: OwedReport | None = None) -> str | None:
         """0114: classify SLA-breached answer debt by silence root cause so
-        stewards route (dead/deaf/unseen/seen-and-ignored) instead of
-        forensics. None when the seat has no escalated to_answer rows.
+        stewards route (dead/deaf/unseen/unseen-but-working/seen-and-ignored)
+        instead of forensics. None when the seat has no escalated to_answer
+        rows.
         `debts` lets a caller that already computed /owed for this seat pass
         it in — recomputing it here doubled the cost of every full-fleet
         surface (measured on a copy of the live 50-seat hub: `doctor()` 26.7s
-        -> 15.7s)."""
+        -> 15.7s).
+
+        THE FIFTH CLASS, AND WHY IT IS NOT COSMETIC (2026-08-25, reported by
+        delegate at agora-and-wui#737 against a LIVE alert on `agora`).
+        `unseen` said one thing — the cursor is behind on an escalated row —
+        and its route said another: *reprompt or relaunch*, a session-fault
+        remedy. Unread-past-SLA is equally consistent with a seat that is
+        alive, producing, and simply losing the triage race on those rows,
+        and the hub can tell the two apart from state it already keeps: work
+        AUTHORED after the unread row arrived is proof the model was reached
+        with the message already sitting there. Nothing about presence or
+        reception can prove that — both stay green for a listener whose model
+        never runs, which is exactly the RC-3 blackout `unseen` was built for.
+        So the two keep separate names: the diagnosis, and the remedy that
+        follows from it, are opposite (`_SILENCE_CLASS_ROUTE`).
+
+        The measurement that forced it: the alert told the operator to
+        relaunch a session that had posted a considered reply eleven minutes
+        earlier. A false session fault printed with the hub's own authority
+        costs the operator the one action they can take on it."""
         if debts is None:
             debts = self.owed(AgentInfo(id=agent_id, name=agent_id))
         escalated = [r for r in debts.to_answer if r.escalated]
@@ -10557,10 +11615,15 @@ class HubService:
         reception_state, _ = self.presence.reception(agent_id)
         if reception_state == "stale":
             return "deaf"
-        unread = any(
-            self.db.get_cursor(agent_id, row.channel) < row.seq
-            for row in escalated)
+        unread = [row for row in escalated
+                  if self.db.get_cursor(agent_id, row.channel) < row.seq]
         if unread:
+            # Measured from the arrival of the OLDEST unread row, never from
+            # "recently": the claim is "it produced while this was waiting",
+            # and a fixed lookback would answer a different question.
+            since = min(row.created_at for row in unread)
+            if since and self.db.last_work_at(agent_id, since) is not None:
+                return "unseen-but-working"
             return "unseen"
         return "seen-and-ignored"
 

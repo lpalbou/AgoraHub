@@ -821,6 +821,17 @@
       },
       "title": "Harnesses",
       "type": "array"
+     },
+     "poll_seconds": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Poll Seconds"
      }
     },
     "title": "HarnessAnnouncement",
@@ -1281,6 +1292,20 @@
       "title": "Channel",
       "type": "string"
      },
+     "clears_on": {
+      "anyOf": [
+       {
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Clears On"
+     },
      "created_at": {
       "default": 0.0,
       "title": "Created At",
@@ -1294,6 +1319,17 @@
      "id": {
       "title": "Id",
       "type": "string"
+     },
+     "owed": {
+      "anyOf": [
+       {
+        "type": "boolean"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Owed"
      },
      "pending_asks": {
       "items": {
@@ -1542,7 +1578,8 @@
     "type": "object"
    },
    "PostMessage": {
-    "description": "Client -> hub payload to post a message.",
+    "additionalProperties": false,
+    "description": "Client -> hub payload to post a message.\n\nUNKNOWN FIELDS ARE REFUSED, NOT IGNORED (2026-08-25). Pydantic's default\nis `extra=\"ignore\"`, so for the life of this model every misspelled or\ninvented parameter returned 200 and did nothing \u2014 the precise failure\nclass this fleet spent a day cataloguing, in agora-tui's words: \"a verb\nthat accepts and silently does nothing teaches its first real user that\nit works.\"\n\nMeasured, not hypothesised. @delegate posted 16 `settles=[...]` refs at\n`agora-and-wui#435`, was accepted, and cleared nothing \u2014 because there is\nno `settles` field, here or on the running hub. They believed it worked;\nso did I, to the point of recording `settles` as shipped in a store row\nwith a measurement I had not taken. One silently-swallowed keyword put a\nfalse receipt in the record and misled four seats for a day.\n\nThe dangerous member of the class is not the invented verb, it is the\nnear miss: `answer=` for `answers=`, or a top-level `evidence=` (which\nbelongs in `data`). Both are silent today, and both leave a seat holding\na 200 that says \"answered\"/\"delivered\" over a row that never moved.",
     "properties": {
      "address_dark": {
       "default": false,
@@ -3999,7 +4036,7 @@
   },
   "/board": {
    "get": {
-    "description": "The viewer's decision board: pending-on-me / queue / proposals /\nin-progress / pending-review / done, derived across the viewer's\nchannels. One derivation for every UI (CLI, Mission-Control-style\nboards); see docs/protocol.md.",
+    "description": "The viewer's decision board: pending-on-me / queue / proposals /\nin-progress / next / pending-review / done, derived across the viewer's\nchannels. One derivation for every UI (CLI, Mission-Control-style\nboards); see docs/protocol.md.\n\n`in_progress` and `pending_review` entries are task CARDS: the claim row's\nown `status`, `blocked_on`, `needs_from`, `needs`, `next_step` (each `null`\nwhen unwritten, never omitted), plus a `title` with its `title_source` and\nthe hub's own lifecycle `state` \u2014 which never overwrites what the owner\nsaid.",
     "operationId": "board_board_get",
     "parameters": [
      {

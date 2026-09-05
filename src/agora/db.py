@@ -1977,6 +1977,34 @@ class Database:
                 out.setdefault(row["updated_by"], {})["wrote"] = row["t"]
         return out
 
+    def last_work_at(self, agent_id: str, since: float) -> float | None:
+        """The newest thing ONE seat DID at or after `since` — a message it
+        authored or a store row it wrote — or None if it produced nothing in
+        that window. The per-seat half of `work_signals`, which groups the
+        whole fleet.
+
+        WHY PER SEAT. The caller is `silence_class_for_seat`, which runs
+        inside a per-agent loop and only asks this when a seat already has
+        escalated UNREAD debt. A fleet-wide group-by there would compute 50
+        seats' signals to answer one seat's question, and `since` differs per
+        seat (each is measured against the arrival of ITS oldest unread row),
+        so the fleet call cannot be hoisted out of the loop anyway.
+
+        Both halves are timestamps only, never content, and both are bounded
+        by `since` — which in practice is minutes-to-hours old, not the
+        whole table."""
+        with self.read_transaction() as conn:
+            posted = conn.execute(
+                "SELECT MAX(created_at) AS t FROM messages"
+                " WHERE sender = ? AND created_at >= ? AND kind = 'message'",
+                (agent_id, since)).fetchone()["t"]
+            wrote = conn.execute(
+                "SELECT MAX(updated_at) AS t FROM store"
+                " WHERE updated_by = ? AND updated_at >= ?",
+                (agent_id, since)).fetchone()["t"]
+        stamps = [t for t in (posted, wrote) if t is not None]
+        return max(stamps) if stamps else None
+
     def unread_criticals(self, agent_id: str, channels: list[str]) -> list[Message]:
         """Critical messages stay pinned until the agent actually reads the body."""
         if not channels:
@@ -2308,12 +2336,15 @@ class Database:
             # clears its cadence ping, exactly as every rule text teaches —
             # but never mint a version, so a loop repeating the same receipt
             # cannot fake progress past the initiative no-progress guard
-            # (strikes are keyed on the version). Only the author of the
-            # row's CURRENT state may heartbeat it: a peer's identical write
-            # is a pure no-op, otherwise any seat could invisibly forge
-            # another's claim liveness (suppressing cadence pings and the
-            # steward's stale-claim sweep) with no version minted and no
-            # audit trail.
+            # (strikes are keyed on the version). ANY seat may heartbeat a
+            # row, author or peer — see the peer branch below for why the
+            # author-only rule this comment used to assert was dropped. The
+            # consequence, stated here so nobody has to derive it: a peer CAN
+            # refresh another seat's claim liveness (suppressing cadence pings
+            # and the steward's stale-claim sweep) leaving no trace, because
+            # the peer branch deliberately keeps `updated_by` pinned to the
+            # author. That is a real forging surface on today's store door and
+            # it is not a migration risk.
             if row is not None and json.loads(row["value"]) == value:
                 if updated_by == row["updated_by"]:
                     self._conn.execute(

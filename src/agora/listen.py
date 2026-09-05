@@ -841,9 +841,57 @@ def _hub_notice_clause(notices: list[dict[str, Any]]) -> str:
     return " HUB NOTICE — " + " | ".join(parts) + more
 
 
+def _dedupe_events(batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One entry per MESSAGE, not per notification event.
+
+    The notify file is append-only and the hub re-appends a line every time it
+    re-rings a message — and an owed row is re-rung for as long as it is owed.
+    So a batch read from that file is a log of *notification events*, in which
+    one message can appear many times: measured on this seat's own log, 201
+    ids had more than one line and one had FOURTEEN.
+
+    Counting those events as messages is what produced the false wakes three
+    seats hit on 2026-08-25. In one measured window the wake said `60 new` for
+    60 lines carrying 36 distinct ids, of which 3 were actually unread; the
+    channel set it named was the set of channels those *lines* touched, so it
+    named rooms whose only traffic was a re-ring of something read hours
+    earlier — and omitted rooms with genuine new messages and no owed rows.
+
+    Worst of all it fed `operator_task_to_me`: a long-answered operator DM,
+    re-rung 14 times, kept firing "Human task(s) in this batch EXPLICITLY NAME
+    YOU" at seats who then went looking for a task that did not exist. A false
+    count costs a glance; that flag is the one signal a driven seat must not
+    learn to discount.
+
+    EXACTLY THE PRECEDENT `wake_line` ALREADY SET for hub notices — "counting
+    them inflated `n=` and put a phantom channel in `channels=`". Same defect,
+    a different reason for the extra lines, so it is fixed the same way and in
+    ONE place: here, where both the sentinel and the stderr digest read it.
+
+    The LAST occurrence wins — a re-ring carries the freshest flags and status
+    (an escalation, say), and that is the state the seat should be woken with.
+    Events with no id are kept as-is; they are not forgeable into each other.
+
+    THIS DOES NOT SUPPRESS RE-RINGS ACROSS WAKES, deliberately. A row that is
+    still owed SHOULD wake its seat again later — that is the escalation
+    mechanism working. What is never right is counting one message twice
+    inside one wake.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    anonymous: list[dict[str, Any]] = []
+    for event in batch:
+        key = str(event.get("id") or "")
+        if key:
+            out[key] = event          # last wins: freshest flags/status
+        else:
+            anonymous.append(event)
+    return list(out.values()) + anonymous
+
+
 def _deliver_wake(batch, agent_id, *, preview: bool, once: bool,
                   hub: str = "", classify_driver_wake: bool = False) -> int | None:
     """Emit the wake sentinel (+ stderr digest and exit-2 in --once mode)."""
+    batch = _dedupe_events(batch)
     owed, sig, owed_raw = (_owed_snapshot(hub, agent_id) if hub
                            else (None, None, None))
     line = wake_line(batch, agent_id, preview=preview)
@@ -1125,11 +1173,28 @@ async def run_ws_mode(url: str, key: str, agent_id: str, pid_path: Path, *,
         delay = 0.5
         while True:  # the hub may be down: arming waits (and retries) for it
             try:
-                rows = await client.list_channels()
-                # Head-seeded cursors: the ws twin of seek-to-END (no replay);
-                # reconnect catch-up then covers outage windows only.
-                await client.connect([r["name"] for r in rows if r["member"]], since={
-                    r["name"]: int(r.get("last_seq") or 0) for r in rows if r["member"]})
+                # The deadline bounds the ATTEMPT, not just the gap between
+                # attempts. The check below only runs once an attempt returns,
+                # so a single hung connect used to outlive --max-wait entirely:
+                # measured 31.3s for --max-wait 1.5 against a host that
+                # black-holes the SYN. `--max-wait` is what a driver budgets a
+                # seat's reception on, so it has to be authoritative here.
+                # BOTH calls are inside the budget: the ws handshake reaches
+                # the same unreachable host as the REST probe and hangs the
+                # same way, so bounding only the first would move the stall
+                # rather than end it.
+                async def _arm() -> None:
+                    rows = await client.list_channels()
+                    # Head-seeded cursors: the ws twin of seek-to-END (no
+                    # replay); reconnect catch-up then covers outage windows.
+                    await client.connect(
+                        [r["name"] for r in rows if r["member"]],
+                        since={r["name"]: int(r.get("last_seq") or 0)
+                               for r in rows if r["member"]})
+
+                budget = None if deadline is None else max(
+                    0.0, deadline - time.monotonic())
+                await asyncio.wait_for(_arm(), timeout=budget)
                 break
             except Exception as exc:
                 if isinstance(exc, AgoraError) and exc.status_code in (401, 403):

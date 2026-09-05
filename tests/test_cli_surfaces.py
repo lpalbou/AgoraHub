@@ -831,6 +831,47 @@ def test_spawn_machines_prints_the_knobs_so_reasoning_is_not_typed_from_memory(
     assert "has not announced its knobs" not in out
 
 
+def test_spawn_machines_prints_the_model_menu_and_says_nothing_when_absent(
+        live_hub, isolated_home, capsys):
+    """Three menu states, and the third one prints NOTHING.
+
+    Absent means this runner has not said (`--models` was not typed), and a
+    line saying so for every harness on every machine would bury the ones that
+    did. `[]` is a statement the operator asked for and gets its own sentence.
+    The menu is also labelled as a menu: this surface is where an operator
+    would otherwise read a short list as a permission."""
+    runner_key = _register(live_hub.url, "runner-mbp")
+    httpx.put(f"{live_hub.url}/admin/machines/local/runner",
+              json={"agent_id": "runner-mbp"},
+              headers=_bearer(live_hub.admin), timeout=5)
+    httpx.post(f"{live_hub.url}/machines/local/announce",
+               json={"harnesses": ["claude", "cursor", "codex"],
+                     "capabilities": {
+                         "claude": {"reasoning": ["low"],
+                                    "models": ["claude-opus-5",
+                                               "claude-sonnet-5"]},
+                         "cursor": {"reasoning": [], "models": []},
+                         "codex": {"reasoning": ["low"]}}},
+               headers=_bearer(runner_key), timeout=5)
+
+    _run_cli(["spawn", "--machines", "--url", live_hub.url,
+              "--admin-key", live_hub.admin])
+    out = capsys.readouterr().out
+    assert "models: claude-opus-5, claude-sonnet-5" in out
+    assert "a menu, not a gate" in out
+    assert "models: this runner constrains nothing" in out
+    # codex announced knobs but NO menu: no models line follows its own row.
+    # Anchored on the harness row (the one that names its reasoning), not on
+    # the first line containing "codex" — the machine summary lists every
+    # harness name, so matching that would pass however this renders.
+    lines = out.splitlines()
+    codex_at = next(i for i, ln in enumerate(lines)
+                    if ln.strip().startswith("codex "))
+    assert not lines[codex_at + 1].strip().startswith("models:"), \
+        "absent must print nothing — it is not 'constrains nothing'"
+    assert "cursor" in lines[codex_at + 1]
+
+
 def test_spawn_forwards_the_knobs_and_the_hub_refuses_an_unannounced_level(
         live_hub, isolated_home, capsys):
     """The CLI is the third door to the same knob, and a door that drops the

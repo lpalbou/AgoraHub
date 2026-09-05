@@ -193,7 +193,10 @@ def test_queue_writes_require_reporting_power():
     flow = register(client, "flow")
     agency = register(client, "agency")
     op = register(client, "op", operator=True)
-    make_channel(client, flow, "room", agency, op)
+    # laurent JOINS: a queue row keyed to a seat outside the room is refused
+    # (operator-board#20 ask 2), and this test is about write AUTHORITY.
+    laurent = register(client, "laurent")
+    make_channel(client, flow, "room", agency, op, laurent)
 
     row = {"value": {"q": "decide x"}}
     denied = client.put("/channels/room/store/queue:laurent:x", json=row, headers=flow)

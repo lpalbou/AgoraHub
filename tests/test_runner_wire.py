@@ -33,7 +33,9 @@ import pathlib
 import socket
 import threading
 import time
+from dataclasses import replace
 from types import SimpleNamespace
+from typing import Any
 
 import httpx
 import pytest
@@ -67,7 +69,11 @@ def live_hub(tmp_path: pathlib.Path):
         if time.monotonic() > deadline or not thread.is_alive():
             raise RuntimeError("test hub failed to start")
         time.sleep(0.02)
-    yield SimpleNamespace(url=f"http://127.0.0.1:{port}")
+    # `app` is yielded too: uvicorn runs in a THREAD of this process, so the
+    # service object is reachable for the one thing HTTP cannot express — a
+    # spawn requested by a NON-operator. `POST /spawns` is operator-only by
+    # design, and the approval gate's negative half is exactly that case.
+    yield SimpleNamespace(url=f"http://127.0.0.1:{port}", app=app)
     server.should_exit = True
     thread.join(timeout=10)
     assert not thread.is_alive(), "test hub did not shut down"
@@ -117,7 +123,8 @@ def wired(live_hub, tmp_path: pathlib.Path):
                        agent_id="runner-bb", api_key=runner_key,
                        require_approval=False)
     hub = RunnerHub(url, runner_key)
-    yield SimpleNamespace(url=url, cfg=cfg, hub=hub, operator_key=operator_key)
+    yield SimpleNamespace(url=url, cfg=cfg, hub=hub, operator_key=operator_key,
+                          app=live_hub.app)
     hub.close()
 
 
@@ -174,6 +181,99 @@ def test_announce_reaches_the_machines_list_clients_read(wired, monkeypatch):
     # constant repeated in the test.
     assert mine[0]["capabilities"]["claude"] == \
         R.harness_capabilities(accepted)["claude"]
+
+
+def test_an_announced_model_menu_reaches_the_clients_dropdown(wired, monkeypatch):
+    """`--models claude=…` -> `GET /machines`, over a real socket.
+
+    laurent asked for a per-harness model list (`commons#296`) and agora-wui's
+    consumer was already written against `models: [...]`. Before this, the hub
+    answered such an announce `200` and dropped the key — a runner believing it
+    had announced a menu, a client rendering free text, and nothing red."""
+    _installed(monkeypatch, "claude")
+    accepted = R.accepted_harnesses(wired.cfg)
+    menus = R.parse_model_menus(["claude=claude-opus-5,claude-sonnet-5"])
+    wired.hub.announce(MACHINE, accepted, R.harness_capabilities(accepted, menus))
+
+    machines = httpx.get(f"{wired.url}/machines", headers=_admin(),
+                         timeout=10).json()
+    caps = next(m for m in machines if m["machine"] == MACHINE)["capabilities"]
+    assert caps["claude"]["models"] == ["claude-opus-5", "claude-sonnet-5"]
+
+
+def test_the_three_menu_states_stay_three_on_the_wire(wired, monkeypatch):
+    """Absent, `[]` and a list mean three different things to an operator:
+    *this runner has not said*, *it constrains nothing*, and the menu. Folding
+    absent into `[]` would make every un-configured harness claim it had been
+    considered."""
+    _installed(monkeypatch, "claude")
+    accepted = R.accepted_harnesses(wired.cfg)
+
+    def announced(menus):
+        wired.hub.announce(MACHINE, accepted,
+                           R.harness_capabilities(accepted, menus))
+        machines = httpx.get(f"{wired.url}/machines", headers=_admin(),
+                             timeout=10).json()
+        row = next(m for m in machines if m["machine"] == MACHINE)
+        return row["capabilities"]["claude"]
+
+    assert "models" not in announced({})
+    assert announced(R.parse_model_menus(["claude="]))["models"] == []
+    assert announced({"claude": ("m-1",)})["models"] == ["m-1"]
+
+
+def test_a_knob_the_hub_does_not_serve_is_refused_by_name(wired, monkeypatch):
+    """The defect that made the menu necessary, as a permanent guard.
+
+    `_clean_capabilities` used to rebuild each row from three keys, so ANY
+    other knob was accepted with a 200 and silently absent from the echo. The
+    runner and hub ship from one package: a refusal naming the key is printed
+    by the runner's own startup log, where a drop is printed nowhere."""
+    _installed(monkeypatch, "claude")
+    accepted = R.accepted_harnesses(wired.cfg)
+    caps = R.harness_capabilities(accepted)
+    caps["claude"]["tempreature"] = 0.7          # a plausible typo, not nonsense
+
+    with pytest.raises(httpx.HTTPStatusError) as raised:
+        wired.hub.announce(MACHINE, accepted, caps)
+    detail = raised.value.response.json()["detail"]
+    assert "tempreature" in detail and "models" in detail
+    assert raised.value.response.status_code == 400
+
+
+def test_a_model_id_is_refused_rather_than_truncated(wired, monkeypatch):
+    """Same rule as `default_model`: a sliced model id is a string that looks
+    like a model and is not one, and this one would land in a dropdown as a
+    choosable option."""
+    _installed(monkeypatch, "claude")
+    accepted = R.accepted_harnesses(wired.cfg)
+    caps = R.harness_capabilities(accepted, {"claude": ("m" * 400,)})
+
+    with pytest.raises(httpx.HTTPStatusError) as raised:
+        wired.hub.announce(MACHINE, accepted, caps)
+    assert raised.value.response.status_code == 400
+    machines = httpx.get(f"{wired.url}/machines", headers=_admin(),
+                         timeout=10).json()
+    assert not [m for m in machines if m["machine"] == MACHINE
+                and m["harnesses"]], "a refused announce stored nothing"
+
+
+def test_an_unlisted_model_still_spawns_because_the_menu_is_not_a_gate(wired,
+                                                                      monkeypatch):
+    """The asymmetry with `reasoning`, asserted rather than only documented.
+
+    The hub refuses a reasoning level the machine did not announce — the
+    machine said it cannot express it. The model menu is hand-typed by a human
+    at that machine, so enforcing it would refuse working models with a
+    hub-authored 'not allowed'. agora-wui renders a dropdown from it; nobody
+    may render it as a permission."""
+    _installed(monkeypatch, "claude")
+    accepted = R.accepted_harnesses(wired.cfg)
+    wired.hub.announce(MACHINE, accepted,
+                       R.harness_capabilities(accepted, {"claude": ("m-1",)}))
+
+    row = _wanted(wired.url, wired.operator_key, model="not-on-the-menu")
+    assert row["model"] == "not-on-the-menu"
 
 
 def test_claim_returns_the_shape_the_runner_unpacks(wired):
@@ -261,6 +361,172 @@ def test_run_once_takes_a_real_row_to_running_and_the_seat_exists(
     seat = {"Authorization": f"Bearer {joined.json()['api_key']}"}
     who = httpx.get(f"{wired.url}/whoami", headers=seat, timeout=10).json()
     assert who["mission"] == "keep the minutes"
+
+
+def test_the_shape_a_console_actually_posts_omits_keys_it_does_not_empty_them(
+        wired, monkeypatch):
+    """The console's payload, not the suite's — asked for by agora-wui through
+    `agora-and-wui#647` ask 1 (their `spawn-end-to-end#5`).
+
+    Every other test in this file goes through `_wanted`, which posts
+    `mission=""`, `folder=""`, `channels=[]`, `options={}`. agora-wui's Spawn
+    panel OMITS a field the operator left blank and never sends `options` at
+    all, so no test here had ever posted the shape laurent's own click
+    produces.
+
+    Today the two shapes collapse before anything reads them, because every
+    `CreateSpawn` field carries a default — so this is green on arrival and it
+    is not a defect report. What it buys is the CONTRACT: absent≡empty is a
+    property of those defaults and nothing asserted it. Write
+    `folder: str | None = None`, drop a default, or add validation that tells
+    absent from empty, and the console breaks on laurent's first spawn while
+    this entire suite stays green.
+
+    Both mutants below were RUN, and each reddened this test alone with the
+    other 15 green:
+      * `CreateSpawn.mission: str` (no default) — the post 422s at line 3 of
+        the body below;
+      * `CreateSpawn.folder: str | None = None` — `POST /spawns` raises
+        `AttributeError: 'NoneType' has no attribute 'strip'` inside
+        `models.validate_spawn_folder`. Sharper than the `null` echo I
+        predicted: the console's own click 500s on the hub, and every test
+        that sends `folder=""` is untouched.
+    """
+    _installed(monkeypatch, "claude")
+    # Exactly the keys a console sends for a seat with no mission typed: no
+    # `mission`, no `folder`, no `channels`, no `options`.
+    body = {"seat_id": "scribe", "harness": "claude", "machine": MACHINE}
+    posted = httpx.post(f"{wired.url}/spawns", json=body, timeout=10,
+                        headers={"Authorization":
+                                 f"Bearer {wired.operator_key}"})
+    assert posted.status_code == 200, posted.text
+    spawn_id = posted.json()["id"]
+
+    tokens: list[str] = []
+    line = R.run_once(wired.cfg, RunnerState(), wired.hub,
+                      joiner=_joiner(tokens), launcher=_launcher())
+
+    # 1. It ran — the omitted keys reached `handle_request`, which indexes
+    #    every one of them, without a KeyError or a None where a str is used.
+    assert "scribe: running" in line
+    row = _row(wired.url, spawn_id)
+    assert row["state"] == "running", row
+
+    # 2. The omitted keys read back off the hub as the EMPTY forms the runner
+    #    and both clients index, never as null.
+    assert row["mission"] == "" and row["folder"] == ""
+    assert row["channels"] == [] and row["options"] == {}
+
+    # 3. And the absence travels the whole way: the seat mints, with an empty
+    #    mission rather than a missing one.
+    joined = httpx.post(f"{wired.url}/join", timeout=10,
+                        json={"token": tokens[0], "agent_id": "scribe"})
+    assert joined.status_code == 200, joined.text
+    who = httpx.get(f"{wired.url}/whoami", timeout=10,
+                    headers={"Authorization":
+                             f"Bearer {joined.json()['api_key']}"}).json()
+    assert who["id"] == "scribe" and who["mission"] == ""
+
+
+def _approval_spy() -> tuple[list, Any]:
+    """An approver that must NEVER be called on the operator's own request.
+
+    It returns False rather than True on purpose: if the gate ever consults it
+    the row is REJECTED, so a regression fails loudly on the row state as well
+    as on the spy — two independent assertions of the same defect."""
+    calls: list = []
+
+    def approve(cfg, row):
+        calls.append(row.get("seat_id"))
+        return False
+
+    return calls, approve
+
+
+def test_the_operators_own_request_is_the_approval_end_to_end(wired, monkeypatch):
+    """laurent's overnight commission (`dm#83`, via `agora-and-wui#642` ask 1):
+    request in -> runner claims -> `requested_by_operator` fires -> the tty
+    prompt is SKIPPED -> the seat is on the roster. ONE run, across the process
+    boundary, with approval genuinely ON.
+
+    THIS IS THE TEST THE FEATURE DID NOT HAVE, and its absence is the whole
+    story: the fix lives in two files in two processes — `service.py` puts
+    `requested_by_operator` on the claim, `runner.py:364` reads it — and each
+    half had a green test against a double of the other. `codex-seat-spawn` sat
+    at `awaiting_approval` in front of a terminal nobody was watching while
+    both suites passed.
+
+    Mutant that must redden it: delete the `requested_by_operator` read at
+    runner.py:364. Then the spy is called, the row is rejected, and both
+    assertions fire.
+    """
+    _installed(monkeypatch, "claude")
+    # Approval ON — the shipped default, and the state the whole gate is about.
+    cfg = replace(wired.cfg, require_approval=True)
+    calls, approve = _approval_spy()
+
+    spawn_id = _wanted(wired.url, wired.operator_key,
+                       mission="keep the minutes")["id"]
+    tokens: list[str] = []
+    line = R.run_once(cfg, RunnerState(), wired.hub, joiner=_joiner(tokens),
+                      launcher=_launcher(), approver=approve)
+
+    # 1. The prompt never happened, with approval on.
+    assert calls == [], f"the operator was asked to approve their own spawn: {calls}"
+    # 2. The row is running — not awaiting_approval, not rejected — read back
+    #    off the hub rather than off the runner's own return value.
+    row = _row(wired.url, spawn_id)
+    assert row["state"] == "running", row
+    assert "scribe: running" in line
+    # 3. The hub really did say the requester was an operator. Asserted on the
+    #    CLAIM payload, because that field crossing the wire is the seam.
+    assert row["requested_by"] == "laurent"
+    # 4. The seat exists: the token mints it, with its mission.
+    joined = httpx.post(f"{wired.url}/join",
+                        json={"token": tokens[0], "agent_id": "scribe"},
+                        timeout=10)
+    assert joined.status_code == 200, joined.text
+    seat = {"Authorization": f"Bearer {joined.json()['api_key']}"}
+    who = httpx.get(f"{wired.url}/whoami", headers=seat, timeout=10).json()
+    assert who["id"] == "scribe" and who["mission"] == "keep the minutes"
+    assert who["operator"] is False
+
+
+def test_the_gate_stays_live_for_a_requester_who_is_not_an_operator(wired,
+                                                                   monkeypatch):
+    """The negative twin, and the one that makes the test above mean something.
+
+    A skip that fired for everyone would pass every assertion in the positive
+    test while removing the gate entirely — so this asserts the prompt DOES
+    happen for a non-operator requester, over the same wire, in the same shape.
+    Spawning is operator-only today and will not stay that way (laurent, `dm#83`:
+    *"later on, we will want delegates to be able to spawn seats"*); a machine
+    you do not own must still be able to refuse.
+
+    `POST /spawns` is operator-only, so the row is created through the service
+    the threaded hub is actually serving — the only way to express a
+    non-operator requester at all.
+    """
+    _installed(monkeypatch, "claude")
+    from agora.models import AgentInfo
+
+    _register(wired.url, "someone-else")
+    service = wired.app.state.service
+    row = service.create_spawn_request(
+        AgentInfo(id="someone-else", operator=False),
+        seat_id="scribe", mission="", harness="claude", machine=MACHINE,
+        folder="", channels=[], options={})
+
+    cfg = replace(wired.cfg, require_approval=True)
+    calls, approve = _approval_spy()
+    R.run_once(cfg, RunnerState(), wired.hub, joiner=_joiner([]),
+               launcher=_launcher(), approver=approve)
+
+    assert calls == ["scribe"], "a non-operator requester skipped the tty gate"
+    # And the decline is honoured: refused at the machine, said out loud.
+    refused = _row(wired.url, row.id)
+    assert refused["state"] == "rejected"
+    assert MACHINE in refused["detail"]
 
 
 def test_a_refused_row_reaches_the_hub_as_rejected_not_as_silence(

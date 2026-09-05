@@ -410,10 +410,20 @@ def list_machines(
 class HarnessAnnouncement(BaseModel):
     harnesses: list[str] = []
     #: harness -> {reasoning: [...], reasoning_advisory: bool,
-    #: default_model: str|None}. Optional: an older runner announces the list
-    #: alone and the hub stores `{}`, which clients render as "this machine
-    #: has not said" rather than as "no knobs".
+    #: default_model: str|None, models: [...]}. Optional: an older runner
+    #: announces the list alone and the hub stores `{}`, which clients render
+    #: as "this machine has not said" rather than as "no knobs". A knob name
+    #: outside that set is REFUSED by name rather than dropped — see
+    #: `HubService._clean_capabilities`.
     capabilities: dict[str, Any] = {}
+    #: How often this runner polls, in seconds — the ONLY seat that knows it,
+    #: since it is a runner-side flag. Without it a client reading
+    #: `last_seen_at` has to invent a staleness cutoff, and two clients that
+    #: invent different ones disagree about one machine in front of one
+    #: operator (agora-wui, agora-and-wui#571). Optional: an older runner
+    #: omits it and the hub serves `stale_after_seconds: null`, which means
+    #: "this machine has not said" and never a default nobody announced.
+    poll_seconds: float | None = None
 
 
 @router.post("/machines/{machine}/announce")
@@ -427,7 +437,7 @@ def announce_harnesses(
     Only the seat an admin named as this machine's runner may call it —
     otherwise any member could write the list every client's dropdown reads."""
     return _run(service.announce_harnesses, agent, machine, payload.harnesses,
-                payload.capabilities)
+                payload.capabilities, payload.poll_seconds)
 
 
 @router.get("/spawns")
@@ -1003,9 +1013,15 @@ def board(
     service: HubService = Depends(get_service),
 ) -> dict[str, Any]:
     """The viewer's decision board: pending-on-me / queue / proposals /
-    in-progress / pending-review / done, derived across the viewer's
+    in-progress / next / pending-review / done, derived across the viewer's
     channels. One derivation for every UI (CLI, Mission-Control-style
-    boards); see docs/protocol.md."""
+    boards); see docs/protocol.md.
+
+    `in_progress` and `pending_review` entries are task CARDS: the claim row's
+    own `status`, `blocked_on`, `needs_from`, `needs`, `next_step` (each `null`
+    when unwritten, never omitted), plus a `title` with its `title_source` and
+    the hub's own lifecycle `state` — which never overwrites what the owner
+    said."""
     return _run(service.board, agent)
 
 

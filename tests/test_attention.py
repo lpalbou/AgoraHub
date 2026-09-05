@@ -99,6 +99,16 @@ def test_title_is_sanitized_and_an_over_cap_title_is_REFUSED(service, team):
                              PostMessage(body="b", title="!" * 300))
     assert exc.value.status_code == 400
     assert "300 characters" in str(exc.value) and "cap is 120" in str(exc.value)
+    # ...AND IT MUST NAME THE FIELD (2026-08-25). This call omitted `field=`,
+    # so the refusal read "text is 300 characters" and a sender could not tell
+    # WHICH field was over. That is not cosmetic: a whole-call refusal that
+    # does not name its field makes rebuild-from-scratch the cheapest repair,
+    # and the rebuild is where the title gets dropped — measured three times
+    # on this seat in one session, 8-9 on delegate's in one night, and twice
+    # on agora-tui's, who lost the title itself both times
+    # (claim:a-required-title-is-unenforced-and-a-retry-drops-it).
+    assert exc.value.field == "title"
+    assert str(exc.value).startswith("title is 300 characters")
 
 
 # -- obligation escalation ---------------------------------------------------------

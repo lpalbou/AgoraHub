@@ -555,6 +555,28 @@ def test_the_member_boundary_on_every_spawn_surface(wire):
     assert wire.post(f"/spawns/{spawn_id}/stop", headers=op).status_code == 200
 
 
+def test_a_spawn_row_serves_its_own_age(wire):
+    """`created_at` on the wire, pinned for the clients that render the card.
+
+    agora-wui asked whether `GET /spawns` serves a creation timestamp
+    (`agora-and-wui#594` ask 1) and could not look: the route is operator-only
+    and 403s them. It does, and this is the guard that keeps the answer true —
+    `pending` with no age is the difference between *submitted seconds ago* and
+    *orphaned four hours ago*, which is the whole question laurent was asking
+    of the fleet panel."""
+    spawn_id = _request_row(wire)
+    listed = wire.get("/spawns", headers=_admin()).json()[0]
+    single = wire.get(f"/spawns/{spawn_id}", headers=_admin()).json()
+
+    for row in (listed, single):
+        assert isinstance(row["created_at"], float) and row["created_at"] > 0
+        # The three other stamps a card reasons from, and the null-vs-number
+        # distinction in the two that are honestly unknown on a pending row.
+        assert isinstance(row["updated_at"], float)
+        assert row["claimed_at"] is None
+        assert row["stop_requested_at"] is None
+
+
 def test_a_taken_seat_id_is_refused_at_request_time(wire):
     from agora.hub.service import HubError
     from agora.models import AgentInfo
@@ -602,13 +624,19 @@ def test_a_runner_announces_what_it_can_run_and_clients_read_it(wire):
     # them differently — so the hub must distinguish them.
     row = wire.get("/machines", headers=_admin()).json()[0]
     assert row == {"machine": "local", "runner": "runner-mbp",
-                   "harnesses": [], "capabilities": {}, "announced_at": None}
+                   "harnesses": [], "capabilities": {}, "announced_at": None,
+                   "last_seen_at": None, "stale_after_seconds": None}
 
     wire.post("/machines/local/announce",
               json={"harnesses": ["claude", "codex"]}, headers=runner)
     row = wire.get("/machines", headers=_admin()).json()[0]
     assert row["harnesses"] == ["claude", "codex"]
     assert row["announced_at"] is not None
+    # A THIRD fact, and the only one with liveness in it: when the runner last
+    # spoke. `announced_at` is a startup stamp that never moves again, so
+    # without this the wire cannot tell a dead runner from an idle one — see
+    # tests/test_machine_liveness.py for the poll that keeps it current.
+    assert row["last_seen_at"] is not None
     # An older runner announces the list alone: "has not said", not "no knobs".
     assert row["capabilities"] == {}
 

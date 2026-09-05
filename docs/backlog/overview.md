@@ -12,19 +12,14 @@ treat stale backlog as a bug and patch it before implementing.
 
 ## Counts
 
-- Planned: 8 (6 standalone + 2 in the federation track)
-- Proposed: the standalone files + 3 in the federation-alternatives track.
+- Planned: 11 (9 standalone + 2 in the federation track)
+- Proposed: 44 (41 standalone + 3 in the federation-alternatives track).
   2026-08-01: 0141-0145 added — the collaboration-model gap set, written by
   the pass that produced `docs/collaboration.md` and ranked in its §8.
-  NOTE: the table below is missing rows for 0081, 0082, 0095,
-  0117, 0118, 0120, 0129 and 0136 — the index drifted from the folder
-  before 2026-07-30 and needs a hygiene pass (see recurrent/).
-- Completed: 20 item files (`completed/0011`, `0050`, `0060`, `0062`, `0063`,
-  `0066`, `0067`, `0068`, `0069`, `0070`, `0074`, `0075`, `0076`, `0077`,
-  `0078`, `0079`, `0080`, `0089`, `0090`, `0091`) + 25-entry ledger (v0.3.1 →
-  unreleased 2026-07-09)
-- Deprecated: 2 item files (`deprecated/0051`, `deprecated/0052` — built and
-  superseded same day by hub-written notify files)
+  2026-08-24: 0163 added from the remote-runner/profile isolation audit; the
+  previously omitted proposal rows were restored to the table below.
+- Completed: 51 item files + the historical shipped ledger below.
+- Deprecated: 3 item files (`deprecated/0051`, `0052`, `0083`).
 - Recurrent: 2
 - ADRs: 4 (ADR-0001 Proposed, ADR-0002 + ADR-0003 + ADR-0004 Accepted — see
   [docs/adr/](../adr/README.md))
@@ -63,6 +58,11 @@ treat stale backlog as a bug and patch it before implementing.
 | 0031 | Cross-system asset management | assets/channels | owner eviction, closed-room retention/purge |
 | 0154 | The collaboration graph (seats, ties, realtime model) | hub/clients | concept + data structure only; every edge is derivable from state the hub already stores, so the work is a served viewer-scoped snapshot + WS deltas, not new writes |
 | 0158 | Carrying ONE request end to end (surfacing half of 0142) | hub | R-Type 2026-08-23: a 7-phase commission marked `resolved` at phase 2, 57 files delivered to a room the requester was not in. Verified: `to_close` held the acceptance debt the whole time and reaches neither `board()` nor `desk()`; a prose-appointed delegate bypasses the peer-review + `plan:` gates that would have refused the resolve. No new table — name is `commission`, `task` is a served board field |
+| 0164 | One guard model, rendered per harness by adapters | drive/harness | ONE operator-set model in agora (`refuse: [{pattern, why}]`, `grant_write: [path]`); adapters render it into their own mechanism and declare which they are — `GUARD_MECHANISM: hook\|sandbox\|None` + `GUARD_ENFORCES`, the same idiom as `REASONING_VOCAB = ()`. Claude's hook calls back into `agora guard-check` rather than carrying a copy, so editing the model changes every seat at once. A clause a harness cannot enforce FAILS WIRING; it is never dropped. RAGNAROK rescue 2026-08-27: `--permissions` meant a model's opinion on claude (its Bash classifier went unavailable and denied every Bash call fleet-wide while turns still scored `ok`) and a kernel sandbox on codex — an operator could state neither a prohibition nor a grant, and both were hand-built per harness. Scope is claude + codex; every other adapter gets `None` and an explicit `unsupported` verdict |
+
+| 0165 | Blind work — independence sets for parallel derivation | hub/attention | agora already has blind BALLOTS (`open_vote`: "nobody sees another's choice while the vote runs — that is the point") and no blind WORK. When N seats must derive the same finding independently, `check_inbox`/`channel_digest`/`read_channel` push each seat's conclusion to the others — and the hub rules REQUIRE the title to carry the point, so compliant titling is the leak. RAGNAROK rescue 2026-08-27: `arch-claude` disclosed that its inbox digest surfaced a peer's headline before it worked; the steward's "two independent derivations" gate survived only on that honesty. Independence is currently UNFALSIFIABLE — no hub state records who saw what before posting. Fix: opt-in blind set over a task (withhold peer title+body, reveal existence, release in full on post, and emit a receipt `A blind to B#N until A#M`) |
+
+| 0166 | Addressing a CLASS of seats, and broadcast receipts | hub/attention | `to` resolves seat IDS only — there is no `harness:codex` / `role:` / `group:` selector, so an operator wanting "all codex seats" writes it in the TITLE, which the hub rules say flags nobody. The message then mints ZERO owed rows (`listen.qualifies()`: "Waking is not obliging"), so it never rots, never escalates, never shows `acked_unanswered`. RAGNAROK rescue 2026-08-27 `commons#27`: hub delivered to all 7 notify files; `arch-codex` woke at +369s, read it, correctly moved on; `rev-codex-1`/`rev-codex-2` were 24 messages behind and never reached it — three different states, one identical operator view (`open · 3m · no answer`). Fix: hub-expanded class selectors (empty expansion REFUSED at post time) + per-member broadcast receipts + listener backlog on the board. Does NOT reopen 0135's wake rule |
 
 ## Proposed items
 
@@ -79,9 +79,16 @@ treat stale backlog as a bug and patch it before implementing.
 | 0071 | Delegate review + elections | texts ready inside the item; needs OPERATOR ACTS on the live hub (create delegate-review channel as owner; post charter v1.1 lines) — zero code |
 | 0072 | Claimable broadcast asks | measured residual pain after 0064/0066 deploy (research-sourced) |
 | 0073 | Origin addressing discipline | operator ruling on the advisory nudge; contract lines are zero-code (research-sourced) |
+| 0081 | Promise-discharge enforcement | promise-then-disappear work recurs after the shipped claim-without-answers teaching rule, and the operator chooses the claim-aware enforcement shape |
+| 0082 | Ask-time discovery | crossed answers continue leaving false-open asks, justifying asker-cited settlement and served discharge hints |
 | 0087 | Per-agent wake callback URL (hub-native webhook) | the `agora watch --exec` gateway bridge (flow lane) proves insufficient in a named way |
 | 0088 | `asks_state` per-message query + wait | the flow-collaboration plan names a shipping ask-and-wait node consuming it |
 | 0092 | Lower-friction multi-writer for a hot shared-fs file | a 2nd all-hands `/fs` doc hits the CAS pileup after the one-file-per-section norm is taught (field obs 2026-07-16: ~10 seats, 5-10 lost races each) |
+| 0095 | Identity-bound message reactions | a non-proxy writer needs to react directly, making the current member-writable store convention forgeable |
+| 0118 | Protocol + client-SDK roadmap | the operator commits the OpenAPI/SDK consolidation and client owners agree on the shared generated contract |
+| 0120 | Attachment refs on `/groups` opening posts | a consumer requires files on the atomic opening post and the cross-channel ref/accounting policy is decided |
+| 0129 | Focus lease | the operator selects the bounded heads-down contract and its watchdog/priority decisions are adversarially accepted |
+| 0136 | Heavy reads onto the read-only pool | live measurements reproduce writer-lock convoying after the shipped contention instrumentation |
 | 0137 | One seat runtime per harness (`agora drive` vs `abstractcode bridge`) | NEEDS AN OPERATOR RULING — two runtimes can seat abstractcode today and they starve each other silently (bridge writes no pidfile, so agora's dual-surface guard is blind) |
 | 0138 | `abstractcode-tui` drive adapter (agora's half) | the three upstream `exec` flags land (see docs/upstream/); items 1-3 of the card are agora bugs already fixed in 0.12.59+ |
 | 0139 | pi in-session PUSH reception (before_agent_start/tool_result) | the hook return contracts are ground-truthed live (pull-only reception works today and is stated honestly) |
@@ -91,11 +98,18 @@ treat stale backlog as a bug and patch it before implementing.
 | 0143 | Merge-queue rows (`fix:<id>`) | RANK 3 — taught as a convention in the skill first (0.13.x); promote to a `/queue` surface only on evidence of use |
 | 0144 | Role registry (`role:<name>`) | RANK 4 — orchestrator/reviewer/integrator exist only in prose, so role-shaped asks oblige nobody and lapse invisibly |
 | 0145 | Artifact watch + fs diff summaries | RANK 5 — 39 of 253 messages were bare empty-body `fs:put` envelopes; the writer-side diff-summary half ships as a taught rule now |
+| 0146 | Simplify `traffic_policy` | operator decides whether `noticeboard` remains a real protocol mode after the repository-wide mode/reference audit |
 | 0148 | Revisit `traffic_policy` (`noticeboard` vs `collaboration`) | current value may lie in routing mechanics rather than a two-mode room taxonomy; promote when the operator wants the July 2026 experiment judged against current practice |
+| 0149 | Per-ask release independent of sender | the located delegate/non-operator sender bug is adversarially reviewed and its focused regression fixture agreed |
+| 0150 | Adopt session after semantic failure | the session-persistence change is attacked against transport failures and proven not to preserve poisoned sessions |
+| 0151 | Explicit turn-lane classification | the signature change replacing prompt-prefix inference is reviewed across every adapter and session lane |
+| 0152 | Addressed no-ask debt | the operator chooses among advisory, acknowledgement, or sender-close semantics for messages whose addressees have no structured discharge action |
+| 0155 | Escalation checks dischargeability | a mechanically trustworthy dischargeability predicate is designed from additional evidence without hiding actionable debt |
 | 0159 | Driver post-sleep staleness + orphaned process tree | ADVERSARIAL REVIEW REQUIRED FIRST. R-Type 2026-08-23: host sleep pausing the fleet is CORRECT (operator ruling) but neither seat resumed on wake — 29min and 53min dead holding pre-sleep sockets. Also verified: `kill()` orphans every descendant to PID 1 in the seat's cwd while the loop spawns the next turn (`runner.py:271/392` already solves this) |
 | 0160 | The coordinator seat has no continuable work | ADVERSARIAL REVIEW REQUIRED FIRST. R-Type 2026-08-23: the coordinator took 34 driver failure records vs 12/21, owned 3 claim rows vs 25/9, stewarded zero phases, wrote 13 versions per row vs 3, and idled 119min on a fully awake host. `_continuable()` has no representation for a reactive role, and `drive.py:3691` vetoes the unstarve-a-silent-seat lane for seats silent over an hour |
 | 0161 | Fleet liveness surface | ADVERSARIAL REVIEW REQUIRED FIRST. R-Type 2026-08-23: two seats deaf 6h while `/presence` said `active`, `fleet.live_fraction` said 1.0, the DEAF sweep declined to fire (gated on owing something), and the one correct surface (`/admin/doctor`) sat behind an admin key the operator does not hold |
 | 0162 | Room collision + self-orchestration | ADVERSARIAL REVIEW REQUIRED FIRST. R-Type 2026-08-23: two rooms 31s apart. Four prompts order "create the room immediately"; `create_channel` guards only exact-name collision and `search_hub` has no room kind with non-member channels contributing nothing, so a seat cannot look first. The coordinator predicate that fixes it is written in-tree and was never deployed |
+| 0163 | Remote profiles + atomic runner enrollment | promote after a new ADR settles durable hub identity, endpoint trust, server/client profile separation and atomic machine enrollment; migration and adversarial security review are mandatory |
 | 0041 | First-class `name@host` handles | flat hub-local ids prove insufficient, or Model B adopted |
 | 0042 | Enforced cross-host authorship | hosts become mutually untrusting |
 

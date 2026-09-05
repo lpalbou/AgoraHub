@@ -551,6 +551,85 @@ def test_prose_after_the_state_word_and_parked_claims(client, room):
     assert tasks.isdisjoint({"prose-done", "prose-closed"})
 
 
+def test_an_abandoned_row_is_terminal_not_stale(client, room):
+    """A row the work will never return to is OVER, and until 2026-08-25 the
+    terminal vocabulary could only say DELIVERED (`commons#353`/`#359`).
+
+    The modal case turned out to be the operator's own full stop. Measured
+    over all 290 claim rows on the live hub: **9 of the 53 rows the sweep was
+    reporting were laurent's halt on WebOS** (`webos#167`), spelled `stopped`
+    and re-alerted for 65 hours — 17% of everything the steward was being
+    asked to chase was work the operator had personally ended. One of those
+    rows reads `"stopped — NOT parked and NOT blocked. laurent ordered this
+    seat off WebOS"`: a seat arguing with a frozenset inside its status field.
+
+    A tenth row was honestly retired as `WITHDRAWN`, kept counting, and its
+    owner re-worded a correct closure to `closed —` to satisfy the parser.
+    **That is the failure this test guards: not a refusal anyone noticed, but
+    an honest row rewritten to fit a vocabulary that could not read it.**
+
+    Mutant: delete ANY single word from `_TERMINAL_CLAIM_STATUSES` and this
+    reddens, naming that word — the loop below asserts each one separately
+    rather than asserting a count, so a partial revert cannot pass.
+    """
+    service = client.app.state.service
+    key = room["named"]
+    client.put("/admin/delegation", headers={"Authorization": f"Bearer {ADMIN_KEY}"},
+               json={"agent_id": "bystander", "powers": ["reporting"]})
+
+    # laurent's real sentence, and every other way a seat says "over".
+    over = {
+        "op-stop": "STOPPED BY OPERATOR (laurent, webos#167 — 'WebOS was an "
+                   "experiment, stop working on it'). Acknowledged in webos#168.",
+        "gone-withdrawn": "WITHDRAWN — the finding it tracked was refuted.",
+        "gone-retired": "retired; the surface it covered no longer exists",
+        "gone-cancelled": "cancelled — laurent dropped the feature",
+        "gone-canceled": "canceled (US spelling, same act)",
+        "gone-superseded": "superseded by claim:the-newer-row",
+        "gone-abandoned": "abandoned — nobody will finish this",
+        "gone-dropped": "dropped from the milestone",
+        "gone-obsolete": "obsolete since the rewrite",
+    }
+    for slug, status in over.items():
+        client.put(f"/channels/canvass/store/claim:{slug}", headers=_auth(key),
+                   json={"value": {"owner": "named", "status": status},
+                         "expect_version": 0})
+    # The control. Without it a mutant that made EVERYTHING terminal would
+    # pass every assertion below by emptying the alert entirely.
+    client.put("/channels/canvass/store/claim:genuinely-live", headers=_auth(key),
+               json={"value": {"owner": "named", "status": "live — mid-slice"},
+                     "expect_version": 0})
+    # A near-miss: `stop` is not `stopped`, and first-word matching must not
+    # become prefix matching on the way past.
+    client.put("/channels/canvass/store/claim:stopgap-work", headers=_auth(key),
+               json={"value": {"owner": "named",
+                               "status": "stopgap in place, real fix pending"},
+                     "expect_version": 0})
+    service.db._conn.execute(
+        "UPDATE store SET updated_at = updated_at - 7200 "
+        "WHERE channel='canvass' AND key LIKE 'claim:%'")
+    service.db._conn.commit()
+
+    assert service._steward_sweep() == ["stale-claims:2"]
+    alerts = service.db.get_messages("hub-alerts", 0, 50)
+    alert = next(m for m in reversed(alerts) if "STALE CLAIMS" in m.body)
+
+    # Per-word, so a partial revert names the word it dropped.
+    for slug in over:
+        assert f"claim:{slug}" not in alert.body, \
+            f"{slug!r} was reported as stale work: {over[slug]!r}"
+    assert "claim:genuinely-live" in alert.body, "the control stopped alerting"
+    assert "claim:stopgap-work" in alert.body, "'stopgap' matched as 'stopped'"
+
+    # And the board agrees, because it shares `_claim_done` on purpose: an
+    # abandoned row is out of in_progress, NOT parked-but-live. Parking means
+    # the work resumes; none of these do.
+    board = client.get("/board", headers=_auth(key)).json()
+    tasks = {row["task"] for row in board["in_progress"]}
+    assert tasks.isdisjoint(set(over)), sorted(tasks & set(over))
+    assert {"genuinely-live", "stopgap-work"} <= tasks
+
+
 def test_fleet_status_gated_to_operators_and_reporting_delegates(client, room):
     """0084: GET /status serves the operator overview to reporting delegates
     (the steward could not see lurk metrics behind the admin key), with
@@ -693,6 +772,125 @@ def test_overview_silence_class_routes_sla_breach(client, room):
     assert named["silence_class"] == "dead"
 
 
+def _silence_class(client, agent_id="named"):
+    rows = client.get("/admin/status",
+                      headers={"Authorization": f"Bearer {ADMIN_KEY}"}).json()["agents"]
+    return next(r for r in rows if r["agent_id"] == agent_id)["silence_class"]
+
+
+def test_a_producing_seat_is_not_classed_as_a_stuck_session(client, room):
+    """THE FALSE DIAGNOSIS (2026-08-25, delegate at agora-and-wui#737, on a
+    live alert against `agora`). `unseen` was inferred from unread-past-SLA
+    alone and routed to *reprompt or relaunch* — a session-fault remedy. The
+    seat it named had posted a considered reply eleven minutes earlier: the
+    rows were losing a triage race, not falling into a dead session, and
+    acting on the alert would have killed a working seat.
+
+    Work AUTHORED AFTER the unread row arrived is the discriminator, and it
+    is the one thing presence and reception cannot supply — both stay green
+    for a listener whose model never runs, which is the RC-3 case `unseen`
+    exists for."""
+    client.put("/channels/canvass/store/channel:meta",
+               json={"value": {"response_sla_minutes": 0.001}},
+               headers=_auth(room["asker"]))
+    _post(client, room["asker"], status="open", title="for named",
+          asks=[{"id": "1", "text": "row", "to": ["named"]}])
+    time.sleep(0.2)
+
+    # Unread and escalated, and the seat has produced nothing since.
+    assert _silence_class(client) == "unseen"
+
+    # It now posts — the row is still unread, the cursor has not moved.
+    _post(client, room["named"], title="working on something else",
+          body="a considered reply on another thread")
+    assert _silence_class(client) == "unseen-but-working"
+
+
+def test_work_that_predates_the_debt_is_not_evidence_the_seat_saw_it(client, room):
+    """The claim is "it produced WHILE this was waiting", so the window is
+    the row's own arrival, never a fixed lookback. A seat that posted and
+    then died mid-turn produced recently and is exactly the stuck session the
+    original alert is for."""
+    client.put("/channels/canvass/store/channel:meta",
+               json={"value": {"response_sla_minutes": 0.001}},
+               headers=_auth(room["asker"]))
+    _post(client, room["named"], title="before", body="posted first")
+    _post(client, room["asker"], status="open", title="for named",
+          asks=[{"id": "1", "text": "row", "to": ["named"]}])
+    time.sleep(0.2)
+
+    assert _silence_class(client) == "unseen"
+
+
+def test_a_store_write_counts_as_work_like_a_post(client, room):
+    """A seat heads-down on its own claim row produces no messages for an
+    hour. `work_signals` already treats a store write as work for `doctor`;
+    the classifier reads the same two facts, or it would smear precisely the
+    seat that is following the claim-row discipline."""
+    client.put("/channels/canvass/store/channel:meta",
+               json={"value": {"response_sla_minutes": 0.001}},
+               headers=_auth(room["asker"]))
+    _post(client, room["asker"], status="open", title="for named",
+          asks=[{"id": "1", "text": "row", "to": ["named"]}])
+    time.sleep(0.2)
+    assert _silence_class(client) == "unseen"
+
+    r = client.put("/channels/canvass/store/claim:mine",
+                   json={"value": {"owner": "named", "status": "open"},
+                         "expect_version": 0}, headers=_auth(room["named"]))
+    assert r.status_code == 200, r.text
+    assert _silence_class(client) == "unseen-but-working"
+
+
+def test_the_lurk_alert_states_the_count_and_stops_asserting_the_cause(client, room):
+    """The count was real and the cause was invented, so the alert keeps the
+    first and earns the second. Both branches are pinned: a silent seat still
+    gets the relaunch remedy — removing that would trade one false diagnosis
+    for its mirror image, and RC-3 is the reason this leg exists."""
+    service = client.app.state.service
+    msg = _post(client, room["asker"], status="open", title="do X",
+                asks=[{"id": "1", "text": "please do X", "to": ["named"]}])
+    _post(client, room["asker"], status="open", title="do Y",
+          asks=[{"id": "1", "text": "please do Y", "to": ["bystander"]}])
+    service.db._conn.execute(
+        "UPDATE messages SET created_at = created_at - 86400 "
+        "WHERE channel = 'canvass' AND kind = 'message'")
+    service.db._conn.commit()
+    for seat in ("named", "bystander"):
+        service.presence.mark_reception(seat)
+        service._lurk_since[seat] = 0.0     # past the confirm window
+
+    # `named` is heads-down on other work; `bystander` has produced nothing.
+    _post(client, room["named"], title="elsewhere", body="a real reply")
+
+    alerted: list[str] = []
+    for seat in ("named", "bystander"):
+        service._lurk_sweep_one(seat, set(), alerted)
+    assert alerted == ["named", "bystander"]   # the COUNT still alerts, both times
+
+    _op_info, op_key = service.register_agent("op-reader", "Op", operator=True,
+                                              mission="reads the alerts")
+    service.db.add_member(service.DARK_ALERTS_CHANNEL, "op-reader")
+    bodies = {}
+    for m in client.get(f"/channels/{service.DARK_ALERTS_CHANNEL}/messages",
+                        headers=_auth(op_key)).json():
+        for seat in ("named", "bystander"):
+            if f"AGENT LURKING: {seat}" in m["body"]:
+                bodies[seat] = m["body"]
+
+    working = bodies["named"]
+    assert "obligation(s) addressed to it have rotted UNREAD" in working
+    assert "silence_class=unseen-but-working" in working
+    assert "do NOT relaunch" in working
+    assert "Reprompt or relaunch" not in working
+    assert "stuck in a follow-up-only loop" not in working
+
+    silent = bodies["bystander"]
+    assert "silence_class=unseen;" in silent
+    assert "Reprompt or relaunch" in silent
+    assert msg is not None
+
+
 def test_blocked_claims_are_exempt_like_parked(client, room):
     """The code must match the teaching (2026-08-01). SKILL.md groups
     `blocked` with `parked`/`done` as a row you leave honest where it is, but
@@ -805,8 +1003,13 @@ def test_stalled_phase_alert_names_the_steward_and_its_blocking_ask(client, room
                                "steward": "named", "next": "verification"},
                      "expect_version": 0})
     # The steward's blocking ask on the operator, already escalated.
+    # `blocked_on`/`needs` used to ride this payload and were silently
+    # dropped — they are CLAIM ROW fields, never message fields, and nothing
+    # here ever asserted on them. `status`+`to` is what the sweep reads.
+    # PostMessage refuses unknown fields now (test_post_payload_strictness),
+    # so the noise had to come out; the test's subject is unchanged.
     r = client.post("/channels/canvass/messages", headers=_auth(room["named"]),
-                    json={"blocked_on": "external", "needs": "the vendor build to land", "status": "blocked", "to": ["op"],
+                    json={"status": "blocked", "to": ["op"],
                           "body": "which toolchain may I use for the pdf?"})
     ask_seq = r.json()["seq"]
     service.db._conn.execute(

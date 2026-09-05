@@ -397,6 +397,117 @@ def test_supervise_carries_every_blocker_with_who_can_end_it(hub, rooms):
     assert row["you_can_act"] is False          # no proxy in this grant
     assert view["needs_the_operator"] == ["claim:a"]
 
+def test_an_external_act_the_OPERATOR_must_perform_stays_in_their_queue(hub, rooms):
+    """agora-tui, commons#465: their row waits on a crates.io publish only
+    the operator can do. `external` described it truthfully and dropped it
+    out of `needs_the_operator`; `operator` kept the count and called an act
+    a decision. So the count keys on the ACTOR now — a seat must never have
+    to choose between an accurate tag and staying visible to the human who
+    can end it."""
+    lead, _ = rooms
+    hub.register_agent("laurent", "Laurent", True, mission="operator")
+    hub.db.add_member("open-room", "laurent")
+    hub.set_delegation("lead", ["reporting"], ttl_seconds=86400.0,
+                       scope="open-room")
+    hub.store_set(lead, "open-room", "claim:publish",
+                  {"owner": "lead", "status": "parked",
+                   "blocked_on": "external", "needs_from": "laurent",
+                   "needs": "abstracttui 0.6.0 published to crates.io"})
+
+    view = hub.supervise(lead, "open-room")
+    row = [b for b in view["blocked"] if b["key"] == "claim:publish"][0]
+    assert row["blocked_on"] == "external"          # the tag stays honest
+    assert "laurent is the hand that does it" in row["move"]
+    assert view["needs_the_operator"] == ["claim:publish"]
+
+
+def test_an_external_act_with_no_named_hand_is_not_the_operators(hub, rooms):
+    """The other side of it: `external` alone must NOT conscript the human.
+    Without this, keying on the actor would sweep every outside-the-hub wait
+    into their queue — the inflation the `owner` word was added to end."""
+    lead, _ = rooms
+    hub.register_agent("laurent", "Laurent", True, mission="operator")
+    hub.db.add_member("open-room", "laurent")
+    hub.set_delegation("lead", ["reporting"], ttl_seconds=86400.0,
+                       scope="open-room")
+    hub.store_set(lead, "open-room", "claim:ci",
+                  {"owner": "lead", "status": "parked",
+                   "blocked_on": "external",
+                   "needs": "a third-party CI run nobody here triggers"})
+
+    assert hub.supervise(lead, "open-room")["needs_the_operator"] == []
+
+
+def test_a_row_idle_by_its_owners_choice_never_rings_the_operator(hub, rooms):
+    """THE MUTANT @delegate INSISTED ON (`operator-board#14`): *a park tagged
+    `owner` must not ring the operator. If that arm can be removed without a
+    test going red, the word has recreated the problem it fixes.*
+
+    The defect the word fixes, measured four times in one night by three
+    seats: `PARK_BLOCKERS` had no term for *I ranked other work above this*,
+    which is the commonest reason a row is idle. So an honest seat either
+    mis-tagged `operator` — putting a human on the hook for a choice the seat
+    itself had made — or left the row unparked, inflating the stale count the
+    sweep exists to shrink. @tui disclosed FOUR rows reading `blocked_on:
+    operator` while exactly one actually needed laurent.
+    """
+    lead, _ = rooms
+    hub.set_delegation("lead", ["reporting"], ttl_seconds=86400.0,
+                       scope="open-room")
+    hub.store_set(lead, "open-room", "claim:mine",
+                  {"owner": "lead", "status": "parked", "blocked_on": "owner",
+                   "needs": "the operator queue to clear so I can pick it up"})
+    hub.store_set(lead, "open-room", "claim:theirs",
+                  {"owner": "lead", "status": "parked",
+                   "blocked_on": "operator",
+                   "needs": "laurent to pick the art direction"})
+
+    view = hub.supervise(lead, "open-room")
+    # THE ASSERTION THAT MATTERS: only the row that really needs a human is
+    # on the human's list.
+    assert view["needs_the_operator"] == ["claim:theirs"]
+
+    mine = [b for b in view["blocked"] if b["key"] == "claim:mine"][0]
+    assert mine["blocked_on"] == "owner"
+    # It is still SURFACED — deprioritised is a state, not a disappearance —
+    # and the move names who can raise it, which is neither the operator nor
+    # the delegate.
+    assert "not blocked" in mine["move"] and "lead" in mine["move"]
+    assert mine["you_can_act"] is False
+    # And it is not silently reclassified into the catch-all either.
+    assert "undeclared blocker" not in mine["move"]
+
+
+def test_waiting_on_a_row_must_name_the_row(hub, rooms):
+    """The same rule as `blocked_on: seat` naming its seat, for the same
+    reason: a block that names nothing tells nobody. `waiting_on` already
+    exists, is validated against a real target, and drives the board's `next`
+    column — the missing piece was only the word that leads a seat to it."""
+    lead, _ = rooms
+    with pytest.raises(HubError) as exc:
+        hub.store_set(lead, "open-room", "claim:downstream",
+                      {"owner": "lead", "status": "parked",
+                       "blocked_on": "row", "needs": "the upstream row"})
+    assert exc.value.status_code == 400
+    assert "waiting_on" in exc.value.detail
+    assert hub.db.store_get("open-room", "claim:downstream") is None
+
+    # Named, it is accepted and the supervisor is pointed at the right owner.
+    hub.store_set(lead, "open-room", "claim:upstream",
+                  {"owner": "lead", "status": "in progress"})
+    hub.set_delegation("lead", ["reporting"], ttl_seconds=86400.0,
+                       scope="open-room")
+    hub.store_set(lead, "open-room", "claim:downstream",
+                  {"owner": "lead", "status": "parked", "blocked_on": "row",
+                   "needs": "the upstream row to finish",
+                   "waiting_on": {"channel": "open-room",
+                                  "key": "claim:upstream"}})
+    view = hub.supervise(lead, "open-room")
+    row = [b for b in view["blocked"] if b["key"] == "claim:downstream"][0]
+    assert "claim:upstream" in row["move"]
+    assert "claim:downstream" not in view["needs_the_operator"]
+
+
 def test_untagged_legacy_parks_are_named_not_hidden(hub, rooms):
     """Rows parked before the rule are the ones nobody can act on. That is a
     reason to surface them, not to bury them."""
@@ -925,3 +1036,103 @@ def test_supervise_carries_the_rooms_open_phase(hub):
                    "steward": "lead"})
     ph = hub.supervise(lead, "room")["open_phases"]
     assert ph and ph[0]["current"] == "M0" and ph[0]["next"] == "M1"
+
+
+def test_the_ring_names_the_addressee_before_the_second_person(hub, rooms):
+    """A bystander must learn whose move it is from the first word.
+
+    THREE RECORDED MISREADS of one string. The body used to open
+    `"YOU ARE THE BLOCKER on `claim:x` (lead)"` — second person first, and
+    the only seat id in the sentence being the row's OWNER, i.e. the one
+    seat it is NOT about. `service.py`'s ring-delivery gate records two
+    seats reading it as theirs on 2026-08-23. On 2026-08-25 it happened
+    twice more inside an hour on `commons#384`: `agora` (the row's owner,
+    not the addressee) and then `agora-tui`, who was NOT addressed at all,
+    went to `declines` on it, was correctly refused, and reported the hub
+    as self-contradictory.
+
+    The delivery was right every single time — `to_agents` named the right
+    seat and no `to-you` flag was ever set. It is the PROSE that put
+    bystanders in the wrong room, so a delivery test cannot catch it and
+    none did: every existing assertion here matches the marker phrase
+    anywhere in the body and stayed green through the whole episode.
+
+    `agora-tui`, from the receiving end (`commons#391`): *"a seat that is
+    not that name stops reading without having to check a field it cannot
+    see."*
+
+    Mutant: restore `f"YOU ARE THE BLOCKER on \\`{key}\\` ({owner}): ..."` —
+    assertions 1 and 3 fire. Assertion 4 pins the marker phrase itself,
+    which must survive any rewording because `_report_blocker_answered`
+    finds standing alerts by it.
+    """
+    lead, worker = rooms
+    hub.store_set(lead, "open-room", "claim:x",
+                  {"owner": "lead", "status": "blocked", "blocked_on": "seat",
+                   "needs_from": "worker",
+                   "needs": "an auditable same-run capture path"})
+    body = [m for m in hub.db.get_messages("open-room", limit=50)
+            if m.to == ["worker"]][-1].body
+
+    # 1. The ADDRESSEE is the first thing on the line, before any pronoun.
+    assert body.startswith("worker"), \
+        f"the ring does not lead with the seat it is for: {body[:70]!r}"
+    # 2. ...and it precedes the second person, so a bystander stops early.
+    assert body.index("worker") < body.lower().index("you"), \
+        "the second person still arrives before the addressee's name"
+    # 3. The OWNER appears LABELLED, never as a bare parenthetical that
+    #    reads like a target. This is the exact token that misled twice.
+    assert "(owner: lead)" in body, \
+        f"the row owner is not labelled as the owner: {body[:90]!r}"
+    # 4. The marker phrase survives — `_report_blocker_answered` keys on it,
+    #    so a reword that drops it orphans every alert on a live hub.
+    assert "YOU ARE THE BLOCKER" in body
+    # 5. Not a cosmetic-only change: it is still a real addressed debt.
+    assert hub.owed(worker).counts.to_answer >= 1
+
+
+def test_the_ring_attributes_the_owners_words_instead_of_pasting_them(hub,
+                                                                      rooms):
+    """The alert speaks in the second person; `needs` is written in the first.
+
+    Pasted bare they collide. `tui` parked a row whose `needs` read *"…I
+    told them at dm#96 I will run any variable they name"*; the nudge that
+    reached `agora-tui` therefore said "YOU ARE THE BLOCKER … I told them at
+    dm#96 …" — a second person who is the reader and a first person who is
+    neither the reader nor the hub, in one sentence. Reported from the
+    receiving end at `dm:agora--tui#4` (2026-08-25): even correctly
+    addressed, *"that is hard to act on"*.
+
+    The addressee-first fix above does not touch this: it repaired who the
+    sentence names, not whose voice the quote is in.
+
+    Mutant: paste the field back with
+    `f"… (owner: {owner}) — {elide(needs, 400)}"` — assertions 1 and 2 fire.
+    Assertion 3 pins per-LINE prefixing, which a single leading `>` passes
+    for one line and fails the moment the owner writes two."""
+    lead, worker = rooms
+    hub.store_set(lead, "open-room", "claim:x",
+                  {"owner": "lead", "status": "blocked", "blocked_on": "seat",
+                   "needs_from": "worker",
+                   "needs": "I need an auditable same-run capture path.\n"
+                            "I will run any variable you name."})
+    body = [m for m in hub.db.get_messages("open-room", limit=50)
+            if m.to == ["worker"]][-1].body
+
+    # 1. The owner's voice is NAMED, so the reader knows who "I" is.
+    assert "lead writes:" in body, \
+        f"the quoted field is not attributed to its author: {body!r}"
+    # 2. ...before the first-person text it introduces.
+    assert body.index("lead writes:") < body.index("I need an auditable"), \
+        "the attribution arrives after the words it is meant to attribute"
+    # 3. EVERY line is quoted — a one-line `>` stops quoting at the newline,
+    #    which is exactly how a two-sentence `needs` leaks back into the
+    #    hub's own voice.
+    assert "> I need an auditable same-run capture path." in body
+    assert "> I will run any variable you name." in body
+    # 4. The earlier fix is not regressed by this one.
+    assert body.startswith("worker")
+    assert "(owner: lead)" in body
+    assert "YOU ARE THE BLOCKER" in body
+    # 5. Still a real addressed debt, not a formatting change.
+    assert hub.owed(worker).counts.to_answer >= 1

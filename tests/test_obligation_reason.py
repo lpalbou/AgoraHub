@@ -17,6 +17,9 @@ beside the one that can, with nothing to tell them apart. Which verb
 discharges is the hub's verdict; it was not derivable from `status`.
 """
 
+import time
+
+import pytest
 from fastapi.testclient import TestClient
 
 from agora.hub.app import create_app
@@ -78,13 +81,21 @@ def test_pending_asks_that_are_yours_read_as_asks_pending():
 
 def test_an_addressed_reply_reads_as_names_you():
     """Case 2: a directive debt. Any reply from the named seat clears it —
-    which is precisely what the row could not say."""
+    which is precisely what the row could not say.
+
+    THE SENDER IS AN OPERATOR SINCE (c) (2026-08-25). This case was written
+    with a PEER sender, and a peer's addressed reply no longer mints a
+    directive debt — that is the whole of claim:reply-cannot-renounce-its-
+    debt (c). The reason value and its exit are unchanged; only the class of
+    sender that can produce one has narrowed, so the fixture moves to the
+    sender that still does rather than the case being deleted."""
     client = make_client()
+    laurent = register(client, "laurent", operator=True)
     alice, bob = register(client, "alice"), register(client, "bob")
-    make_channel(client, alice, "room", bob)
+    make_channel(client, laurent, "room", alice, bob)
 
     root = post(client, alice, body="a root", title="root")
-    named = post(client, alice, body="pointing this at you", title="yours",
+    named = post(client, laurent, body="pointing this at you", title="yours",
                  status="reply", reply_to=root["id"], to=["bob"])
 
     row = next(r for r in rows_for(client, bob) if r["seq"] == named["seq"])
@@ -195,7 +206,11 @@ def test_every_served_row_carries_a_reason():
     make_channel(client, laurent, "room", alice, bob)
 
     root = post(client, alice, body="a root", title="root")
-    post(client, alice, body="named", title="named", status="reply",
+    # The `names_you` row comes from the OPERATOR since (c): a PEER's
+    # addressed reply no longer mints a directive debt at all, so sourcing it
+    # from alice here would leave this contract test asserting three rows and
+    # silently stop covering the fourth reason.
+    post(client, laurent, body="named", title="named", status="reply",
          reply_to=root["id"], to=["bob"])
     post(client, alice, body="peer job", title="peer", status="open", to=["bob"])
     post(client, laurent, body="op job", title="op", status="open", to=["bob"])
@@ -579,3 +594,515 @@ def test_the_refusal_hands_each_seat_the_gesture_that_would_actually_work():
     assert "ordinary reply" in d
     assert "data.evidence" not in d and "answers=[" not in d
     assert "settled_by" not in d, "offered an exit that is refused with a 403"
+
+
+# --------------------------------------------------------------------------
+# AFTER YOU REPLIED, THE EXIT NARROWS BUT THE ALARM DOES NOT (ruled
+# agora-and-wui#703). An operator's ask-less request that its named seat has
+# replied to still escalates — `_operator_settled` closes it on a `resolved`
+# citing evidence from a NAMED seat, so the exit is one the holder can reach,
+# and that is exactly when the pressure should stay on. What changes is the
+# SENTENCE: a second reply is the one move that cannot help.
+#
+# A per-viewer escalation valve for this case was built and taken back out.
+# These tests are its gravestone: the first three would all have passed under
+# the valve too, so the two `escalated is True` assertions below are the ones
+# doing the work.
+# --------------------------------------------------------------------------
+
+
+def _rush_sla(client: TestClient, op: dict, channel: str = "room") -> None:
+    """~60ms SLA, so the next sleep ages a row past it."""
+    r = client.put(f"/channels/{channel}/store/channel:meta",
+                   json={"value": {"response_sla_minutes": 0.001}}, headers=op)
+    assert r.status_code == 200, r.text
+
+
+def _env(client: TestClient, headers: dict, message_id: str) -> dict:
+    envs = [e for e in client.get("/inbox", headers=headers).json()
+            if e["id"] == message_id]
+    assert envs, "the message must still be delivered"
+    return envs[0]
+
+
+def test_replying_to_an_operators_ask_less_request_narrows_the_reason():
+    client = make_client()
+    laurent = register(client, "laurent", operator=True)
+    bob = register(client, "bob")
+    make_channel(client, laurent, "room", bob)
+
+    job = post(client, laurent, body="ship the parser", title="job",
+               status="open", to=["bob"])
+    assert reason_for(client, bob, job["seq"]) \
+        == "operator_request_awaiting_your_report"
+
+    post(client, bob, body="shipped, here is what changed", title="re",
+         status="reply", reply_to=job["id"])
+
+    assert reason_for(client, bob, job["seq"]) \
+        == "operator_request_awaiting_your_citation"
+
+
+def test_the_replied_row_KEEPS_escalating_on_both_surfaces():
+    """THE GRAVESTONE. The valve made both of these False; the ruling makes
+    them True. Delete the ruling and this is the test that reds."""
+    client = make_client()
+    laurent = register(client, "laurent", operator=True)
+    bob = register(client, "bob")
+    make_channel(client, laurent, "room", bob)
+    _rush_sla(client, laurent)
+
+    job = post(client, laurent, body="ship the parser", title="job",
+               status="open", to=["bob"])
+    post(client, bob, body="on it", title="re", status="reply",
+         reply_to=job["id"])
+    time.sleep(0.2)
+
+    row = next(r for r in rows_for(client, bob) if r["seq"] == job["seq"])
+    assert row["reason"] == "operator_request_awaiting_your_citation"
+    assert row["escalated"] is True, "a reachable exit keeps the pressure on"
+    env = _env(client, bob, job["id"])
+    assert env["escalated"] is True
+    assert env["effective_urgency"] == "interrupt"
+
+
+def test_the_exit_the_reason_names_actually_closes_the_row():
+    """The door the whole ruling turns on, walked through end to end — and
+    with a STORE row as the evidence, which is the case the valve claimed was
+    unreachable ("an opinion has nothing to cite"). An opinion becomes
+    citable by being recorded. Note the ordering trap: evidence resolves
+    against the channel you post in, so the row must live there."""
+    client = make_client()
+    laurent = register(client, "laurent", operator=True)
+    bob = register(client, "bob")
+    make_channel(client, laurent, "room", bob)
+
+    job = post(client, laurent, body="what do you think of the seam?",
+               title="opinion wanted", status="open", to=["bob"])
+    post(client, bob, body="I think it holds", title="re", status="reply",
+         reply_to=job["id"])
+    assert reason_for(client, bob, job["seq"]) \
+        == "operator_request_awaiting_your_citation"
+
+    # Nothing was DELIVERED — so record the opinion, and cite the record.
+    r = client.put("/channels/room/store/decision:the-seam-holds",
+                   json={"value": {"verdict": "holds", "by": "bob"}},
+                   headers=bob)
+    assert r.status_code == 200, r.text
+    post(client, bob, body="recorded", title="recorded", status="resolved",
+         reply_to=job["id"],
+         data={"evidence": [{"kind": "store",
+                             "ref": "decision:the-seam-holds"}]})
+
+    assert not [x for x in rows_for(client, bob) if x["seq"] == job["seq"]], \
+        "the cited resolved must CLOSE it — otherwise the reason names an " \
+        "exit that does not work, which is the defect this enum exists for"
+
+
+def test_a_seat_that_has_NOT_replied_keeps_the_unnarrowed_reason():
+    """Per-addressee: another seat's reply changes neither your reason nor
+    your alarm."""
+    client = make_client()
+    laurent = register(client, "laurent", operator=True)
+    alice, bob = register(client, "alice"), register(client, "bob")
+    make_channel(client, laurent, "room", alice, bob)
+    _rush_sla(client, laurent)
+
+    job = post(client, laurent, body="both of you", title="job",
+               status="open", to=["alice", "bob"])
+    post(client, alice, body="alice replying", title="re", status="reply",
+         reply_to=job["id"])
+    time.sleep(0.2)
+
+    narrowed = next(r for r in rows_for(client, alice) if r["seq"] == job["seq"])
+    assert narrowed["reason"] == "operator_request_awaiting_your_citation"
+    assert narrowed["escalated"] is True
+
+    untouched = next(r for r in rows_for(client, bob) if r["seq"] == job["seq"])
+    assert untouched["reason"] == "operator_request_awaiting_your_report"
+    assert untouched["escalated"] is True
+
+
+def test_a_STRUCTURED_operator_request_never_narrows_on_commentary():
+    """One answered ask does not speak for the asks it left pending, so a
+    structured request never reaches the citation case at all."""
+    client = make_client()
+    laurent = register(client, "laurent", operator=True)
+    bob = register(client, "bob")
+    make_channel(client, laurent, "room", bob)
+
+    q = post(client, laurent, body="two things", title="q", status="open",
+             to=["bob"], asks=[{"id": "1", "text": "which parser?",
+                                "to": ["bob"]}])
+    post(client, bob, body="looking into it", title="re", status="reply",
+         reply_to=q["id"])
+
+    row = next(r for r in rows_for(client, bob) if r["seq"] == q["seq"])
+    assert row["reason"] == "asks_pending"
+    assert row["asks_naming_you"] == ["1"]
+
+
+def test_a_PEERS_ask_less_request_never_narrows():
+    """Scoped to the operator case: a peer's request is closed by a claim
+    row, a different exit and a different sentence."""
+    client = make_client()
+    laurent = register(client, "laurent", operator=True)
+    alice, bob = register(client, "alice"), register(client, "bob")
+    make_channel(client, laurent, "room", alice, bob)
+
+    job = post(client, alice, body="peer job", title="peer", status="open",
+               to=["bob"])
+    post(client, bob, body="on it", title="re", status="reply",
+         reply_to=job["id"])
+
+    row = next(r for r in rows_for(client, bob) if r["seq"] == job["seq"])
+    assert row["reason"] == "peer_request_no_asks"
+
+
+def test_the_reporting_delegate_on_a_STRUCTURED_operator_request_never_narrows():
+    """The `asks_of` guard's ONLY live case, and it took a dead mutant to
+    find it. Every other seat is stopped before the guard by the ladder
+    (`asks_pending`, or the structured-release clause above it) — but that
+    clause deliberately excludes the reporting delegate, who carries the
+    commission itself. So the delegate is the one seat that reaches this
+    predicate with asks on the table, and without the guard a bare "on it"
+    would narrow their row to `..._citation` while another seat's ask is
+    still pending. Their exit is the cited report, not a citation for work
+    that is not finished."""
+    client = make_client()
+    laurent = register(client, "laurent", operator=True)
+    alice, bob = register(client, "alice"), register(client, "bob")
+    make_channel(client, laurent, "room", alice, bob)
+    _grant(client, "bob", ["reporting"])
+
+    q = post(client, laurent, body="commission", title="q", status="open",
+             asks=[{"id": "1", "text": "which parser?", "to": ["alice"]}])
+    post(client, bob, body="coordinating", title="re", status="reply",
+         reply_to=q["id"])
+
+    row = next(r for r in rows_for(client, bob) if r["seq"] == q["seq"])
+    assert row["reason"] == "operator_request_awaiting_your_report"
+
+
+def test_a_hub_alert_is_not_served_as_a_peers_work_ask():
+    """`hub` is not an operator, so a machine-routed alert fell through the
+    ladder to `peer_request_no_asks` — and that value's whole content is an
+    exit that is wrong here twice over: it says a bare reply does NOT clear
+    the row (discharge_state's system branch clears on exactly that), and it
+    tells the seat to materialize a claim row citing the message (on a CLAIMS
+    DUE ping, a claim row about the reminder to touch your claim rows).
+
+    Found on the live hub: commons#531 gave its addressee that advice while
+    the addressee had already done the only thing that helps — touched the
+    idle rows. The reason and the discharge rule disagreed about one
+    message."""
+    client = make_client()
+    flow = register(client, "flow")
+    make_channel(client, flow, "room")
+    service = client.app.state.service
+
+    alert = service._post_system(
+        "room", "CLAIMS DUE: claim:x (idle 1.1h).", to=["flow"],
+        status="open")
+
+    row = next(r for r in rows_for(client, flow) if r["id"] == alert.id)
+    assert row["reason"] == "hub_alert_fix_the_condition"
+
+    # And the exit that value implies is the one the hub honours: an
+    # addressee's own reply clears the ledger row.
+    post(client, flow, body="touched the rows", title="re", status="reply",
+         reply_to=alert.id)
+    assert not [r for r in rows_for(client, flow) if r["id"] == alert.id]
+
+
+def test_an_UNADDRESSED_hub_alert_is_not_this_case():
+    """The value is for a MACHINE-ROUTED alert — one the hub aimed at a seat.
+    A broadcast system notice names nobody, obliges nobody, and must not
+    manufacture a row to carry the new reason."""
+    client = make_client()
+    flow = register(client, "flow")
+    make_channel(client, flow, "room")
+    service = client.app.state.service
+
+    notice = service._post_system("room", "the room was archived",
+                                  status="open")
+    assert not [r for r in rows_for(client, flow) if r["id"] == notice.id]
+
+
+# -- the capability beside the name (reason-enum-and-unknown-values#7 ask 2) --
+
+def row_for(client: TestClient, headers: dict, seq: int) -> dict:
+    return next(r for r in rows_for(client, headers) if r["seq"] == seq)
+
+
+def test_every_reason_the_ladder_can_serve_has_a_capability():
+    """The mapping and the ladder must not drift — that is the whole point
+    of serving the capability rather than letting clients derive it. A new
+    reason with no row in `_REASON_CLEARS_ON` raises on the first request
+    instead of serving `[]`, which on this wire is the strongest possible
+    claim ('nothing you can do') told by omission."""
+    from agora.hub.service import HubService
+
+    # Every value the ladder assigns, read off the source of truth rather
+    # than a list in this file that could go stale beside it.
+    served = set(HubService._REASON_CLEARS_ON)
+    assert served == {
+        "asks_pending", "names_you", "peer_request_no_asks",
+        "operator_request_awaiting_your_report",
+        "operator_request_awaiting_your_citation",
+        "hub_alert_fix_the_condition",
+    }
+    # ACTS, never states: an authoritative close ends a row too and is
+    # deliberately absent — it is not an act the owed seat performs.
+    vocabulary = {"answer", "decline", "reply", "claim", "evidence", "read"}
+    for reason, acts in HubService._REASON_CLEARS_ON.items():
+        assert acts, f"{reason} maps to no act — `[]` is a claim, not a gap"
+        assert set(acts) <= vocabulary, reason
+
+
+def test_decline_is_offered_ONLY_where_asks_exist_to_name():
+    """The live defect this shipped for: agorawui offered Decline on
+    `peer_request_no_asks`, where `declines=[...]` 400s because the parent
+    carries no ask ids (`_validate_answers`). Their gate keyed on the reason
+    NAME; agoratui's keyed on ask-id presence. Both were derivations."""
+    client = make_client()
+    alice, bob = register(client, "alice"), register(client, "bob")
+    make_channel(client, alice, "room", bob)
+
+    structured = post(client, alice, body="numbered", title="asks",
+                      status="open",
+                      asks=[{"id": "1", "text": "a?", "to": ["bob"]}])
+    askless = post(client, alice, body="do the work", title="work",
+                   status="open", to=["bob"])
+
+    assert row_for(client, bob, structured["seq"])["clears_on"] == [
+        "answer", "decline"]
+    assert row_for(client, bob, askless["seq"])["clears_on"] == ["claim"]
+
+    # ...and the wire agrees with the capability it just served: the decline
+    # the ask-less row does not offer is the decline the hub refuses.
+    refused = client.post("/channels/room/messages", headers=bob,
+                          json={"body": "not mine", "status": "reply",
+                                "reply_to": askless["id"],
+                                "declines": ["1"]})
+    assert refused.status_code == 400
+    assert "no asks" in refused.json()["detail"]
+
+
+def test_the_two_operator_values_share_an_exit_and_keep_their_own_name():
+    """agora-wui: behaviour from `clears_on`, nuance from the name. Both
+    reduce to `evidence` — the act is identical, so the guidance is — and
+    what the name still carries is 'you already spoke, a second reply is the
+    one move that cannot help'."""
+    client = make_client()
+    laurent = register(client, "laurent", operator=True)
+    bob = register(client, "bob")
+    make_channel(client, laurent, "room", bob)
+
+    q = post(client, laurent, body="operator job", title="op",
+             status="open", to=["bob"])
+    before = row_for(client, bob, q["seq"])
+    assert before["reason"] == "operator_request_awaiting_your_report"
+    assert before["clears_on"] == ["evidence"]
+
+    client.post("/channels/room/messages", headers=bob,
+                json={"body": "here is what I found", "status": "reply",
+                      "reply_to": q["id"]})
+    after = row_for(client, bob, q["seq"])
+    assert after["reason"] == "operator_request_awaiting_your_citation"
+    assert after["clears_on"] == ["evidence"]      # same act...
+    assert after["reason"] != before["reason"]     # ...different sentence
+    assert after["escalated"] is False or True     # pressure is not this test
+
+
+def test_owed_is_served_so_no_client_keeps_an_OWING_REASONS_list():
+    client = make_client()
+    laurent = register(client, "laurent", operator=True)
+    alice, bob = register(client, "alice"), register(client, "bob")
+    make_channel(client, laurent, "room", alice, bob)
+    # An addressed OPERATOR reply is the directive debt. Neither an addressed
+    # peer `fyi` NOR an addressed peer `reply` is one any more — (c) closed
+    # that asymmetry by making `reply` agree with `fyi`, so this fixture uses
+    # the sender class that still mints one.
+    root = post(client, alice, body="root", title="root", status="fyi")
+    q = post(client, laurent, body="look at this", title="pointer",
+             status="reply", reply_to=root["id"], to=["bob"])
+
+    row = row_for(client, bob, q["seq"])
+    assert row["owed"] is True
+    assert row["reason"] == "names_you"
+    assert row["clears_on"] == ["reply"]
+
+
+def test_a_hub_alert_says_the_act_that_clears_the_ROW():
+    """The exit is the condition and the hub closes its own alert — but what
+    clears the reader's ledger row is a reply (`discharge_state`'s system
+    branch). `clears_on` answers the second question; the reason name
+    carries the first."""
+    from agora.hub.service import HubService
+    assert HubService._REASON_CLEARS_ON["hub_alert_fix_the_condition"] == (
+        "reply",)
+
+
+def test_an_UNMAPPED_reason_raises_instead_of_serving_an_empty_capability():
+    """The drift guard, and it needed its own test: three mutants of this
+    change survived the first suite, and this was the worst of them —
+    swapping the indexed lookup for `.get(reason, ())` passed everything,
+    because every current reason happens to have a mapping. A future value
+    added to the ladder alone would then serve `[]`, which on this wire is
+    the STRONGEST claim ("nothing you can do"), told by omission."""
+    import pytest
+
+    from agora.hub.service import HubService
+
+    client = make_client()
+    alice, bob = register(client, "alice"), register(client, "bob")
+    make_channel(client, alice, "room", bob)
+    q = post(client, alice, body="numbered", title="asks", status="open",
+             asks=[{"id": "1", "text": "a?", "to": ["bob"]}])
+
+    saved = HubService._REASON_CLEARS_ON.pop("asks_pending")
+    try:
+        with pytest.raises(KeyError):
+            client.get("/owed", headers=bob)
+    finally:
+        HubService._REASON_CLEARS_ON["asks_pending"] = saved
+
+    # ...and it recovers: the guard is about the missing mapping, not the row.
+    assert row_for(client, bob, q["seq"])["clears_on"] == ["answer", "decline"]
+
+
+def test_owed_is_served_from_the_LADDER_site_too():
+    """The second survivor. `test_owed_is_served_...` uses an addressed
+    reply, which is built at the early `names_you` branch — so dropping
+    `owed=True` at the main ladder site killed nothing. Two construction
+    sites, and a test that only covers one is a test of the wrong half."""
+    client = make_client()
+    laurent = register(client, "laurent", operator=True)
+    bob = register(client, "bob")
+    make_channel(client, laurent, "room", bob)
+    q = post(client, laurent, body="operator job", title="op",
+             status="open", to=["bob"])
+
+    row = row_for(client, bob, q["seq"])
+    assert row["reason"] == "operator_request_awaiting_your_report"
+    assert row["owed"] is True
+
+
+def test_an_UNSERVED_capability_is_null_and_never_an_empty_list():
+    """The third survivor, and it is the null contract itself: `null` means
+    a hub older than the field, `[]` means nothing you can do. Defaulting
+    the model to `[]` collapses "said nothing" into the strongest claim —
+    the same overloaded-null defect the reason field's own docs were written
+    against."""
+    from agora.models import ObligationRow
+
+    bare = ObligationRow(channel="c", id="i", seq=1, sender="s")
+    assert bare.clears_on is None
+    assert bare.owed is None
+
+
+# -- (c): a peer's addressed REPLY stops minting a directive debt -------------
+#
+# claim:reply-cannot-renounce-its-debt. THE MEASUREMENT: three seats, one
+# afternoon, ~20 directive rows between them, and not one of the messages
+# that created them wanted an answer. The exit already existed — `fyi` +
+# `reply_to` threads, wakes the named seat and obliges nothing — and nobody
+# could find it; delegate's own pile reached ~30 rows, clearable only ONE
+# MESSAGE AT A TIME because `consumes` correctly refuses to batch them.
+#
+# So `reply` now agrees with `fyi` three lines above it in the same filter.
+# The author's STATUS is the author's statement: want an answer in a thread?
+# `open` + `reply_to`, which mints and escalates exactly as before.
+#
+# REVERTED 2026-08-25, AND THESE TWO ARE SKIPPED RATHER THAN DELETED.
+# The rationale above — "`reply` now agrees with `fyi` ... an inconsistency
+# removed" — does not survive reading agora-0102, which DREW that line on
+# purpose: peer `reply` obliges, peer `fyi` is "the terminal gesture"
+# BECAUSE reply is not. Extending one to the other does not harmonise them,
+# it deletes the class — after it no peer message of any status obliges
+# anyone, which is the state the operator overturned on 2026-07-19 ("a reply
+# is not mandatory" -> "it MUST be"). A delegate decision cannot reverse an
+# operator ruling.
+#
+# The MEASUREMENT behind (c) is real and is a good case for laurent to change
+# the ruling; these tests are what that change would need, so they are kept
+# executable and skipped rather than thrown away. Un-skip them in the same
+# change that re-lands (c), if and when the operator rules for it.
+_C_PENDING_OPERATOR = pytest.mark.skip(
+    reason="(c) reverses operator ruling 2026-07-19 (agora-0102) on a "
+           "delegate decision; reverted in service.py pending laurent. "
+           "Un-skip with the re-land. See claim:reply-cannot-renounce-its-debt")
+
+
+@_C_PENDING_OPERATOR
+def test_a_peers_addressed_reply_no_longer_mints_a_directive_debt():
+    client = make_client()
+    alice, bob = register(client, "alice"), register(client, "bob")
+    make_channel(client, alice, "room", bob)
+
+    root = post(client, alice, body="root", title="root", status="fyi")
+    pointer = post(client, alice, body="look at this", title="fyi-shaped",
+                   status="reply", reply_to=root["id"], to=["bob"])
+
+    assert not [r for r in rows_for(client, bob) if r["seq"] == pointer["seq"]]
+
+
+def test_but_a_peers_addressed_OPEN_still_mints_and_still_escalates():
+    """Constraint 1 of the sanction: key on what the AUTHOR SAID. A peer who
+    wants an answer says so with `open`, and that row is untouched — this is
+    the falsification that keeps the change from being a silent drop."""
+    client = make_client()
+    alice, bob = register(client, "alice"), register(client, "bob")
+    make_channel(client, alice, "room", bob)
+
+    root = post(client, alice, body="root", title="root", status="fyi")
+    asking = post(client, alice, body="I need an answer", title="answer me",
+                  status="open", reply_to=root["id"], to=["bob"])
+
+    row = next(r for r in rows_for(client, bob) if r["seq"] == asking["seq"])
+    assert row["reason"] == "peer_request_no_asks"
+    assert row["owed"] is True
+
+
+def test_an_OPERATORS_addressed_reply_still_mints():
+    """The 2026-07-19 ruling stands untouched: humans are allowed to be
+    sloppy about status and the fleet still owes the work. Only PEER replies
+    move."""
+    client = make_client()
+    laurent = register(client, "laurent", operator=True)
+    bob = register(client, "bob")
+    make_channel(client, laurent, "room", bob)
+
+    root = post(client, laurent, body="root", title="root", status="fyi")
+    directive = post(client, laurent, body="do this", title="from the operator",
+                     status="reply", reply_to=root["id"], to=["bob"])
+
+    row = next(r for r in rows_for(client, bob) if r["seq"] == directive["seq"])
+    assert row["reason"] == "names_you"
+
+
+@_C_PENDING_OPERATOR
+def test_the_sender_is_TOLD_what_their_reply_did_and_which_shape_obliges():
+    """The other half, and shipping without it is what `do_not_ship` on the
+    row forbids: an extension alone lets a sender who MEANT "answer me" oblige
+    nobody, silently. A doorbell is ephemeral and wakes no one, so the cost
+    is paid by the author at the moment they can still choose."""
+    client = make_client()
+    alice, bob = register(client, "alice"), register(client, "bob")
+    make_channel(client, alice, "room", bob)
+    service = client.app.state.service
+    seen: list[tuple[str, str]] = []
+
+    class _Sink:
+        def deliver(self, agent_id, envelope):
+            seen.append((agent_id, envelope.body or ""))
+
+    service.notify_sink = _Sink()
+    root = post(client, alice, body="root", title="root", status="fyi")
+    post(client, alice, body="fyi-shaped", title="pointer",
+         status="reply", reply_to=root["id"], to=["bob"])
+
+    told = [b for who, b in seen if who == "alice" and "obliged nobody" in b]
+    assert told, seen
+    assert "open" in told[0]      # names the shape that DOES oblige

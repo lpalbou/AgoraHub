@@ -72,6 +72,10 @@ class RunnerConfig:
     #: allowlist can only ever NARROW that: naming a harness that is not
     #: installed does not make it available.
     allow: tuple[str, ...] = ()
+    #: Per-harness model menus, typed by the human at THIS machine (`--models
+    #: claude=id,id`). Absent for a harness means this runner has not said, and
+    #: a client leaves the model free text; see `harness_capabilities`.
+    models: dict[str, tuple[str, ...]] = field(default_factory=dict)
     max_seats: int = 4
     require_approval: bool = True
     poll_seconds: float = DEFAULT_POLL_SECONDS
@@ -125,7 +129,9 @@ def accepted_harnesses(cfg: RunnerConfig) -> tuple[str, ...]:
     return tuple(out)
 
 
-def harness_capabilities(names: tuple[str, ...]) -> dict[str, dict[str, Any]]:
+def harness_capabilities(names: tuple[str, ...],
+                         models: dict[str, tuple[str, ...]] | None = None,
+                         ) -> dict[str, dict[str, Any]]:
     """What each announced harness will ACCEPT, read off its own adapter.
 
     Same rule as `accepted_harnesses`, one level down: the harness list stopped
@@ -146,11 +152,25 @@ def harness_capabilities(names: tuple[str, ...]) -> dict[str, dict[str, Any]]:
       `default_model` — what it drives with when nobody names a model. `None`
                      means the harness resolves its own, so a client must not
                      print a default it does not have.
-    There is deliberately no model LIST: no adapter enumerates models, and an
-    invented one is the fallback list this function exists to kill.
+      `models`     — the menu of model ids for this harness ON THIS MACHINE,
+                     and the ONE capability no adapter can compute. It is
+                     emitted only when the human running this process typed it
+                     (`--models <harness>=<id,id>`), because that human is the
+                     only party who knows which models this machine's account
+                     can actually drive. Absent means exactly that — nobody has
+                     said — and a client leaves the field free text.
+
+    There is still deliberately no adapter-authored model list: no adapter
+    enumerates models, and a hardcoded one is the fallback this function exists
+    to kill. `--models` is not that list; it is a local operator statement,
+    which is the same authority `harnesses` already carries (what is installed
+    HERE), one level down. laurent asked for the per-harness list at
+    `commons#296`; this is where it can come from without the hub or a client
+    inventing one.
     """
     from .drive import _DRIVE_ADAPTERS
 
+    menus = models or {}
     caps: dict[str, dict[str, Any]] = {}
     for name in names:
         adapter = _DRIVE_ADAPTERS.get(name)
@@ -162,6 +182,8 @@ def harness_capabilities(names: tuple[str, ...]) -> dict[str, dict[str, Any]]:
                 getattr(adapter, "ADVISORY", frozenset()) or frozenset()),
             "default_model": getattr(adapter, "HARNESS_DEFAULT_MODEL", None),
         }
+        if name in menus:
+            caps[name]["models"] = list(menus[name])
     return caps
 
 
@@ -330,7 +352,21 @@ def handle_request(cfg: RunnerConfig, state: RunnerState, row: dict[str, Any],
     except GateRefused as e:
         return SpawnState.rejected.value, str(e)
 
-    if cfg.require_approval:
+    # THE OPERATOR'S OWN REQUEST IS THE APPROVAL (laurent, commons#290). This
+    # gate collects a human's consent; when the human who asked IS the hub
+    # operator, asking again at this shell demands a second yes from the same
+    # person and strands the spawn at `awaiting_approval` until they happen to
+    # be watching this terminal — which is exactly how `codex-seat-spawn` sat
+    # unspawned. The role comes from the hub with the claim: a runner must not
+    # infer authority from an id, and the gate stays live for every requester
+    # who is NOT an operator, which is the case that arrives when spawning
+    # stops being operator-only.
+    if cfg.require_approval and row.get("requested_by_operator"):
+        emit_log(f"AGORA_RUNNER event=approval-skipped seat={seat_id} "
+                 f"machine={cfg.machine} "
+                 f"requested_by={row.get('requested_by') or '?'} "
+                 "reason=operator-requested")
+    elif cfg.require_approval:
         if report is not None:
             report(SpawnState.awaiting_approval.value,
                    f"awaiting approval on {cfg.machine}")
@@ -456,10 +492,15 @@ class RunnerHub:
             timeout=timeout)
 
     def announce(self, machine: str, harnesses: tuple[str, ...],
-                 capabilities: dict[str, Any] | None = None) -> dict[str, Any]:
+                 capabilities: dict[str, Any] | None = None,
+                 poll_seconds: float | None = None) -> dict[str, Any]:
+        # This process is the only place the poll interval is known — it is a
+        # local flag. Announcing it lets the hub serve a staleness cutoff so
+        # no client has to invent one from a default it cannot see.
         r = self._http.post(f"/machines/{machine}/announce",
                             json={"harnesses": list(harnesses),
-                                  "capabilities": capabilities or {}})
+                                  "capabilities": capabilities or {},
+                                  "poll_seconds": poll_seconds})
         r.raise_for_status()
         return r.json()
 
@@ -502,6 +543,11 @@ def run_once(cfg: RunnerConfig, state: RunnerState, hub: RunnerHub, *,
     if claimed is None:
         return "; ".join(lines) or "nothing to do"
     row = claimed["request"]
+    # The requester's ROLE rides the claim, not the row — carried onto the row
+    # here so every gate reads one object. An older hub omits it and the value
+    # is False, which prompts exactly as before: absent authority is never
+    # read as authority.
+    row["requested_by_operator"] = bool(claimed.get("requested_by_operator"))
     options = row.get("options") if isinstance(row.get("options"), dict) else {}
     asked_permissions = str(options.get("permissions") or PERMISSION_FLOOR)
     effective_permissions = permission_for(options)
@@ -577,6 +623,16 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
                              "every harness declared to agora AND installed "
                              "here. This can only narrow — naming one that is "
                              "not installed does not make it available")
+    parser.add_argument("--models", dest="models", action="append", default=[],
+                        metavar="HARNESS=ID,ID",
+                        help="the model menu clients offer for one harness on "
+                             "this machine (repeatable, e.g. "
+                             "--models claude=claude-opus-5,claude-sonnet-5). "
+                             "No adapter can compute this — you are the only "
+                             "party who knows which models this machine's "
+                             "account drives. Omit a harness and clients leave "
+                             "its model a free-text field; it is a MENU, not a "
+                             "gate, and an unlisted model still spawns")
     parser.add_argument("--max-seats", type=int, default=4)
     parser.add_argument("--require-approval", dest="require_approval",
                         action="store_true", default=True,
@@ -590,6 +646,32 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
                         default=DEFAULT_POLL_SECONDS)
     parser.add_argument("--once", action="store_true",
                         help="one iteration and exit (for scripts and tests)")
+
+
+def parse_model_menus(specs: list[str]) -> dict[str, tuple[str, ...]]:
+    """`["claude=a,b"]` -> `{"claude": ("a", "b")}`, or SystemExit.
+
+    A malformed spec exits at config time rather than being skipped: this is a
+    hand-typed flag, the operator is at the terminal, and a dropped `--models`
+    would be discovered as a missing dropdown an hour later on another machine.
+    `claude=` with nothing after it is legal and MEANS something — the empty
+    list is 'this runner constrains nothing', which a client renders
+    differently from having said nothing at all."""
+    menus: dict[str, tuple[str, ...]] = {}
+    for spec in specs:
+        harness, sep, raw = spec.partition("=")
+        harness = harness.strip()
+        if not sep or not harness:
+            raise SystemExit(
+                f"agora runner: --models {spec!r} is not HARNESS=ID,ID — e.g. "
+                "--models claude=claude-opus-5,claude-sonnet-5")
+        ids: list[str] = []
+        for entry in raw.split(","):
+            ident = entry.strip()
+            if ident and ident not in ids:
+                ids.append(ident)
+        menus[harness] = tuple(ids)
+    return menus
 
 
 def config_from_args(args: argparse.Namespace) -> RunnerConfig:
@@ -612,6 +694,7 @@ def config_from_args(args: argparse.Namespace) -> RunnerConfig:
     return RunnerConfig(root=root, machine=args.machine, url=url,
                         agent_id=agent_id, api_key=key,
                         allow=tuple(args.allow), max_seats=args.max_seats,
+                        models=parse_model_menus(getattr(args, "models", [])),
                         require_approval=args.require_approval,
                         poll_seconds=args.poll_seconds)
 
@@ -633,8 +716,19 @@ def main(args: argparse.Namespace) -> int:
     # "the agent only touches the folder I named" would be false.
     emit_log("AGORA_RUNNER notice | spawned seats run as this user with this "
              "environment; harness wiring may also be written under $HOME")
+    # A menu for a harness this machine cannot run would make the hub refuse
+    # the WHOLE announce — one typo and the machine says it has no harnesses at
+    # all. Drop those here and NAME them: the operator is at this terminal now,
+    # and a missing dropdown discovered later reads as a hub defect.
+    menus = {h: ids for h, ids in cfg.models.items() if h in accepted}
+    for stray in sorted(set(cfg.models) - set(menus)):
+        emit_log(f"AGORA_RUNNER notice | --models {stray}=… ignored: this "
+                 f"machine does not announce {stray} (installed and allowed: "
+                 + (",".join(accepted) or "NONE") + ")")
     try:
-        hub.announce(cfg.machine, accepted, harness_capabilities(accepted))
+        hub.announce(cfg.machine, accepted,
+                     harness_capabilities(accepted, menus),
+                     poll_seconds=cfg.poll_seconds)
         emit_log(f"AGORA_RUNNER event=announced status=ok "
                  f"machine={cfg.machine} harnesses={len(accepted)}")
     except Exception as e:                       # noqa: BLE001

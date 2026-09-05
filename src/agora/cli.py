@@ -2124,7 +2124,9 @@ def cmd_board(args):
         counts = b["counts"]
         print(f"# board for {b['viewer']} — {counts['pending_on_me']} pending on you · "
               f"{counts['queue']} queued · {counts['proposals']} proposals · "
-              f"{counts['in_progress']} in progress · {counts['pending_review']} awaiting review")
+              f"{counts['in_progress']} in progress · "
+              f"{counts.get('next', 0)} waiting on another row · "
+              f"{counts['pending_review']} awaiting review")
         if b["pending_on_me"]:
             print("\n## pending on you (decide or answer)")
             for r in b["pending_on_me"]:
@@ -2148,7 +2150,47 @@ def cmd_board(args):
         if b["in_progress"]:
             print("\n## in progress (claims)")
             for r in b["in_progress"]:
-                print(f"  {r['channel']} {r['task']} — {r['owner']}")
+                # The card contract, at a terminal. `.get` throughout: an older
+                # hub serves the old five keys and this prints the slug rather
+                # than raising at a reader's prompt.
+                head = r.get("title") or r["task"]
+                state = r.get("state")
+                badge = f" [{state}]" if state and state != "active" else ""
+                blocked = r.get("blocked_on")
+                who = r.get("needs_from")
+                on = (f" — waiting on {blocked}"
+                      + (f": {who}" if who else "")) if blocked else ""
+                # The abandoned-work signal, at the same surface. Serving it
+                # on the wire and dropping it here would be the lossy
+                # projection this whole contract exists to end, one terminal
+                # over. `.get` for the same reason as the rest: an older hub
+                # has no such key, and "the hub did not say" prints nothing —
+                # never "they are fine".
+                standing = r.get("owner_standing") or {}
+                if standing.get("retired"):
+                    why = standing.get("reason")
+                    stood = " STOOD DOWN" + (f" ({why})" if why else "")
+                elif standing.get("known") is False:
+                    stood = " (owner unknown to the hub)"
+                else:
+                    stood = ""
+                print(f"  {r['channel']} {r['task']}{badge} — {r['owner']}"
+                      f"{stood}")
+                print(f"      {head}{on}")
+        # Served since the `next` column landed; an older hub omits the key
+        # and this prints nothing rather than raising at a reader's terminal.
+        waiting = b.get("next") or []
+        if waiting:
+            print("\n## next (what each waiting row waits for, and who can "
+                  "end it)")
+        for r in waiting:
+            hops = " -> ".join(r["chain"]) or "(unresolved)"
+            who = f" [{r['who']}]" if r.get("who") else ""
+            moved = " MOVED" if r.get("moved") else ""
+            print(f"  {r['channel']} {r['task']} — {r['kind']}{who}{moved}: "
+                  f"{r['what']}")
+            if len(r["chain"]) > 1:
+                print(f"      via {hops}")
         if b["pending_review"]:
             print("\n## pending review")
             for r in b["pending_review"]:
@@ -2457,6 +2499,33 @@ def cmd_spawn(args: argparse.Namespace) -> None:
             seen = ("never started" if row.get("announced_at") is None
                     else ", ".join(row.get("harnesses") or []) or "no harness installed")
             print(f"  {row['machine']:<16} runner={row['runner']:<16} {seen}")
+            # Liveness, printed rather than left on the wire: `announced_at`
+            # is a startup stamp, so without this line a dead runner and an
+            # idle one read identically here — which is how a `pending` spawn
+            # became unexplainable from any surface.
+            last_seen = row.get("last_seen_at")
+            if row.get("announced_at") is not None:
+                if last_seen is None:
+                    print("      last heard from: not since this hub started "
+                          "recording it — restart the runner to be sure")
+                else:
+                    secs = max(0, int(time.time() - float(last_seen)))
+                    when = (f"{secs}s" if secs < 60 else
+                            f"{secs // 60}m" if secs < 3600 else
+                            f"{secs // 3600}h")
+                    # The cutoff is the HUB's, derived from the interval this
+                    # runner announced. When it did not announce one, print
+                    # the age with no verdict — inventing a cutoff here is how
+                    # two clients come to disagree about one machine.
+                    cutoff = row.get("stale_after_seconds")
+                    if not isinstance(cutoff, (int, float)) or cutoff <= 0:
+                        print(f"      last heard from: {when} ago "
+                              "(this runner has not announced its poll "
+                              "interval, so there is no cutoff to judge it by)")
+                    else:
+                        verdict = ("polling" if secs < cutoff
+                                   else "SILENT — it may not be running")
+                        print(f"      last heard from: {when} ago ({verdict})")
             # The KNOBS, so `--reasoning` can be typed from what this machine
             # said rather than from memory. Four states, four sentences: no
             # capabilities at all is a runner predating the announce (restart
@@ -2480,6 +2549,16 @@ def cmd_spawn(args: argparse.Namespace) -> None:
                 model = (f", default model: {default}" if default
                          else ", the harness picks its own model")
                 print(f"      {harness:<14} {levels}{model}")
+                # Three states, three sentences. Absent prints NOTHING: this
+                # machine has not said, and a line saying so for every harness
+                # on every machine would bury the ones that did.
+                menu = cap.get("models")
+                if menu:
+                    print(f"      {'':<14} models: " + ", ".join(menu)
+                          + " (a menu, not a gate — another id still spawns)")
+                elif menu is not None:
+                    print(f"      {'':<14} models: this runner constrains "
+                          "nothing")
         return
 
     if args.list:

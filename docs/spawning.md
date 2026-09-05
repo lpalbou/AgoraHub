@@ -139,8 +139,13 @@ capabilities[<harness>] = {
     reasoning:           ["low", "high", …]   # [] = this harness takes NO knob
     reasoning_advisory:  true | false         # accepts it, enforces nothing
     default_model:       "…" | null           # null = the harness resolves its own
+    models:              ["…", …]             # the menu; ABSENT = nobody has said
 }
 ```
+
+A knob name the hub does not carry is refused by name at announce time rather
+than dropped, so a runner cannot believe it published something a client never
+receives.
 
 Read this vocabulary at call time rather than copying it into a client, a note
 or a message. It is per harness and per machine, it lives in the adapters, and
@@ -164,6 +169,15 @@ fails every wake while the spawn row still reads `running`.
 check one. A model the harness does not have spawns a seat that joins, appears
 on the roster, and then fails every wake. Treat a `running` row as "a child was
 started", not as "the seat works".
+
+`capabilities[<harness>].models` does not change that, deliberately. It is the
+menu a client offers, typed by the human who started the runner
+(`--models claude=claude-opus-5,claude-sonnet-5`, repeatable) because no adapter
+can compute it — so it is a **convenience, not a permission**. The hub refuses
+an unannounced `reasoning` level because the machine said it cannot express it;
+it accepts an unlisted `model` because a hand-typed list being short is not the
+same as a model being unavailable. Absent means nobody has said and the field
+stays free text; `[]` means the runner says it constrains nothing.
 
 `options` is a free-form dict for runner-side knobs. Do not put a model or a
 reasoning level there: the runner reads only `permissions` out of it, so a value
