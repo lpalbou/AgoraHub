@@ -1073,6 +1073,9 @@ class CloseRow(BaseModel):
     #: one to close quietly.
     declined_asks: list[str] = Field(default_factory=list)
     declined_by: list[str] = Field(default_factory=list)
+    #: 0.18.0: the `task:` row minted for this request, when one exists —
+    #: a delivered task waits here for the requester's accept or reject.
+    task: str | None = None
 
 
 class OwedReport(BaseModel):

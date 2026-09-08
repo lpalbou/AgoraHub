@@ -202,14 +202,49 @@ def test_spawn_seat_carries_the_knobs_through_the_mcp_door(hub, monkeypatch):
 
 def test_spawn_seat_from_a_non_operator_fails_loudly(hub, monkeypatch):
     """The MCP lane must not soften a refusal into something an LLM reads as
-    success — that is what the `ok: false` shape exists for."""
+    success — that is what the `ok: false` shape exists for. A member is not
+    served the operator tools at all; with AGORA_MCP_TOOLS=all it sees them
+    and the hub's refusal arrives in the `ok: false` shape."""
     key = _make_agent(hub, "member")
     mcp = _server_against(hub, monkeypatch, key)
+    assert "spawn_seat" not in _tool_names(mcp)
 
+    monkeypatch.setenv("AGORA_MCP_TOOLS", "all")
+    mcp = _server_against(hub, monkeypatch, key)
     out = _call_tool(mcp, "spawn_seat",
                      {"seat_id": "scribe", "harness": "claude"})
     assert out["ok"] is False and out["error"] == 403
     assert out["detail"] == "this is an operator act"
+
+
+def _tool_names(mcp) -> set[str]:
+    import asyncio
+    return {t.name for t in asyncio.run(mcp.list_tools())}
+
+
+def test_a_seat_is_served_the_tools_it_can_use(hub, monkeypatch):
+    """Tool definitions ride every prompt of every seat. A member is served
+    the member surface; operator verbs and the delegate radar only reach
+    seats whose whoami says they can use them; the social tools are opt-in."""
+    from agora.mcp.server import tools_to_drop
+    member = _make_agent(hub, "plain")
+    names = _tool_names(_server_against(hub, monkeypatch, member))
+    for absent in ("spawn_seat", "retire_agent", "supervise", "get_desk",
+                   "rate_agent", "read_ledger"):
+        assert absent not in names
+    for present in ("whoami", "check_inbox", "post_message", "store_set",
+                    "create_group", "open_vote", "list_machines",
+                    "search_hub"):
+        assert present in names
+    assert len(names) <= 42
+
+    boss = _make_agent(hub, "boss2", operator=True)
+    assert len(_tool_names(_server_against(hub, monkeypatch, boss))) > len(names)
+    # A whoami the server cannot read tiers nothing: never hide a tool from
+    # a seat it cannot classify.
+    assert tools_to_drop({"ok": False}) == set()
+    assert "supervise" not in tools_to_drop(
+        {"operator": False, "delegations": [{"powers": ["reporting"]}]})
 
 
 def test_list_machines_is_readable_by_a_plain_member_and_is_empty(hub, monkeypatch):

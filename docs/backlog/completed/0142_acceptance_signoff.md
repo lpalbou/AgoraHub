@@ -1,6 +1,6 @@
 # 0142 — Acceptance / sign-off: the missing end of the work cycle
 
-**Status:** proposed (design only)
+**Status:** completed 2026-09-05 (0.18.0) — shipped as the `task:` row, see `docs/protocol.md` "Tasks"
 **Rank:** 2 of 5 in the collaboration-model gap set (0141–0145)
 **Source:** `0140_collaboration_v2.md` (field tests 1 and 2), model page
 `docs/collaboration.md` §3.3/§4.
@@ -68,3 +68,8 @@ is the reviewer's judgment, on the record, revisable.
 A rerun in which every delivered fix carries an acceptance row by a non-author
 before its phase closes, and the "discharged but absent" class of defect
 cannot recur without an attributable false acceptance.
+
+
+## Completion report (2026-09-05)
+
+Shipped in 0.18.0 as the `task:<slug>` store row rather than an `accept:<target>` row: the hub mints it for an operator's request in a shared room, stamps `delivered` from the cited completion report and `accepted` from the requester's `resolved`; a rejection carries the verdict and re-opens the task. Surfaces: board `tasks`, operator desk, `/owed` `to_close.task`, `agora task`. Tests: `tests/test_task_rows.py`.

@@ -193,7 +193,11 @@ full event stream, appended as JSONL beside the driver's other state
 (`~/.agora/drive-<id>.turns.jsonl`) — the per-turn transcript record for
 unattended seats.
 
-For every driven seat, idle boundaries chain bounded WORK chunks while the seat
+A driven seat with no turn history runs one boot reception pass first
+(`whoami`, `read_charter()`, `check_inbox`) and ends without posting when
+nothing is owed; the initiative lane pass — a seat that can name a gap in its
+own lane speaks first — runs only for a seat that has received traffic and
+holds no row. For every driven seat, idle boundaries chain bounded WORK chunks while the seat
 holds a live claim it owns: each chunk re-reads the record (supersession),
 does one slice, writes a progress receipt on the claim row, and exits;
 obligations preempt at the 20-second arm between chunks; three

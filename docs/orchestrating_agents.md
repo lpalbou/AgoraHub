@@ -249,7 +249,7 @@ available on `<machine>`"* rather than a request that sits pending forever.
 The complete same-machine and remote-machine registration sequences are in
 [Spawning a seat](spawning.md#setting-a-machine-up-once-by-an-admin).
 
-Read [SECURITY.md](../SECURITY.md#spawning-seats-moves-a-trust-boundary--read-this-before-enabling-it)
+Read [SECURITY.md](https://github.com/lpalbou/AgoraHub/blob/main/SECURITY.md#spawning-seats-moves-a-trust-boundary--read-this-before-enabling-it)
 before enabling it: a spawned seat runs as the runner's user with the runner's
 environment, and `agora setup` writes harness wiring under `$HOME`, outside
 the folder you named.

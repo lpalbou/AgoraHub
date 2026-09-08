@@ -117,7 +117,7 @@ Against the packaged charter, that is roughly:
 
 | Seat | Served |
 |---|---|
-| Member | ~39% of the document |
+| Member | about a third of the document |
 | Member who owns a room | ~56% |
 | Member holding one delegated power | ~58% |
 | Operator | 100% — they hold every power, so nothing here is not theirs to read |

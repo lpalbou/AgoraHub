@@ -74,6 +74,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -101,54 +102,24 @@ from .setup_harness import resolve_workspace_identity
 # seat that wakes empty and finds no instruction to stay silent manufactures
 # a receipt, and that receipt wakes the room, which wakes more empty seats.
 WAKE_PROMPT = (
-    "AGORA WAKE. Agora MCP is REQUIRED: use only Agora MCP tools for Agora "
-    "communication, never the `agora` CLI or direct HTTP. Run ONE reception "
-    "pass: check_inbox; settle what you OWE. For a question, answer it. For "
-    "assigned work, BEGIN IT THIS TURN. Thinking, designing and agreeing a "
-    "plan with the room IS work — on anything the room shares it is the "
-    "FIRST work, and going straight to building is how two seats build the "
-    "same thing twice. What is banned is a BARE promise: an acknowledgement "
-    "with nothing attached. Say what you are taking AND do something with it "
-    "in the same turn. When you start on something others depend on, SAY SO "
-    "in the room, and say so again when a piece is ready for them — a "
-    "colleague who discovers your lane by collision was failed by you. "
-    "If the human posted an open/blocked task in a shared room, treat it as "
-    "a contribution call: evaluate it against what you own; if you can help, "
-    "reply once with the slice you own and how you will contribute; if not, "
-    "say nothing. EXPLICIT COORDINATION OWNERSHIP DECIDES WHO ROUTES: if the "
-    "human names another seat as coordinator, that seat owns routing. If the "
-    "human merely assigns another seat a slice, addressing does not create an "
-    "open leadership role. Unless explicit, formal, or claimed state makes "
-    "you the coordinator, do not claim the whole commission, create_group, "
-    "write a competing whole plan, or choose a canonical room; offer at most "
-    "your one slice on the original thread and wait for the coordinator's "
-    "invitation. If the human names YOU as the "
-    "coordinator, say so on the original thread and create or reuse the ONE "
-    "focused room before work moves. If nobody is named, contributors state "
-    "their slices on the original thread; one seat may re-check and claim "
-    "coordination there, and only a formal delegate or an agreed/claimed "
-    "coordinator routes them, so concurrent volunteers never "
-    "create competing rooms. If routed work only needs one peer, use a DM. In that "
-    "focused room, planning comes BEFORE implementation: agree the plan, the "
-    "phases if any, and the ownership split before building. "
-    "Finish and answer with "
-    "evidence when feasible. If the job needs another turn, create or update "
-    "a real `claim:msg-<source seq>` row with store_set in the request's "
-    "channel; its value MUST include owner, status, source_message_id, and "
-    "next_step. Then complete one useful work slice before replying. Never "
-    "write 'claiming' only in prose. Use answers only for completed asks — "
-    "if an ask should not be done or is not yours, decline it on the record "
-    "(declines=[ids], why in the body) rather than answering thinly. "
-    "ack_inbox, then END. If check_inbox shows nothing owed BY YOU and no "
-    "ask names you, and no human contribution call matches a slice you own, "
-    "that is a COMPLETE and correct turn: ack_inbox and END "
-    "THE TURN WITHOUT POSTING ANYTHING. Posting an acknowledgement, a "
-    "status line, a 'nothing for me' note, or any other receipt on an empty "
-    "reception pass is the anti-pattern this instruction exists to stop — "
-    "silence is the right answer and it costs the room nothing. Do not "
-    "advance unrelated claims, post routine progress traffic, wait, listen, "
-    "sleep, or re-check; the driver owns reception and automatically "
-    "continues real claims."
+    "AGORA WAKE. Use only the Agora MCP tools for the hub. Run ONE reception "
+    "pass: check_inbox; settle what you OWE. A question: answer it. Assigned "
+    "work: BEGIN IT THIS TURN — planning with the room is the first work on "
+    "anything shared; a BARE promise is banned. When you start on something "
+    "others depend on, SAY SO in the room. A human's open task in a shared "
+    "room is a contribution call: reply once with the ONE slice you own, or "
+    "say nothing. EXPLICIT COORDINATION OWNERSHIP DECIDES WHO ROUTES: the "
+    "seat the human named, else the reporting delegate, else whoever claims "
+    "it on the thread opens the ONE focused room; concurrent volunteers never "
+    "create competing rooms. Work that needs another turn gets a real "
+    "`claim:<slug>` row (owner, status, next_step, source=<channel>#<seq>) "
+    "via store_set in the channel where the work is discussed, plus one "
+    "useful slice now. Never write 'claiming' only in prose. Decline what is "
+    "not yours (declines=[ids]). Then ack_inbox and END. If nothing owed BY "
+    "YOU and no ask names you: END THE TURN WITHOUT POSTING ANYTHING — a "
+    "receipt on an empty pass is the anti-pattern this rule exists to stop. "
+    "Do not wait, listen or re-check; the driver owns reception and continues "
+    "real claims."
 )
 
 # Boot prompt for a fresh session (no prior --resume): establish identity
@@ -156,31 +127,15 @@ WAKE_PROMPT = (
 # "start agora protocol" — that phrase now triggers the skill's (a) boot
 # (self-armed reception), which a driven seat must never run.
 BOOT_PROMPT = (
-    "You are a DRIVEN agora seat. Agora MCP is REQUIRED. Use only the Agora "
-    "MCP tools for Agora communication; never invoke the `agora` CLI or an "
-    "HTTP substitute. First: call whoami and heed the hub "
-    "rules; call read_charter() ONCE now (the standing answer to who is who "
-    "and what each seat owes). A receipt is per-SEAT and this context is "
-    "NEW: the delegate that soloed a commission on 2026-08-04 held a "
-    "day-old receipt, was told its charter was current, and so never read "
-    "the sentence telling it to decompose into addressed asks. If you hold "
-    "any delegation, read the part that names what YOU owe. Skim your "
-    "channels. Then run one reception pass (check_inbox, "
-    "settle what you owe). Questions require answers. Assigned work requires "
-    "actual workspace work now, not an acknowledgement or promise; finish it "
-    "when feasible, otherwise create a real linked `claim:msg-<source seq>` "
-    "store row (owner, status, source_message_id, next_step), complete one "
-    "useful slice, then ack and END. Use answers only on completion; refuse "
-    "with declines=[ids] when the work should not be done. Nothing "
-    "owed by you, no ask naming you, and no relevant human contribution call "
-    "is a complete turn: ack and END "
-    "WITHOUT POSTING — an empty reception pass that posts anyway is the "
-    "anti-pattern. Do not "
-    "advance unrelated claims or post routine progress receipts; the driver "
-    "automatically continues real claims. If Agora MCP is unavailable, do not "
-    "improvise: end with "
-    "AGORA_MCP_UNAVAILABLE and the exact MCP error. A driver loop wakes you "
-    "on each new message; never start a listener yourself."
+    "You are a DRIVEN agora seat. Use only the Agora MCP tools for the hub. "
+    "First: whoami (heed the hub rules and your mission), read_charter() once "
+    "(a receipt is per-seat and this context is new), then skim your "
+    "channels. Then run one reception pass: settle what you owe — answers, "
+    "declines, real work or a real claim row — and END. Nothing owed and no "
+    "ask naming you: ack and END WITHOUT POSTING. Never post routine progress "
+    "receipts; the driver continues real claims. If the Agora MCP tools are "
+    "unavailable, end with AGORA_MCP_UNAVAILABLE and the exact error. Never "
+    "start a listener."
 )
 
 # The work prompt: STATIC like the others — no hub or peer
@@ -192,43 +147,20 @@ BOOT_PROMPT = (
 # because the operator or a peer may have canceled/refined/replaced the
 # task while the seat was heads-down.
 WORK_PROMPT = (
-    "AGORA WORK CHUNK. Agora MCP is REQUIRED: use only Agora MCP tools for "
-    "Agora communication, never the `agora` CLI or direct HTTP. No new "
-    "obligation is waiting; you hold continuable work — a live claim row, or "
-    "an open phase: row you steward — continue THAT work. A phase row is "
-    "ignition, not a slice receipt: if the work is more than one turn, open a "
-    "claim row for it NOW and chain on that. A claim you already marked "
-    "blocked or parked does NOT count against opening a new one for different "
-    "work. FIRST re-read the "
-    "row and any newer messages touching the task: a newer message "
-    "may have canceled, refined, or superseded it (the record outranks "
-    "your memory) — if so, adjust or park on the record instead of "
-    "continuing blind. If the task has outgrown #commons or another open "
-    "floor and 3+ seats now need to coordinate, create or reuse the focused "
-    "room before continuing ONLY when you are the task's named/formal/claimed "
-    "coordinator; otherwise stop shared work and ask that coordinator to "
-    "route it. If the room still lacks a shared "
-    "plan or phase order, do that planning work first. Otherwise do ONE bounded slice "
-    "toward completion, "
-    "stop at a safe checkpoint (workspace consistent: commit or stash), "
-    "overwrite your claim row with a one-line progress receipt naming "
-    "what is done and what is next. That row is the ONLY per-slice receipt: "
-    "never post reception-pass, no-delta, guard-rerun, parked, or routine "
-    "progress messages to a channel. If blocked, mark the claim row and send "
-    "one addressed structured ask in a DM or focused group only when another "
-    "seat can act; never broadcast or repeat an unchanged blocker. You do NOT "
-    "have to be blocked to ask: when you are about to write a guard, a stub, "
-    "a fallback or a TODO around a symbol ANOTHER seat owns — a function, a "
-    "key, an event, a field you are hoping exists — send that same addressed "
-    "ask instead, naming the exact symbol and the contract you need. A hedge "
-    "around a missing symbol is an unasked question that ships: the call site "
-    "never throws, so nobody learns the symbol was never built. Then END "
-    "this turn — the driver "
-    "re-wakes you for the next slice. Finished, blocked, or not worth "
-    "continuing? Write done/blocked/parked on the row and END. Post only one "
-    "typed external milestone or delivery when the event is genuinely new. "
-    "Do NOT check the inbox again, wait, listen, or "
-    "start watchers — reception is the driver's job between slices."
+    "AGORA WORK CHUNK. Use only the Agora MCP tools for the hub. No new "
+    "obligation waits; you hold continuable work — a live claim row, or an "
+    "open phase: row you steward (open a claim row for it once the work "
+    "outgrows one turn; a blocked or parked row never blocks a new one). "
+    "FIRST re-read the row and newer messages on the task: the record "
+    "outranks your memory — a newer message may have cancelled, changed or "
+    "superseded it; adjust or park on the record. If the room still lacks a "
+    "shared plan, that planning is the slice. Otherwise do ONE bounded slice, "
+    "stop at a safe checkpoint, and overwrite the row with what is done and "
+    "what is next: the row is the ONLY per-slice receipt; never post progress "
+    "to a channel. Blocked, or about to hedge around a symbol another seat "
+    "owns? Send one addressed structured ask naming it — never broadcast, "
+    "never repeat an unchanged blocker. Then END; the driver re-wakes you. Do "
+    "not check the inbox, wait, listen or start watchers."
 )
 
 # A fresh initiative session needs identity/orientation before the work
@@ -236,22 +168,15 @@ WORK_PROMPT = (
 # from doing work, and prevents a rotated work session from wasting its first
 # chunk on reception only.
 WORK_BOOT_PROMPT = (
-    "AGORA WORK CHUNK BOOT. You are a DRIVEN agora seat. Agora MCP is "
-    "REQUIRED: use only Agora MCP tools for Agora communication, never the "
-    "`agora` CLI or direct HTTP. First call "
-    "whoami and heed the hub rules; call read_charter() once now (a receipt "
-    "is per-seat, and this context is new — if you hold a delegation, read "
-    "what YOU owe); skim your channels. Then follow the work "
-    "contract: re-read your continuable work — a live claim row, or an open "
-    "phase: row you steward — and newer messages that may "
-    "supersede it, do one bounded slice, and update the claim row (open one "
-    "if a stewarded phase is all you hold; a blocked or parked row does NOT "
-    "count against opening a new one). The row is "
-    "the only per-slice receipt; never post reception-pass, no-delta, guard-"
-    "rerun, parked, or routine progress messages. If blocked, mark the row "
-    "and send one addressed structured ask in a DM or focused group only "
-    "when another seat can act; never broadcast or repeat an unchanged blocker. "
-    "Then END. Do not wait, listen, or start watchers."
+    "AGORA WORK CHUNK BOOT. You are a DRIVEN agora seat. Use only the Agora "
+    "MCP tools for the hub. First whoami (heed the hub rules and your "
+    "mission) and read_charter() once (a receipt is per-seat and this context "
+    "is new); skim your channels. Then follow the work contract: re-read your "
+    "continuable work — a live claim row, or an open phase: row you steward — "
+    "and newer messages that may supersede it; do one bounded slice; "
+    "overwrite the claim row, the only per-slice receipt. Blocked? Mark the "
+    "row and send one addressed structured ask. Then END. Never wait, listen "
+    "or start watchers."
 )
 
 # The LANE PASS: the only prompt a seat that holds no row will ever see that
@@ -275,92 +200,36 @@ WORK_BOOT_PROMPT = (
 # the ceremony the empty-pass rule closed (0140 field test 2: 50% ceremony on
 # turns woken owing nothing).
 INITIATIVE_PROMPT = (
-    "AGORA WORK CHUNK — LANE PASS. Agora MCP is REQUIRED: use only Agora MCP "
-    "tools for Agora communication, never the `agora` CLI or direct HTTP. If "
-    "this work session is new to you, call whoami first (heed the hub rules) "
-    "and read_charter() once. "
-    "Nothing is owed and you hold no live claim row, so nothing here is "
-    "assigned. This turn exists for ONE reason: a seat that can SEE a problem "
-    "in its own lane must have a way to say so, and every other prompt you "
-    "get tells you to be quiet when nothing names you. Your standing rule "
-    "that an empty inbox never authorises UNRELATED new claim work still "
-    "holds exactly as written: the only thing you may open here is work in "
-    "your OWN lane that no live row covers. Do NOT check the inbox — "
-    "reception is the driver's job between chunks. "
-    "Look at what this seat is FOR and then at the actual shared artifact — "
-    "the workspace tree, the plan, the contract and phase rows in the channel "
-    "store — not at the conversation. Then answer ONE question: can you NAME "
-    "a specific gap in your lane? A symbol that is called and never defined, "
-    "a key or event one seat emits and no seat handles, a contract two seats "
-    "read differently, a spec point with no owner, an interface your own work "
-    "will need that does not exist yet, a defect your lane is the one "
-    "qualified to catch. Name means name: the file, the symbol, the row, the "
-    "spec point. Check the store rows once (store_list, or channel_digest) "
-    "before you speak: if a live row already owns it, it is not your gap. "
-    "IF YOU CAN NAME ONE: do exactly one of these, once, then END. Either "
-    "send ONE addressed structured ask (asks=..., to=the seat that owns it) "
-    "in the room where that work lives — or open ONE `claim:<slug>` row with "
-    "store_set (owner, status, next_step) and do a first real slice of it "
-    "now. If the work is more than this one slice, leave the row NON-TERMINAL "
-    "with a next_step naming what comes next — write done only when it "
-    "actually is. Prefer the claim when the work is yours to do; prefer the "
-    "ask when the answer is another seat's to give. Either way the driver "
-    "picks the row up and keeps you working from the next pass on. "
-    "IF YOU CANNOT: END THE TURN WITHOUT POSTING ANYTHING. That is the "
-    "expected outcome here and it costs the room nothing. "
-    "These are NOT nameable gaps: 'I am available', 'I could help with X', a "
-    "status line, a summary of what other seats did, an agreement, a re-raise "
-    "of anything you already raised, or a question whose answer would not "
-    "change what somebody builds. If what you are about to send would not "
-    "survive the question 'which line of which file does this change?', it is "
-    "ceremony — do not send it."
+    "AGORA WORK CHUNK — LANE PASS. Use only the Agora MCP tools for the hub. "
+    "If this session is new, whoami first. Nothing is owed and you hold no "
+    "live claim; this pass exists so a seat that can SEE a problem in its own "
+    "lane can say so. Do not check the inbox. Look at what you are FOR and at "
+    "the shared artifact and the store rows (store_list, channel_digest), not "
+    "the conversation. Can you NAME a specific gap in your lane that no live "
+    "row covers — a symbol called and never defined, a contract two seats "
+    "read differently, a defect your lane is the one to catch? IF YES: do "
+    "exactly one thing — send ONE addressed structured ask, or open ONE claim "
+    "row (owner, status, next_step) and do a first real slice — then END. IF "
+    "NOT: END WITHOUT POSTING ANYTHING; that is the expected outcome. 'I am "
+    "available', a status line, a summary, an agreement or a re-raise is not "
+    "a gap. An empty workspace is not a gap."
 )
 
 #: Prepended to a DELEGATE's work chunk. Its job is the room, not the code.
 SUPERVISE_PROMPT = (
-    "You are a user's delegate. Your job is to make their work simpler.\n"
-    "They may be reading along right now, or not — either way, they should "
-    "not have to follow every seat to know where things stand. That is what "
-    "you are for. With a handful of agents it is a convenience; with twenty "
-    "it is the difference between a project they can follow and a firehose "
-    "they cannot. So keep the whole picture and give it back to them "
-    "condensed: what progressed, what is stuck and why, what was decided and "
-    "on what grounds, what needs them specifically.\n"
-    "What you may DO with that picture depends entirely on the powers they "
-    "granted you — check whoami.delegations. Some delegates only watch and "
-    "report. Some may run the machinery. Some may decide in the user's name. "
-    "Read what you hold before you act, and never promise a move your grant "
-    "does not cover.\n"
-    "When a task on #commons or another open floor already has a real owner "
-    "and the contributor set is known, your default move is to put the work "
-    "in its focused room immediately: two speaking seats = DM; three+ or "
-    "clearly multi-turn coordination = create_group. Keep the open floor for "
-    "the pointer, cross-room decisions, milestones and final delivery.\n"
-    "For a fresh operator task in a shared room, first look for contributor "
-    "replies already on the operator thread. If contributors already stated "
-    "their slices there, that set is known: do NOT ask the same question "
-    "again. Reply in-thread to the operator naming that you own the "
-    "commission and where the work is moving, then create the focused room "
-    "immediately and make the first job there the shared plan. Only run a "
-    "formation round when the contributor set is not yet known: let each "
-    "seat decide silently whether it can contribute; contributors state what "
-    "they own and how they help; once that set is known, create the room. "
-    "Use phases when the plan needs ordering, and do not let implementation "
-    "jump ahead of an unsettled plan. A new root pointer does not settle the "
-    "operator thread; your operator-facing progress updates belong in-thread "
-    "on the original commission at phase changes and completion.\n"
-    "supervise(channel) is your radar: who is live and holding nothing, what "
-    "each seat is for, whether they can hear you, which rows are stuck and on "
-    "whom, and — given your powers — which of those you can end yourself. "
-    "Read it each chunk, then act within your grant: hand an idle seat the "
-    "slice its expertise fits, ask the room what it thinks, call a vote when "
-    "the decision belongs to them, ask for a shared plan they can argue over, "
-    "chase whoever is blocking someone, wake a seat that went quiet mid-task. "
-    "The work itself belongs to the seats; you are not the one building.\n"
-    "Decide only after hearing from the people who know, and only what your "
-    "powers allow. If the user is reachable and the call is theirs, ask them. "
-    "If it is yours to make, make it — and tell them what you decided and "
-    "why, so they can disagree.\n\n"
+    "You are the user's delegate: make their work simpler. Keep the whole "
+    "picture and give it back condensed — what progressed, what is stuck and "
+    "why, what was decided and on what grounds, what needs them. What you may "
+    "DO is exactly what whoami.delegations grants. supervise(channel) is your "
+    "radar each chunk: hand idle seats addressed slices; ask the room; call a "
+    "vote when the decision is theirs; chase whoever is blocking someone. A "
+    "task on the open floor with a known contributor set moves to ONE focused "
+    "room now, and the first job there is the shared plan; implementation "
+    "never jumps ahead of an unsettled plan. Progress to the operator goes "
+    "in-thread on the original commission at phase changes and completion. "
+    "Decide only after hearing the seats who know, and only within your "
+    "grant; tell the operator what you decided and why. The work belongs to "
+    "the seats — you are not the one building.\n\n"
 )
 
 DEFAULT_MODEL: str | None = None
@@ -406,6 +275,17 @@ DRIVE_CHAIN_WAIT = 20.0             # listen window between chained work chunks:
 DEFAULT_WORK_BUDGET = 100           # initiative chunks per rolling hour;
 #                                     a light fuse for degenerate churn, not
 #                                     a normal-work throttle
+DRIVE_PAUSE_POLL = 15.0             # how often a driver re-asks whether the
+#                                     operator is still holding the hub paused
+#                                     — both while parked and while a turn is
+#                                     in flight. `agora pause` used to stop
+#                                     only WRITES: reception stayed open, so
+#                                     every driver kept waking and spawning
+#                                     turns that could do nothing but burn a
+#                                     provider call and lose their work (19
+#                                     seats, 18 turns still running after the
+#                                     pause landed, 2026-09-07). Pausing the
+#                                     hub must pause the harnesses too.
 WORK_STRIKES = 3                    # receipt-less chunks per claim VERSION
 #                                     before the chain parks (a NEW receipt =
 #                                     a version bump = the reset; identical
@@ -2679,6 +2559,125 @@ class Driver:
         parts += [f"{k}={v}" for k, v in extra.items() if v not in (None, "")]
         _emit(" ".join(parts))
 
+    def _hub_paused(self) -> bool | None:
+        """Is the operator holding the hub paused? None = don't know.
+
+        `/healthz` is unauthenticated and side-effect free, which is what makes
+        it safe to ask on a timer from inside a running turn. UNKNOWN is not
+        PAUSED: a network blip, a restarting hub, or an older hub that never
+        served the field must never park a working seat — the failure mode of
+        guessing "paused" is a fleet that silently stops, which is exactly the
+        outage this feature exists to make visible.
+        """
+        import httpx
+        try:
+            value = httpx.get(f"{self.hub.rstrip('/')}/healthz",
+                              timeout=5.0).json().get("paused")
+        except Exception:
+            return None
+        return None if value is None else bool(value)
+
+    def _await_resume(self) -> bool:
+        """Park while the hub is paused; return True if we actually parked.
+
+        A paused hub answers every write with 423 while leaving reads open, so
+        a turn started now cannot post, cannot ack, and cannot record a claim:
+        it can only spend a provider call and throw the result away. Parking
+        costs nothing and keeps the seat's cursor, so no obligation is lost —
+        the work resumes at `agora resume`, it does not restart.
+        """
+        if self._hub_paused() is not True:
+            return False
+        self._state("paused", reason="hub-paused", next_s=DRIVE_PAUSE_POLL)
+        while True:
+            time.sleep(DRIVE_PAUSE_POLL)
+            if self._hub_paused() is not True:
+                self._state("armed", reason="hub-resumed")
+                return True
+
+    def _signal_turn_tree(self, sig: int) -> int:
+        """Signal the in-flight harness turn's process TREE. Returns how many
+        groups were signalled.
+
+        The turn is spawned with `start_new_session=True`, so it is a
+        process-group leader and its descendants share its pgid — signalling
+        the GROUP ends the tree, where signalling the child alone leaves every
+        descendant reparented to PID 1, still running in this cwd with this
+        seat's credentials (the orphan-leak this file's `_spawn_turn` comment
+        has described for months).
+
+        The pid is DISCOVERED rather than held because the spawn deliberately
+        still goes through `subprocess.run`: that call is the seam the whole
+        drive suite stubs, and moving it to `Popen` to keep a handle broke ~15
+        tests into real harness spawns. The loop is single-threaded and runs
+        one turn at a time, so "my children" is that turn. `Popen` is used
+        here (never `run`) so a stubbed `run` cannot capture this lookup.
+        """
+        try:
+            probe = subprocess.Popen(["pgrep", "-P", str(os.getpid())],
+                                     stdout=subprocess.PIPE,
+                                     stderr=subprocess.DEVNULL, text=True)
+            out, _ = probe.communicate(timeout=5.0)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return 0
+        hit = 0
+        for token in (out or "").split():
+            try:
+                pid = int(token)
+            except ValueError:
+                continue
+            try:
+                # Only groups WE made a leader of: never signal a stray child
+                # that happens to share this process's parentage.
+                if os.getpgid(pid) == pid:
+                    os.killpg(pid, sig)
+                    hit += 1
+            except (ProcessLookupError, PermissionError, OSError):
+                continue
+        return hit
+
+    def _run_turn_process(self, cmd: list[str],
+                          aborted: threading.Event) -> subprocess.CompletedProcess:
+        """Run ONE harness turn, ending it if the operator pauses the hub.
+
+        `agora pause` used to stop only WRITES. Reception stayed open, so an
+        idle seat kept waking and a BUSY seat ran its turn to completion
+        against a hub that would refuse every post it made — the work was lost
+        and the provider call paid for anyway. The watcher closes that: it asks
+        the hub every DRIVE_PAUSE_POLL and kills the turn's process tree the
+        moment the answer is yes.
+
+        The spawn itself is still `subprocess.run` — the seam the drive suite
+        stubs. A stubbed run never spawns, so the watcher simply finds nothing
+        to signal and the test path is unchanged.
+        """
+        done = threading.Event()
+
+        def _watch() -> None:
+            while not done.wait(DRIVE_PAUSE_POLL):
+                if self._hub_paused() is not True:
+                    continue
+                aborted.set()
+                self._state("pausing", reason="hub-paused",
+                            detail="ending the turn in flight")
+                self._signal_turn_tree(signal.SIGTERM)
+                # Grace, then insist: a harness mid-stream on a provider call
+                # commonly ignores SIGTERM.
+                if not done.wait(10.0):
+                    self._signal_turn_tree(signal.SIGKILL)
+                return
+
+        threading.Thread(target=_watch, daemon=True,
+                         name=f"pause-watch-{self.agent_id}").start()
+        try:
+            return subprocess.run(cmd, capture_output=True, text=True,
+                                  timeout=self._turn_timeout, cwd=str(self.cwd),
+                                  stdin=subprocess.DEVNULL,
+                                  env=self._harness_env(),
+                                  start_new_session=True)
+        finally:
+            done.set()
+
     @contextlib.contextmanager
     def _long_turn_notice(self, kind: str):
         """Announce a blocking turn, and repeat every LONG_TURN_NOTICE.
@@ -3051,6 +3050,11 @@ class Driver:
         cmd = self._adapter.build_command(prompt, session_id)
         kind = self._kind_of_turn(prompt)
         t0 = time.time()
+        # Set by the pause watcher inside _run_turn_process when the operator
+        # pauses the hub mid-turn. Read on BOTH exit paths below: an aborted
+        # turn is not a failure of this seat, its harness, or its provider, and
+        # must not feed backoff, the poison ledger, or quarantine.
+        paused_abort = threading.Event()
         # turn_start BEFORE the spawn: a wedged turn still shows it began.
         self._log_event(event="turn_start", ts=round(t0, 3),
                         agent=self.agent_id, kind=kind,
@@ -3096,10 +3100,7 @@ class Driver:
             #
             # The seat is deaf for the whole window either way, which is why
             # _long_turn_notice announces every turn at LONG_TURN_NOTICE.
-            proc = subprocess.run(cmd, capture_output=True, text=True,
-                                  timeout=self._turn_timeout, cwd=str(self.cwd),
-                                  stdin=subprocess.DEVNULL,
-                                  env=self._harness_env())
+            proc = self._run_turn_process(cmd, paused_abort)
         except subprocess.TimeoutExpired as exc:
             out = exc.stdout or ""
             if isinstance(out, bytes):
@@ -3161,6 +3162,27 @@ class Driver:
         except FileNotFoundError:
             self._adapter.preflight()
             raise AssertionError("unreachable: preflight should already fail")
+        if paused_abort.is_set():
+            # The operator paused the hub mid-turn and the watcher ended it.
+            # Deliberately NOT _record_failure: nothing here misbehaved, and
+            # charging this to the seat would back it off (or quarantine it)
+            # for an operator action. The session id is still parsed and kept
+            # so `agora resume` continues this seat's transcript rather than
+            # starting it over.
+            sid = self._adapter.parse_session_id(
+                getattr(proc, "stdout", "") or "", session_id)
+            if self._turn_log is not None:
+                self._log_event(event="turn_end", ts=round(time.time(), 3),
+                                agent=self.agent_id, kind=kind, ok=False,
+                                harness=self.harness, stage="operator",
+                                reason="hub-paused",
+                                dur_s=round(time.time() - t0, 1), session=sid)
+            _emit("AGORA_DRIVE event=turn_end status=paused "
+                  f"agent={self.agent_id} harness={self.harness} kind={kind} "
+                  "stage=operator reason=hub-paused "
+                  f"dur_s={round(time.time() - t0, 1)} — turn ended in flight; "
+                  "the seat parks until `agora resume`")
+            return sid, False
         stdout_text = getattr(proc, "stdout", "") or ""
         stderr_text = getattr(proc, "stderr", "") or ""
         if self._turn_log is not None:
@@ -3735,7 +3757,20 @@ class Driver:
         if self._turn_times:
             if max(self._turn_times) <= self._last_initiative:
                 return False
-        elif self._last_initiative:
+        newborn = not self._turn_times and not self._last_initiative
+        if newborn:
+            # NO TURN HISTORY AT ALL: a seat that has just been born. Its
+            # first turn is a BOOT RECEPTION pass, not a lane pass. Measured
+            # live (2026-09-05, exp1): four newborn seats ran the lane pass
+            # on an empty repo before any commission existed; one invented a
+            # "missing contract" ask, two others built to it, and the plan
+            # round became post-hoc. A boot pass reads whoami (the mission
+            # is what a spawned seat is for), the charter and the inbox, and
+            # ends silently when nothing is owed. It still runs through the
+            # gates below (budget, delegate, readable /owed) so a quiet or
+            # unknowable hub buys no turn.
+            pass
+        elif not self._turn_times and self._last_initiative:
             # NO TURN HISTORY AT ALL: a seat that has just been born. The
             # traffic gate above reads "a dead room buys zero passes", and it
             # used to refuse this case too — `not self._turn_times` was the
@@ -3761,6 +3796,9 @@ class Driver:
             # outranks a thought, and an unreadable /owed is never read as 0.
             return False
         self._last_initiative = now
+        if newborn:
+            self._state("turn", reason="newborn-boot")
+            return self.run_turn()
         self._state("chunk", reason="initiative-lane")
         return self.run_work_turn(prompt_override=INITIATIVE_PROMPT)
 
@@ -4059,11 +4097,19 @@ class Driver:
         driven = 0
         try:
             if once:
+                self._await_resume()
                 ran = self.run_turn()
                 return 0 if ran and self._last_turn_ok else 1
             backoff = 1.0
             while max_turns is None or driven < max_turns:
                 self._touch_drive_pid()
+                # THE PAUSE GATE. Checked before anything that could spawn a
+                # turn — a paused hub refuses every write, so the only thing a
+                # turn can do here is cost money and lose its output. Reception
+                # is untouched: the cursor keeps its place, and the seat picks
+                # up exactly where it stopped at `agora resume`.
+                if self._await_resume():
+                    continue
                 hold = (self._hold(has_debt=self._pending_wake_has_debt)
                         if self._pending_wake else None)
                 # A held human/peer debt outranks idle listening. Run it as

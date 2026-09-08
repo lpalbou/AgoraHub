@@ -767,7 +767,7 @@ def test_a_valid_re_park_STILL_rings_the_named_seat(hub, rooms):
     assert not [m for m in new if "NOBODY WAS RUNG" in (m.body or "")]
 
 
-def test_a_block_written_before_the_hook_is_still_delivered(hub, rooms):
+def test_a_block_written_before_the_hook_is_still_delivered(hub, rooms, monkeypatch):
     """THE GENERAL DEFECT (2026-08-07). Every delivery mechanism on this hub
     was write-triggered, so a coordination fact was lost for every row
     already written and for every seat that was down when it happened.
@@ -778,6 +778,7 @@ def test_a_block_written_before_the_hook_is_still_delivered(hub, rooms):
 
     State the hub can derive must be deliverable FROM the state."""
     lead, worker = rooms
+    monkeypatch.setattr(hub, "channel_sla", lambda ch: 0.0)  # a legacy row is older than any SLA
     # A block written straight to the DB — the hook never ran.
     hub.db.store_set("open-room", "claim:legacy",
                      {"owner": "lead", "status": "blocked",
@@ -806,8 +807,9 @@ def test_the_sweep_and_the_write_hook_share_one_dedupe(hub, rooms):
                 if "YOU ARE THE BLOCKER" in m.body]) == 1
 
 
-def test_a_resolved_block_stops_being_swept(hub, rooms):
+def test_a_resolved_block_stops_being_swept(hub, rooms, monkeypatch):
     lead, _ = rooms
+    monkeypatch.setattr(hub, "channel_sla", lambda ch: 0.0)
     hub.db.store_set("open-room", "claim:x",
                      {"owner": "lead", "status": "blocked",
                       "blocked_on": "seat", "needs_from": "worker",

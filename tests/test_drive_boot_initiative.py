@@ -60,6 +60,11 @@ def _lane(d: Driver, monkeypatch, debt=NOTHING_OWED) -> list[str]:
         d, "run_work_turn",
         lambda *, prompt_override=None: (seen.append(prompt_override or ""),
                                          True)[1])
+    # A newborn's one pass is a BOOT RECEPTION turn (whoami, charter, inbox),
+    # not a lane chunk: measured live, the lane pass on an empty room
+    # manufactured an ask and two premature builds. Captured as "BOOT".
+    monkeypatch.setattr(d, "run_turn",
+                        lambda **kw: (seen.append("BOOT"), True)[1])
     d._initiative_step()
     return seen
 
@@ -70,9 +75,9 @@ def test_a_seat_that_has_never_taken_a_turn_gets_its_one_pass(home, monkeypatch)
     d = _seat(home)
     assert d._turn_times == [], "premise: a newborn has no turn history"
 
-    assert _lane(d, monkeypatch), (
-        "a newborn seat was refused the only lane that lets it act on its "
-        "mission — this is scribe never saying hi")
+    assert _lane(d, monkeypatch) == ["BOOT"], (
+        "a newborn seat gets exactly one boot reception pass — the turn that "
+        "reads its mission (scribe saying hi) — and never a lane chunk")
 
 
 def test_the_pass_is_once_per_process_not_once_per_loop(home, monkeypatch):
@@ -89,7 +94,7 @@ def test_the_pass_is_once_per_process_not_once_per_loop(home, monkeypatch):
     """
     monkeypatch.setattr("agora.drive.DRIVE_INITIATIVE_COOLDOWN", 0.0)
     d = _seat(home)
-    assert _lane(d, monkeypatch), "first pass"
+    assert _lane(d, monkeypatch) == ["BOOT"], "first pass is the boot"
     assert d._last_initiative > 0, "the pass must stamp the clock"
 
     assert not _lane(d, monkeypatch), (

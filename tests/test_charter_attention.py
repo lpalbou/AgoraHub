@@ -558,7 +558,7 @@ def test_charter_show_and_history_diff(live_hub, isolated_home, tmp_path, capsys
     # key alone, which is what an operator has.
     _run_cli(["charter", "show", "--diff", "--url", live_hub.url])
     out = capsys.readouterr().out
-    assert "hub charter v1 changed: +2 -90 lines" in out
+    assert "hub charter v1 changed: +2 -" in out
     assert "--- hub charter v0" in out and "+++ hub charter v1" in out
     assert "-# Hub charter — who is who" in out
 

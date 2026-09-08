@@ -382,10 +382,11 @@ def test_operator_broadcast_survives_a_bystanders_partial_reply():
 
 
 def test_operator_broadcast_discharges_on_the_operators_own_word():
-    """The human can always settle their own request."""
+    """The human settles their own request with `resolved`; a plain reply
+    is a reply — "no, do it over" must not close what it rejects."""
     parent = _op_msg()
     assert discharge_state(parent, [_msg("laurent", status="reply")],
-                           OPS).discharged is True
+                           OPS).discharged is False
     assert discharge_state(parent, [_msg("laurent", status="resolved")],
                            OPS).closed is True
 
@@ -440,6 +441,8 @@ def test_addressed_operator_commission_survives_any_mere_reply():
                      data={"evidence": [{"kind": "fs", "ref": "n.md@7"}]})],
         OPS, dels).discharged is True
     assert discharge_state(named, [_msg("laurent", status="reply")],
+                           OPS, dels).discharged is False
+    assert discharge_state(named, [_msg("laurent", status="resolved")],
                            OPS, dels).discharged is True
 
 
@@ -516,6 +519,8 @@ def test_answering_a_commissions_QUESTIONS_does_not_deliver_its_WORK():
 
     # ...and so does the operator's own word.
     assert discharge_state(parent, [answered, _msg("laurent", status="reply")],
+                           OPS, DELEGATES, 0.0, 1.0).closed is False
+    assert discharge_state(parent, [answered, _msg("laurent", status="resolved")],
                            OPS, DELEGATES, 0.0, 1.0).closed is True
 
 
@@ -692,7 +697,8 @@ def test_linked_claim_matches_the_channel_seq_form_too():
 
 
 def test_operator_engagement_also_clears_the_commission():
-    """The human's own word settles their request wherever it stands."""
+    """The human's `resolved` settles their request wherever it stands; a
+    plain reply keeps it open (delivered is not accepted)."""
     service = HubService(Database(":memory:"), rate_per_minute=600.0)
     op, _ = service.register_agent("laurent", "Laurent", operator=True, mission="seat laurent")
     delegate, _ = service.register_agent("assistant", "Assistant", mission="seat assistant")
@@ -705,7 +711,11 @@ def test_operator_engagement_also_clears_the_commission():
         body="ack", status=Status.reply, reply_to=m.id))
     assert m.id in {r.id for r in service.owed(delegate).to_answer}
     service.post_message(op, "novel", PostMessage(
-        body="never mind — cancelling this", status=Status.reply,
+        body="looks wrong, do it over", status=Status.reply,
+        reply_to=m.id))
+    assert m.id in {r.id for r in service.owed(delegate).to_answer}
+    service.post_message(op, "novel", PostMessage(
+        body="never mind — cancelling this", status=Status.resolved,
         reply_to=m.id))
     assert m.id not in {r.id for r in service.owed(delegate).to_answer}
 

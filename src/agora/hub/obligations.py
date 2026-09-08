@@ -415,8 +415,15 @@ def discharge_state(parent: Message, replies: list[Message],
         kind of claim. An UNADDRESSED commission still has no addressee to
         pay it, so it stays the operator's to close, which is the case that
         rule was written for."""
+        # DELIVERED IS NOT ACCEPTED (2026-09-05). An operator's plain reply
+        # used to settle their own request — including "no, do it over"
+        # (dm:agora--laurent#140 in the production record; 17 of 33
+        # seat-closed commissions were followed by the human's rejection
+        # within 48 h). Only the operator's own `resolved` closes it; a
+        # reply is a reply. The delegate's cited report still discharges
+        # the delegate (delivered), and the thread waits for the requester.
         return any(
-            r.sender in operators
+            (r.sender in operators and r.status.value == "resolved")
             or (r.status.value == "resolved" and _cites_evidence(r)
                 and (r.sender in delegates or r.sender in named))
             for r in replies)

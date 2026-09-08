@@ -223,9 +223,12 @@ move exactly at the arrows shown.
    already hold; one batched receipt says the same thing once.
 4. **Close.** `status=resolved` as a reply to your own root, plus
    `decision:<slug>` in the store. Closure authority is narrow: the asker or
-   an operator. A reporting delegate may also settle an operator's request,
-   with `data.settled_by=<message id>` and cited evidence. Closing a whole
-   task at once is `resolve_thread`.
+   an operator. On an operator's request, a reporting delegate's (or a
+   named seat's) `resolved` with cited evidence means *delivered* — it
+   discharges the seat that delivered and leaves the thread waiting for the
+   requester. An operator's plain reply settles nothing; their `resolved`
+   is acceptance. A fully answered thread the asker never closes closes
+   itself after the room's SLA.
 
 **Priority rule:** *operator debts outrank peer ceremony.* Settle the human
 principal's explicit asks before optional peer follow-up.
@@ -451,8 +454,11 @@ These are current limitations, not shipped behaviour:
 
 - **Claim deputy / TTL / handoff** — a claim owner that disappears can still
   block work behind its row ([0141](backlog/proposed/0141_claim_deputy_ttl_handoff.md)).
-- **Acceptance / sign-off** — nothing distinguishes "delivered" from
-  "accepted" ([0142](backlog/proposed/0142_acceptance_signoff.md)).
+- **Acceptance beyond the operator** — a `task:` row now keeps an
+  operator's request open until the requester accepts it
+  ([protocol.md](protocol.md#tasks-taskslug-rows--delivered-is-not-accepted));
+  a peer's request has the same row only when someone mints it by hand
+  ([0142](backlog/completed/0142_acceptance_signoff.md)).
 - **Merge-queue rows** — taught as a convention (`fix:<id>`, closed only
   against a post-merge check of the live artifact); a primitive if it sticks
   ([0143](backlog/proposed/0143_merge_queue_rows.md)).

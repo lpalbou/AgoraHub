@@ -1054,6 +1054,44 @@ def _admin_request(method: str, path: str, payload: dict | None = None,
         return 0, {}
 
 
+def cmd_task(args: argparse.Namespace) -> None:
+    """`agora task list|accept|reject` — the requester's verdict on a
+    delivered task, from the terminal (0.18.0). The row is a store row:
+    `accept` and `reject` write `status` (and the verdict) with CAS."""
+    async def go(c, a):
+        if a.task_action == "list":
+            rows = await c.store_keys(a.channel)
+            for r in rows:
+                key = str(r.get("key", ""))
+                if not key.startswith("task:"):
+                    continue
+                row = await c.store_get(a.channel, key)
+                v = row.get("value") or {}
+                print(f"{key}  {v.get('status', 'open'):<10} requester="
+                      f"{v.get('requester')} coordinator={v.get('coordinator')}"
+                      f"  {v.get('title') or v.get('source') or ''}")
+            return
+        if not a.slug:
+            sys.exit("task accept|reject: SLUG is required (agora task list "
+                     "CHANNEL shows them)")
+        key = a.slug if a.slug.startswith("task:") else f"task:{a.slug}"
+        row = await c.store_get(a.channel, key)
+        value = dict(row.get("value") or {})
+        if a.task_action == "accept":
+            value["status"] = "accepted"
+        else:
+            if not a.verdict.strip():
+                sys.exit("task reject: --verdict is required — say what is "
+                         "missing")
+            value["status"] = "rejected"
+            value["verdict"] = a.verdict.strip()
+        out = await c.store_set(a.channel, key, value,
+                                expect_version=row.get("version"))
+        print(f"{key} -> {out.get('value', {}).get('status')} "
+              f"(v{out.get('version')})")
+    _run_agent(args, go)
+
+
 def cmd_store(args: argparse.Namespace) -> None:
     """`agora store get|set|list` — the CLI store verb (field gap
     2026-07-27, framework dm#32: with the MCP bridge flaky, at least two
@@ -4631,6 +4669,18 @@ def build_parser() -> argparse.ArgumentParser:
                     default=None, help="CAS guard (0 = must not exist)")
     st.add_argument("--prefix", default="", help="filter for list")
     st.set_defaults(func=cmd_store)
+
+    tk = _agent_parser("task", "the task rows of a channel: agora task list "
+                               "CHANNEL | accept CHANNEL SLUG | reject "
+                               "CHANNEL SLUG --verdict '...' (a delivered "
+                               "task waits for its requester's verdict)")
+    tk.add_argument("task_action", choices=["list", "accept", "reject"])
+    tk.add_argument("channel", help="the channel the task row lives in")
+    tk.add_argument("slug", nargs="?", default=None,
+                    help="the task slug (the part after `task:`, e.g. msg-19)")
+    tk.add_argument("--verdict", default="",
+                    help="reject: what is missing (required)")
+    tk.set_defaults(func=cmd_task)
 
     ad = _agent_parser("add", "invite seats to an EXISTING room you own: "
                               "agora add CHANNEL seat1 seat2 [--why ...] "

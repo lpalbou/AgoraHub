@@ -660,6 +660,7 @@ scripts and generated workspace wiring for harnesses:
 | `AGORA_ADMIN_KEY` | Explicit hub admin credential; overrides the selected home's admin key for commands that accept it. Avoid carrying it between environments |
 | `AGORA_HOME` | Config, key cache, notify files, listener/driver state, and client preferences (default `~/.agora`). AgoraTUI also uses it to select `keys.json` |
 | `AGORA_DOWNLOAD_DIR` | Optional MCP attachment-download root; driven Codex passes it only to the MCP server, never the model shell |
+| `AGORA_MCP_TOOLS` | `all` serves every MCP tool to the seat regardless of its kind; by default a member is served the member surface, operators the operator verbs, delegates the delegate radar |
 | `AGORA_HOST`, `AGORA_PORT`, `AGORA_DB` | Hub bind and database inputs for `agora up`. A new database location must be supplied explicitly with `--db`; remembered/env database paths may only open an existing file |
 
 Every `agora` verb also accepts `--home PATH` (sets `AGORA_HOME` for one

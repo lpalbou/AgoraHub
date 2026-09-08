@@ -122,6 +122,7 @@ from .attention import DEFAULT_RESPONSE_SLA_MINUTES, AttentionPolicy, SlidingWin
 from .notify import FanOut, LoopBinder, Notifier
 from .obligations import (
     DischargeState,
+    _cites_evidence,
     _closes,
     ask_addressees,
     asks_of,
@@ -2262,7 +2263,8 @@ class HubService:
                         "question. If they have gone quiet, ask an operator.")
             data["settled_by"] = pointer
         if "evidence" in data:
-            data["evidence"] = self._validate_evidence(channel, data["evidence"])
+            data["evidence"] = self._validate_evidence(channel, data["evidence"],
+                                                       agent_id=sender or None)
         if (payload.status == Status.resolved and payload.reply_to
                 and "settled_by" not in data):
             # A reporting delegate's `resolved` on an operator's request IS
@@ -3045,6 +3047,16 @@ class HubService:
             # a read receipt on the answer is what `owed.to_consume` clears
             # on. One message, N debts settled, one line in the transcript.
             self.db.mark_read(target, agent.id)
+        # Task rows ride post-commit and never fail the post (0.18.0): an
+        # operator's root in a shared room mints one; a `resolved` on a root
+        # that has one may deliver or accept it.
+        try:
+            if message.reply_to is None:
+                self._task_mint(message)
+            elif message.status == Status.resolved:
+                self._task_on_resolved(message, parent)
+        except Exception:
+            pass
         self._wake(message)
         # Routing nudges (0133/0135) ride post-commit and NEVER fail the
         # post: a teaching gesture that could 500 a message would be worse
@@ -4643,6 +4655,16 @@ class HubService:
         # operator's own verb) — it lands post-epoch and obliges cleanly.
         if m.created_at < self._directive_epoch:
             return False
+        if m.status == Status.fyi and isinstance(m.data, dict) and (
+                m.data.get("invite_token") or m.data.get("channel_invite")):
+            # AN INVITE IS NOT A DIRECTIVE (2026-09-05). Room invites ride
+            # as addressed fyi DMs carrying the token; when the inviter is an
+            # operator every invitee owed a reply for it, and the record
+            # shows what that bought: replies whose whole content was
+            # "joined" (B round 2: 64 ceremony replies on 339 operator
+            # addressed fyi/reply rows, nearly all invite notes). Joining
+            # the room is the act; the DM obliges nothing.
+            return False
         if m.sender in self.operator_ids():
             return True
         if m.status == Status.fyi:
@@ -5342,6 +5364,7 @@ class HubService:
                 title=m.title, answered_by=last.sender,
                 answered_at=last.created_at,
                 declined_asks=ds.declined, declined_by=declined_by,
+                task=self._task_key_for(m.channel, m.seq),
             ))
         # Open phases across the agent's rooms (0140/2). Not a debt: a
         # standing constraint on WHICH work is legitimate now. It rides
@@ -5597,6 +5620,15 @@ class HubService:
                 self._require_gate(channel, agent, "phase_complete")
             self._validate_phase_row(value, agent,
                                      self.db.store_get(channel, key))
+        if key.startswith(self._TASK_PREFIX):
+            if len(key) <= len(self._TASK_PREFIX):
+                raise HubError(400, "task keys name a request: task:<slug> "
+                                    "(the hub mints task:msg-<seq>)")
+            current = self.db.store_get(channel, key)
+            refusal = self._task_writer_refusal(channel, agent, current)
+            if refusal is not None:
+                raise HubError(403, refusal)
+            self._validate_task_row(channel, value, agent, current)
         if key.startswith("claim:") and isinstance(value, dict):
             # Identity fields inside store values are validated against the
             # caller (0068/ADR-0004; live-test finding): you may claim FOR
@@ -5746,6 +5778,17 @@ class HubService:
                                     for m in self.db.list_members(channel)}
                     if park_ring not in ring_members or park_ring == agent.id:
                         undeliverable_ring, park_ring = park_ring, ""
+                    elif self._blocker_already_engaged(channel, value,
+                                                       park_ring):
+                        # THE NAMED SEAT IS ALREADY ON IT (2026-09-05, exp1):
+                        # parser had answered render's ask 60 s before render
+                        # parked on parser, and the hub rang parser anyway;
+                        # parser spent a turn replying "already delivered,
+                        # see #13". A seat that replied into the row's own
+                        # thread within the room's SLA, or is the human, is
+                        # not told to hurry. The sweep still rings if the row
+                        # is still parked past the SLA.
+                        park_ring = ""
             # Claim/key consistency (0093): when the claim key's task part
             # parses as a WORK ID and the value carries an `item` field,
             # they must agree — a pointer row that points two ways would
@@ -6554,7 +6597,8 @@ class HubService:
     #: Evidence refs a completion report may cite. Capped like attachments.
     MAX_EVIDENCE_REFS = 12
 
-    def _validate_evidence(self, channel: str, raw: Any) -> list[dict[str, Any]]:
+    def _validate_evidence(self, channel: str, raw: Any,
+                           agent_id: str | None = None) -> list[dict[str, Any]]:
         """Resolve `data.evidence` citations against this channel, and stamp
         SERVER TRUTH over whatever the sender wrote.
 
@@ -6596,6 +6640,26 @@ class HubService:
             if not ref:
                 raise HubError(400, f"evidence ref of kind '{kind}' names "
                                     "nothing — cite what you verified")
+            # CROSS-CHANNEL CITATIONS (2026-09-05). A completion report is a
+            # reply on the operator's thread, usually in #commons, while the
+            # review rows and files it cites live in the focused room. Twice
+            # measured (fund4 2026-08-12, exp1 2026-09-05) the delegate had
+            # to ask a peer to COPY its review row into the report's channel
+            # to satisfy a same-channel lookup. An optional `channel` on the
+            # item names the room a `store`/`fs` ref resolves in; the citer
+            # must be a member there, so a citation never reads a room the
+            # reader could not.
+            cited = str(item.get("channel") or "").strip() or channel
+            if cited != channel:
+                if kind not in ("fs", "store"):
+                    raise HubError(400, "evidence `channel` applies to fs and "
+                                        "store refs only")
+                if not self.db.get_channel(cited):
+                    raise HubError(400, f"evidence cites channel '{cited}', "
+                                        "which does not exist")
+                if agent_id and not self.db.is_member(cited, agent_id):
+                    raise HubError(400, f"evidence cites '{cited}', a channel "
+                                        "you are not a member of")
             if kind == "fs":
                 # "path@version" — the version is what makes it a citation
                 # rather than a gesture at a moving file.
@@ -6605,16 +6669,19 @@ class HubService:
                                         f"(got '{ref}') — the version is what "
                                         "pins the claim")
                 norm = self._normalize_fs_path(path)
-                row = self.db.fs_version(channel, FS_PREFIX + norm, int(version))
+                row = self.db.fs_version(cited, FS_PREFIX + norm, int(version))
                 if row is None:
                     raise HubError(400, f"evidence cites '{norm}@{version}', "
-                                        f"which is not in '{channel}' — write "
+                                        f"which is not in '{cited}' — write "
                                         "the artifact to the channel before "
                                         "citing it as delivered")
-                out.append({"kind": "fs", "ref": f"{norm}@{int(version)}",
-                            "size_bytes": len(str(row["value"])),
-                            "updated_by": row["updated_by"],
-                            "updated_at": row["updated_at"], "verified": True})
+                fs_item = {"kind": "fs", "ref": f"{norm}@{int(version)}",
+                           "size_bytes": len(str(row["value"])),
+                           "updated_by": row["updated_by"],
+                           "updated_at": row["updated_at"], "verified": True}
+                if cited != channel:
+                    fs_item["channel"] = cited
+                out.append(fs_item)
             elif kind == "store":
                 # `key@version` IS ACCEPTED (agora-wui, 2026-08-22). The two
                 # lanes had opposite conventions — `fs` REQUIRES `path@version`
@@ -6627,11 +6694,11 @@ class HubService:
                 # The verbatim lookup goes FIRST so a key that really contains
                 # `@` still resolves; only then is a trailing `@<digits>`
                 # read as a version.
-                entry = self.db.store_get(channel, ref)
+                entry = self.db.store_get(cited, ref)
                 if entry is None:
                     key, _, want = ref.rpartition("@")
                     if key and want.isdigit():
-                        entry = self.db.store_get(channel, key)
+                        entry = self.db.store_get(cited, key)
                         if entry is not None and entry.version != int(want):
                             # The store keeps only HEAD, so v1 cannot be
                             # served back. Say which version the reader would
@@ -6648,7 +6715,7 @@ class HubService:
                             ref = key
                 if entry is None:
                     raise HubError(400, f"evidence cites store row '{ref}', "
-                                        f"which does not exist in '{channel}'")
+                                        f"which does not exist in '{cited}'")
                 # A STORE ROW HAS NO ARCHIVE (2026-08-13). `fs` evidence
                 # cites `path@version` and the hub can serve those exact
                 # bytes back forever; the store keeps only HEAD, so a cited
@@ -6665,6 +6732,7 @@ class HubService:
                 # recompute it: sha256 of json.dumps(value, sort_keys=True,
                 # separators=(",", ":")).
                 out.append({"kind": "store", "ref": ref,
+                            **({"channel": cited} if cited != channel else {}),
                             "version": entry.version,
                             "sha256": hashlib.sha256(json.dumps(
                                 entry.value, sort_keys=True, default=str,
@@ -7989,6 +8057,287 @@ class HubService:
     #    fleet had threads, what it lacked was one current-phase FACT every
     #    reception pass reads without asking anyone.
 
+    # =====================================================================
+    # TASKS (0.18.0): one row per operator request, from mint to acceptance
+    # =====================================================================
+    #
+    # The record showed the same failure in every fleet room: "delivered" was
+    # asserted by the seat that built the thing and nothing ever recorded
+    # whether the person who asked for it agreed (at-test #293/#294, scifi
+    # #204/#211, agora-wui #100, rtype-g4 #167). A `task:` row is the
+    # smallest object that carries a request across rooms and turns and
+    # keeps DELIVERED and ACCEPTED apart:
+    #
+    #   open --(cited completion report)--> delivered --(requester)--> accepted
+    #                                        \--(requester: rejected)--> open
+    #
+    # The hub mints it when an operator's open/blocked root lands in a
+    # shared room, stamps `delivered` when a cited `resolved` from the
+    # reporting delegate or a named seat lands on that root, and stamps
+    # `accepted` when the requester's own `resolved` lands. `rejected` is the
+    # requester's verdict written on the row; the task re-opens and counts
+    # the rejection. Everything the hub knows is STAMPED (requester, report,
+    # evidence, who decided, when); a writer supplies only coordinator,
+    # rooms, title and the verdict. No new table, no new endpoint: it is a
+    # store row with a validator, like `phase:`.
+    _TASK_PREFIX = "task:"
+    _TASK_FIELDS = {"source", "requester", "coordinator", "rooms", "status",
+                    "title", "report", "evidence", "delivered_by",
+                    "delivered_at", "decided_by", "decided_at", "verdict",
+                    "rejections", "declared_by", "declared_at"}
+    _TASK_STAMPED = {"requester", "report", "evidence", "delivered_by",
+                     "delivered_at", "decided_by", "decided_at", "rejections",
+                     "declared_by", "declared_at"}
+    TASK_STATUSES = ("open", "delivered", "accepted", "rejected")
+
+    def _delegation_reaches(self, agent_id: str, channel: str,
+                            powers: tuple[str, ...]) -> bool:
+        """Does `agent_id` hold one of `powers` with a scope covering
+        `channel` (hub-wide, `*`, or that channel)?"""
+        for d in self.active_delegations():
+            if d["agent_id"] != agent_id:
+                continue
+            if not any(p in (d.get("powers") or ()) for p in powers):
+                continue
+            scope = str(d.get("scope") or "").strip()
+            if scope in ("", "*") or scope == channel:
+                return True
+        return False
+
+    def _resolve_source(self, channel: str, src: Any) -> Message | None:
+        """A task's `source`: `channel#seq` or a message id, in this channel."""
+        ref = str(src or "").strip()
+        if not ref:
+            return None
+        if "#" in ref:
+            ch, _, seq = ref.rpartition("#")
+            if not seq.isdigit() or (ch and ch != channel):
+                return None
+            return self.db.get_message_by_seq(channel, int(seq))
+        m = self.db.get_message(ref)
+        return m if m is not None and m.channel == channel else None
+
+    def _task_key_for(self, channel: str, seq: int) -> str | None:
+        """The task row minted for `channel#seq`, if one exists."""
+        key = f"{self._TASK_PREFIX}msg-{seq}"
+        return key if self.db.store_get(channel, key) is not None else None
+
+    def _task_writer_refusal(self, channel: str, agent: AgentInfo,
+                             current: Any) -> str | None:
+        """Who may write a task row: the requester, an operator, the
+        coordinator, or a delegate whose grant reaches this channel."""
+        if agent.operator:
+            return None
+        value = (current.value if current is not None
+                 and isinstance(current.value, dict) else {})
+        if agent.id in (value.get("requester"), value.get("coordinator")):
+            return None
+        if self._delegation_reaches(agent.id, channel,
+                                    ("reporting", "ruling", "operational",
+                                     "proxy")):
+            return None
+        if current is None:
+            return None   # anyone may mint a task from a root they can read
+        return (f"a task row is written by its requester, its coordinator, "
+                "an operator, or a delegate whose grant reaches this "
+                "channel — ask one of them")
+
+    def _validate_task_row(self, channel: str, value: Any, agent: AgentInfo,
+                           current_row: Any = None) -> None:
+        """Shape-check a `task:*` row, carry the hub-stamped fields forward,
+        and apply the requester's verdict."""
+        if not isinstance(value, dict):
+            raise HubError(400, "task rows must be objects: {source, "
+                                "coordinator?, rooms?, title?, status?, "
+                                "verdict?}")
+        unknown = set(value) - self._TASK_FIELDS
+        if unknown:
+            raise HubError(400, f"unknown task fields: {sorted(unknown)} "
+                                f"(allowed: {sorted(self._TASK_FIELDS)})")
+        prior = (current_row.value if current_row is not None
+                 and isinstance(current_row.value, dict) else {})
+        # Stamped fields are the hub's: a writer never sets them.
+        for field_name in self._TASK_STAMPED:
+            if field_name in prior:
+                value[field_name] = prior[field_name]
+            else:
+                value.pop(field_name, None)
+        src = value.get("source") or prior.get("source")
+        source = self._resolve_source(channel, src)
+        if source is None or source.kind != Kind.message:
+            raise HubError(400, "task needs source: the request it tracks, "
+                                "as '<channel>#<seq>' or a message id in "
+                                "this channel")
+        if source.reply_to is not None:
+            raise HubError(400, "a task tracks a thread ROOT (the request "
+                                "itself), not a reply")
+        value["source"] = f"{channel}#{source.seq}"
+        value["requester"] = source.sender
+        title = value.get("title", prior.get("title") or source.title or "")
+        if not isinstance(title, str) or len(title) > 120:
+            raise HubError(400, "task title must be a string of <= 120 chars")
+        value["title"] = sanitize_text(title.strip(), 120, field="task title")
+        coord = value.get("coordinator", prior.get("coordinator"))
+        if coord is not None:
+            if not isinstance(coord, str) or len(coord) > 64:
+                raise HubError(400, "task coordinator must be a seat id")
+            coord = coord.strip() or None
+        value["coordinator"] = coord
+        rooms = value.get("rooms", prior.get("rooms") or [])
+        if (not isinstance(rooms, list) or len(rooms) > 16
+                or any(not isinstance(r, str) or not r.strip() or len(r) > 100
+                       for r in rooms)):
+            raise HubError(400, "task rooms must be <= 16 channel names")
+        value["rooms"] = [r.strip() for r in rooms]
+        status = value.get("status", prior.get("status") or "open")
+        if status not in self.TASK_STATUSES:
+            raise HubError(400, "task status must be one of "
+                                f"{', '.join(self.TASK_STATUSES)}")
+        prior_status = prior.get("status") or "open"
+        verdict = value.get("verdict")
+        if verdict is not None and (not isinstance(verdict, str)
+                                    or len(verdict) > 400):
+            raise HubError(400, "task verdict must be a string of <= 400 chars")
+        if status != prior_status:
+            if status == "delivered":
+                raise HubError(400, "`delivered` is stamped by the hub when a "
+                                    "cited `resolved` lands on the request — "
+                                    "post the completion report instead")
+            if status in ("accepted", "rejected"):
+                requester = value["requester"]
+                if not (agent.operator or agent.id == requester
+                        or self._delegation_reaches(agent.id, channel,
+                                                    ("proxy",))):
+                    raise HubError(403, f"only {requester} (who asked), an "
+                                        "operator, or a proxy delegate for "
+                                        "this channel may accept or reject "
+                                        "a task")
+                if status == "rejected" and not (verdict and verdict.strip()):
+                    raise HubError(400, "rejecting a task needs a verdict: "
+                                        "say what is missing")
+                value["decided_by"] = agent.id
+                value["decided_at"] = time.time()
+                if status == "rejected":
+                    # A rejection re-opens the task and is counted; the
+                    # verdict stays on the row for the seats picking it up.
+                    value["rejections"] = int(prior.get("rejections") or 0) + 1
+                    status = "open"
+            elif status == "open" and prior_status in ("accepted",):
+                raise HubError(400, "an accepted task does not re-open — mint "
+                                    "a new one from a new request")
+        value["status"] = status
+        if verdict is not None:
+            value["verdict"] = sanitize_text(verdict.strip(), 400,
+                                             field="task verdict")
+        elif "verdict" in prior:
+            value["verdict"] = prior["verdict"]
+        value.setdefault("rejections", int(prior.get("rejections") or 0))
+        value["declared_by"] = prior.get("declared_by") or agent.id
+        value["declared_at"] = prior.get("declared_at") or time.time()
+
+    def _task_mint(self, message: Message) -> None:
+        """Mint `task:msg-<seq>` for an operator's open/blocked root in a
+        shared room. Post-commit and never a refusal. DMs are not minted
+        automatically: a human's quick question to one seat is not a task
+        until someone says so (any member may `store_set` one)."""
+        if (message.kind != Kind.message or message.reply_to is not None
+                or message.status not in (Status.open, Status.blocked)
+                or message.channel.startswith(DM_PREFIX)
+                or message.sender not in self.operator_ids()):
+            return
+        key = f"{self._TASK_PREFIX}msg-{message.seq}"
+        if self.db.store_get(message.channel, key) is not None:
+            return
+        delegates = [d for d in self.reporting_delegate_ids()
+                     if self._delegation_reaches(d, message.channel,
+                                                 ("reporting",))]
+        coordinator = (sorted(delegates)[0] if delegates
+                       else (message.to[0] if message.to else None))
+        self.db.store_set(message.channel, key, {
+            "source": f"{message.channel}#{message.seq}",
+            "requester": message.sender,
+            "coordinator": coordinator,
+            "rooms": [],
+            "status": "open",
+            "title": sanitize_text((message.title or "").strip(), 120,
+                                   field="task title"),
+            "rejections": 0,
+            "declared_by": "hub", "declared_at": time.time(),
+        }, "hub", None)
+
+    def _task_on_resolved(self, message: Message, parent: Message | None) -> None:
+        """Move a task on a `resolved` reply to its source: the requester's
+        (or an operator's) word accepts; a cited completion report from the
+        reporting delegate or a seat the request named delivers."""
+        if (parent is None or message.status != Status.resolved
+                or message.reply_to != parent.id):
+            return
+        key = f"{self._TASK_PREFIX}msg-{parent.seq}"
+        stored = self.db.store_get(parent.channel, key)
+        if stored is None or not isinstance(stored.value, dict):
+            return
+        value = dict(stored.value)
+        status = str(value.get("status") or "open")
+        requester = str(value.get("requester") or parent.sender)
+        now = time.time()
+        if message.sender == requester or message.sender in self.operator_ids():
+            if status == "accepted":
+                return
+            value.update({"status": "accepted", "decided_by": message.sender,
+                          "decided_at": now})
+        else:
+            named = set(parent.to) | ask_addressees(parent)
+            if status != "open" or not _cites_evidence(message):
+                return
+            if not (message.sender in self.reporting_delegate_ids()
+                    or message.sender in named
+                    or message.sender == value.get("coordinator")):
+                return
+            value.update({"status": "delivered",
+                          "report": f"{message.channel}#{message.seq}",
+                          "evidence": (message.data or {}).get("evidence"),
+                          "delivered_by": message.sender,
+                          "delivered_at": now})
+        self.db.store_set(parent.channel, key, value, "hub", stored.version)
+
+    def task_rows(self, channel: str) -> list[dict[str, Any]]:
+        """Every `task:*` row in a channel, as a card."""
+        rows: list[dict[str, Any]] = []
+        for entry in self.db.store_keys(channel):
+            key = entry["key"]
+            if not key.startswith(self._TASK_PREFIX):
+                continue
+            stored = self.db.store_get(channel, key)
+            if stored is None or not isinstance(stored.value, dict):
+                continue
+            v = stored.value
+            rows.append({
+                "channel": channel, "key": key,
+                # `slug`, not `task`: board claim rows already serve `task`
+                # as the CLAIM slug (typed as BoardClaim.task in agoratui),
+                # and one word must not mean two things on one surface.
+                "slug": key[len(self._TASK_PREFIX):],
+                "title": str(v.get("title") or ""),
+                "source": str(v.get("source") or ""),
+                "requester": str(v.get("requester") or ""),
+                "coordinator": v.get("coordinator"),
+                "rooms": [str(r) for r in (v.get("rooms") or [])],
+                "status": str(v.get("status") or "open"),
+                "report": v.get("report"),
+                "delivered_by": v.get("delivered_by"),
+                "delivered_at": v.get("delivered_at"),
+                "decided_by": v.get("decided_by"),
+                "decided_at": v.get("decided_at"),
+                "rejections": int(v.get("rejections") or 0),
+                "verdict": v.get("verdict"),
+                "version": stored.version,
+                "declared_at": v.get("declared_at"),
+            })
+        rows.sort(key=lambda r: (r["status"] != "delivered",
+                                 r["status"] != "open",
+                                 -(float(r["declared_at"] or 0))))
+        return rows
+
     _PHASE_PREFIX = "phase:"
     _PHASE_FIELDS = {"current", "status", "next", "steward", "paths", "note",
                      "declared_by", "declared_at"}
@@ -8754,9 +9103,12 @@ class HubService:
         # it reads as patience until someone says so.
         next_up.sort(key=lambda r: (not r["owner_can_act"], r["channel"],
                                     r["task"]))
+        tasks = [row for ch in self.db.channels_of(agent.id)
+                 for row in self.task_rows(ch)]
         return {
             "viewer": agent.id,
             "pending_on_me": pending_on_me,
+            "tasks": tasks,
             "queue": queue,
             "proposals": proposals,
             "in_progress": in_progress,
@@ -8764,6 +9116,9 @@ class HubService:
             "pending_review": pending_review,
             "done": done[:20],
             "counts": {"pending_on_me": len(pending_on_me), "queue": len(queue),
+                       "tasks": len(tasks),
+                       "tasks_delivered": sum(1 for t in tasks
+                                              if t["status"] == "delivered"),
                        "proposals": len(proposals),
                        "in_progress": len(in_progress),
                        "next": len(next_up),
@@ -9056,6 +9411,21 @@ class HubService:
                     else:
                         rows.append(row)
         rows.sort(key=lambda r: -r["age_minutes"])
+        for op in operators:
+            for channel in self.db.channels_of(op):
+                for t in self.task_rows(channel):
+                    if t["status"] != "delivered" or t["requester"] != op:
+                        continue
+                    rows.append({
+                        "kind": "task", "operator": op, "channel": channel,
+                        "key": t["key"], "what": t["title"] or t["source"],
+                        "who_waits": t["delivered_by"] or t["coordinator"] or "",
+                        "report": t["report"],
+                        "age_minutes": round((now - float(t["delivered_at"] or now)) / 60, 1),
+                        "one_action": ("accept it (resolved on the request, or "
+                                       "status=accepted on the row) or reject "
+                                       "it with a verdict"),
+                    })
         return {"computed_at": now, "viewer": agent.id,
                 "operators": operators, "rows": rows, "satisfied": satisfied,
                 "counts": {"rows": len(rows), "satisfied": len(satisfied)}}
@@ -10863,6 +11233,38 @@ class HubService:
                 fired.append(f"waiting-on:{ch}/{key}")
         return fired
 
+    def _blocker_already_engaged(self, channel: str, value: dict[str, Any],
+                                 who: str) -> bool:
+        """Has the seat a park names already engaged that row's thread?
+
+        True when `who` is an operator (a human is never rung by a timer), or
+        when `who` posted into the thread the row cites (`source` /
+        `source_message_id`, as `channel#seq` or an id) — or anywhere in the
+        channel — within the room's SLA. Facts only, no prose read."""
+        if who in self.operator_ids():
+            return True
+        window = self.channel_sla(channel) * 60.0
+        since = time.time() - window
+        src = str(value.get("source") or value.get("source_message_id") or "")
+        parent = None
+        if src:
+            if "#" in src:
+                ch, _, seq = src.rpartition("#")
+                if seq.isdigit():
+                    parent = self.db.get_message_by_seq(ch or channel, int(seq))
+            else:
+                parent = self.db.get_message(src)
+        if parent is not None:
+            for r in self.db.replies_to(parent.id):
+                if r.sender == who and r.created_at >= since:
+                    return True
+        for m in reversed(self.db.get_messages(channel, limit=100)):
+            if m.created_at < since:
+                break
+            if m.sender == who and m.kind == Kind.message:
+                return True
+        return False
+
     def _blocking_sweep(self) -> list[str]:
         """Tell every seat a live block NAMES, whether or not it was told
         when the block was written.
@@ -10941,6 +11343,20 @@ class HubService:
                     fired.append(f"undeliverable-block:{ch}/{key}")
                     continue
                 if not who or who not in members or who == owner:
+                    continue
+                if who in self.operator_ids():
+                    # A human is never told "YOU ARE THE BLOCKER" by a timer
+                    # (commons#9737/#10056 in the production record). Their
+                    # block shows on the desk and in supervise() instead.
+                    continue
+                sla_s = self.channel_sla(ch) * 60.0
+                if time.time() - float(stored.updated_at or 0.0) < sla_s:
+                    # The write hook already rang (or deliberately did not,
+                    # because the seat was engaged); the sweep speaks only
+                    # for a block that has outlived the room's SLA. The
+                    # RETURN PATH is not aged: a blocker who answered the
+                    # ring is reported to the owner at the next sweep.
+                    self._ring_back_if_blocker_answered(ch, key, owner, who)
                     continue
                 needs = needs_txt
                 try:

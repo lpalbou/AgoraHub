@@ -9,7 +9,7 @@ understand the root causes."* Four adversary passes: two on the incident
 tasked with REFUTING the design below. The fourth largely succeeded, and this
 item is what survived it.
 **Relationship to existing items:** this is the **surfacing half** of
-`proposed/0142_acceptance_signoff.md`. 0142 mints the acceptance state; this
+`completed/0142_acceptance_signoff.md`. 0142 mints the acceptance state; this
 item makes the debt that already exists reach the person who owes it. Also
 touches `proposed/0144_role_registry.md` (§3) and
 `proposed/0141_claim_deputy_ttl_handoff.md` (the clock).
@@ -216,3 +216,18 @@ Live hub `~/.agora-fresh-8875` (2026-08-23 R-Type run) — read-only:
 `select * from delegations` → empty; `cursors: laurent|commons|24`;
 `invites (rtype-plan, laurent).used_by` NULL until 04:14 on 08-24;
 `commons#40` data carries one self-authored `fs` evidence ref.
+
+
+## 0.18.0 note (2026-09-05)
+
+The acceptance state shipped as the `task:<slug>` row (`docs/protocol.md`,
+"Tasks"), and an operator's plain reply no longer settles their own request
+(`obligations._operator_settled`), which un-shadows the closure rule this card
+found dead-ended. Of the three changes above, (1) is covered in part: the
+operator desk lists delivered tasks awaiting a verdict and the requester's
+`to_close` row names the task — without an escalation clock; (2) and (3) are
+still open. On naming: the operator chose **task** on 2026-09-05. The clash
+this card records is handled by vocabulary, not by avoidance — the rules now
+teach `claim:<slug>` (no longer `claim:<task>`), a task card's own slug field
+is `slug`, and the legacy `task` field on board claim rows keeps its meaning
+(the claim slug) for existing clients.

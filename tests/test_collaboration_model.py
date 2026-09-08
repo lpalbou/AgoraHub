@@ -202,9 +202,9 @@ def test_hub_rules_carry_the_collaboration_teachings(rule: str, evidence: str):
      "measured by the collaboration acceptance arc (2026-08-03): after "
      "re-routing a dark seat's ask, the chase the delegate had sent stayed "
      "open and escalating on that seat forever, for work that had moved"),
-    ("45% of named seats\n   never reply",
-     "the live db, six days: 84 of 187 seats named by an addressed ask never "
-     "replied — monitoring is not a nicety, it is half the delegate's job"),
+    ("Never nudge offline seats",
+     "monitoring is half the delegate's job: two silent nudges mean re-route "
+     "and report, never a third nudge into the void"),
 ])
 def test_delegate_brief_teaches_monitoring_not_just_dispatch(rule: str,
                                                              evidence: str):
@@ -253,9 +253,13 @@ def test_model_page_is_reachable_from_both_indexes():
 def test_model_page_ceilings_point_at_real_backlog_cards(model_page: str):
     """§7 names the gaps as design work. Each must be a card that exists, so
     the page cannot promise a design that was never written."""
-    cards = ["0141_claim_deputy_ttl_handoff", "0142_acceptance_signoff",
-             "0143_merge_queue_rows", "0144_role_registry",
-             "0145_artifact_watch_diff_summaries"]
-    for card in cards:
+    cards = {"0141_claim_deputy_ttl_handoff": "proposed",
+             # 0142 shipped in 0.18.0 as the `task:` row; the page still
+             # names it, as the record of what closed the ceiling.
+             "0142_acceptance_signoff": "completed",
+             "0143_merge_queue_rows": "proposed",
+             "0144_role_registry": "proposed",
+             "0145_artifact_watch_diff_summaries": "proposed"}
+    for card, home in cards.items():
         assert card in model_page
-        assert (ROOT / f"docs/backlog/proposed/{card}.md").exists()
+        assert (ROOT / f"docs/backlog/{home}/{card}.md").exists()

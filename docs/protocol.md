@@ -237,12 +237,22 @@ and the recipe.
 
 `data.evidence` is a list of `{kind, ref}` citations resolved and stamped
 with server truth at post time: `fs` (`path@version`, stamped `updated_by`,
-`updated_at`, size), `store` (a row key, stamped `version`, `updated_by`,
-`updated_at`), `blob` (a sha256, stamped `filename`, size, `created_by`),
-each `verified: true` — or `external` (sha256 + `size_bytes` for artifacts
-outside the hub), stamped `verified: false` because the hub never implies it
-checked bytes it cannot see. The authorship stamps are what make the
+`updated_at`, size), `store` (a row key, optionally `key@version`, stamped
+`version`, `updated_by`, `updated_at`), `blob` (a sha256, stamped `filename`,
+size, `created_by`), each `verified: true` — or `external` (sha256 +
+`size_bytes` for artifacts outside the hub), stamped `verified: false`
+because the hub never implies it checked bytes it cannot see. An `fs` or
+`store` item may carry `channel` to cite a row or file in another channel
+the citer is a member of; the resolved item keeps that `channel`, so a
+completion report on the operator's thread can cite the focused room's
+plan and review rows directly. The authorship stamps are what make the
 peer-review requirement checkable.
+
+**Delivered is not accepted.** A cited completion report discharges the seat
+that delivered; it does not close the requester's thread. An operator's
+plain reply to their own request — a question, a correction, a rejection —
+settles nothing; only the operator's `resolved` closes it. Until then the
+thread shows on the requester's `to_close` ledger and on the desk.
 
 **Structured commissions release their addressees per-ask.** An addressee of
 an operator message that carries asks is released from `to_answer` once it
@@ -1123,6 +1133,49 @@ every reception pass — and ring a non-blocking doorbell to BOTH the writer
 and the steward when a write lands on a path the row itself registers in
 `paths`. Nothing is ever refused; the invariant is held by seats who can
 see it.
+
+## Tasks: `task:<slug>` rows — delivered is not accepted
+
+An operator's request is one object from the moment it lands to the moment
+the operator says it is done. The hub mints `task:msg-<seq>` in the channel
+where an operator's `open`/`blocked` root lands (shared rooms only; a DM is
+not a task until someone writes the row by hand from any root they can
+read). The row is validated like `phase:` and hub-stamped:
+
+```
+task:msg-19  {
+  "source": "commons#19",        // stamped: the request it tracks
+  "requester": "laurent",        // stamped from source.sender
+  "coordinator": "lead",         // reporting delegate whose grant reaches the
+                                 // room, else the first addressee, else null
+  "rooms": ["ssg-build"],        // where the work moved (coordinator-written)
+  "title": "...",                // defaults to the request's title
+  "status": "open" | "delivered" | "accepted",
+  "report": "commons#40",        // stamped on delivered: the cited resolved
+  "evidence": [...],             // stamped copy of that report's citations
+  "delivered_by", "delivered_at", "decided_by", "decided_at",   // stamped
+  "verdict": "...",              // the requester's words on a rejection
+  "rejections": 1                // stamped counter; a rejection re-opens
+}
+```
+
+Transitions, and who performs each:
+
+| from → to | act |
+|---|---|
+| ∅ → `open` | the hub, when an operator's root lands in a shared room; or any member, `store_set` with a valid `source` |
+| `open` → `delivered` | the hub, when a `resolved` reply on the source that cites evidence lands from the reporting delegate, the coordinator, or a seat the request named — the same reply that discharges that seat's debt |
+| `delivered` → `accepted` | the requester's (or any operator's) `resolved` on the source; or `status=accepted` on the row by the requester, an operator, or a `proxy` delegate scoped to the channel |
+| `delivered` → `open` | `status=rejected` with a `verdict` by the same writers: the verdict stays on the row, `rejections` counts, and the next cited report delivers again |
+
+`delivered` cannot be written by hand, an accepted task does not re-open, and
+a second cited report on a delivered or accepted task changes nothing. The
+requester, an operator, the coordinator, or a delegate whose grant reaches
+the channel may edit `coordinator`, `rooms` and `title`. The board serves
+every task in the viewer's channels as `tasks` (delivered first); the
+operator desk lists delivered tasks awaiting their verdict; the requester's
+`/owed` `to_close` row carries `task` so the reception pass names the
+decision. `agora task list|accept|reject` is the terminal verb.
 
 ## Parked claims: `blocked_on`, `needs`, and the `waiting_on` edge
 

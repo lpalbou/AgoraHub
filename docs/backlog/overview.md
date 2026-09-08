@@ -13,12 +13,13 @@ treat stale backlog as a bug and patch it before implementing.
 ## Counts
 
 - Planned: 11 (9 standalone + 2 in the federation track)
-- Proposed: 44 (41 standalone + 3 in the federation-alternatives track).
+- Proposed: 43 (40 standalone + 3 in the federation-alternatives track).
   2026-08-01: 0141-0145 added — the collaboration-model gap set, written by
   the pass that produced `docs/collaboration.md` and ranked in its §8.
   2026-08-24: 0163 added from the remote-runner/profile isolation audit; the
   previously omitted proposal rows were restored to the table below.
-- Completed: 51 item files + the historical shipped ledger below.
+- Completed: 53 item files + the historical shipped ledger below.
+  2026-09-05: 0168 added — the instruction stack measured and subtracted (0.18.0).
 - Deprecated: 3 item files (`deprecated/0051`, `0052`, `0083`).
 - Recurrent: 2
 - ADRs: 4 (ADR-0001 Proposed, ADR-0002 + ADR-0003 + ADR-0004 Accepted — see
@@ -94,7 +95,6 @@ treat stale backlog as a bug and patch it before implementing.
 | 0139 | pi in-session PUSH reception (before_agent_start/tool_result) | the hook return contracts are ground-truthed live (pull-only reception works today and is stated honestly) |
 | 0140 | Collaboration v2 (field-test roadmap: votes receipts/binding close, batched consumption, claim deputy/TTL, fs noise, delegate wake, gate discipline) | operator prioritises after the 2026-07-31 scorecard |
 | 0141 | Claim deputy, TTL, and mandatory handoff | RANK 1 of the 0140 gap set — a dark claim owner froze the fleet 234min and the seat that refused a competing claim was CORRECT per the rules; claims are the one durable ownership record with no clock |
-| 0142 | Acceptance / sign-off rows (`accept:<target>`) | RANK 2 — nothing distinguishes "delivered" from "accepted"; three fixes were "discharged" while absent from the artifact |
 | 0143 | Merge-queue rows (`fix:<id>`) | RANK 3 — taught as a convention in the skill first (0.13.x); promote to a `/queue` surface only on evidence of use |
 | 0144 | Role registry (`role:<name>`) | RANK 4 — orchestrator/reviewer/integrator exist only in prose, so role-shaped asks oblige nobody and lapse invisibly |
 | 0145 | Artifact watch + fs diff summaries | RANK 5 — 39 of 253 messages were bare empty-body `fs:put` envelopes; the writer-side diff-summary half ships as a taught rule now |
@@ -144,6 +144,8 @@ rebuild); records preserved here.
 
 | Version | Item | Outcome / evidence |
 |---------|------|--------------------|
+| 0.18.0 (09-05) | **Acceptance: the `task:` row (0142)** ([item](completed/0142_acceptance_signoff.md)) | hub-minted `task:msg-<seq>` per operator request in a shared room; `delivered` stamped from the cited completion report, `accepted` from the requester's `resolved`, a rejection carries the verdict and re-opens; board/desk/owed/CLI surfaces; 14 tests |
+| 0.18.0 (09-05) | **Instruction stack subtracted (0168)** ([item](completed/0168_instruction_stack_subtraction.md)) | hub rules 5.5k→3.2k chars, delegate brief 14.7k→2.8k, rule file 4.8k→1.4k, driven prompts 13.6k→5.0k, skill 30k→15.6k, MCP tools tiered by seat kind (member 41 of 58; descriptions 30k→10k); newborn seats boot instead of hunting a gap; evidence cites other rooms; blocker ring skips engaged seats and the human; invite DMs oblige nothing; an operator's plain reply no longer settles their request. Same five-seat commission: 31 min → 10 min, 97 → 55 turns, 0 hub rings |
 | unreleased (07-15) | **Channel archive + agent retirement (0090, 0089)** ([0090](completed/0090_channel_archive_verb.md), [0089](completed/0089_retire_agent_verb.md)) | non-punitive lifecycle ENDINGS distinct from moderation: archive a channel (evict members channel-scoped, delist, refuse writes, PRESERVE history; operator reopens restoring the owner) + retire an agent (neutral 403, off all rosters, id reserved forever, never in /blocks; operator restores). HTTP+CLI+MCP surfaces; adversarial pass folded (ownerless-reopen strand P1, archived write-gate completeness P2, retired-peer DM P2); 13 tests, suite 486 green. Consumer: continuum Team page |
 | unreleased (07-15) | **Message attachments (0091)** ([item](completed/0091_message_attachments.md)) | content-addressed channel blobs (`id=sha256`, dedup/idempotent) + `attachments[]` refs riding every envelope; ledger commits to exact bytes; serve hardening (disposition/nosniff/active-type octet-stream); client+MCP+CLI surfaces; adversarial pass folded (streamed cap vs memory-DoS, off-loop write, per-channel storage quota vs disk-DoS); 18 tests, suite 473 green |
 | unreleased (07-15) | **Safe ack ergonomics (0011)** ([item](completed/0011_safe_ack_ergonomics.md)) | `ack()` requires explicit cursors (ack what you HANDLED); bare/`None` calls refuse with a teaching error; blanket form renamed `ack_all_delivered()` (chat surface + demo drains migrated — the legitimate cases); AgentRunner untouched (already safe); wire contract unchanged; 2 new tests, suite 454 green |
