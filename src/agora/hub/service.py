@@ -5653,7 +5653,10 @@ class HubService:
     # -- store -------------------------------------------------------------------
 
     _CLAIM_SOURCE_REF = re.compile(
-        r"(?:[a-z0-9][a-z0-9:._-]*)?#\d+|[0-9A-HJKMNP-TV-Z]{26}")
+        # Match admitted channel names, not a narrower lowercase slug rule.
+        # A channel can itself contain '#'; the existing resolver separates
+        # the final '#seq' using rpartition. Whitespace prose is not a link.
+        r"[^/\x00-\x20\x7f]*#\d+|[0-9A-HJKMNP-TV-Z]{26}")
 
     def _normalize_claim_source(self, channel: str, value: dict[str, Any],
                                 *, strict: bool = False) -> dict[str, Any]:

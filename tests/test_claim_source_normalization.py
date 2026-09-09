@@ -1,5 +1,5 @@
 """The documented claim shape must reach both hub and driver debt readers."""
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import pytest
 from fastapi.testclient import TestClient
@@ -178,3 +178,32 @@ def test_closure_only_update_preserves_provenance_but_explicit_erasure_is_owned(
     assert r.json()["value"]["owner"] == "worker"
     assert r.json()["value"]["source_message_id"] == message["id"]
     assert room[2]._linked_claim_sources() == set()
+
+
+@pytest.mark.parametrize("channel", ["AF-Review", "task+1", "area#1", "équipe", "#"])
+@pytest.mark.parametrize("field", ["source", "source_message_id"])
+def test_claim_refs_accept_hub_channel_names_and_split_at_last_hash(room, channel, field):
+    client, seats, _ = room
+    assert client.post("/channels", json={"name":channel,"private":False},
+                       headers=seats["operator"]).status_code == 200
+    route = f"/channels/{quote(channel, safe='')}"
+    assert client.post(f"{route}/join", json={}, headers=seats["worker"]).status_code == 200
+    posted = client.post(f"{route}/messages", headers=seats["operator"], json={
+        "status":"open", "to":["worker"], "body":"Perform the assigned audit."})
+    assert posted.status_code == 200, posted.text
+    message = posted.json()
+    ref = f"{channel}#{message['seq']}"
+    value = {"owner":"worker", "status":"in_progress", "next_step":"Audit", field:ref}
+    result = client.put(f"{route}/store/claim:grammar", headers=seats["worker"],
+                        json={"value":value,"expect_version":0})
+    assert result.status_code == 200, result.text
+    assert result.json()["value"]["source_message_id"] == message["id"]
+    service = client.app.state.service
+    assert service._normalize_claim_source(channel, value)["source_message_id"] == message["id"]
+    # Broader channel spelling never makes a source in another room valid.
+    foreign = put(room, value)
+    assert foreign.status_code == 400 and "claim's channel" in foreign.text
+    malformed = dict(value, **{field:f"{channel}#not-a-sequence"})
+    bad = client.put(f"{route}/store/claim:malformed", headers=seats["worker"],
+                     json={"value":malformed,"expect_version":0})
+    assert bad.status_code == 400
