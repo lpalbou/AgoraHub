@@ -2408,6 +2408,11 @@ class Driver:
                       "(relative: lands in the seat's own cwd)")
         self._turn_log_warned = False
         self._turn_log_secured = False
+        self._work_receipts = None
+        if self._turn_log is not None and harness == "codex":
+            from .work_receipts import WorkReceipts
+            self._work_receipts = WorkReceipts(
+                home, agent_id, hub, redact=_redact, warn=_emit)
 
     # -- one driver per seat (the ownership file) ------------------------------
 
@@ -2835,7 +2840,7 @@ class Driver:
         falling back to the prompt guess for callers that have only a prompt."""
         return self._turn_kind or self._prompt_kind(prompt)
 
-    def _log_lines(self, lines: list[str]) -> None:
+    def _log_lines(self, lines: list[str], *, capture: bool = True) -> None:
         """Best-effort JSONL append: recording must NEVER break a turn.
         A failure warns ONCE (the operator asked for these logs; silent
         loss would be worse than the noise) and the turn proceeds.
@@ -2848,6 +2853,8 @@ class Driver:
         seats may still interleave BLOCKS, never tear a line)."""
         if self._turn_log is None or not lines:
             return
+        if capture and self._work_receipts is not None:
+            self._work_receipts.observe(lines)
         try:
             fd = os.open(self._turn_log,
                          os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
@@ -2870,7 +2877,12 @@ class Driver:
     def _log_event(self, **fields) -> None:
         if self._turn_log is None:
             return  # recorder off = zero work, not even the dumps
-        self._log_lines([json.dumps(fields, ensure_ascii=False)])
+        if self._work_receipts is not None:
+            if fields.get("event") == "turn_start":
+                self._work_receipts.begin(fields)
+            elif fields.get("event") == "turn_end":
+                self._work_receipts.finish(fields)
+        self._log_lines([json.dumps(fields, ensure_ascii=False)], capture=False)
 
     # -- the spawn (real) ----------------------------------------------------
 
@@ -3343,6 +3355,7 @@ class Driver:
             sid = self._adapter.parse_session_id(
                 getattr(proc, "stdout", "") or "", session_id)
             if self._turn_log is not None:
+                self._log_lines((getattr(proc, "stdout", "") or "").splitlines())
                 self._log_event(event="turn_end", ts=round(time.time(), 3),
                                 agent=self.agent_id, kind=kind, ok=False,
                                 harness=self.harness, stage="operator",
@@ -3517,6 +3530,11 @@ class Driver:
         block, self._presented_cursors = self._reception_block()
         if block:
             prompt = f"{prompt}\n\n{block}"
+        # Private work evidence crosses the session boundary independently of
+        # reception: this pointer never relaxes inbox/ack/debt verification.
+        receipts = self._work_receipts.brief() if self._work_receipts is not None else ""
+        if receipts:
+            prompt = f"{prompt}\n\n{receipts}"
         # Declare the lane (0151); cleared in the finally below.
         self._turn_kind = "wake" if sid else "boot"
         verify_debt = self.verify_reception_debt
