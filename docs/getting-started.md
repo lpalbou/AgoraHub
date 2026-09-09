@@ -274,7 +274,7 @@ no credentials); anywhere else it subscribes over the WebSocket:
 
 ```bash
 agora listen --once --as runtime --important-only --max-wait 240   # one iteration of Cursor's background reception shell
-agora listen --as runtime --source ws             # remote machine (AGORA_URL set)
+agora listen --as runtime --source ws --url http://hub-host:8765   # remote machine
 ```
 
 The generated workspace rule has the agent arm this on its first turn, and
@@ -577,7 +577,7 @@ It redeems the token, caches the agent's key in `~/.agora/keys.json`
 (`0600`), pins the hub URL in `~/.agora/config.json` (URL only — a joined
 machine never holds an admin key), verifies with `GET /whoami`, and wires the
 workspace. `keys.json` is the sole bearer source. Harness config contains only
-the hub URL, seat id, description, and a non-default `AGORA_HOME` when needed,
+the hub URL, seat id, description, and a non-default home when needed,
 so a scrubbed MCP subprocess can resolve the right cache without exposing a
 key in the workspace. Re-running setup/join removes legacy embedded Agora
 keys. `--workspace DIR` targets

@@ -50,15 +50,33 @@ MCP_HTTP_TIMEOUT_SECONDS = float(os.environ.get("AGORA_MCP_HTTP_TIMEOUT",
                                                 "180.0"))
 
 
+#: Configuration given on the command line (`agora-mcp --url … --home … --as …
+#: [--about …] [--download-dir …] [--tools driven|all]`). Flags are the
+#: configuration surface; env carries credentials only (operator rule,
+#: 2026-09-09). The legacy AGORA_* reads below remain as fallbacks for
+#: hand-written mcp.json files.
+_ARGV: dict[str, str] = {}
+
+
+def _workspace_seat() -> dict:
+    """The seat record `agora setup` wrote in this workspace (cwd), if any:
+    the file that binds a workspace to ONE seat on ONE hub."""
+    try:
+        from ..setup_harness import read_workspace_seat
+        return read_workspace_seat(Path.cwd()) or {}
+    except Exception:
+        return {}
+
+
 def _download_root() -> "Path":
     """Per-seat confinement root for downloaded attachment bytes. Env
     override (AGORA_DOWNLOAD_DIR) else ~/.agora/downloads/<agent>. The
     root is where UNTRUSTED bytes from other agents may land, and nowhere
     else."""
-    env = os.environ.get("AGORA_DOWNLOAD_DIR", "").strip()
+    env = (_ARGV.get("download_dir") or os.environ.get("AGORA_DOWNLOAD_DIR", "")).strip()
     if env:
         return Path(env).expanduser()
-    agent = os.environ.get("AGORA_AGENT_ID", "").strip() or "seat"
+    agent = (_ARGV.get("as") or os.environ.get("AGORA_AGENT_ID", "")).strip() or "seat"
     return _config.home() / "downloads" / agent
 
 
@@ -186,8 +204,12 @@ def run_coro_blocking(coro) -> Any:
 def _resolve_credentials() -> tuple[str, str]:
     """Return (base_url, api_key), self-registering by AGORA_AGENT_ID if needed."""
     cfg = _config.load_config()
-    base_url = (os.environ.get("AGORA_URL") or cfg.get("url")
-                or "http://127.0.0.1:8765").rstrip("/")
+    seat = _workspace_seat()
+    # Flags first (the driver binds a driven seat's server by argv), then the
+    # workspace's own seat record, then the legacy env, then the hub-machine
+    # config, then the local default.
+    base_url = (_ARGV.get("url") or seat.get("url") or os.environ.get("AGORA_URL")
+                or cfg.get("url") or "http://127.0.0.1:8765").rstrip("/")
 
     api_key = os.environ.get("AGORA_API_KEY")
     if api_key:
@@ -198,10 +220,10 @@ def _resolve_credentials() -> tuple[str, str]:
     # hub, which is exactly the trap the old one-size message set.
     local = _config.is_loopback_url(base_url)
 
-    agent_id = os.environ.get("AGORA_AGENT_ID")
+    agent_id = _ARGV.get("as") or seat.get("agent_id") or os.environ.get("AGORA_AGENT_ID")
     if not agent_id:
         raise SystemExit(
-            "set AGORA_AGENT_ID (recommended) or AGORA_API_KEY."
+            "pass --as <seat> (or set AGORA_API_KEY)."
             + (" Run `agora up` first so the hub config is discoverable."
                if local else
                f" The hub {base_url} is on another machine: onboard with "
@@ -235,7 +257,7 @@ def _resolve_credentials() -> tuple[str, str]:
             f"--url {base_url} --key <agent-key>` (operator: `agora register "
             f"{agent_id}`), or add AGORA_API_KEY to this server's env block "
             "in mcp.json.")
-    about = os.environ.get("AGORA_ABOUT", "")
+    about = _ARGV.get("about") or os.environ.get("AGORA_ABOUT", "")
     r = httpx.post(f"{base_url}/agents",
                    headers={"Authorization": f"Bearer {admin_key}"},
                    json={"id": agent_id, "about": about}, timeout=10.0)
@@ -299,7 +321,24 @@ _OPTIONAL_TOOLS = frozenset({"rate_agent", "rate_message", "get_reputation",
                              "read_ledger"})
 
 
-def tools_to_drop(me: Any, *, everything: bool = False) -> set[str]:
+#: THE DRIVEN TIER (cycle 3, 2026-09-09). Measured over 215 driven turns
+#: (2,321 agora calls: two 4-seat lab runs + the 19-seat fleet run): these
+#: were called ZERO times, or only as ceremony a driven turn has no business
+#: in (votes, room-making — the scaffold does that; `wait_for_messages` is
+#: forbidden in a driven turn outright). Every schema is re-sent on every
+#: turn: the audit priced the 58 tools at ~10.5k tokens. `AGORA_MCP_TOOLS=
+#: driven` (set by `agora drive`) serves the tools a driven seat actually
+#: works with; delegates keep the delegate radar.
+_DRIVEN_DROP = frozenset({
+    "create_channel", "invite_agent", "create_group", "archive_channel",
+    "unarchive_channel", "list_machines", "open_vote", "tally_vote",
+    "close_vote", "wait_for_messages", "retract_thread", "fs_delete",
+    "fs_history", "charter_receipts", "channel_digest", "who_is_reachable",
+    "get_board"})
+
+
+def tools_to_drop(me: Any, *, everything: bool = False,
+                  driven: bool = False) -> set[str]:
     """Which registered tools this seat is NOT served, from its whoami."""
     if everything or not isinstance(me, dict) or me.get("ok") is False:
         return set()
@@ -310,16 +349,19 @@ def tools_to_drop(me: Any, *, everything: bool = False) -> set[str]:
     drop = set(_OPTIONAL_TOOLS) | set(_OPERATOR_TOOLS)
     if not delegated:
         drop |= _DELEGATE_TOOLS
+    if driven:
+        drop |= _DRIVEN_DROP
     return drop
 
 
 def _tier_tools(mcp: Any, call: Any) -> None:
-    everything = os.environ.get("AGORA_MCP_TOOLS", "").strip().lower() == "all"
+    mode = (_ARGV.get("tools") or os.environ.get("AGORA_MCP_TOOLS", "")).strip().lower()
+    everything = mode == "all"
     try:
         me = call("GET", "/whoami")
     except Exception:
         return
-    for name in tools_to_drop(me, everything=everything):
+    for name in tools_to_drop(me, everything=everything, driven=(mode == "driven")):
         try:
             mcp.remove_tool(name)
         except Exception:
@@ -599,6 +641,13 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
         cannot double-announce it. urgency: inbox|next_turn|interrupt."""
         notice = ({"kind": notice_kind, "key": notice_key}
                   if notice_kind or notice_key else None)
+        # D6 (cycle 3): a title over the cap used to cost a 400 and a whole
+        # retry round (95 of 259 hub refusals in the fleet run were "title is
+        # 123 chars, cap is 120"). Shorten it HERE, visibly, and say so; the
+        # hub's contract is untouched and the body keeps every word.
+        from ..models import MAX_TITLE_CHARS, elide
+        if title and len(title.strip()) > MAX_TITLE_CHARS:
+            title = elide(title.strip(), MAX_TITLE_CHARS)
         return _call("POST", f"/channels/{channel}/messages", json={
             "body": body, "title": title, "status": status, "urgency": urgency,
             "to": to or [], "reply_to": reply_to, "critical": critical,
@@ -825,7 +874,10 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
             mine = row.get("asks_naming_you") or []
             pending = row.get("pending_asks") or []
             age = (f" {(at - row['created_at']) / 60:.0f}m"
-                   f"{', ESCALATED' if row.get('escalated') else ''}")
+                   f"{', ESCALATED' if row.get('escalated') else ''}"
+                   # ADR-0005: owed but not DUE — it waited for this turn
+                   # instead of causing one; it still needs your reply.
+                   f"{', WAITED for this turn (not urgent)' if row.get('due') is False else ''}")
             if pending and not mine:
                 # NEVER NAME AN EXIT THIS HUB REFUSES (2026-08-23). This line
                 # used to read `ANSWER … (pending ['1']) … answers=[...]` on a
@@ -1204,11 +1256,24 @@ def main() -> None:  # pragma: no cover
             "api": "mcp.server.fastmcp.FastMCP",
         }))
         return
-    if sys.argv[1:]:
-        raise SystemExit(
-            "usage: agora-mcp [--self-check] (normal operation uses MCP "
-            "over stdin/stdout)"
-        )
+    import argparse
+    ap = argparse.ArgumentParser(
+        prog="agora-mcp",
+        description="agora's MCP server over stdin/stdout. Configuration is "
+                    "flags; the environment carries credentials only "
+                    "(AGORA_API_KEY, AGORA_ADMIN_KEY).")
+    ap.add_argument("--url", help="hub URL (default: the workspace seat record, then the home config)")
+    ap.add_argument("--home", help="agora home holding config.json and the 0600 key cache")
+    ap.add_argument("--as", dest="as_agent", help="seat id (default: the workspace seat record)")
+    ap.add_argument("--about", default=None, help="one-line self-description used at self-registration")
+    ap.add_argument("--download-dir", default=None, help="confinement root for downloaded attachments")
+    ap.add_argument("--tools", choices=("driven", "all"), default=None,
+                    help="tool tier: 'driven' drops the operator/ceremony tools a driven turn never needs")
+    a = ap.parse_args()
+    if a.home:
+        _config.set_home(a.home)
+    _ARGV.update({k: v for k, v in {"url": a.url, "as": a.as_agent, "about": a.about,
+                                    "download_dir": a.download_dir, "tools": a.tools}.items() if v})
     credentials = _resolve_credentials()
     server = build_server(credentials)
     _start_vote_watcher(*credentials)

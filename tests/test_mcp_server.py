@@ -331,14 +331,12 @@ def test_owed_line_for_another_seats_ask_names_the_exit_that_works(hub, monkeypa
     mcp = _server_against(hub, monkeypatch, bob_key)
     text = _owed_text(mcp)
 
-    # The exit that works is named...
-    assert f"REPLY room#{seq}" in text
-    assert "ANY reply of yours clears this row" in text
-    # ...the ids are marked as somebody else's...
-    assert "ANOTHER seat's" in text
-    # ...and neither refused exit is offered.
+    # Since 2026-09-09 (ADR-0006 to the end): the ask names who ANSWERS and
+    # the `to` names who READS — bob, named on the message and on no ask, owes
+    # no row at all, so neither exit is offered and no foreign ask id appears.
+    assert f"REPLY room#{seq}" not in text
     assert f"ANSWER room#{seq}" not in text
-    assert "answers=[...]" not in text.split(f"room#{seq}")[1].split("\n")[0]
+    assert "ANOTHER seat's" not in text
 
 
 def test_a_row_whose_asks_DO_name_you_still_says_ANSWER(hub, monkeypatch):

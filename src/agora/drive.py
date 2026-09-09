@@ -306,6 +306,11 @@ WORK_STRIKE_TTL = 3600.0            # struck-out rows re-enter selection after
 _LISTENER_FRESH_S = 600.0           # a listen pidfile younger than this marks
 #                                     a live interactive surface (tab loops
 #                                     rewrite it every <=245s)
+#: What one reception block may carry. Sized for a 20-seat roster: the cycle-2b
+#: lead was at the old cap of 12 owed rows with FOUR seats (reviewer Round 2).
+RECEPTION_OWED_CAP = 48
+RECEPTION_CONSUME_CAP = 16
+RECEPTION_INBOX_CAP = 60
 _DRIVER_STALE_S = 7200.0            # a drive pidfile older than this never
 #                                     blocks anyone (reboot pid-reuse guard)
 #: Failure stages that mean the turn NEVER REACHED THE HUB — the transport
@@ -354,6 +359,21 @@ class ReceptionDebt:
     #: match both (fund4: 8 of 11 delegate turns failed `debt-remains` while
     #: a live claim named `commons#6`).
     refs: tuple[tuple[str, str], ...] = ()
+    #: The subset of `to_answer` the hub says is DUE (ObligationRow.due).
+    #: An owed-but-not-due row — an fyi, a watchdog alert — must neither bar
+    #: the seat from its own work (the initiative gate) nor fail its turn
+    #: (`debt-remains`): a driver "must never fail a turn on a debt the hub
+    #: itself refuses to wake anyone for" (this class's own docstring).
+    #: `None` — the default, and what every pre-existing constructor gets —
+    #: means "no narrowing: all of `to_answer` is due", the same absence-
+    #: is-due rule the wire uses. The first cut defaulted to EMPTY, which
+    #: quietly excused every commission from the anti-lurk bound
+    #: (test_standing_claimed_commission_does_not_fail_the_turn went red).
+    to_answer_due: frozenset[str] | None = None
+
+    @property
+    def due(self) -> frozenset[str]:
+        return self.to_answer if self.to_answer_due is None else self.to_answer_due
 
     @property
     def empty(self) -> bool:
@@ -460,6 +480,11 @@ def _find_session_id(value) -> str | None:
 #: harness crash into "retry forever", which is the opposite failure.
 _PROVIDER_FAILURE = re.compile(
     r"rate[ _-]?limit"
+    # A subscription's own ceiling is a provider condition too. Live 2026-09-07:
+    # "You've hit your session limit · resets 9:20pm" exited nonzero, was
+    # scored `harness/nonzero-exit`, and CLEARED the session pointer — 66 cold
+    # sessions for 19 seats in 6.6 h, each re-paying the whole standing prefix.
+    r"|\b(session|usage|weekly|daily) limit\b|hit your .{0,24}limit|resets \d"
     r"|429\b|\btoo many requests"
     r"|overloaded"
     r"|\b50[0234]\b|service unavailable|bad gateway|gateway time-?out"
@@ -871,7 +896,7 @@ class CodexDriveAdapter(DriveAdapter):
         )
         values = (
             f"mcp_servers.agora.command={q(self.mcp.command)}",
-            "mcp_servers.agora.args=[]",
+            f"mcp_servers.agora.args={q(self.mcp.args(tools='driven'))}",
             "mcp_servers.agora.enabled=true",
             "mcp_servers.agora.required=true",
             'mcp_servers.agora.default_tools_approval_mode="approve"',
@@ -1048,16 +1073,19 @@ def _skill_text() -> str:
     line naming what follows. Never raises: a seat that has agora's MCP half
     and not its skill half is degraded, not broken.
     """
+    # THE DRIVEN CONTRACT, not the whole skill (cycle 3, 2026-09-09). The
+    # full SKILL.md is 15.4k chars — ~3.9k tokens re-sent on EVERY turn of
+    # every driven seat, where the driver's own prompt already carries the
+    # turn's job. The fleet audit put agora's per-turn footprint at 10-11k
+    # tokens against a 2.2k budget. DRIVEN.md is the subset that binds a
+    # driven turn; the full skill stays installed for interactive seats and
+    # readable on demand.
     try:
         from importlib import resources
-        raw = (resources.files("agora.skill") / "SKILL.md").read_text()
+        raw = (resources.files("agora.skill") / "DRIVEN.md").read_text()
     except Exception:
         return ""
-    if raw.startswith("---\n"):
-        raw = raw.split("---", 2)[-1]
-    return ("The agora collaboration protocol — the `agora-channels` skill, "
-            "the half of agora that is not the MCP tools — is in force for "
-            "this seat:\n\n" + raw.strip())
+    return raw.strip()
 
 
 class ClaudeDriveAdapter(DriveAdapter):
@@ -1104,7 +1132,7 @@ class ClaudeDriveAdapter(DriveAdapter):
         # agora-mcp reads the bearer from the 0600 key cache under AGORA_HOME.
         cmd += ["--mcp-config", json.dumps({"mcpServers": {"agora": {
             "command": self.mcp.command,
-            "args": [],
+            "args": self.mcp.args(tools="driven"),
             "env": self.mcp.environment(),
         }}})]
         # Loading the server is not enough — its TOOLS are still permission
@@ -1226,6 +1254,16 @@ class ClaudeDriveAdapter(DriveAdapter):
             detail = _one_line(str(
                 (terminal or {}).get("result")
                 or stderr or f"process exited {returncode}"))
+            if (terminal or {}).get("subtype") == "error_max_turns":
+                # The operator's `--harness-arg max-turns=N` budget ended the
+                # turn, not the provider: six Opus turns on a real subject
+                # died at 31 calls and were booked as transport failures
+                # (validation run, 2026-09-09). Name the cause so the sheet
+                # and the operator can size the budget.
+                return TurnEvidence(
+                    ok=False, stage="harness", reason="call-budget-exhausted",
+                    detail=f"max-turns reached after {terminal.get('num_turns')} calls",
+                    tools=tuple(successful))
             return TurnEvidence(
                 ok=False, stage="harness",
                 reason="nonzero-exit" if returncode else "turn-failed",
@@ -1362,7 +1400,7 @@ class AbstractCodeDriveAdapter(DriveAdapter):
                 pass
         existing.setdefault("mcp_servers", {})["agora"] = {
             "transport": "stdio",
-            "command": [self.mcp.command],
+            "command": [self.mcp.command, *self.mcp.args(tools="driven")],
             "env": self.mcp.environment(),
         }
         # Persist provider/model into the sidecar too. AbstractCode resolves
@@ -1610,7 +1648,7 @@ class OpencodeDriveAdapter(DriveAdapter):
         cfg: dict = {
             "mcp": {"agora": {
                 "type": "local",
-                "command": [self.mcp.command],
+                "command": [self.mcp.command, *self.mcp.args(tools="driven")],
                 "enabled": True,
                 "timeout": 30000,
                 # Non-secret identity only; agora-mcp reads the bearer from
@@ -1883,9 +1921,17 @@ class PiDriveAdapter(DriveAdapter):
             "PI_OFFLINE": "1",
             "PI_SKIP_VERSION_CHECK": "1",
         }
-        # Non-secret identity for the bridge's MCP subprocess; the bearer
-        # stays in the 0600 key cache (the bridge forces empty key vars).
+        # The bridge (pi_ext/agora.js) spawns agora-mcp itself and has no
+        # argv seam, so the non-secret identity rides ITS env — the one
+        # surface where that is the contract. The bearer stays in the 0600
+        # key cache (the bridge forces empty key vars).
         env.update(self.mcp.environment())
+        env["AGORA_URL"] = self.mcp.url.rstrip("/")
+        env["AGORA_AGENT_ID"] = self.mcp.agent_id
+        env["AGORA_HOME"] = str(self.mcp.home.resolve())
+        env["AGORA_ABOUT"] = self.mcp.about
+        if self.mcp.download_dir:
+            env["AGORA_DOWNLOAD_DIR"] = str(Path(self.mcp.download_dir).expanduser().resolve())
         env["AGORA_API_KEY"] = ""
         env["AGORA_ADMIN_KEY"] = ""
         return env
@@ -2333,6 +2379,8 @@ class Driver:
         self._has_work = False                    # last KNOWN continuation answer
         self._scan_ok = False                     # ...and whether it was READ
         self._pending_wake = False                # a wake we could not run YET
+        self._presented_cursors: dict[str, int] = {}   # reception the prompt carried (D1/D2)
+        self._presented_truncated = False               # the block could not show it all
         self._pending_wake_has_debt = False       # addressed/owed beats broadcast fuse
         self._reception_debt_before: ReceptionDebt | None = None
         self._reception_debt_verification_required = False
@@ -2670,11 +2718,12 @@ class Driver:
         threading.Thread(target=_watch, daemon=True,
                          name=f"pause-watch-{self.agent_id}").start()
         try:
-            return subprocess.run(cmd, capture_output=True, text=True,
-                                  timeout=self._turn_timeout, cwd=str(self.cwd),
-                                  stdin=subprocess.DEVNULL,
-                                  env=self._harness_env(),
-                                  start_new_session=True)
+            with self._driven_marker():
+                return subprocess.run(cmd, capture_output=True, text=True,
+                                      timeout=self._turn_timeout, cwd=str(self.cwd),
+                                      stdin=subprocess.DEVNULL,
+                                      env=self._harness_env(),
+                                      start_new_session=True)
         finally:
             done.set()
 
@@ -2827,6 +2876,97 @@ class Driver:
 
     # -- the spawn (real) ----------------------------------------------------
 
+    def _reception_block(self) -> tuple[str, dict[str, int]]:
+        """The turn's reception, rendered by the DRIVER: one line per owed row
+        and per unread envelope, plus the per-channel cursors presented.
+
+        Measured on the 2026-09-07 fleet run: `check_inbox` returned ~10.6 KB
+        per call and, with `ack_inbox`, was 18% of all agora calls — every
+        one re-read into context by each later call in the turn. The driver
+        already fetches /owed at arm; fetching /inbox beside it and putting
+        both in the prompt costs one HTTP round and a few hundred tokens once.
+        Any failure -> empty block, and the seat falls back to check_inbox
+        exactly as before. Never raises."""
+        api_key = _config.get_cached_key(self.hub, self.agent_id)
+        if not api_key:
+            return "", {}
+        import httpx
+        headers = {"Authorization": f"Bearer {api_key}"}
+        try:
+            owed = httpx.get(f"{self.hub.rstrip('/')}/owed", headers=headers,
+                             timeout=5.0).json()
+            inbox = httpx.get(f"{self.hub.rstrip('/')}/inbox", headers=headers,
+                              timeout=5.0).json()
+        except Exception:
+            return "", {}
+        if not isinstance(owed, dict) or not isinstance(inbox, list):
+            return "", {}
+        lines: list[str] = []
+        truncated = 0
+        rows_a = [r for r in (owed.get("to_answer") or []) if isinstance(r, dict)]
+        rows_c = [r for r in (owed.get("to_consume") or []) if isinstance(r, dict)]
+        envs = [e for e in inbox if isinstance(e, dict) and e.get("channel")]
+        truncated = (max(0, len(rows_a) - RECEPTION_OWED_CAP) + max(0, len(rows_c) - RECEPTION_CONSUME_CAP)
+                     + max(0, len(envs) - RECEPTION_INBOX_CAP))
+        for r in rows_a[:RECEPTION_OWED_CAP]:
+            if not isinstance(r, dict):
+                continue
+            tag = "DUE" if r.get("due", True) else "waits"
+            naming = r.get("asks_naming_you") or []
+            lines.append(f"- OWE {r.get('channel')}#{r.get('seq')} from {r.get('sender')} "
+                         f"[{r.get('reason')}; {tag}]"
+                         f"{' asks naming you ' + str(naming) if naming else ''}: "
+                         f"{str(r.get('title') or '')[:90]}")
+        for r in rows_c[:RECEPTION_CONSUME_CAP]:
+            lines.append(f"- USE {r.get('channel')}#{r.get('answer_seq')}"
+                         f"{' [DUE: you are blocked on it]' if r.get('due') else ''}: "
+                         f"{r.get('answered_by')} answered your ask {r.get('your_asks')}")
+        cursors: dict[str, int] = {}
+        for e in envs[:RECEPTION_INBOX_CAP]:
+            flags = [k for k in ("critical", "to_me", "reply_to_me", "from_operator", "escalated")
+                     if e.get(k)]
+            if e.get("asks_yours"):
+                flags.append("asks naming you " + ",".join(str(x) for x in e["asks_yours"]))
+            elif e.get("asks_others") and str(e.get("status") or "") in ("open", "blocked"):
+                # Its asks are someone else's: read it, owe it nothing (a
+                # 20-seat manager spent a turn explaining this to a seat).
+                flags.append("asks name other seats: read only")
+            lines.append(f"- {str(e.get('status') or '').upper()} {e['channel']}#{e.get('seq')} "
+                         f"from {e.get('sender')}{' [' + ','.join(flags) + ']' if flags else ''}: "
+                         f"{str(e.get('title') or '')[:90]}")
+            try:
+                cursors[e["channel"]] = max(cursors.get(e["channel"], 0), int(e.get("seq") or 0))
+            except (TypeError, ValueError):
+                pass
+        if not lines:
+            return "", {}
+        self._presented_truncated = truncated > 0
+        if truncated:
+            # Never tell a seat it has seen everything when it has not
+            # (reviewer Round 2, BLOCKER 2): say how much is missing, and
+            # the verdict will not be relaxed for this turn.
+            lines.append(f"- … and {truncated} more not shown — call check_inbox.")
+        head = ("RECEPTION — fetched by the driver as this turn began; this IS your "
+                "check_inbox (read_message for bodies; call check_inbox only to refresh"
+                + (" — and you MUST, this list is incomplete" if truncated else "") + "). "
+                "Ack is done for you for what is listed here.")
+        return head + "\n" + "\n".join(lines), cursors
+
+    def _ack_presented(self) -> None:
+        """D1: the driver acks the exact snapshot the prompt carried. A receipt,
+        never a discharge — owed rows are untouched. Never raises."""
+        cursors, self._presented_cursors = self._presented_cursors, {}
+        api_key = _config.get_cached_key(self.hub, self.agent_id)
+        if not cursors or not api_key:
+            return
+        import httpx
+        try:
+            httpx.post(f"{self.hub.rstrip('/')}/inbox/ack",
+                       headers={"Authorization": f"Bearer {api_key}"},
+                       json={"cursors": cursors}, timeout=5.0)
+        except Exception:
+            pass
+
     def _reception_debt(self) -> ReceptionDebt | None:
         """Current trusted hub debt IDs, or None when they are unknowable."""
 
@@ -2837,6 +2977,11 @@ class Driver:
             to_answer=frozenset(
                 str(row.get("id")) for row in raw.get("to_answer", [])
                 if isinstance(row, dict) and row.get("id")
+            ),
+            to_answer_due=frozenset(
+                str(row.get("id")) for row in raw.get("to_answer", [])
+                if isinstance(row, dict) and row.get("id")
+                and row.get("due", True)
             ),
             refs=tuple(
                 (str(row.get("id")), f"{row.get('channel')}#{row.get('seq')}")
@@ -2891,7 +3036,7 @@ class Driver:
             addressed = frozenset(
                 str(a.get("id")) for a in asks if isinstance(a, dict)
                 and a.get("id") is not None
-                and (not a.get("to") or self.agent_id in (a.get("to") or []))
+                and self.agent_id in (a.get("to") or [])        # ADR-0006
             )
             # No structured asks at all: the whole message is the obligation,
             # exactly as before. Structured asks present: only mine count.
@@ -2939,7 +3084,9 @@ class Driver:
             _emit(f"AGORA_DRIVE verify agent={self.agent_id} status=skipped "
                   "reason=owed-unreadable-after-turn")
             return evidence
-        unanswered = sorted(before.to_answer & after.to_answer)
+        # DUE rows only: a debt the hub will not ring anyone for (an fyi, a
+        # watchdog alert) is not a debt this turn can be failed on.
+        unanswered = sorted(before.due & after.due)
         linked_sources: set[str] | None = None
         if unanswered:
             # A standing row whose work this seat has CLAIMED is not an
@@ -2963,6 +3110,8 @@ class Driver:
         # structured check and was simply never applied to the row.
         per_ask_released: set[str] = set()
         for channel, seq, message_id, original_pending in before.structured:
+            if message_id not in before.due:
+                continue                         # waiting debt cannot fail a turn
             pending = self._message_pending_asks(channel, seq, message_id)
             if pending is None:
                 # Fails open, as above: an unreadable message row is a hub
@@ -3044,6 +3193,30 @@ class Driver:
             return False
         return any(d.get("agent_id") == self.agent_id
                    for d in (me.get("delegations") or []))
+
+    def _assess(self, stdout_text: str, stderr_text: str, returncode: int,
+                kind: str) -> TurnEvidence:
+        """The turn's verdict: the adapter's reading, provider-failure
+        classification, the narrow reception-in-prompt relaxation, then the
+        /owed verification. One method so the rule can be tested alone."""
+        evidence = self._adapter.assess_turn(stdout_text, stderr_text, returncode, kind)
+        evidence = self._classify_provider_failure(evidence, stderr_text)
+        if (not evidence.ok and evidence.stage == "mcp-use"
+                and evidence.reason == "incomplete-reception-pass"
+                and kind in ("boot", "wake") and self._presented_cursors
+                and not self._presented_truncated):
+            # D2 (cycle 3): the reception rode in the prompt, so a turn that
+            # called hub tools but never check_inbox is not a failed pass;
+            # whether the debt is settled is decided below against /owed.
+            # NOT relaxed (reviewer Round 2, Q1b): `no-agora-tool-call` — a
+            # seat that called nothing at all produced nothing, and scoring
+            # that ok forever would never back off; and any turn whose block
+            # was truncated — that seat was told it saw everything and did not.
+            evidence = TurnEvidence(ok=True, reason="reception-in-prompt",
+                                    tools=evidence.tools)
+        if evidence.ok:
+            evidence = self._verify_reception_debt(evidence, kind)
+        return evidence
 
     def _spawn_turn(self, prompt: str, session_id: str | None):
         """Run ONE headless harness turn. Returns (session_id, ok)."""
@@ -3198,12 +3371,7 @@ class Driver:
         # refusal surfaces).
         for notice in self._adapter.turn_notices(stdout_text, stderr_text):
             _emit(f"{notice} agent={self.agent_id} kind={kind}")
-        evidence = self._adapter.assess_turn(
-            stdout_text, stderr_text, proc.returncode, kind
-        )
-        evidence = self._classify_provider_failure(evidence, stderr_text)
-        if evidence.ok:
-            evidence = self._verify_reception_debt(evidence, kind)
+        evidence = self._assess(stdout_text, stderr_text, proc.returncode, kind)
         new_sid = self._adapter.parse_session_id(stdout_text, session_id)
         if not evidence.ok:
             if self._turn_log is not None:
@@ -3268,7 +3436,39 @@ class Driver:
                 f"{', '.join(bad)} in the harness environment. Agora "
                 "credentials never travel in a harness process.")
         env.update(extra)
+        # No hub/home pin rides here any more: configuration is not carried
+        # in env (operator rule, 2026-09-09). The seat's MCP server is bound
+        # by argv (MCPBinding.args) and its shell CLI by the turn marker
+        # `_driven_marker` writes in the workspace.
         return env
+
+    @contextlib.contextmanager
+    def _driven_marker(self):
+        """`.agora/driven-<seat>.json` in the workspace for the duration of a
+        turn: the file that tells the seat's `agora` CLI which hub and home
+        this cwd is bound to (and to refuse any other). A file, not env; one
+        per seat (two seats may share a folder); read as stale once the pid
+        is dead or the age passes the drive pidfile's own bound; unlinked
+        only by the driver that wrote it."""
+        path = Path(self.cwd) / ".agora" / f"driven-{self.agent_id}.json"
+        mine = json.dumps({
+            "agent_id": self.agent_id, "url": self.hub.rstrip("/"),
+            "home": str(self._mcp_binding.home.resolve()),
+            "pid": os.getpid(), "started_at": round(time.time(), 3)})
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(mine)
+        except OSError as exc:
+            _emit(f"AGORA_DRIVE warn agent={self.agent_id} reason=driven-marker-unwritable "
+                  f"path={path} detail={exc} — the seat's shell CLI is NOT bound this turn")
+        try:
+            yield
+        finally:
+            try:
+                if path.read_text() == mine:
+                    path.unlink()
+            except OSError:
+                pass
 
     def _listen_window(self, snap: tuple[str, str, int] | None) -> float:
         """How long to block in the listener: the chain cadence when a work
@@ -3313,6 +3513,12 @@ class Driver:
             return False
         sid = self.reception_session_id
         prompt = WAKE_PROMPT if sid else BOOT_PROMPT
+        # D2 (cycle 3): the driver fetched reception over HTTP anyway; carry it
+        # in the prompt so the turn need not spend a call and a 10 KB payload
+        # on check_inbox before it can think. check_inbox stays available.
+        block, self._presented_cursors = self._reception_block()
+        if block:
+            prompt = f"{prompt}\n\n{block}"
         # Declare the lane (0151); cleared in the finally below.
         self._turn_kind = "wake" if sid else "boot"
         verify_debt = self.verify_reception_debt
@@ -3335,6 +3541,15 @@ class Driver:
             self._reception_debt_verification_required = False
             self._turn_kind = None
         self._last_turn_ok = ok
+        if ok and self._presented_cursors:
+            # D1: ack EXACTLY what the prompt presented — the per-channel
+            # high-water mark of the envelopes shown — never the channel's
+            # live head (a message that landed mid-turn is not "seen").
+            self._ack_presented()
+        else:
+            # A failed turn acks nothing (D1), and what it was shown must not
+            # leak into the next turn's verdict either.
+            self._presented_cursors = {}
         if not ok:
             # A CONFIGURATION error can never succeed, so retrying it is pure
             # waste: the model does not support this reasoning effort, the
@@ -3789,7 +4004,7 @@ class Driver:
         if self._is_delegate_seat():
             return False
         debt = self._reception_debt()
-        if debt is None or debt.to_answer:
+        if debt is None or debt.due:
             # LAST, after every free gate, so the /owed GET is paid at most
             # once per loop pass and only by a seat that is otherwise ready.
             # The lane is for a seat that owes NOTHING: an unread answer
@@ -4174,7 +4389,8 @@ class Driver:
                     rc = run_listen(agent_id=self.agent_id, url=self.hub,
                                     once=True, important_only=True,
                                     max_wait=window, source="auto",
-                                    signal_passthrough=True, driver_call=True)
+                                    signal_passthrough=True, driver_call=True,
+                                    wake_policy="addressed")
                 if rc == _DRIVER_UNOWNED_WAKE:
                     # A WAKE MUST CARRY WORK. This batch named nobody and the
                     # hub says the seat owes nothing, so a turn here has

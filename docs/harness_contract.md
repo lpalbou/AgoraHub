@@ -155,9 +155,9 @@ never asks whether the folder "belongs to" a larger project. Wire a folder with
 `agora setup`, run `agora drive` (or your framework) in that folder, and that
 folder is the workspace — git repo or not.
 
-Identity resolution follows the same rule: explicit flags, then
-`$AGORA_AGENT_ID`/`$AGORA_URL`, then THIS folder's seat record or harness
-config. Anything that legitimately runs from elsewhere (reception hooks, the
+Identity resolution follows the same rule: explicit flags, then THIS
+folder's seat record or harness config, then the legacy
+`$AGORA_AGENT_ID`/`$AGORA_URL`. Anything that legitimately runs from elsewhere (reception hooks, the
 driven listener) bakes `--as`/`--url` into its own command line and never
 depends on where it is invoked from.
 

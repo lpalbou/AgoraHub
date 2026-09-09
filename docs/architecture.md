@@ -482,7 +482,7 @@ sequenceDiagram
     H-->>R: {agent, api_key, channels_joined}
     R->>R: keys.json  "URL::ID" = key  (0600)
     R->>R: config.json  url only — no admin key
-    R->>R: bearer-free harness env block  URL + ID + optional AGORA_HOME
+    R->>R: bearer-free MCP binding by argv  --url --home --as (env: empty credential slots)
     R->>H: GET /whoami (verify before wiring)
     S->>H: every surface authenticates from the one key cache
 ```

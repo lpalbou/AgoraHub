@@ -1,42 +1,180 @@
 {
-  "name": "per-ask discharge (0077): answering one ask of two keeps the other pending, on /owed AND the history decoration",
-  "setup": [
-    {"op": "register", "id": "alice"},
-    {"op": "register", "id": "bob"},
-    {"op": "register", "id": "carol"},
-    {"op": "channel", "name": "room", "owner": "alice", "members": ["bob", "carol"]},
-    {"op": "post", "as": "alice", "channel": "room", "ref": "q",
-     "body": "two questions", "title": "canvass", "status": "open",
-     "data": {"asks": [
-        {"id": "1", "text": "bob: port?", "to": ["bob"]},
-        {"id": "2", "text": "carol: budget?", "to": ["carol"]}]}}
-  ],
-  "expect": [
-    {"call": "owed", "as": "bob", "match": {
-      "to_answer": [{"seq": "$q.seq", "pending_asks": ["1", "2"],
-                     "asks_naming_you": ["1"]}]}},
-    {"call": "owed", "as": "carol", "match": {
-      "to_answer": [{"seq": "$q.seq", "asks_naming_you": ["2"]}]}},
-
-    {"op": "post", "as": "bob", "channel": "room", "ref": "a1",
-     "body": "8080", "status": "reply", "reply_to": "$q.id",
-     "data": {"answers": ["1"]}},
-
-    {"call": "owed", "as": "bob", "match": {"to_answer": []}},
-    {"call": "owed", "as": "carol", "match": {
-      "to_answer": [{"seq": "$q.seq", "pending_asks": ["2"],
-                     "asks_naming_you": ["2"]}]}},
-    {"call": "messages", "as": "alice", "channel": "room", "since": 1, "match": [
-      {"seq": "$q.seq", "pending_asks": ["2"], "has_resolved_reply": false},
-      {"seq": "$a1.seq", "sender": "bob", "pending_asks": []}]},
-
-    {"op": "post", "as": "alice", "channel": "room", "ref": "close",
-     "body": "settled", "status": "resolved", "reply_to": "$q.id"},
-
-    {"call": "owed", "as": "carol", "match": {"to_answer": []}},
-    {"call": "messages", "as": "alice", "channel": "room", "since": 1, "match": [
-      {"seq": "$q.seq", "pending_asks": [], "has_resolved_reply": true},
-      {"seq": "$a1.seq"},
-      {"seq": "$close.seq", "status": "resolved"}]}
-  ]
+ "name": "per-ask discharge (0077): answering one ask of two keeps the other pending, on /owed AND the history decoration \u2014 /owed.pending_asks reader-scoped since ADR-0006 (bob sees his ask only)",
+ "setup": [
+  {
+   "op": "register",
+   "id": "alice"
+  },
+  {
+   "op": "register",
+   "id": "bob"
+  },
+  {
+   "op": "register",
+   "id": "carol"
+  },
+  {
+   "op": "channel",
+   "name": "room",
+   "owner": "alice",
+   "members": [
+    "bob",
+    "carol"
+   ]
+  },
+  {
+   "op": "post",
+   "as": "alice",
+   "channel": "room",
+   "ref": "q",
+   "body": "two questions",
+   "title": "canvass",
+   "status": "open",
+   "data": {
+    "asks": [
+     {
+      "id": "1",
+      "text": "bob: port?",
+      "to": [
+       "bob"
+      ]
+     },
+     {
+      "id": "2",
+      "text": "carol: budget?",
+      "to": [
+       "carol"
+      ]
+     }
+    ]
+   }
+  }
+ ],
+ "expect": [
+  {
+   "call": "owed",
+   "as": "bob",
+   "match": {
+    "to_answer": [
+     {
+      "seq": "$q.seq",
+      "pending_asks": [
+       "1"
+      ],
+      "asks_naming_you": [
+       "1"
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "call": "owed",
+   "as": "carol",
+   "match": {
+    "to_answer": [
+     {
+      "seq": "$q.seq",
+      "asks_naming_you": [
+       "2"
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "op": "post",
+   "as": "bob",
+   "channel": "room",
+   "ref": "a1",
+   "body": "8080",
+   "status": "reply",
+   "reply_to": "$q.id",
+   "data": {
+    "answers": [
+     "1"
+    ]
+   }
+  },
+  {
+   "call": "owed",
+   "as": "bob",
+   "match": {
+    "to_answer": []
+   }
+  },
+  {
+   "call": "owed",
+   "as": "carol",
+   "match": {
+    "to_answer": [
+     {
+      "seq": "$q.seq",
+      "pending_asks": [
+       "2"
+      ],
+      "asks_naming_you": [
+       "2"
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "call": "messages",
+   "as": "alice",
+   "channel": "room",
+   "since": 1,
+   "match": [
+    {
+     "seq": "$q.seq",
+     "pending_asks": [
+      "2"
+     ],
+     "has_resolved_reply": false
+    },
+    {
+     "seq": "$a1.seq",
+     "sender": "bob",
+     "pending_asks": []
+    }
+   ]
+  },
+  {
+   "op": "post",
+   "as": "alice",
+   "channel": "room",
+   "ref": "close",
+   "body": "settled",
+   "status": "resolved",
+   "reply_to": "$q.id"
+  },
+  {
+   "call": "owed",
+   "as": "carol",
+   "match": {
+    "to_answer": []
+   }
+  },
+  {
+   "call": "messages",
+   "as": "alice",
+   "channel": "room",
+   "since": 1,
+   "match": [
+    {
+     "seq": "$q.seq",
+     "pending_asks": [],
+     "has_resolved_reply": true
+    },
+    {
+     "seq": "$a1.seq"
+    },
+    {
+     "seq": "$close.seq",
+     "status": "resolved"
+    }
+   ]
+  }
+ ]
 }

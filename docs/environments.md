@@ -8,8 +8,9 @@ An Agora environment is three things that must agree:
 | **URL** | The running hub a client contacts; keys are stored under the exact `URL::seat` identity | `http://127.0.0.1:8875` |
 | **Database** | The hub's channels, seats, messages, shared files, and governance state | `~/.agora-hubs/test/agora.db` |
 
-The CLI's `--home` selects the home; `$AGORA_HOME` is the backward-compatible
-default when the flag is absent. `--db` selects only the database. A different database by itself is therefore **not** a complete
+The CLI's `--home` selects the home; without it, a running driven turn's
+marker or this folder's `.agora/seat.json` names the home the seat was set up
+with, and `$AGORA_HOME` is the backward-compatible default after those. `--db` selects only the database. A different database by itself is therefore **not** a complete
 environment boundary: the CLI may still read another environment's saved URL,
 admin key, or seat keys from the selected home.
 
@@ -175,14 +176,17 @@ database merely to adopt this layout.
 
 ## Resolution rules
 
-- CLI home: `--home` → `$AGORA_HOME` → `~/.agora`.
-- Agent-command URL: `--url` → `$AGORA_URL` → the selected home's
-  `config.json` → `http://127.0.0.1:8765`.
+- CLI home: `--home` → the live turn marker `.agora/driven-<seat>.json` →
+  this folder's `.agora/seat.json` → `$AGORA_HOME` → `~/.agora`.
+- Agent-command, listener and `agora-mcp` URL: `--url` → the live turn
+  marker → this folder's `.agora/seat.json` → `$AGORA_URL` → the selected
+  home's `config.json` → `http://127.0.0.1:8765`. One order everywhere.
 - Hub database: explicit `--db` → `$AGORA_DB` → the selected home's remembered
   `db_path` → `<selected-home>/agora.db`.
 - Seat key: the selected home's `keys.json`, indexed by the normalized
   `URL::seat` string.
-- AgoraTUI home: `--home` → `$AGORA_HOME` → `~/.agora`; `--url` selects the hub.
+- AgoraTUI home: `--home` → `$AGORA_HOME` → `~/.agora`; `--url` selects the hub
+  (the TUI reads no workspace seat record).
 
 Explicit `--home`, `--host`, `--port`, and `--db` values win over their
 same-named environment defaults. `--new-admin-key` likewise wins over an

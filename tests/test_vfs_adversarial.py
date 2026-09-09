@@ -345,8 +345,8 @@ def test_content_b64_with_markdown_mime_is_flipped_to_octet_stream(service, agen
 def test_text_binary_text_overwrite_all_three_versions(service, agents):
     alice, bob = agents
     service.fs_write(alice, "design", "doc", "# text v1")
-    service.fs_write(bob, "design", "doc", content_b64=PAYLOAD_B64, mime="image/png")
-    service.fs_write(alice, "design", "doc", "text v3")
+    service.fs_write(bob, "design", "doc", content_b64=PAYLOAD_B64, mime="image/png", expect_version=1)
+    service.fs_write(alice, "design", "doc", "text v3", expect_version=2)
     v1 = service.fs_read(bob, "design", "doc", version=1)
     v2 = service.fs_read(bob, "design", "doc", version=2)
     v3 = service.fs_read(bob, "design", "doc")

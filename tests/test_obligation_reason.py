@@ -256,28 +256,12 @@ def test_a_pending_ask_addressed_to_ANOTHER_seat_is_not_your_asks_row():
     # laurent owns the ask and gets the asks row, with the id to answer.
     assert reason_for(client, laurent, q["seq"]) == "asks_pending"
 
-    # bob is named on the message and on no ask. Not an asks row: bob cannot
-    # answer '1' and cannot decline it either.
-    assert reason_for(client, bob, q["seq"]) == "names_you"
-    row = next(r for r in rows_for(client, bob) if r["seq"] == q["seq"])
-    assert row["asks_naming_you"] == []
-
-    # And the hub still refuses bob the ids, which is the refusal that has to
-    # agree with the reason above rather than contradict it.
-    refused = client.post("/channels/room/messages", headers=bob, json={
-        "body": "not mine", "title": "no", "status": "reply",
-        "reply_to": q["id"], "declines": ["1"]})
-    assert refused.status_code == 400
-    assert "not addressed to you" in refused.text
-
-    # And the exit the value NAMES is the exit that works. Asserting the
-    # word alone would be decoration: the whole complaint is rows naming an
-    # act that does not clear them, so the act has to be performed.
-    post(client, bob, body="noted, not mine", title="noted", status="reply",
-         reply_to=q["id"])
-    assert all(r["seq"] != q["seq"] for r in rows_for(client, bob))
-    # ...and laurent's ask is untouched by bob replying.
-    assert reason_for(client, laurent, q["seq"]) == "asks_pending"
+    # bob is named on the message and on no ask. Since 2026-09-09 (ADR-0006
+    # to the end): the ask names who ANSWERS, the `to` names who READS — bob
+    # owes no row at all, and the envelope says whose the asks are.
+    assert not any(r["seq"] == q["seq"] for r in rows_for(client, bob))
+    env = next(e for e in client.get("/inbox", headers=bob).json() if e["seq"] == q["seq"])
+    assert env["to_me"] is True and env["asks_yours"] == [] and env["asks_others"] is True
 
 
 def test_an_UNADDRESSED_pending_ask_is_still_everyones_asks_row():

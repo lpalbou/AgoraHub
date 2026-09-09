@@ -554,17 +554,17 @@ def test_escalated_debt_re_rings_per_age_band(tmp_path, monkeypatch, capsys,
     assert run_listen(**common) == 0                    # same band: no storm
     capsys.readouterr()
 
-    # Band arithmetic itself: crossing a 4h boundary changes the token; the
-    # bare id never carries a band; a missing created_at pins band 0 so a
-    # hub that omits it still gets the one escalation-flip re-ring.
+    # ONE re-ring per escalated row, never a band ladder (2026-09-09: the
+    # validation steward was re-rung 20 times on the commission it was
+    # delivering). Age no longer enters the token; the bare id never flips.
     now = time.time()
     young = listen_mod._debt_token({"id": "x", "escalated": True,
                                     "created_at": now - 3600}, now)
     old = listen_mod._debt_token({"id": "x", "escalated": True,
                                   "created_at": now - 5 * 3600}, now)
-    assert young == "x!0" and old == "x!1"
+    assert young == old == "x!"
     assert listen_mod._debt_token({"id": "x", "created_at": now}, now) == "x"
-    assert listen_mod._debt_token({"id": "x", "escalated": True}, now) == "x!0"
+    assert listen_mod._debt_token({"id": "x", "escalated": True}, now) == "x!"
 
 
 def test_offset_resume_replays_the_between_instance_gap(tmp_path, monkeypatch):
@@ -762,10 +762,15 @@ def test_resolve_identity_precedence_zero_search(tmp_path, monkeypatch):
     # explicit flags beat everything.
     assert resolve_identity("cli", "http://h:1/", workspace) == ("cli",
                                                                  "http://h:1")
-    # env beats the folder config.
+    # The folder's own config beats the legacy env (2026-09-09: configuration
+    # is flags and files; env is for credentials). Env still fills a folder
+    # that has no seat record.
     monkeypatch.setenv("AGORA_AGENT_ID", "envbob")
     monkeypatch.setenv("AGORA_URL", "http://env:2")
-    assert resolve_identity(None, None, workspace) == ("envbob", "http://env:2")
+    assert resolve_identity(None, None, workspace) == ("wsbob", "http://10.0.0.5:9999")
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    assert resolve_identity(None, None, bare) == ("envbob", "http://env:2")
 
 
 def test_resolve_identity_never_inherits_a_parents_seat(tmp_path, monkeypatch):

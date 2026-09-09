@@ -86,6 +86,23 @@ def parse_mention_candidates(body: str) -> list[tuple[str, bool]]:
     return list(out.items())
 
 
+_LEADING_SEAT = re.compile(r"^\s*@?([A-Za-z0-9][A-Za-z0-9_-]*)\s*:")
+
+
+def leading_addressee(text: str) -> str | None:
+    """The seat a `seat: …` ask names — the fan-out form a human writes.
+
+    `@` was the only sigil `resolve_mentions` knew, so a delegate's
+    `core: review runtime, …` ×18 flagged nobody, every ask fell to the
+    message-global pool, and 216 of 453 messages in the 2026-09-07 fleet run
+    were spent rebuilding rounds the hub had silently discharged. Only the
+    LEADING token counts ("alpha: does gamma's section…" names alpha, not
+    gamma); membership is the caller's check, so `note:` / `claim:` derive
+    nobody. Shape only — same contract as parse_mention_candidates."""
+    m = _LEADING_SEAT.match(text or "")
+    return m.group(1).lower() if m else None
+
+
 def parse_mentions(body: str) -> list[str]:
     """Ordered, deduped lowercase agent ids of the plain mentions — the
     registry-free safe subset: path-like candidates are dropped, so a vfs

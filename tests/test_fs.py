@@ -46,8 +46,9 @@ def test_every_version_content_is_recoverable_with_provenance(service, agents):
     author, so history is recoverable, not just countable."""
     alice, bob = agents
     service.fs_write(alice, "design", "plan.md", "# Plan by alice")
-    service.fs_write(bob, "design", "plan.md", "# Plan by alice\n- bob: AGREED")
-    service.fs_write(alice, "design", "plan.md", "# Plan v3 rewritten")
+    # Another seat co-edits KNOWINGLY (2026-09-09): it passes the version it read.
+    service.fs_write(bob, "design", "plan.md", "# Plan by alice\n- bob: AGREED", expect_version=1)
+    service.fs_write(alice, "design", "plan.md", "# Plan v3 rewritten", expect_version=2)
 
     v1 = service.fs_read(bob, "design", "plan.md", version=1)
     assert v1.content == "# Plan by alice" and v1.updated_by == "alice"

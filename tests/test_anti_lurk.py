@@ -86,8 +86,8 @@ def test_ask_to_validates_membership_cap_and_self(client, room):
     r = client.post("/channels/canvass/messages", headers=_auth(k), json={
         "title": "t", "body": "b", "status": "open",
         "asks": [{"id": "1", "text": "x",
-                  "to": ["named", "bystander", "named", "bystander"]}]})
-    assert r.status_code == 400 and "max 3" in r.json()["detail"]
+                  "to": [f"seat{i}" for i in range(9)]}]})
+    assert r.status_code == 400 and "max 8" in r.json()["detail"]
 
 
 def test_ask_named_seat_is_flagged_and_pinned_until_its_ask_is_answered(client, room):

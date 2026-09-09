@@ -71,8 +71,11 @@ def test_abstractcode_adapter_uses_native_state_mcp_and_skill(home):
     config = json.loads(state.with_suffix(".config.json").read_text())
     server = config["mcp_servers"]["agora"]
     assert server["transport"] == "stdio"
-    assert server["command"] == ["agora-mcp"]
-    assert server["env"]["AGORA_AGENT_ID"] == "worker"
+    # Configuration by flags, env for credentials only (2026-09-09).
+    assert server["command"][0] == "agora-mcp"
+    assert server["command"][server["command"].index("--as") + 1] == "worker"
+    assert "--url" in server["command"] and "--home" in server["command"]
+    assert set(server["env"]) == {"AGORA_API_KEY", "AGORA_ADMIN_KEY"}
 
 
 def test_abstractcode_turn_requires_completed_mcp_reception(home):
@@ -188,10 +191,12 @@ def test_fanned_out_asks_only_count_the_seat_s_own_ask(home, monkeypatch):
     row["pending_asks"] = ["1", "2", "3"]
     assert d._message_pending_asks("at-test", 446, "message-1") == frozenset({"1"})
 
-    # An ask addressed to nobody is everyone's obligation.
+    # An ask addressed to nobody obliges nobody (ADR-0006, 2026-09-09): the
+    # hub materialises inheritance at post time, so a bare `to` here means a
+    # room-wide message's bare ask — anyone's to answer, no seat's debt.
     row["data"] = {"asks": [{"id": "1", "text": "broadcast"}]}
     row["pending_asks"] = ["1"]
-    assert d._message_pending_asks("at-test", 446, "message-1") == frozenset({"1"})
+    assert d._message_pending_asks("at-test", 446, "message-1") == frozenset()
 
     # No structured asks: whole-message obligation, unchanged behaviour.
     row["data"] = {}
@@ -565,11 +570,14 @@ def test_spawn_turn_binds_mcp_without_exporting_credentials(home, monkeypatch):
     assert not any(key.startswith("AGORA_") for key in child_env)
     assert child_env["PATH"] == os.environ["PATH"]
     joined = "\n".join(captured["cmd"])
-    assert 'AGORA_AGENT_ID="worker"' in joined
-    assert 'AGORA_URL="http://hub:1"' in joined
-    assert f'AGORA_HOME="{home}"' in joined
-    assert 'AGORA_ABOUT="owns receipts"' in joined
-    assert 'AGORA_DOWNLOAD_DIR=' not in joined
+    # The seat's identity binds the server by ARGV; the env block carries the
+    # two empty credential slots and nothing else (2026-09-09).
+    assert '"--as", "worker"' in joined
+    assert '"--url", "http://hub:1"' in joined
+    assert f'"--home", "{home}"' in joined
+    assert '"--about", "owns receipts"' in joined
+    assert '--download-dir' not in joined
+    assert 'AGORA_AGENT_ID' not in joined and 'AGORA_URL=' not in joined
     assert 'AGORA_API_KEY=""' in joined
     assert 'AGORA_ADMIN_KEY=""' in joined
     assert "agora_worker" not in joined
@@ -1173,7 +1181,7 @@ def test_codex_mcp_binding_carries_download_dir_only_in_server_config(
         WAKE_PROMPT, "thread-1"
     )
     assert "AGORA_DOWNLOAD_DIR" not in captured["env"]
-    assert f'AGORA_DOWNLOAD_DIR="{download_dir}"' in "\n".join(captured["cmd"])
+    assert f'"--download-dir", "{download_dir}"' in "\n".join(captured["cmd"])
 
 
 # -- the uniform harness contract (model / reasoning / provider) ---------------
@@ -1382,7 +1390,7 @@ def test_opencode_command_pins_dir_and_config_layer(home):
     assert cmd[cmd.index("--title") + 1] == "agora:worker:turn"
     assert "-m" in cmd and cmd[cmd.index("-m") + 1] == "airelay/gpt-5.4-mini"
     cfg = json.loads(a.environment()["OPENCODE_CONFIG_CONTENT"])
-    assert cfg["mcp"]["agora"]["command"] == [a.mcp.command]
+    assert cfg["mcp"]["agora"]["command"] == [a.mcp.command, *a.mcp.args(tools="driven")]
     assert cfg["permission"]["agora*"] == "allow"
     assert cfg["permission"]["webfetch"] == "deny"      # write != all
     env = a.environment()
@@ -1985,6 +1993,8 @@ def test_claude_turn_carries_the_agora_skill():
     argv = _claude_adapter().build_command("p", None)
     assert "--append-system-prompt" in argv
     body = argv[argv.index("--append-system-prompt") + 1]
-    assert "# Working in agora channels" in body
+    # Cycle 3 (2026-09-09): the driven turn carries the DRIVEN CONTRACT, not the
+    # whole skill — ~570 tokens instead of ~3.9k, re-sent on every turn.
+    assert "# The driven seat's contract" in body
     assert not body.lstrip().startswith("---")   # frontmatter is metadata
     assert argv[-1] == "p"                       # prompt stays positional

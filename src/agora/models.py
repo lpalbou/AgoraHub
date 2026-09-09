@@ -294,6 +294,11 @@ class Ask(BaseModel):
     # so a canvass row can never again be buried by headline scroll (field
     # incident: 70 name-in-TEXT misses in 48h — names in prose flag nobody).
     to: list[str] = Field(default_factory=list)
+    #: The phase this ask belongs to (a `phase:` row's `current`). Not
+    #: PENDING — mints no debt, wakes nobody — until that phase is declared
+    #: open in the channel. Lets a commission carry its later-phase asks
+    #: without pinning every seat on them now (2026-09-07: release#23).
+    phase: str | None = None
     #: Which of `to` the HUB added from this ask's TEXT rather than the author
     #: passing them (2026-08-23; agora-tui thread-shape-and-panels#142).
     #: A mention-derived addressee gates the ask's discharge exactly like a
@@ -499,6 +504,12 @@ class Envelope(BaseModel):
     #                                      authority, but named asks narrow to the
     #                                      named seats plus any hub-routed delegate.
     reply_to_me: bool = False
+    #: Per-reader ask scope (ADR-0006; 20-seat run 2026-09-09): the ids of the
+    #: message's asks that name THIS reader, and whether the message carries
+    #: asks that all name OTHER seats — an `open` addressed to you whose asks
+    #: are someone else's is yours to READ, not to answer or decline.
+    asks_yours: list[str] = Field(default_factory=list)
+    asks_others: bool = False
     title: str = ""
     body_bytes: int = 0                  # honest size signal (hard to fake upward)
     body: str | None = None              # inlined only per delivery policy
@@ -747,6 +758,21 @@ class ObligationRow(BaseModel):
     pending_asks: list[str] = Field(default_factory=list)
     asks_naming_you: list[str] = Field(default_factory=list)
     reason: str | None = None
+    #: OWED vs DUE (operator criteria (b)/(d), 2026-09-08; independent review
+    #: in untracked/review-owed-vs-due-2026-09-08.md). Every row is OWED: it
+    #: is on the seat's ledger and rides its next `check_inbox`. A row is
+    #: DUE when it justifies acting NOW — the hub can point at the seat by
+    #: name in the message that created it (message-level `to`, a pending
+    #: per-ask `to`, reporting-delegate routing, a hub alert about this
+    #: seat's own work) or its sender is the operator. NOT due, and the only
+    #: two cases: an `fyi` (the author chose "can wait"; `critical` still
+    #: rings), and a watchdog alert in the operator's `hub-alerts` room
+    #: (AGENT DARK/DEAF/LURKING — status for a human, not a task for a seat).
+    #: A room-wide open that names nobody mints no row at all, so it needs
+    #: no rule here. The name is the hub's fact ("due"), not a driver
+    #: mechanism ("wakes"); what a client does about it is its own business.
+    #: Older hubs omit the field; a reader treats absence as True.
+    due: bool = True
     # ^ WHY this row is here (0155). Until this existed the row carried
     #   `pending_asks` and `asks_naming_you` and nothing else, so when both
     #   were empty a client had literally nothing to show and printed the
@@ -981,6 +1007,11 @@ class ConsumeRow(BaseModel):
     #: read this reply yet", so its age runs from the reply. Ages derive
     #: from `report.computed_at` (see ObligationRow).
     answer_created_at: float = 0.0
+    #: Owed, and DUE only while the seat is demonstrably blocked (a live
+    #: `claim:` row of its own says `blocked`): then the answer it asked for
+    #: is exactly what must wake it. Otherwise it waits for the seat's next
+    #: real turn (ADR-0005 §1; reviewer Round 2, Q1a).
+    due: bool = False
 
 
 class WaitingRow(BaseModel):

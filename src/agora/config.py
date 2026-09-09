@@ -16,8 +16,21 @@ from pathlib import Path
 from typing import Any
 
 
+_HOME_OVERRIDE: Path | None = None
+
+
+def set_home(path: str | Path) -> None:
+    """`--home PATH` for THIS process (the MCP server's flag). The flag is the
+    configuration surface; env is for credentials (operator rule, 2026-09-09).
+    The CLI keeps exporting AGORA_HOME to its children as an internal carrier
+    until every child spawn passes `--home` itself."""
+    global _HOME_OVERRIDE
+    _HOME_OVERRIDE = Path(path).expanduser().resolve()
+
+
 def home() -> Path:
-    p = Path(os.environ.get("AGORA_HOME", str(Path.home() / ".agora")))
+    p = _HOME_OVERRIDE or Path(os.environ.get("AGORA_HOME")
+                               or str(Path.home() / ".agora"))
     p.mkdir(mode=0o700, parents=True, exist_ok=True)
     return p
 

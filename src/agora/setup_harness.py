@@ -1158,11 +1158,21 @@ def install_claude_reception_hooks(workspace: Path, url: str,
     # workspace. Under `agora drive` the listener exits instantly anyway (the
     # driver owns reception and `agora listen` says so), and an attended
     # session re-arms this single shot at every SessionStart and Stop.
+    # `--home` is BAKED here exactly as hook.py:hook_command bakes it: a driven
+    # turn's environment carries no AGORA_* variable (drive._harness_environment
+    # strips them all, credentials included), so a hook that relied on
+    # $AGORA_HOME resolved to ~/.agora — the wrong home — looked for the
+    # driver's pid THERE, found nothing, and waited out the whole window on
+    # every turn (measured 2026-09-07: 12 of 19 Opus seats, 900.x s each,
+    # ~40 seat-hours). With the right home the existing driver-owns-reception
+    # refusal (listen.py) returns in 0.1 s. Reproduction: agora-lab/hook_repro.sh.
+    home = os.environ.get("AGORA_HOME")
     listen_cmd = (
         f"{_resolve_agora_command()} listen --as {agent_id} --once "
         f"--important-only --max-wait {IDLE_REWAKE_MAX_WAIT} "
         f"--url {url.rstrip('/')} "
-        '--lock "${AGORA_HOME:-$HOME/.agora}/listen-' + agent_id + '.lock"'
+        + (f"--home {json.dumps(home)} " if home else "")
+        + '--lock "${AGORA_HOME:-$HOME/.agora}/listen-' + agent_id + '.lock"'
     )
     rewake = {"hooks": [{
         "type": "command",

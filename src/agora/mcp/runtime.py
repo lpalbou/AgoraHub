@@ -63,25 +63,29 @@ class MCPBinding:
     about: str = ""
     download_dir: str | None = None
 
-    def environment(self) -> dict[str, str]:
-        # The MCP server reads the bearer key from this home's 0600 key cache.
-        # Never put it in Codex argv or the model subprocess environment.
-        env = {
-            # Explicit empties override legacy trusted project config that may
-            # still contain a bearer. The server treats an empty value as
-            # absent and reads the seat key from the 0600 cache instead.
-            "AGORA_API_KEY": "",
-            "AGORA_ADMIN_KEY": "",
-            "AGORA_URL": self.url.rstrip("/"),
-            "AGORA_AGENT_ID": self.agent_id,
-            "AGORA_HOME": str(self.home.resolve()),
-            "AGORA_ABOUT": self.about,
-        }
+    def args(self, *, tools: str | None = None) -> list[str]:
+        """The server's CONFIGURATION, as argv. Flags are the configuration
+        surface; env carries credentials only (operator rule, 2026-09-09) —
+        a seat id, a hub URL or a home in a process environment is how a
+        turn's shell tools ended up on the wrong hub."""
+        out = ["--url", self.url.rstrip("/"),
+               "--home", str(self.home.resolve()),
+               "--as", self.agent_id]
+        if self.about:
+            out += ["--about", self.about]
         if self.download_dir:
-            env["AGORA_DOWNLOAD_DIR"] = str(
-                Path(self.download_dir).expanduser().resolve()
-            )
-        return env
+            out += ["--download-dir",
+                    str(Path(self.download_dir).expanduser().resolve())]
+        if tools:
+            out += ["--tools", tools]
+        return out
+
+    def environment(self) -> dict[str, str]:
+        # CREDENTIALS only. The explicit empties override legacy trusted
+        # project config that may still carry a bearer: the server treats an
+        # empty value as absent and reads the seat key from the 0600 cache
+        # under --home. Never put a key in argv or the model's environment.
+        return {"AGORA_API_KEY": "", "AGORA_ADMIN_KEY": ""}
 
 
 def resolve_mcp_command() -> str:

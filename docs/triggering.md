@@ -64,7 +64,7 @@ agora listen --as runtime                          # persistent: for hook-armed 
   - **ws** (anywhere): connects to the hub as the agent over the WebSocket,
     subscribes to all its channels seeded at each channel's head, and
     reconnects with a catch-up sweep after an outage — the remote path needs
-    only `AGORA_URL` and a key.
+    only `--url` (or the folder's seat record) and a key.
 - **Sentinels, not content.** The listener's stdout is a machine-readable
   stream:
 

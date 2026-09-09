@@ -45,7 +45,7 @@ from ..governance import (
     split_charter,
 )
 from ..ids import new_token
-from ..mentions import resolve_mentions
+from ..mentions import resolve_mentions, leading_addressee
 from ..models import (
     TextTooLong,
     attributed_quote,
@@ -1669,10 +1669,11 @@ class HubService:
 
     #: Per-ask addressing cap (0077): more than 3 named answerers on ONE ask
     #: is diffusion of responsibility — use message-level `to` for broadcast.
-    MAX_ASK_TO = 3
+    MAX_ASK_TO = 8   # explicit per-ask `to`; an INHERITED list is uncapped (ADR-0006)
 
     def _validate_asks(self, raw: Any, status: Status, *, sender: str = "",
-                       channel: str = "") -> list[dict[str, Any]]:
+                       channel: str = "",
+                       message_to: list[str] | None = None) -> list[dict[str, Any]]:
         """Normalize + validate structured asks. Applied to whatever ends up in
         the message data — whether it arrived via the typed `asks` param or was
         hand-crafted into the raw `data` payload — so there is no bypass path."""
@@ -1689,6 +1690,15 @@ class HubService:
             if not isinstance(a, dict) or a.get("id") is None:
                 raise HubError(400, "each ask must be an object with an id")
             aid = str(a["id"]).strip()
+            if "@" in aid and not a.get("to"):
+                # `ID@SEAT,SEAT` is the terse form of "an ask names its seats"
+                # (ADR-0006). It is parsed HERE, once, so no client — the CLI,
+                # an MCP call, a hand-written payload — can ever store an id
+                # nobody can answer (a 0.17.8 CLI stored '1@companion' raw and
+                # the reply answers=['1'] was refused as unknown).
+                aid, _, seats = aid.partition("@")
+                aid = aid.strip()
+                a = {**a, "to": [x.strip() for x in seats.split(",") if x.strip()]}
             if not aid or aid in seen:
                 raise HubError(400, "ask ids must be unique and non-empty")
             seen.add(aid)
@@ -1741,9 +1751,33 @@ class HubService:
             # client that must first ask whether the key exists will get it
             # wrong exactly once, in the direction of reading every addressee
             # as deliberate, which is the confusion the field exists to end.
+            # INHERITANCE, materialised (ADR-0006, 2026-09-09). An ask with no
+            # `to` on a message that HAS a `to` is addressed to exactly those
+            # seats — written once here so every consumer (owed, discharge,
+            # the driver's narrowing, every client) reads one explicit list.
+            # Not capped: the author already addressed the message to them.
+            # A room-wide message's unaddressed ask keeps `to: []` and, since
+            # this change, obliges NOBODY: 22 of 22 owed-only wakes in the
+            # lab runs were one such ask, due for every seat, undischargeable
+            # by any of them (`asks_naming_you=[]` beside `pending_asks=[1]`).
+            if not entry.get("to") and not entry.get("assignee") and message_to:
+                inherited = [str(x) for x in message_to if str(x) != sender]
+                if inherited:
+                    entry["to"] = inherited
+                    entry["to_inherited"] = True
             derived = [s for s in (a.get("to_from_text") or [])
                        if s in entry.get("to", [])]
             entry["to_from_text"] = derived
+            # Ask.phase (cycle 2): carried verbatim, validated as a phase
+            # slug. It gates PENDING in discharge_state — an ask scoped to
+            # a phase mints no debt until that phase is declared open.
+            if a.get("phase"):
+                phase = sanitize_text(str(a["phase"]), 64, field="ask phase").strip()
+                if phase and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", phase):
+                    raise HubError(400, f"ask '{aid}' phase '{phase}' is not a "
+                                        "phase slug (letters, digits, - and _)")
+                if phase:
+                    entry["phase"] = phase
             norm.append(entry)
         return norm
 
@@ -2152,7 +2186,7 @@ class HubService:
             data["notice"] = payload.notice.model_dump()
         if "asks" in data:
             data["asks"] = self._validate_asks(data["asks"], payload.status,
-                                               sender=sender, channel=channel)
+                                               sender=sender, channel=channel, message_to=list(payload.to or []))
         if "answers" in data or "declines" in data:
             answers, declines = self._validate_discharge(
                 data.get("answers"), data.get("declines"), payload.status,
@@ -3408,6 +3442,17 @@ class HubService:
             for ask in payload.asks:
                 in_ask, out_ask = resolve_mentions(ask.text, members,
                                                    registered)
+                # `seat: …` — the fan-out form a human writes (0077 field
+                # incident, 2026-09-07 fleet run). A leading MEMBER name is
+                # an addressee exactly like `@seat`; a non-member leading
+                # token (`note:`, `claim:`) is prose.
+                # Only when the author gave NO explicit `to`: an explicit list
+                # is the author's intent, and a leading token that happens to
+                # be a member name (`note: …`) must not add a respondent to it
+                # (companion review, 2026-09-09).
+                lead_seat = leading_addressee(ask.text) if not ask.to else None
+                if lead_seat and lead_seat in members and lead_seat not in in_ask:
+                    in_ask = [lead_seat] + list(in_ask)
                 for o in out_ask:
                     if o not in ctx.outsiders:
                         ctx.outsiders.append(o)
@@ -4093,6 +4138,11 @@ class HubService:
         # Computed at the one choke point every envelope surface goes through,
         # so notify lines, /inbox and the WS agree.
         envelope.from_operator = message.sender in self.operator_ids()
+        asks = asks_of(message)
+        if asks:
+            envelope.asks_yours = [str(a.get("id")) for a in asks
+                                   if viewer_id in (a.get("to") or [])]
+            envelope.asks_others = not envelope.asks_yours
         return envelope
 
     def _linked_claim_sources(self, owner: str, channels: list[str]) -> set[str]:
@@ -4636,7 +4686,16 @@ class HubService:
             return False
         if m.sender == viewer_id:
             return False
-        if viewer_id not in m.to and not self._operator_delegate_debt(viewer_id, m):
+        if (viewer_id not in m.to and m.critical
+                and not self._operator_delegate_debt(viewer_id, m)
+                and self.db.has_read(m.id, viewer_id)):
+            # A critical BROADCAST is everyone's debt only until it is READ
+            # (ADR-0006 §4): the row is the second delivery path for a seat
+            # that missed the notify line mid-turn, not a reply obligation.
+            # `unread_criticals` keeps the inbox pin's own read-based contract.
+            return False
+        if (viewer_id not in m.to and not m.critical
+                and not self._operator_delegate_debt(viewer_id, m)):
             # Unaddressed reply/fyi obliges nobody — EXCEPT the reporting
             # delegate on an operator line (ruling 2026-08-01): see
             # _operator_delegate_debt for the to=[] hole this closes.
@@ -4734,7 +4793,31 @@ class HubService:
                                self._canvass_rule_epoch,
                                self._peer_addressed_rule_epoch,
                                self._closure_rule_epoch,
-                               self.ruling_delegate_ids(m.channel))
+                               self.ruling_delegate_ids(m.channel),
+                               open_phases=self._open_phases_cached(m.channel))
+
+    @property
+    def _phase_memo(self) -> dict[str, tuple[float, frozenset[str]]]:
+        # Per INSTANCE (lazily): a class-level dict leaked one app's "no open
+        # phases" into the next app's `work` channel within the same second.
+        return self.__dict__.setdefault("_phase_memo_inst", {})
+
+    def _open_phases_cached(self, channel: str) -> frozenset[str]:
+        """Every phase this channel has EVER opened (each track's hub-kept
+        `opened` list, plus the current open one), memoised for one second
+        and dropped on any `phase:` write: `_discharge` runs per message per
+        reader in `owed()`, and a phase changes by declaration, not per
+        request."""
+        now = time.time()
+        hit = self._phase_memo.get(channel)
+        if hit and now - hit[0] < 1.0:
+            return hit[1]
+        opened = frozenset(
+            ph for row in self.phase_rows(channel)
+            for ph in ([row["current"]] if row["status"] == "open" and row["current"] else [])
+                      + list(row.get("opened") or []))
+        self._phase_memo[channel] = (now, opened)
+        return opened
 
     def _addressee_released(self, m: Message, ds: DischargeState,
                             agent_id: str) -> bool:
@@ -4927,9 +5010,16 @@ class HubService:
         # reply/fyi lines (ruling 2026-08-01). Queried only for delegates and
         # only for operator senders, so the ping-pong the addressed rule
         # prevents stays prevented for everyone else.
+        ops = sorted(self.operator_ids())
         if agent_id in self.reporting_delegate_ids():
-            ops = sorted(self.operator_ids())
             candidates = candidates + self.db.unaddressed_directives(channels, ops)
+        else:
+            # A CRITICAL broadcast is everyone's debt: it needs a second
+            # delivery path (the owed signature) beside the notify line,
+            # which a seat mid-turn can miss (cycle-1 A4, 2026-09-09).
+            candidates = candidates + [
+                m for m in self.db.unaddressed_directives(channels, ops)
+                if m.critical]
         return [m for m in candidates if self._is_addressed_debt(agent_id, m)]
 
     #: THE CAPABILITY BESIDE THE NAME (reason-enum-and-unknown-values#7 ask
@@ -4969,6 +5059,28 @@ class HubService:
         # bookkeeping rather than delivery is what the reason NAME is for.
         "hub_alert_fix_the_condition": ("reply",),
     }
+
+    def _seat_is_blocked(self, agent_id: str, channels: list[str]) -> bool:
+        """True while one of the seat's own live `claim:` rows says `blocked`.
+        The seat said it cannot proceed; an answer to its ask is then due,
+        not ambient mail (reviewer Round 2, Q1a). Bounded: rows are read
+        once per /owed, and the state clears when the claim moves on."""
+        for ch in channels:
+            try:
+                keys = self.db.store_keys(ch)
+            except Exception:
+                continue
+            for row in keys:
+                key = str(row.get("key") or "")
+                if not key.startswith("claim:"):
+                    continue
+                entry = self.db.store_get(ch, key)
+                value = entry.value if entry is not None else None
+                if not isinstance(value, dict) or value.get("owner") != agent_id:
+                    continue
+                if str(value.get("status") or "").strip().lower().startswith("blocked"):
+                    return True
+        return False
 
     def owed(self, agent: AgentInfo) -> OwedReport:
         """The agent's outstanding debts (0079), read receipts deliberately
@@ -5045,6 +5157,14 @@ class HubService:
                     reason="names_you",
                     clears_on=list(self._REASON_CLEARS_ON["names_you"]),
                     owed=True,
+                    # (d): an operator's addressed fyi is OWED — and not
+                    # DUE. It reaches the seat in its next check_inbox; it
+                    # does not justify spawning that turn. This narrows the
+                    # 2026-07-19 ruling ("humans are sloppy about status")
+                    # by the operator's own 2026-09-08 criterion: an fyi is
+                    # the author saying "can wait". `critical` still rings.
+                    due=(m.status != Status.fyi
+                         or bool(m.critical)),
                     created_at=m.created_at,
                     escalated=age > sla_cache[m.channel] * 60.0,
                 ))
@@ -5068,6 +5188,20 @@ class HubService:
                     # at-test#382 was a broadcast open carrying five
                     # requirements and it obliged no single seat.
                     or self._operator_delegate_debt(agent.id, m)):
+                continue
+            deferred_named = {seat for a in asks_of(m)
+                              if str(a.get("id")) in set(ds.deferred)
+                              for seat in (a.get("to") or [])}
+            if (asks_of(m) and agent.id not in named_pending
+                    and agent.id not in deferred_named
+                    and not self._operator_delegate_debt(agent.id, m)):
+                # ADR-0006, whether or not this seat has replied (20-seat run,
+                # 2026-09-09): a STRUCTURED message's asks name who ANSWERS;
+                # its `to` names who READS. A manager's open to nine seats
+                # with one ask addressed to `gateway` pinned the other eight
+                # with `names_you` and a manager spent a turn telling a seat
+                # it owed nothing. The reporting delegate alone carries an
+                # operator's commission to its evidence-cited report.
                 continue
             if any(r.sender == agent.id for r in replies):
                 # Engaged: the remaining pending asks are other seats' —
@@ -5114,12 +5248,12 @@ class HubService:
                 # `_message_pending_asks` takes the same reading ("an ask
                 # addressed to nobody is everyone's"), so hub and driver now
                 # agree instead of contradicting each other.
+                # ADR-0006: an ask names its seats (given, derived from a
+                # leading `seat:`, or inherited from the message `to`); an
+                # ask that names nobody obliges nobody. The former
+                # "addressed to nobody is everyone's" clause is gone.
                 if (asks_of(m)
                         and agent.id not in named_pending
-                        and not any(
-                            not (a.get("to") or a.get("assignee"))
-                            for a in asks_of(m)
-                            if str(a.get("id")) in set(ds.pending))
                         and not self._operator_delegate_debt(agent.id, m)):
                     continue
                 if not (m.sender in ops
@@ -5165,8 +5299,7 @@ class HubService:
             mine_pending = [
                 a for a in asks_of(m)
                 if str(a.get("id")) in set(ds.pending)
-                and (agent.id in (a.get("to") or [])
-                     or not (a.get("to") or a.get("assignee")))]
+                and agent.id in (a.get("to") or [])]          # ADR-0006
             if mine_pending:
                 reason = "asks_pending"
             elif (asks_of(m) and m.status in (Status.open, Status.blocked)
@@ -5239,14 +5372,36 @@ class HubService:
                 reason = "peer_request_no_asks"
             else:
                 reason = "names_you"
+            # OWED vs DUE (ObligationRow.due). Every row on this path names
+            # this seat — `peer_request_no_asks` is minted ONLY for a seat in
+            # message-level `to` (the gate above), and a peer's fyi never
+            # reaches here — so every row is due EXCEPT a watchdog alert in
+            # the operator's own room: AGENT DARK/DEAF/LURKING are status
+            # for a human, not a task for the seat they name. A hub alert
+            # addressed into a work channel (YOU ARE THE BLOCKER, CLAIMS
+            # DUE) IS the seat's own work and stays due. First cut (same
+            # day) also excluded `peer_request_no_asks`, misreading it as
+            # "names nobody"; the independent review caught it.
+            due = not (reason == "hub_alert_fix_the_condition"
+                       and m.channel == self.DARK_ALERTS_CHANNEL)
+            # READER-SCOPED: a pending ask that names OTHER seats is not this
+            # reader's business. The message-global list told every seat it
+            # owed 16-18 asks in the fleet run (most another seat's) and told
+            # the companion its own asks were "another seat's". An ask that
+            # names nobody stays everyone's (the anti-partial-rot reading).
+            _to_of = {str(a.get("id")): [str(x) for x in (a.get("to") or [])]
+                      for a in asks_of(m)}
+            mine_or_open = [aid for aid in ds.pending
+                            if agent.id in _to_of.get(aid, [])]     # ADR-0006
             to_answer.append(ObligationRow(
                 channel=m.channel, id=m.id, seq=m.seq,
                 sender=m.sender, title=m.title,
-                pending_asks=ds.pending,
+                pending_asks=mine_or_open,
                 asks_naming_you=sorted(
                     str(a["id"]) for a in asks_of(m)
                     if agent.id in (a.get("to") or []) and str(a["id"]) in ds.pending),
                 reason=reason,
+                due=due,
                 # Indexed, never `.get(reason, [])`: a reason with no
                 # mapping must blow up in a test, not serve `[]` — which
                 # is the strongest claim on the wire ("nothing you can do")
@@ -5259,6 +5414,7 @@ class HubService:
         to_consume: list[ConsumeRow] = []
         waiting_on: list[WaitingRow] = []
         cursor_cache: dict[tuple[str, str], int] = {}
+        blocked = self._seat_is_blocked(agent.id, channels)
         for m in self.db.my_open_messages(agent.id, channels):
             replies = self.db.replies_to(m.id)
             if self._closed_authoritatively(m, replies):
@@ -5285,6 +5441,7 @@ class HubService:
                         answered_by=r.sender, answer_id=r.id,
                         answer_seq=r.seq,
                         answer_created_at=r.created_at,
+                        due=blocked,
                     ))
             # waiting_on (asker side of the debrief): per still-pending ask
             # addressee, has the hub SERVED them past your question? "acked
@@ -5606,6 +5763,10 @@ class HubService:
             # owner had not chosen.
             self._require_gate(channel, agent, "decision")
         if key.startswith(self._PHASE_PREFIX):
+            # A phase declaration is the one event that changes which asks
+            # are PENDING (Ask.phase): drop the 1s memo before the write so
+            # the next /owed sees it, whatever this request's outcome.
+            self._phase_memo.pop(channel, None)
             if len(key) <= len(self._PHASE_PREFIX):
                 raise HubError(400, "phase keys name a TRACK: "
                                     "phase:<track> (e.g. phase:manuscript)")
@@ -5618,8 +5779,20 @@ class HubService:
                     and str(value.get("status") or "").strip().lower()
                     in ("complete", "completed", "done", "closed")):
                 self._require_gate(channel, agent, "phase_complete")
-            self._validate_phase_row(value, agent,
-                                     self.db.store_get(channel, key))
+            prev = self.db.store_get(channel, key)
+            self._validate_phase_row(value, agent, prev)
+            # `opened` is HUB-MAINTAINED, never the client's: the set of
+            # phases this track has ever opened. It is what makes Ask.phase
+            # readiness MONOTONIC — an ask scoped to `draft` stays pending
+            # after the track moves on to `review` — without a store
+            # history the schema does not keep. Whatever the client sent
+            # under `opened` is overwritten.
+            prev_opened = (prev.value.get("opened")
+                           if prev is not None and isinstance(prev.value, dict)
+                           else None) or []
+            cur = str(value.get("current") or "").strip()
+            value = {**value, "opened": sorted(
+                {str(x) for x in prev_opened} | ({cur} if cur else set()))}
         if key.startswith(self._TASK_PREFIX):
             if len(key) <= len(self._TASK_PREFIX):
                 raise HubError(400, "task keys name a request: task:<slug> "
@@ -5629,6 +5802,19 @@ class HubService:
             if refusal is not None:
                 raise HubError(403, refusal)
             self._validate_task_row(channel, value, agent, current)
+        if key.startswith("fact:"):
+            # A shared number has ONE owner — its first writer (fleet review
+            # F6, 2026-09-09: `fact:` rows were writable by any member and a
+            # store write left no trace in the channel). Others read it; a
+            # correction goes to the owner as an addressed ask, or is made by
+            # channel authority. The write itself is audited below.
+            current = self.db.store_get(channel, key)
+            if (current is not None and current.updated_by != agent.id
+                    and not self.may_administer_channel(agent, channel)):
+                raise HubError(403, f"'{key}' is owned by its first writer "
+                                    f"'{current.updated_by}'. Ask them (an addressed "
+                                    "open) to correct it; channel authority may "
+                                    "overwrite it.")
         if key.startswith("claim:") and isinstance(value, dict):
             # Identity fields inside store values are validated against the
             # caller (0068/ADR-0004; live-test finding): you may claim FOR
@@ -5805,6 +5991,9 @@ class HubService:
         if key.startswith(self.WORK_ROW_PREFIX):
             self._validate_work_row(key, value)
         entry = self.db.store_set(channel, key, value, agent.id, expect_version)
+        if key.startswith("fact:"):
+            # On the record, like a file write: who set which number, when.
+            self._post_store_audit(channel, agent.id, key, entry.version)
         # TELL THE SEAT IT IS BLOCKING (2026-08-07). The park declared, in
         # validated data, who can end it. Storing that and not delivering it
         # is how two rows named `g4-engine` while `g4-engine` sat idle in the
@@ -6506,6 +6695,17 @@ class HubService:
             raise HubError(400, "fs path has empty, '.', '..' or whitespace-padded segments")
         return "/".join(segments)
 
+    def _post_store_audit(self, channel: str, actor: str, key: str, version: int) -> Message:
+        """Append-only record of a shared-number write (`fact:` rows), authored
+        by the actor — a store write posted no audit at all (fleet review F6)."""
+        message = self.db.insert_message(
+            channel, actor, kind=Kind.fs.value, status="fyi", urgency="inbox",
+            title=f"store:set {key}", body="",
+            data={"op": "set", "key": key, "version": version}, reply_to=None,
+        )
+        self._wake(message)
+        return message
+
     def _post_fs_audit(self, channel: str, actor: str, op: str, path: str,
                        version: int, size_bytes: int) -> Message:
         """Append-only record of a file mutation (who/what/when), authored by the
@@ -6838,6 +7038,21 @@ class HubService:
         norm = self._normalize_fs_path(path)
         if norm.startswith(RESERVED_FS_PREFIX):
             self._require_channel_authority(channel, agent)
+        else:
+            # A channel file is OWNED by the seat that last wrote it (fleet
+            # review F3, 2026-09-09: any member could overwrite another seat's
+            # deliverable, receipt and history notwithstanding). Another seat
+            # co-edits it KNOWINGLY — by passing the version it read
+            # (compare-and-swap) — or with channel authority; never by accident.
+            owned = self.db.fs_get(channel, FS_PREFIX + norm)
+            if (owned and not owned.get("deleted") and owned.get("updated_by")
+                    and owned["updated_by"] != agent.id and expect_version is None
+                    and not self.may_administer_channel(agent, channel)):
+                raise HubError(403, f"'{norm}' was written by '{owned['updated_by']}' "
+                                    f"(v{owned.get('version')}). To co-edit it pass "
+                                    f"expect_version={owned.get('version')} — the version "
+                                    "you read — or ask its writer; channel authority may "
+                                    "overwrite it.")
         if (content is None) == (content_b64 is None):
             raise HubError(400, "provide exactly one of content or content_b64")
         if content_b64 is not None:
@@ -8340,7 +8555,8 @@ class HubService:
 
     _PHASE_PREFIX = "phase:"
     _PHASE_FIELDS = {"current", "status", "next", "steward", "paths", "note",
-                     "declared_by", "declared_at"}
+                     "declared_by", "declared_at",
+                     "opened"}   # hub-maintained; a client's value is overwritten
     #: `open` = work on this phase is live; `complete` = the steward has
     #: declared it done and the NEXT phase may begin. Two words on purpose:
     #: a richer vocabulary would need a transition owner per word, and the
@@ -8459,6 +8675,7 @@ class HubService:
                 "next": str(value.get("next", "")),
                 "steward": str(value.get("steward", "")),
                 "paths": [str(p) for p in (value.get("paths") or [])],
+                "opened": [str(x) for x in (value.get("opened") or [])],
                 "note": str(value.get("note", "")),
                 "declared_by": str(value.get("declared_by", "")),
                 "declared_at": float(value.get("declared_at", 0.0) or 0.0),

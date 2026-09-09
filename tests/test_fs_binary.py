@@ -164,9 +164,9 @@ def test_cas_create_only_conflict_on_binary(service, agents):
 def test_text_binary_overwrite_and_archived_version_reads(service, agents):
     alice, bob = agents
     service.fs_write(alice, "design", "doc", "# plain text v1")        # v1 text
-    service.fs_write(bob, "design", "doc", content_b64=PNG_ISH_B64,
+    service.fs_write(bob, "design", "doc", content_b64=PNG_ISH_B64, expect_version=1,
                      mime="image/png")                                 # v2 binary
-    service.fs_write(alice, "design", "doc", "text again v3")          # v3 text
+    service.fs_write(alice, "design", "doc", "text again v3", expect_version=2)  # v3 text
 
     v1 = service.fs_read(bob, "design", "doc", version=1)
     assert v1.content == "# plain text v1" and v1.encoding is None

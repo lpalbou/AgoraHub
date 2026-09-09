@@ -87,10 +87,14 @@ def test_runtime_probe_scrubs_agora_environment(tmp_path, monkeypatch):
     assert probe_mcp_runtime(str(fake)).ok is True
 
 
-def test_server_rejects_unknown_arguments(monkeypatch):
+def test_server_rejects_unknown_arguments(monkeypatch, capsys):
+    # Configuration is flags now (--url/--home/--as/...): an unknown flag is
+    # still refused loudly, with the usage on stderr (argparse exits 2).
     monkeypatch.setattr(sys, "argv", ["agora-mcp", "--unknown"])
-    with pytest.raises(SystemExit, match="usage: agora-mcp"):
+    with pytest.raises(SystemExit) as exc:
         server.main()
+    assert exc.value.code == 2
+    assert "usage: agora-mcp" in capsys.readouterr().err
 
 
 def test_server_rejects_an_incompatible_installed_major(monkeypatch):

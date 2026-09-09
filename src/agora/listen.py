@@ -29,6 +29,7 @@ from .logfmt import emit_log
 DEFAULT_DEBOUNCE = 15.0
 DEFAULT_HEARTBEAT = 300.0
 _CHANNEL_CAP = 6                       # the wake line stays one short line, always
+_SEQS_CAP = 24                        # seqs= field: identifiers only, bounded
 _NOTICE_CAP = 3          # hub notices rendered per digest
 _NOTICE_CHARS = 400      # per-notice clamp (hub-authored, still bounded)
 
@@ -179,13 +180,15 @@ def resolve_identity(agent_id: str | None, url: str | None, cwd: Path,
     from .setup_harness import resolve_workspace_identity
 
     env: dict[str, Any] = resolve_workspace_identity(cwd, harness=harness) or {}
-    aid = agent_id or os.environ.get("AGORA_AGENT_ID") or env.get("AGORA_AGENT_ID")
+    # One order everywhere (2026-09-09): the flag, then THIS folder's seat
+    # record, then the legacy env, then config, then the local default.
+    aid = agent_id or env.get("AGORA_AGENT_ID") or os.environ.get("AGORA_AGENT_ID")
     if not aid:
         raise SystemExit(
             "agora listen: cannot determine the agent id. Pass --as <id>, set "
             "$AGORA_AGENT_ID, or cd to the folder you wired with `agora "
             "setup` (agora does not search parent folders).")
-    hub = (url or os.environ.get("AGORA_URL") or env.get("AGORA_URL")
+    hub = (url or env.get("AGORA_URL") or os.environ.get("AGORA_URL")
            or _config.load_config().get("url") or "http://127.0.0.1:8765")
     return aid, str(hub).rstrip("/")
 
@@ -317,6 +320,12 @@ def wake_line(events: list[dict[str, Any]], agent_id: str, *, preview: bool = Fa
                                     for c in names[:_CHANNEL_CAP])]
     if len(names) > _CHANNEL_CAP:
         parts.append(f"more={len(names) - _CHANNEL_CAP}")
+    # Every seq in the batch, identifiers only (the per-channel maximum above
+    # is the sentinel's contract; attribution needs the full set — reviewer
+    # Round 2, Q3a: a trap message not the batch maximum was unattributable).
+    seqs = sorted({(str(ev["channel"]), int(ev["seq"])) for ev in events})
+    if len(seqs) > 1:
+        parts.append("seqs=" + ",".join(f"{_safe_channel(c)}#{q}" for c, q in seqs[:_SEQS_CAP]))
     # Self-stating latency: hub mint time rides in the message ULID, so the
     # wake can carry its own hub->wake age. Attribution armor (2026-07-15:
     # a phantom "11-minute latency" cost an hour of forensics, and the woken
@@ -561,27 +570,42 @@ def _owed_snapshot(hub: str, agent_id: str) -> tuple[tuple[int, int] | None,
         if not (counts[0] or counts[1]):
             return counts, None, owed
         now = time.time()
-        ids = sorted([_debt_token(row, now) for row in owed.get("to_answer", [])]
-                     + [row.get("answer_id", "") for row in owed.get("to_consume", [])])
+        # Only DUE debt enters the signature (ObligationRow.due, absent on
+        # older hubs = True). 0106's re-ring is preserved for due debt: an
+        # escalated due row's token carries its age band (_debt_token), so
+        # the signature flips when the hub decides that debt has rotted. An
+        # owed-but-not-due row (an fyi, a watchdog alert) is still shown and
+        # still escalates on /owed; it never flips the signature — "can wait"
+        # does not become "must act" because time passed (companion review,
+        # 2026-09-08: a `due OR escalated` clause contradicted ADR-0005 §1).
+        # `to_consume` (an answer to the seat's OWN ask, to be USED on its
+        # next real turn) is owed, never due: it is the seat's own thread,
+        # not a peer's question (ADR-0005 §1). Signing it re-rang one seat
+        # four times for a single DM answer in the cycle-3 run (2026-09-09).
+        ids = sorted([_debt_token(row, now) for row in owed.get("to_answer", [])
+                      if row.get("due", True)]
+                     # A consume row is due only while the seat is BLOCKED on
+                     # it (its live claim says so): then the answer it asked
+                     # for is exactly what must wake it (reviewer Round 2, Q1a).
+                     + [str(row.get("answer_id", "")) for row in owed.get("to_consume", [])
+                        if row.get("due")])
+        if not ids:
+            return counts, None, owed
         return counts, ",".join(ids), owed
     except Exception:
         return None, None, None
 
 
 def _debt_token(row: dict[str, Any], now: float) -> str:
-    """One to_answer row -> its signature token. Escalated debts carry an
-    age band so their token keeps changing while they rot (re-ring); fresh
-    debts are the bare id. Missing/zero created_at degrades to band 0 — a
-    constant, i.e. the single escalation-flip re-ring and nothing more."""
+    """One to_answer row -> its signature token: the bare id, plus ONE flip
+    when the hub escalates it. A single re-ring, never a band ladder: the
+    validation run's steward (2026-09-09) was re-rung on the commission it
+    was mid-way through delivering at every age band — 20 of its 53 turns,
+    none of which could discharge the row before the merge was done. The
+    claim row is the progress receipt; time passing is not new information."""
+    del now  # kept for callers; the age band no longer enters the token
     token = str(row.get("id", ""))
-    if not row.get("escalated"):
-        return token
-    try:
-        created = float(row.get("created_at") or 0.0)
-    except (TypeError, ValueError):
-        created = 0.0
-    band = int(max(now - created, 0.0) // REWAKE_BAND_SECONDS) if created > 0 else 0
-    return f"{token}!{band}"
+    return f"{token}!" if row.get("escalated") else token
 
 
 def _owed_counts(hub: str, agent_id: str) -> tuple[int, int] | None:
@@ -654,6 +678,36 @@ def _record_owed_signature(hub: str, agent_id: str,
         pass
 
 
+def _gap_has_wake(path: Path, agent_id: str, important_only: bool) -> bool:
+    """Does the notify file hold a QUALIFYING line between the stored offset
+    and its end — i.e. a message that landed while no listener was tailing?
+
+    THE REPLAY GAP OUTRANKS THE BACKLOG POLL (cycle-1 A4, 2026-09-09). An
+    operator `critical` landed mid-turn in all four seats' notify files; at
+    the next arm the owed poll fired first for OLD debt (`n=0 backlog
+    oldest=work#8`), returned, and the critical sat unread in the gap — two
+    of four seats never saw it before the run ended. A wake that replays the
+    gap names the line AND carries the owed digest (`_deliver_wake`), so
+    nothing is lost by letting the file go first. Any failure = no gap."""
+    stored = _read_offset(agent_id)
+    if not stored:
+        return False
+    try:
+        st = path.stat()
+        if stored[0] != st.st_ino or stored[1] > st.st_size:
+            return False
+        with open(path, "rb") as fh:
+            fh.seek(stored[1])
+            chunk = fh.read()
+    except OSError:
+        return False
+    for raw in chunk.decode("utf-8", "replace").splitlines():
+        event = parse_line(raw)
+        if event is not None and qualifies(event, agent_id, important_only):
+            return True
+    return False
+
+
 def _backlog_wake_at_arm(hub: str, agent_id: str, *, once: bool) -> int | None:
     """The blind-spot closer: a message that lands BETWEEN two --once listen
     windows (the loop's `sleep 5`, or while the seat is mid-turn) is invisible
@@ -675,6 +729,10 @@ def _backlog_wake_at_arm(hub: str, agent_id: str, *, once: bool) -> int | None:
         return None                      # streaming mode delivers live events
     counts, sig, owed_raw = _owed_snapshot(hub, agent_id)
     if sig is None:
+        # Nothing DUE (or nothing owed, or unknowable). Drop any stored
+        # signature: a stale one from an earlier wake would otherwise
+        # silence the next identical debt (reviewer, 2026-09-09).
+        _record_owed_signature(hub, agent_id, "")
         return None
     last = None
     try:
@@ -889,8 +947,25 @@ def _dedupe_events(batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _deliver_wake(batch, agent_id, *, preview: bool, once: bool,
-                  hub: str = "", classify_driver_wake: bool = False) -> int | None:
-    """Emit the wake sentinel (+ stderr digest and exit-2 in --once mode)."""
+                  hub: str = "", classify_driver_wake: bool = False,
+                  wake_policy: str = "room") -> int | None:
+    """Emit the wake sentinel (+ stderr digest and exit-2 in --once mode).
+
+    `wake_policy` is the DRIVER's rule for what buys a turn, applied only
+    when `classify_driver_wake` is set (the interactive listener's
+    `qualifies` is untouched — that rule has flipped four times and is not
+    flipped here):
+      "room"      — today's grade: an unassigned open/blocked in the batch
+                    buys a broadcast turn (the fuse prices it).
+      "addressed" — a turn is bought only by a line that names this seat
+                    (to-me / reply-to-me / critical / escalated), by the
+                    operator, or by owed debt that is DUE (ObligationRow.due,
+                    or escalated); a peer's room-wide question is delivered
+                    and waits for the seat's next turn. This is the fifth
+                    setting of the room-wide-open rule for DRIVEN seats
+                    only — recorded, as `qualifies` demands, in ADR-0005 and
+                    the CHANGELOG. Operator criterion (b), 2026-09-08.
+    """
     batch = _dedupe_events(batch)
     owed, sig, owed_raw = (_owed_snapshot(hub, agent_id) if hub
                            else (None, None, None))
@@ -915,6 +990,27 @@ def _deliver_wake(batch, agent_id, *, preview: bool, once: bool,
                 for token in str(event.get("flags", "")).split(",")
                 if token
             }
+            if wake_policy == "addressed":
+                # THE POLICY, before the importance gate (2026-09-09). A line
+                # buys a driven turn only if it names ME (to-me, reply-to-me,
+                # critical) or the operator speaks to the ROOM. `escalated`
+                # alone does not: the hub re-emits an escalating line to
+                # every member's file, so another seat's rotting ask woke
+                # the whole room (cycle 1b: 10 of 41 turns). Nor does my own
+                # unrelated due debt: that is the backlog poll's business,
+                # and it already rang for it (cycle 2: lead and gamma woke
+                # on an open addressed to beta because they owed something
+                # else).
+                mine = flags & {"to-me", "reply-to-me", "critical"}
+                operator_room_wide = any(
+                    "from-operator" in str(e.get("flags", ""))
+                    and "addressed" not in str(e.get("flags", ""))
+                    for e in batch)
+                if not mine and not operator_room_wide:
+                    return _DRIVER_UNOWNED_WAKE
+                if not mine:
+                    return _DRIVER_BROADCAST_WAKE      # the operator's room-wide line
+                return 2
             if not (flags & _IMPORTANT_FLAGS):
                 # Two grades of unowned wake, and the driver pays differently
                 # for each. `owed` is the hub's own answer to "does this seat
@@ -1098,6 +1194,7 @@ def run_file_mode(path: Path, agent_id: str, hub_url: str, pid_path: Path, *,
                   preview: bool = False, poll: float = 0.5,
                   heartbeat: float = DEFAULT_HEARTBEAT, window: float | None = None,
                   classify_driver_wake: bool = False,
+                  wake_policy: str = "room",
                   stop: Callable[[], bool] = lambda: False) -> int:
     try:
         fh = open(path, "rb")
@@ -1132,7 +1229,8 @@ def run_file_mode(path: Path, agent_id: str, hub_url: str, pid_path: Path, *,
                 if batch:
                     code = _deliver_wake(batch, agent_id, preview=preview,
                                          once=once, hub=hub_url,
-                                         classify_driver_wake=classify_driver_wake)
+                                         classify_driver_wake=classify_driver_wake,
+                                         wake_policy=wake_policy)
                     if code is not None:
                         return code
                 if heartbeat > 0 and time.monotonic() - last_beat >= heartbeat:
@@ -1156,6 +1254,7 @@ async def run_ws_mode(url: str, key: str, agent_id: str, pid_path: Path, *,
                       preview: bool = False, notify_file: str | None = None,
                       heartbeat: float = DEFAULT_HEARTBEAT,
                       classify_driver_wake: bool = False,
+                      wake_policy: str = "room",
                       window: float | None = None) -> int:
     from .client import AgoraClient
     from .client.client import AgoraError  # not re-exported by the package
@@ -1240,7 +1339,8 @@ async def run_ws_mode(url: str, key: str, agent_id: str, pid_path: Path, *,
             if batch:
                 code = _deliver_wake(batch + notices, agent_id, preview=preview,
                                      once=once, hub=url,
-                                     classify_driver_wake=classify_driver_wake)
+                                     classify_driver_wake=classify_driver_wake,
+                                     wake_policy=wake_policy)
                 if code is not None:
                     return code
     finally:
@@ -1259,6 +1359,7 @@ def run_listen(*, agent_id: str | None = None, url: str | None = None,
                idle_nudge: float = 0.0,  # accepted no-op since 0.10.5 (see cli)
                signal_passthrough: bool = False,
                driver_call: bool = False,
+               wake_policy: str = "room",
                cwd: Path | None = None) -> int:
     aid, hub = resolve_identity(agent_id, url, Path(cwd) if cwd else Path.cwd())
     home = _config.home()
@@ -1312,7 +1413,7 @@ def run_listen(*, agent_id: str | None = None, url: str | None = None,
     shared = dict(once=once, max_wait=effective_wait, debounce=debounce,
                   important_only=important_only, preview=preview,
                   heartbeat=heartbeat, window=effective_wait if adaptive else None,
-                  classify_driver_wake=driver_call)
+                  classify_driver_wake=driver_call, wake_policy=wake_policy)
     try:
         # Everything after the lock is acquired lives inside the try: a failure
         # as early as the pidfile write must still release the lock in the
@@ -1326,8 +1427,15 @@ def run_listen(*, agent_id: str | None = None, url: str | None = None,
             arm_signals()
         pid_path.write_text(str(os.getpid()))
         # Backlog check BEFORE waiting: debt that landed in a listener blind
-        # spot (between --once windows) wakes at arm time or never.
-        backlog_rc = _backlog_wake_at_arm(hub, aid, once=once)
+        # spot (between --once windows) wakes at arm time or never — UNLESS
+        # the notify file's replay gap already holds a qualifying line, which
+        # file mode delivers first, by name, with the owed digest attached
+        # (see _gap_has_wake: the critical the backlog poll pre-empted).
+        if src == "file" and _gap_has_wake(home / f"{aid}-inbox.log", aid,
+                                           bool(shared.get("important_only"))):
+            backlog_rc = None
+        else:
+            backlog_rc = _backlog_wake_at_arm(hub, aid, once=once)
         if backlog_rc is not None:
             return backlog_rc
         if src == "file":

@@ -201,11 +201,17 @@ def _resolve_reply(remap: dict[str, list[tuple[str, str]]], msg: ParsedMessage) 
 
 
 def main() -> None:
-    if len(sys.argv) < 2:
-        raise SystemExit("usage: migrate_file_mailbox.py <mailbox-dir>  "
-                         "(must contain threads/)")
-    source = Path(sys.argv[1]).expanduser()
+    # Configuration by flag (`--url`); the credential by environment.
+    argv = list(sys.argv[1:])
     hub_url = os.environ.get("AGORA_URL", "http://127.0.0.1:8765")
+    if "--url" in argv:
+        i = argv.index("--url")
+        hub_url = argv[i + 1] if i + 1 < len(argv) else ""
+        del argv[i:i + 2]
+    if len(argv) < 1 or not hub_url:
+        raise SystemExit("usage: migrate_file_mailbox.py <mailbox-dir> [--url HUB]  "
+                         "(the dir must contain threads/)")
+    source = Path(argv[0]).expanduser()
     admin_key = os.environ.get("AGORA_ADMIN_KEY", "")
     if not admin_key:
         raise SystemExit("set AGORA_ADMIN_KEY (the hub's admin key)")

@@ -184,9 +184,12 @@ invisible to a surface resolving another — `http://127.0.0.1:8765` and
 `http://192.168.1.10:8765` are different entries even when they are the same
 hub. Use one canonical URL everywhere (the one the artifact carried, or the
 one you passed to `seed-key`). CLI agent commands resolve the URL from
-`--url`, then `$AGORA_URL`, then the selected home's `config.json`. Harness
-wiring carries its own URL. AgoraTUI does not read the CLI config or
-`$AGORA_URL`: give it `AGORA_HOME` for the key file and `--url` for the hub.
+`--url`, then this folder's `.agora/seat.json`, then the legacy `$AGORA_URL`,
+then the selected home's `config.json` — so from a wired workspace the fix is
+`--url` on the command or re-running `agora setup` there, never an exported
+variable (the seat record outranks it). Harness wiring carries its own URL.
+AgoraTUI does not read the CLI config: give it `--home` for the key file and
+`--url` for the hub.
 `agora join` prevents this class by using one normalized URL for redemption,
 the cache entry, and the config write.
 

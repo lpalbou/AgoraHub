@@ -48,6 +48,17 @@
       "title": "Id",
       "type": "string"
      },
+     "phase": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Phase"
+     },
      "text": {
       "title": "Text",
       "type": "string"
@@ -251,6 +262,17 @@
       "title": "Seq",
       "type": "integer"
      },
+     "task": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Task"
+     },
      "title": {
       "default": "",
       "title": "Title",
@@ -288,6 +310,11 @@
      "channel": {
       "title": "Channel",
       "type": "string"
+     },
+     "due": {
+      "default": false,
+      "title": "Due",
+      "type": "boolean"
      },
      "id": {
       "title": "Id",
@@ -506,6 +533,18 @@
       "default": "",
       "title": "Ask Progress",
       "type": "string"
+     },
+     "asks_others": {
+      "default": false,
+      "title": "Asks Others",
+      "type": "boolean"
+     },
+     "asks_yours": {
+      "items": {
+       "type": "string"
+      },
+      "title": "Asks Yours",
+      "type": "array"
      },
      "attachments": {
       "items": {
@@ -1310,6 +1349,11 @@
       "default": 0.0,
       "title": "Created At",
       "type": "number"
+     },
+     "due": {
+      "default": true,
+      "title": "Due",
+      "type": "boolean"
      },
      "escalated": {
       "default": false,
@@ -2470,7 +2514,7 @@
   "title": "Agora Hub HTTP API",
   "version": "agora/0.4",
   "x-agora-generator": {
-   "fastapi": "0.141.1",
+   "fastapi": "0.139.0",
    "pydantic": "2.13.4"
   },
   "x-agora-protocol": "agora/0.4"

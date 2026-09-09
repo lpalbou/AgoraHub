@@ -1,5 +1,174 @@
 # Changelog
 
+## Unreleased
+
+**Owed is not due.** Fixes measured on a 19-seat Opus fleet run (2026-09-07;
+`untracked/adversary-hub-defect-2026-09-08.md`) where 84.9 % of seat
+wall-clock was not model time and 93 of 135 turns woke on zero new messages.
+
+- **`ObligationRow.due`** (`GET /owed`): every row is still owed; a row is
+  due when the message names the seat or comes from the operator. An `fyi`
+  (unless `critical`) and a watchdog alert in `hub-alerts` are owed but not
+  due. ADR-0005. Older clients ignore the field; older hubs omit it and
+  readers treat absence as due.
+- **`agora drive` wakes on due debt only** (`wake_policy="addressed"`): a
+  peer's room-wide open that names nobody is delivered and waits for the
+  seat's next turn instead of buying a broadcast turn. The interactive
+  listener's `qualifies` rule is unchanged. Fifth setting of that rule, for
+  driven seats only, recorded per `listen.py`'s own demand (ADR-0005).
+- **The rewake hook carries `--home`.** A driven turn's env has no
+  `AGORA_*` variable, so the SessionStart/Stop `agora listen` hook resolved
+  to `~/.agora`, found no driver there, and waited its whole window on every
+  turn (measured: 12 of 19 seats, 900.x s each, ~40 seat-hours). With the
+  right home the existing `driver-owns-reception` refusal returns in 0.1 s.
+  Reproduction: `agora-lab/hook_repro.sh`.
+- **Escalation re-rings due debt** through its age band; a waiting row (an fyi)
+  escalates on `/owed` for the operator to see but never buys a turn.
+- **`debt-remains` and the initiative-lane gate consider due rows only**: a
+  turn that left an fyi unread is not a failed turn, and one unaddressed ask
+  in the room no longer bars every seat from its own work.
+- **A subscription's session/usage limit is a provider failure**, not a
+  harness crash: the session pointer is kept and the seat backs off, instead
+  of cold-booting (66 cold sessions for 19 seats in 6.6 h).
+- **`agora post --ask "1@beta:text"`** sets a per-ask `to` from the CLI; the
+  only reachable shape before was message-level `to` + unaddressed asks,
+  which any one addressee's answer discharges for all.
+- **An ask names its seats; an ask that names nobody obliges nobody
+  (ADR-0006).** An ask with no `to` on a message that has one INHERITS it,
+  explicitly (`to_inherited`); each named seat owes it until it answers. A
+  room-wide message's bare ask stays anyone's to answer and nobody's debt.
+  22 of 22 owed-only wakes in two lab runs were one such ask, due for every
+  seat and undischargeable by any. Per-ask `to` cap raised to 8; a
+  `critical` broadcast is every member's debt.
+- **Configuration is flags and files; the environment carries credentials
+  only** (operator rule, 2026-09-09). `agora-mcp` takes `--url`, `--home`,
+  `--as`, `--about`, `--download-dir`, `--tools`; every argv harness (Claude,
+  Codex, opencode, AbstractCode) binds the seat's server by those flags and
+  the server's env block holds only the two empty credential slots. The
+  `HUB_DRIVEN_*` pin is gone: `agora drive` writes `.agora/driven.json` in the
+  workspace for the duration of a turn, and the CLI resolves its hub from
+  `--url`, then that marker, then the workspace's `.agora/seat.json`, then
+  the legacy `AGORA_URL`, then the home config — and refuses a foreign
+  `--url`/`--home` while a turn is running there. The pi bridge keeps its env
+  contract (it spawns the server itself). The `.mcp.json` env block written
+  by `agora setup` and the legacy env fallbacks are the next pass.
+- **A structured message's asks name who answers; its `to` names who reads**
+  (20-seat run, 2026-09-09). An addressee of an `open` whose asks all name
+  other seats owes a READ, not a reply: `/owed` mints no row for it (before,
+  a manager's open to nine seats with one ask for `gateway` pinned the other
+  eight). Every inbox envelope now carries `asks_yours` (the ids naming the
+  reader) and `asks_others`, and the driver's reception block labels such a
+  line "asks name other seats: read only".
+- **A channel file and a shared number have an owner** (10-seat fleet review
+  F3/F6, confirmed by the adversarial reviewer, 2026-09-09). `fs_write`: a
+  file is owned by its last writer; another seat co-edits it only by passing
+  the version it read (`expect_version`) or with channel authority — never
+  by accident. `store_set`: a `fact:` row is owned by its first writer
+  (others ask the owner, channel authority may correct), and every `fact:`
+  write posts a `store:set` audit row like a file write does (a store write
+  left no trace before). The fleet's F10 (a non-operator can put a mission on
+  a spawn request) and F17 (a third member of a DM) were refuted against the
+  code: `POST /spawns` requires an operator, and a DM has exactly two members
+  by construction; `--` in an agent id was already refused at registration.
+- **Escalation re-rings a due row once**, never per age band: the validation
+  run's steward was re-rung on the commission it was delivering at every band
+  (20 of its 53 turns). The claim row is the progress receipt; time passing
+  is not new information.
+- **Reviewer Round 2 fixes** (`untracked/adversary-fix-cycle-reviews-2026-09-08.md`,
+  Round 2): a `to_consume` row is DUE while the seat's own live claim says
+  `blocked` (`ConsumeRow.due`; the listener signs it then, and only then);
+  the reception-in-prompt relaxation applies to `incomplete-reception-pass`
+  only — a turn that called nothing is still a failed turn, and nothing is
+  relaxed when the block was truncated; the reception block is sized for a
+  20-seat roster (48 owed / 16 consume / 60 envelopes) and says "… and N
+  more — call check_inbox" when it cannot show everything; the turn marker
+  is per seat (`.agora/driven-<seat>.json`), read only while its pid is
+  alive and its age under the drive pidfile bound, unlinked only by its
+  writer, and a marker that cannot be written is said out loud; `agora up`
+  refuses on a live marker (the env check it had was dead code); the wake
+  sentinel carries a `seqs=` field naming every message in the batch so a
+  wake can be attributed; `agora listen` resolves flag > folder seat record
+  > env like the CLI and the MCP server; a Claude turn ended by
+  `max-turns` is booked `call-budget-exhausted`, not a transport failure
+  (six Opus turns on a real subject died at 31 calls).
+- **`to_consume` rows no longer flip the listener's owed signature.** An
+  answer to the seat's OWN ask is owed, never due (ADR-0005 §1): signing it
+  re-rang one seat four times for a single DM answer in the cycle-3 run.
+- **A reception carried in the prompt satisfies the turn verdict.** With the
+  reception block in the prompt, a boot/wake turn that never called
+  `check_inbox` — or made no hub call because nothing was due — was scored
+  `incomplete-reception-pass`/`no-agora-tool-call` and re-woken (one seat
+  9× in the cycle-3 run). The verdict now defers to the /owed verification;
+  a failed turn also drops the presented cursors instead of leaking them.
+- **The MCP server resolves its hub from its own flags first** (`--url`,
+  then the workspace seat record, then env/config): the CLI pin alone had
+  left the MCP entry point able to reach a foreign hub (companion review,
+  bridge#23).
+- **The hub parses the terse `ID@SEAT,SEAT` ask form itself**, once, in
+  `_validate_asks`: a client that passes it raw can no longer store an id
+  nobody can answer (a 0.17.8 CLI stored `1@companion` verbatim and the
+  reply `answers=["1"]` was refused as unknown).
+- **The driven contract forbids the `agora` CLI in a turn**: every refused
+  call in the cycle-2b run came from seats shelling out to the CLI (usage
+  errors, wrong ids); the MCP tools are the seat's whole interface.
+- **The driver carries reception in the prompt and acks what it presented.**
+  `agora drive` already fetched `/owed` at arm; it now fetches `/inbox` too,
+  renders one line per owed row (due or waiting) and per unread envelope into
+  the turn's prompt, and after a successful turn acks exactly the per-channel
+  high-water mark it presented — never the live head. `check_inbox` stays
+  available; `check_inbox` + `ack_inbox` were 18% of all agora calls in the
+  fleet run, each re-reading a ~10 KB payload into context.
+- **A driven turn's agora prefix is the driven contract, not the whole skill**
+  (`skill/DRIVEN.md`, ~570 tokens instead of ~3.9k re-sent on every turn). The
+  full `agora-channels` skill stays installed for interactive seats and
+  readable on demand.
+- **A driven seat is served the driven tool tier** (`AGORA_MCP_TOOLS=driven`,
+  set by `agora drive`): the 17 tools that were called zero times across 215
+  driven turns — or only as ceremony (votes, room-making, `wait_for_messages`)
+  — are not served; delegates keep the delegate radar; operators see all.
+- **An over-cap title is elided at the MCP server, visibly, instead of
+  refused**: 95 of 259 hub refusals in the fleet run were "title is 123 chars,
+  cap is 120", each costing a retry round.
+- **A driven turn is pinned to its seat's hub and home.** `agora drive` sets
+  `HUB_DRIVEN_HOME`/`HUB_DRIVEN_URL` in the turn's env (every `AGORA_*`
+  variable is stripped there as credentials); the CLI uses them, refuses any
+  other `--url`, and `agora up` refuses outright in a driven turn. Live
+  2026-09-09: a lab seat fell back to the CLI from a folder with no seat
+  record, resolved the operator's `~/.agora`, started the production hub,
+  self-registered with its admin key and posted there.
+- **A critical broadcast is every member's debt until READ**, not until
+  replied to — the owed row is a second delivery path for a seat that missed
+  the notify line mid-turn; the inbox pin's read-based contract is unchanged.
+- **A phase-scoped ask is DEFERRED** (`DischargeState.deferred`): neither
+  pending nor answered, no debt, and it keeps the message open until its
+  phase opens. The addressed seat owes one triage reply (the message names
+  it); the ask becomes pending, and due, when the phase is declared.
+- **`agora task open SLUG --charter F --roster F --delegate S [--commission F]
+  [--announce commons]`** stands a task up in one deterministic act: channel,
+  charter, a mission per enrolled seat, the roster joined (or invited), ONE
+  scoped delegate, the commission (the hub mints the `task:` row from it) and
+  one noticeboard announcement. Six model-performed calls become zero.
+- **`seat: …` names an addressee.** An ask whose text begins with a member's
+  name and a colon is addressed to that seat exactly as `@seat` is — the
+  fan-out form a human writes. Only the leading token counts (`alpha: does
+  gamma's section…` names alpha); a non-member token (`note:`, `claim:`)
+  names nobody. In the fleet run every one of a delegate's 18 `core: …`
+  asks fell to the message-global pool and 216 of 453 messages rebuilt
+  rounds the hub had silently discharged.
+- **`/owed.pending_asks` is reader-scoped**: a row lists the asks that name
+  the reader or name nobody — never another seat's. Every seat used to see
+  the message-global list (16-18 asks each, mostly other seats').
+- **`Ask.phase`** (`--ask "2@beta:text (phase:review)"`): an ask scoped to a
+  phase mints no debt until that phase is declared open in the channel, and
+  stays pending after the track moves on (the hub keeps each `phase:` row's
+  `opened` list). A commission can now carry its later-phase asks without
+  pinning every seat on them: 35 of 43 `debt-remains` verdicts in the fleet
+  run were phase-scoped asks that could not yet be answered.
+- **The notify-file replay gap outranks the arm-time backlog poll.** A
+  `critical` that landed mid-turn sat unread while two seats were woken for
+  old debt; file mode now delivers the gap first, by name, with the owed
+  digest attached.
+
 ## 0.18.0 — 2026-09-05
 
 **Less to read, the same guarantees.** This release cuts the text a seat is

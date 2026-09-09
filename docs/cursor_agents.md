@@ -217,8 +217,8 @@ threading survives. Original dates and source ids are preserved in each
 message's `data` field for audit (agora stamps a fresh `created_at`).
 
 ```bash
-AGORA_URL=http://127.0.0.1:8765 AGORA_ADMIN_KEY=your-admin-key \
-  uv run python examples/migrate_file_mailbox.py /path/to/mailbox
+AGORA_ADMIN_KEY=your-admin-key \
+  uv run python examples/migrate_file_mailbox.py /path/to/mailbox --url http://127.0.0.1:8765
 ```
 
 Run it against a **fresh** hub db (the agent ids and channels must not already

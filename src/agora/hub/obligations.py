@@ -43,6 +43,7 @@ class DischargeState:
     pending: list[str] = field(default_factory=list)   # unanswered ask ids
     answered: list[str] = field(default_factory=list)  # discharged ask ids
     declined: list[str] = field(default_factory=list)  # discharged by REFUSAL:
+    deferred: list[str] = field(default_factory=list)  # Ask.phase not yet open: no debt, not answered, keeps the message open
     #                                                    a subset of `answered`
     #                                                    that nobody actually
     #                                                    answered (0153)
@@ -336,7 +337,8 @@ def discharge_state(parent: Message, replies: list[Message],
                     canvass_rule_epoch: float = 0.0,
                     peer_addressed_rule_epoch: float | None = None,
                     closure_rule_epoch: float = 0.0,
-                    rulers: frozenset[str] = frozenset()) -> DischargeState:
+                    rulers: frozenset[str] = frozenset(), *,
+                    open_phases: frozenset[str] | None = None) -> DischargeState:
     """Compute whether `parent`'s obligation is discharged and/or closed.
 
     A reply from the asker itself never DISCHARGES the asker's own obligation
@@ -557,8 +559,24 @@ def discharge_state(parent: Message, replies: list[Message],
             return True
         return all(aid in by_sender.get(seat, set()) for seat in named)
 
-    pending = [str(a["id"]) for a in asks if not _ask_answered(a)]
-    answered = [i for i in ids if i not in pending]
+    def _ask_ready(ask: dict) -> bool:
+        """An ask scoped to a phase is not PENDING until that phase has been
+        OPENED — and stays pending after the track moves on (Ask.phase;
+        `open_phases` is every phase the channel ever opened). release#23's asks 2/3 pinned
+        18 seats for six hours on phases that had not opened — 35 of 43
+        `debt-remains` verdicts. `open_phases=None` = unknown = no filter."""
+        ph = ask.get("phase")
+        return not ph or open_phases is None or str(ph) in open_phases
+
+    # DEFERRED (Ask.phase not yet opened) is a third state beside pending and
+    # answered: it mints no debt, but it is NOT answered and it keeps the
+    # message open. The first cut folded it into `answered` — a future peer
+    # ask with zero replies came back answered, declined and closed
+    # (companion review, 2026-09-09).
+    deferred = [str(a["id"]) for a in asks if not _ask_ready(a)]
+    pending = [str(a["id"]) for a in asks
+               if _ask_ready(a) and not _ask_answered(a)]
+    answered = [i for i in ids if i not in pending and i not in deferred]
     # An ask counts as declined only when NO reply answered it substantively:
     # on a multi-addressee canvass where one seat answers and another
     # declines, the ask was answered.
@@ -582,10 +600,11 @@ def discharge_state(parent: Message, replies: list[Message],
     # for a canvass they completed. What changes is that on an OPERATOR's
     # message, clearing the asks no longer clears the instruction. That
     # still takes the operator's word or the delegate's cited report.
-    asks_settled = not pending
+    asks_settled = not pending and not deferred
     if asks_settled and is_operator_ask(parent, operators) and not pre_asks_epoch:
         asks_settled = _operator_settled()
     return DischargeState(mode="asks", pending=pending, answered=answered,
+                          deferred=deferred,
                           declined=declined, discharged=asks_settled,
                           closed=asks_settled or closed_by_resolve,
                           has_resolved_reply=has_resolved,

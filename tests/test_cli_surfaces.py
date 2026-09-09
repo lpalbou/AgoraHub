@@ -974,3 +974,67 @@ def test_spawn_set_runner_refuses_a_malformed_pair(live_hub, isolated_home):
             _run_cli(["spawn", "--set-runner", bad, "--url", live_hub.url,
                       "--admin-key", live_hub.admin])
         assert "MACHINE=SEAT_ID" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# `agora task open` — one deterministic act stands a task up (ADR-0005/0006,
+# program plan 2026-09-09 §1): channel + charter + missions + roster + one
+# delegate + the commission (the hub mints the task row) + one announcement.
+
+def test_task_open_is_one_atomic_act(live_hub, isolated_home, tmp_path, capsys):
+    url = live_hub.url
+    op = httpx.post(f"{url}/agents", json={"id": "laurent", "operator": True},
+                    headers=_bearer(ADMIN_KEY), timeout=5).json()["api_key"]
+    _config.cache_key(url, "laurent", op)
+    keys = {s: _register(url, s) for s in ("lead", "alpha", "beta")}
+    for s, k in keys.items():
+        _config.cache_key(url, s, k)          # this machine holds the seats' keys: joined directly
+    # `commons` exists on every hub from birth (the operator-wide noticeboard);
+    # the operator only has to be in it to announce there.
+    httpx.post(f"{url}/channels/commons/join", json={}, headers=_bearer(op), timeout=5)
+    charter = tmp_path / "charter.md"
+    charter.write_text("# spec for the notes CLI\n\nThree sections, three owners, one merge.\n")
+    roster = tmp_path / "roster.tsv"
+    roster.write_text("lead\tYou steward the spec; you own no section.\n"
+                      "alpha\tYou own the data model.\n"
+                      "# a comment line is ignored\n"
+                      "beta\tYou own the CLI commands.\n")
+    commission = tmp_path / "commission.md"
+    commission.write_text("A short spec in three sections, merged by lead.\n")
+    _run_cli(["task", "open", "spec", "--as", "laurent", "--url", url,
+              "--admin-key", ADMIN_KEY, "--charter", str(charter),
+              "--roster", str(roster), "--delegate", "lead",
+              "--commission", str(commission), "--announce", "commons"])
+    report = json.loads(capsys.readouterr().out)
+    assert report["joined"] == ["lead", "alpha", "beta"] and report["invited"] == []
+    assert report["missions"] == 3 and report["delegate"] == "lead"
+    assert report["announced_in"] == "commons"
+    # the channel exists, carries the charter, and the roster is in
+    members = {m["agent_id"] for m in httpx.get(f"{url}/channels/spec/members",
+                                                headers=_bearer(op), timeout=5).json()}
+    assert {"laurent", "lead", "alpha", "beta"} <= members
+    charter_on_hub = httpx.get(f"{url}/channels/spec/charter", headers=_bearer(keys["alpha"]),
+                               timeout=5).json()
+    assert "three owners, one merge" in json.dumps(charter_on_hub)
+    # ONE delegate, scoped to the task channel
+    grants = httpx.get(f"{url}/admin/delegations", headers=_bearer(ADMIN_KEY), timeout=5).json()
+    mine = [g for g in (grants if isinstance(grants, list) else grants.get("delegations", []))
+            if g.get("agent_id") == "lead"]
+    assert mine and mine[0].get("scope") == "spec" and "reporting" in mine[0]["powers"]
+    # the commission minted the task row, coordinated by the delegate
+    seq = int(report["commission"].split("#")[1])
+    row = httpx.get(f"{url}/channels/spec/store/task%3Amsg-{seq}", headers=_bearer(op),
+                    timeout=5).json()
+    value = row.get("value", row)
+    assert value["requester"] == "laurent" and value["coordinator"] == "lead"
+    assert value["status"] == "open"
+    # the delegate OWES it (its ask names the delegate); the others owe a READ —
+    # the ask names who answers, the `to` names who reads (ADR-0006, 2026-09-09)
+    owed = httpx.get(f"{url}/owed", headers=_bearer(keys["lead"]), timeout=5).json()["to_answer"]
+    assert any(r["seq"] == seq for r in owed), "lead"
+    for s in ("alpha", "beta"):
+        owed = httpx.get(f"{url}/owed", headers=_bearer(keys[s]), timeout=5).json()["to_answer"]
+        assert not any(r["seq"] == seq for r in owed), s
+        inbox = httpx.get(f"{url}/inbox", headers=_bearer(keys[s]), timeout=5).json()
+        env = next(e for e in inbox if e["seq"] == seq and e["channel"] == "spec")
+        assert env["to_me"] is True and env["asks_others"] is True, s

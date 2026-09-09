@@ -79,21 +79,85 @@ def _smoke_check_mcp(
     return probe
 
 
+def _workspace_seat() -> dict | None:
+    """The seat record `agora setup` wrote in this workspace (cwd): the FILE
+    that binds a directory to one seat on one hub. Configuration lives in
+    flags and files; env carries credentials (operator rule, 2026-09-09)."""
+    try:
+        from .setup_harness import read_workspace_seat
+        return read_workspace_seat(Path.cwd())
+    except Exception:
+        return None
+
+
+def _driven_markers() -> list[dict]:
+    """`.agora/driven-<seat>.json`: written by `agora drive` in the seat's
+    workspace for the duration of a turn (drive._driven_marker). While one is
+    there, its driver alive and its age bounded, every `agora` command run
+    from this directory is that seat's and belongs to that hub and home — a
+    lab seat once ran `agora up` and posted on the operator's production hub
+    from a turn. Stale by construction: a dead pid or an age past the drive
+    pidfile's own bound (reboot pid-reuse guard) binds nothing."""
+    from .drive import _DRIVER_STALE_S
+    from .listen import pid_alive
+    out: list[dict] = []
+    for path in sorted((Path.cwd() / ".agora").glob("driven-*.json")):
+        try:
+            data = json.loads(path.read_text())
+            pid = int(data.get("pid") or 0)
+            age = time.time() - float(data.get("started_at") or 0)
+        except (OSError, ValueError, TypeError):
+            continue
+        if pid > 0 and pid_alive(pid) and 0 <= age <= _DRIVER_STALE_S \
+                and data.get("url") and data.get("home"):
+            out.append(data)
+    return out
+
+
+def _driven_marker(explicit_url: str | None = None,
+                   explicit_home: str | None = None) -> dict | None:
+    """The ONE live turn marker this command runs under, or None. Two seats
+    driven in one folder is allowed (the driver lock is per seat), so with
+    several live markers the explicit flag picks; without one, refuse."""
+    live = _driven_markers()
+    if not live:
+        return None
+    if len(live) == 1:
+        return live[0]
+    for m in live:
+        if explicit_url and explicit_url.rstrip("/") == m["url"].rstrip("/"):
+            return m
+        if explicit_home and os.path.abspath(str(explicit_home)) == os.path.abspath(m["home"]):
+            return m
+    sys.exit("several driven turns share this workspace ("
+             + ", ".join(f"{m['agent_id']}@{m['url']}" for m in live)
+             + "); pass --url or --home naming the one you mean.")
+
+
 def _apply_home(args: argparse.Namespace) -> None:
-    """`--home PATH` = use this agora home for THIS invocation. It maps onto
-    AGORA_HOME (what config.home() and every spawned process — MCP server,
-    listener, hooks — already honor), so one flag replaces the unfriendly
-    env-var prefix `AGORA_HOME=~/.agora-hub2 agora chat ...`. The flag wins
-    over an inherited env var; without it the env var works exactly as
-    before. Applied in main() BEFORE dispatch so every command and every
-    child process sees the same home."""
+    """`--home PATH` = use this agora home for THIS invocation; without it,
+    a driven turn's marker, then the workspace seat record, decide. The
+    chosen home is exported as AGORA_HOME for the CHILD processes this
+    command spawns (listener, hooks) — an internal carrier, not a
+    configuration surface — until every child spawn passes `--home` itself.
+    Applied in main() BEFORE dispatch."""
     home = getattr(args, "home", None)
+    marker = _driven_marker(getattr(args, "url", None), home)
     if home:
         # abspath as well as expanduser: a relative --home would otherwise
         # persist CWD-dependent meaning into every child process (db_locate
         # review F6) — the same trap as a relative remembered db_path.
-        os.environ["AGORA_HOME"] = os.path.abspath(
-            str(Path(home).expanduser()))
+        resolved = os.path.abspath(str(Path(home).expanduser()))
+        if marker and os.path.abspath(marker["home"]) != resolved:
+            sys.exit(f"this workspace is running a driven turn of seat "
+                     f"{marker['agent_id']} (home {marker['home']}); it cannot "
+                     f"use --home {resolved}. Drop --home, or run from another "
+                     "directory.")
+        os.environ["AGORA_HOME"] = resolved
+        return
+    bound = marker or (_workspace_seat() or {})
+    if bound.get("home"):
+        os.environ["AGORA_HOME"] = os.path.abspath(str(bound["home"]))
 
 DEFAULT_PORT = 8765
 
@@ -316,6 +380,15 @@ def _preflight_foreign_hub(db_path: str, cfg: dict, url: str) -> None:
 
 
 def cmd_up(args: argparse.Namespace) -> None:
+    marker = _driven_markers()
+    if marker:
+        # A seat never starts a hub. Live 2026-09-09: a driven Haiku seat ran
+        # `agora up` from a folder without a seat record, which started the
+        # OPERATOR's production hub and let it post there as itself. The
+        # marker file (not env) is what says "this is a seat's turn".
+        sys.exit("agora up: refused — this workspace is running a driven "
+                 f"turn of seat {marker[0]['agent_id']} on {marker[0]['url']}. "
+                 "Hubs are started by operators, never by seats.")
     import uvicorn
 
     from .hub.app import create_app
@@ -1054,10 +1127,130 @@ def _admin_request(method: str, path: str, payload: dict | None = None,
         return 0, {}
 
 
+def cmd_task_open(args: argparse.Namespace) -> None:
+    """`agora task open SLUG --charter F --roster F --delegate S [--commission F]
+    [--announce commons] [--private] [--ttl 7d]` — ONE deterministic act that
+    stands a task up the way ADR-0005/0006 and the 2026-09-09 program plan
+    say a task should exist: one channel per task, its charter, a mission per
+    enrolled seat, the roster joined, ONE delegate, the operator's commission
+    posted (the hub mints the `task:msg-<seq>` row from it), and one
+    announcement in the noticeboard. Six model-performed calls become zero:
+    a seat spends no turn on scaffolding, and the task's memory (messages,
+    files, store, search) is one channel from its first byte.
+
+    Roster file: `seat<TAB>mission` per line (`#` comments). The delegate must
+    be on the roster. Seats whose key this machine caches are joined directly;
+    the others get the ordinary invite DM and join on their first wake."""
+    import asyncio
+    import httpx
+    from pathlib import Path as _P
+    from .client import AgoraClient
+    from .join import parse_ttl
+    from .models import Status
+
+    slug = args.channel
+    if not (args.charter and args.roster and args.delegate):
+        sys.exit("usage: agora task open SLUG --charter FILE --roster FILE "
+                 "--delegate SEAT [--commission FILE] [--announce CHANNEL] "
+                 "[--private] [--ttl 7d] --as <operator>")
+    charter = _P(args.charter).read_text()
+    roster: list[tuple[str, str]] = []
+    for line in _P(args.roster).read_text().splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        seat, _, mission = line.partition("\t")
+        roster.append((seat.strip(), mission.strip()))
+    seats = [seat for seat, _ in roster]
+    if args.delegate not in seats:
+        sys.exit(f"task open: delegate '{args.delegate}' is not on the roster "
+                 f"({', '.join(seats)}) — a steward is an enrolled seat")
+    url = _hub_url(args)
+    admin = _admin_key_or_exit(args, url)
+    ah = {"Authorization": f"Bearer {admin}"}
+    op_key = _config.resolve_key(url, args.as_agent)
+    purpose = next((ln.lstrip("# ").strip() for ln in charter.splitlines()
+                    if ln.strip()), slug)[:200]
+    report: dict[str, object] = {"channel": slug, "joined": [], "invited": [],
+                                 "missions": 0, "delegate": args.delegate}
+    delegate_mission = dict(roster).get(args.delegate, "")
+
+    async def go() -> None:
+        c = AgoraClient(url, op_key)
+        try:
+            await c.create_channel(slug, private=bool(args.private))
+            await c.store_set(slug, "channel:meta", {"purpose": purpose})
+            await c.fs_write(slug, "channel/charter.md", charter,
+                             description="task charter (agora task open)")
+            for seat, mission in roster:
+                if mission:
+                    r = httpx.put(f"{url}/admin/agents/{seat}/mission", headers=ah,
+                                  timeout=10.0, json={"mission": mission})
+                    if r.status_code != 200:
+                        sys.exit(f"task open: mission for {seat}: {r.status_code} {r.text}")
+                    report["missions"] = int(report["missions"]) + 1
+                key = _config.get_cached_key(url, seat)
+                if key:
+                    sc = AgoraClient(url, key)
+                    try:
+                        token = (await c.create_invite(slug, agent_id=seat)
+                                 if args.private else None)
+                        await sc.join_channel(slug, invite_token=token)
+                    finally:
+                        await sc.close()
+                    report["joined"].append(seat)
+                else:
+                    await _invite_to_channel(c, slug, seat, not args.private)
+                    report["invited"].append(seat)
+            r = httpx.put(f"{url}/admin/delegation", headers=ah, timeout=10.0,
+                          json={"agent_id": args.delegate,
+                                "powers": ["reporting", "operational"],
+                                "ttl_seconds": parse_ttl(args.ttl or "7d"),
+                                "note": f"steward of task {slug}",
+                                "scope": slug,
+                                # the hub refuses a blank mission for a delegate;
+                                # the roster line IS the delegate's charge
+                                **({"mission": delegate_mission} if delegate_mission else {})})
+            if r.status_code != 200:
+                sys.exit(f"task open: delegation failed: {r.status_code} {r.text}")
+            if args.commission:
+                text = _P(args.commission).read_text()
+                head = next((ln.strip() for ln in text.splitlines() if ln.strip()), slug)
+                msg = await c.post(
+                    slug, text, title=f"COMMISSION: {head[:100]}",
+                    status=Status.open, to=[s for s in seats if s != args.as_agent],
+                    asks=[{"id": "1",
+                           "text": (f"{args.delegate}: steward this task to delivery — "
+                                    f"one merged deliverable, cited, accepted by "
+                                    f"{args.as_agent}."),
+                           "to": [args.delegate]}],
+                    notice={"kind": "job", "key": f"{slug}-commission"})
+                seq = getattr(msg, "seq", None) or (msg.get("seq") if isinstance(msg, dict) else None)
+                report["commission"] = f"{slug}#{seq}"
+                report["task_row"] = f"task:msg-{seq}"
+            if args.announce:
+                try:
+                    await c.post(args.announce,
+                                 f"Work started: {slug} — {purpose}. Follow it in #{slug}; "
+                                 f"steward: {args.delegate}.",
+                                 title=f"task opened: {slug}", status=Status.fyi,
+                                 notice={"kind": "announcement", "key": f"{slug}-opened"})
+                    report["announced_in"] = args.announce
+                except Exception as exc:          # a missing noticeboard is not fatal
+                    report["announce_failed"] = str(exc)[:120]
+        finally:
+            await c.close()
+
+    asyncio.run(go())
+    print(json.dumps(report, indent=2))
+
+
 def cmd_task(args: argparse.Namespace) -> None:
     """`agora task list|accept|reject` — the requester's verdict on a
     delivered task, from the terminal (0.18.0). The row is a store row:
-    `accept` and `reject` write `status` (and the verdict) with CAS."""
+    `accept` and `reject` write `status` (and the verdict) with CAS.
+    `agora task open` stands a task up in one act — see cmd_task_open."""
+    if getattr(args, "task_action", "") == "open":
+        return cmd_task_open(args)
     async def go(c, a):
         if a.task_action == "list":
             rows = await c.store_keys(a.channel)
@@ -2070,11 +2263,19 @@ def cmd_seed_key(args: argparse.Namespace) -> None:
 # no restart. Output is nonce-fenced (injection-safe) like the MCP surface.
 
 def _hub_url(args: argparse.Namespace) -> str:
-    # Resolution order matches the MCP server: explicit flag, then $AGORA_URL,
-    # then the hub-machine config file, then the local default. The env step
-    # is what makes the CLI usable from a remote machine (no config.json).
-    return (getattr(args, "url", None) or os.environ.get("AGORA_URL")
-            or _config.load_config().get("url")
+    # Resolution: the explicit flag, then a driven turn's marker, then the
+    # workspace's own seat record, then the legacy env, then the hub-machine
+    # config, then the local default. A driven turn is BOUND to its hub: a
+    # foreign --url is refused loudly rather than silently honoured.
+    explicit = getattr(args, "url", None)
+    marker = _driven_marker(explicit, getattr(args, "home", None))
+    if marker and explicit and explicit.rstrip("/") != marker["url"].rstrip("/"):
+        sys.exit(f"this workspace is running a driven turn of seat "
+                 f"{marker['agent_id']} on {marker['url']}; it cannot address "
+                 f"{explicit}. Drop --url, or run from another directory.")
+    seat = _workspace_seat() or {}
+    return (explicit or (marker or {}).get("url") or seat.get("url")
+            or os.environ.get("AGORA_URL") or _config.load_config().get("url")
             or _default_url(DEFAULT_PORT)).rstrip("/")
 
 
@@ -2914,8 +3115,22 @@ def cmd_post(args):
         if a.ask:
             asks = []
             for spec in a.ask:
-                aid, _, text = spec.partition(":")
-                asks.append({"id": aid.strip(), "text": text.strip()})
+                # "1:text" or "1@beta:text" / "2@alpha,gamma:text" — the
+                # per-ask `to` the hub has honoured since 0077 but the CLI
+                # could not send (found 2026-09-08: an operator's only
+                # reachable shape was message-level `to` + unaddressed asks,
+                # which one seat's answer discharges for all of them).
+                head, _, text = spec.partition(":")
+                aid, _, seats = head.partition("@")
+                ask = {"id": aid.strip(), "text": text.strip()}
+                # a trailing "(phase:review)" scopes the ask to that phase
+                mph = re.search(r"\(phase:([A-Za-z0-9][A-Za-z0-9_-]*)\)\s*$", ask["text"])
+                if mph:
+                    ask["phase"] = mph.group(1)
+                named = [s.strip() for s in seats.split(",") if s.strip()]
+                if named:
+                    ask["to"] = named
+                asks.append(ask)
         # --answer 1,3 -> ask ids this reply discharges
         answers = [x.strip() for x in a.answer.split(",")] if a.answer else None
         # --decline 2 -> ask ids this reply REFUSES; still discharged, but on
@@ -4674,12 +4889,29 @@ def build_parser() -> argparse.ArgumentParser:
                                "CHANNEL | accept CHANNEL SLUG | reject "
                                "CHANNEL SLUG --verdict '...' (a delivered "
                                "task waits for its requester's verdict)")
-    tk.add_argument("task_action", choices=["list", "accept", "reject"])
-    tk.add_argument("channel", help="the channel the task row lives in")
+    tk.add_argument("task_action", choices=["list", "accept", "reject", "open"])
+    tk.add_argument("channel", help="the channel the task row lives in "
+                                    "(for `open`: the new task channel's name)")
     tk.add_argument("slug", nargs="?", default=None,
                     help="the task slug (the part after `task:`, e.g. msg-19)")
     tk.add_argument("--verdict", default="",
                     help="reject: what is missing (required)")
+    tk.add_argument("--charter", default=None,
+                    help="open: the task charter file (its first line is the purpose)")
+    tk.add_argument("--roster", default=None,
+                    help="open: TSV of `seat<TAB>mission`, one enrolled seat per line")
+    tk.add_argument("--delegate", default=None,
+                    help="open: the ONE steward (must be on the roster)")
+    tk.add_argument("--commission", default=None,
+                    help="open: post this file as the operator's commission "
+                         "(the hub mints the task row from it)")
+    tk.add_argument("--announce", default=None,
+                    help="open: noticeboard channel for the one 'task opened' fyi")
+    tk.add_argument("--private", action="store_true",
+                    help="open: invite-only task channel (default: public)")
+    tk.add_argument("--ttl", default="7d", help="open: delegation lifetime (default 7d)")
+    tk.add_argument("--admin-key", dest="admin_key", default=None,
+                    help="open: admin key (default: $AGORA_ADMIN_KEY, then config.json)")
     tk.set_defaults(func=cmd_task)
 
     ad = _agent_parser("add", "invite seats to an EXISTING room you own: "
@@ -4718,7 +4950,7 @@ def build_parser() -> argparse.ArgumentParser:
     po.add_argument("--critical", action="store_true"); po.add_argument("--data", default=None)
     po.add_argument("--notice-kind", choices=NOTICE_KINDS)
     po.add_argument("--notice-key", help="stable event id; repeated keys are refused")
-    po.add_argument("--ask", action="append", metavar="ID:TEXT",
+    po.add_argument("--ask", action="append", metavar="ID[@SEATS]:TEXT",
                     help="a numbered ask (repeatable), e.g. --ask '1:confirm the payload cap?'")
     po.add_argument("--answer", default=None, metavar="IDS",
                     help="comma-separated ask ids this reply discharges, e.g. --answer 1,3")
@@ -4746,7 +4978,7 @@ def build_parser() -> argparse.ArgumentParser:
     dm.add_argument("--attach", action="append", metavar="SHA256[:NAME]",
                     help="attach an uploaded blob by id (upload to the dm:<a>--<b> "
                          "channel with `agora attachment put` first)")
-    dm.add_argument("--ask", action="append", metavar="ID:TEXT",
+    dm.add_argument("--ask", action="append", metavar="ID[@SEATS]:TEXT",
                     help="a numbered ask (repeatable; required for "
                          "--status blocked), e.g. --ask '1:which schema?'")
     dm.add_argument("--reply-to", dest="reply_to", default=None,
