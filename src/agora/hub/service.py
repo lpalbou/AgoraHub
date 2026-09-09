@@ -6995,8 +6995,12 @@ class HubService:
                                         f"which is not in '{cited}' — write "
                                         "the artifact to the channel before "
                                         "citing it as delivered")
+                value = row["value"] if isinstance(row["value"], dict) else {}
+                b64 = value.get("content_b64")
+                size = (_b64_decoded_size(b64) if isinstance(b64, str)
+                        else len(value.get("content", "").encode("utf-8")))
                 fs_item = {"kind": "fs", "ref": f"{norm}@{int(version)}",
-                           "size_bytes": len(str(row["value"])),
+                           "size_bytes": size,
                            "updated_by": row["updated_by"],
                            "updated_at": row["updated_at"], "verified": True}
                 if cited != channel:
