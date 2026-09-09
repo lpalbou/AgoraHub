@@ -280,3 +280,38 @@ def test_readiness_checks_emit_no_hub_messages_and_use_only_four_metadata_reads(
     assert room.driver._chain_step(snap)
     assert len(metadata_calls) == 8  # fresh dispatch check; consumed-marker scan reads none
     assert [m.id for m in before] == [m.id for m in room.client.app.state.service.db.get_messages("task-1",limit=200)]
+
+
+def test_peer_unlinked_source_prose_cannot_rearm_consumed_wait_in_driver_loop(room, monkeypatch):
+    value = room.value(source="context A")
+    value.pop("source_message_id")
+    row = room.claim(value)
+    room.ready()
+    monkeypatch.setattr(drive_mod, "run_listen", lambda **kw: 0)
+    assert room.driver.run(max_turns=1) == 0
+    assert len(room.spawned) == 1
+    edited = room.claim({**row["value"], "source":"context B"}, row["version"], writer="peer")
+    assert not edited["value"].get("source_message_id")
+    listens = []
+    class IdleStop(Exception): pass
+    def listen(**kw):
+        listens.append(kw)
+        if len(listens) > 1: raise IdleStop()
+        return 0
+    monkeypatch.setattr(drive_mod, "run_listen", listen)
+    try:
+        room.driver.run(max_turns=1)
+    except IdleStop:
+        pass
+    assert len(room.spawned) == 1, "peer prose edit bought another artifact work turn"
+
+
+def test_owner_new_canonical_source_can_request_another_reconsideration(room):
+    row = room.claim(); room.ready()
+    assert room.driver._chain_step(room.driver._continuation_snapshot())
+    new_source = room.client.post("/channels/task-1/messages", headers=room.seats["operator"], json={
+        "status":"open", "to":["director"], "body":"Use these same artifacts to answer the revised commission."})
+    assert new_source.status_code == 200, new_source.text
+    room.claim({**row["value"], "source_message_id":new_source.json()["id"]}, row["version"])
+    assert room.driver._chain_step(room.driver._continuation_snapshot())
+    assert len(room.spawned) == 2

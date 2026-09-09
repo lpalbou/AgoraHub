@@ -14,7 +14,10 @@ MAX_ARTIFACT_WAITS = 64
 def declaration_signature(value: dict) -> str:
     # Progress prose/CAS versions are deliberately absent: a peer comment or
     # unrelated owner update must not re-arm the same completed reconsideration.
-    identity = [value.get("owner"), value.get("source_message_id") or value.get("source"),
+    # Public claim reads already project valid legacy source references to
+    # source_message_id. Unlinked source prose is peer-editable context, so
+    # hashing it would let a peer re-arm the owner's consumed declaration.
+    identity = [value.get("owner"), value.get("source_message_id"),
                 value.get("waiting_for_artifacts")]
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
 
