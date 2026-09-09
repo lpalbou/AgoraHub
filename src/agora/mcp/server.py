@@ -152,6 +152,29 @@ def tool_error_text(result: Any) -> str:
     return str(result)
 
 
+def channel_info_view(result: dict, *, include_missions: bool = False) -> dict:
+    """Keep orientation complete while loading other seats' long charges on demand.
+
+    This is an MCP presentation choice, not an authority or membership filter.
+    Full HTTP data and whoami's binding mission remain unchanged. Never turn
+    a failed/unknown response into an apparently successful empty roster.
+    """
+    if include_missions or not isinstance(result.get("members"), list):
+        return result
+    members = []
+    for member in result["members"]:
+        compact = dict(member)
+        mission = compact.pop("mission", "")
+        if mission:
+            compact["mission_available"] = True
+        members.append(compact)
+    return {**result, "members": members,
+            "missions": "Full operator missions are available with "
+            "describe_channel(channel, include_missions=true). Fetch them "
+            "when a member's role/about is insufficient. Your binding "
+            "mission is always returned by whoami."}
+
+
 def charter_block_lines(owed: dict) -> list[str]:
     """Charters this seat is behind on, ABOVE everything else in the inbox
     render (0146/2).
@@ -1064,11 +1087,13 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
         return _call("POST", "/inbox/ack", json={"cursors": cursors})
 
     @mcp.tool()
-    def describe_channel(channel: str) -> dict:
-        """Channel metadata (purpose, norms, SLA), members with their about
-        and mission, phase rows, and the charter pointer. Read before your
-        first post there, then read_charter(channel=...)."""
-        return _call("GET", f"/channels/{channel}/info")
+    def describe_channel(channel: str, include_missions: bool = False) -> dict:
+        """Channel purpose, norms, SLA, members/about, phases and charter.
+        Read before your first post, then read_charter(channel=...). Full
+        member missions: include_missions=true when role/about is insufficient.
+        Your own binding mission always comes from whoami."""
+        return channel_info_view(_call("GET", f"/channels/{channel}/info"),
+                                 include_missions=include_missions)
 
     @mcp.tool()
     def set_colleague_note(agent_id: str, note: str) -> dict:

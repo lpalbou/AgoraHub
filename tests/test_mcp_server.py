@@ -51,6 +51,46 @@ def test_mcp_http_timeout_seconds_honors_env(monkeypatch):
     assert reloaded.MCP_HTTP_TIMEOUT_SECONDS == 240.0
 
 
+def test_channel_info_projection_preserves_authority_and_failures():
+    server = _import_local_server()
+    full = {"channel": {"name": "work"}, "meta": {"purpose": "audit"},
+            "members": [{"id": "owner", "about": "owns billing",
+                         "mission": "Binding charge " * 200, "operator": True}],
+            "charter": {"path": "channel/charter.md", "version": 7},
+            "phases": [{"current": "review"}], "state": "active"}
+    view = server.channel_info_view(full)
+    assert "mission" not in view["members"][0]
+    assert view["members"][0] == {"id": "owner", "about": "owns billing",
+                                  "operator": True, "mission_available": True}
+    for key in full.keys() - {"members"}:
+        assert view[key] == full[key]
+    assert "include_missions=true" in view["missions"]
+    assert server.channel_info_view(full, include_missions=True) == full
+    assert full["members"][0]["mission"] == "Binding charge " * 200
+    for failure in ({"ok": False, "error": 403}, {"notice": "unknown shape"}):
+        assert server.channel_info_view(failure) == failure
+
+
+def test_full_member_missions_remain_retrievable_over_mcp(hub, monkeypatch):
+    import httpx
+    mission = "Binding operator charge: own the runtime cancellation contract."
+    r = httpx.post(hub + "/agents", json={"id": "roster-reader", "mission": mission},
+                   headers={"Authorization": "Bearer k"}, timeout=5)
+    r.raise_for_status()
+    key = r.json()["api_key"]
+    mcp = _server_against(hub, monkeypatch, key)
+    identity = _call_tool(mcp, "whoami", {})
+    assert identity["mission"] == mission
+    compact = _call_tool(mcp, "describe_channel", {"channel": "commons"})
+    member = next(m for m in compact["members"] if m["agent_id"] == "roster-reader")
+    assert member["mission_available"] and "mission" not in member
+    full = _call_tool(mcp, "describe_channel", {"channel": "commons", "include_missions": True})
+    member = next(m for m in full["members"] if m["agent_id"] == "roster-reader")
+    assert member["mission"] == mission
+    refused = _call_tool(mcp, "describe_channel", {"channel": "missing-private-room"})
+    assert refused["ok"] is False
+
+
 # -- the spawn tools (laurent dm#24): reachable, and pointed at the real wire
 
 def _live_hub(tmp_path):
