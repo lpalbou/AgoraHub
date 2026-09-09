@@ -2387,6 +2387,7 @@ class Driver:
         # turn REACHED the hub and left debt (a diagnosis); every other stage
         # means it did not get there, and only those back off.
         self._last_turn_stage: str | None = None
+        self._work_attempt_unavailable = False
         self._last_turn_detail: str = ""
         # The flight recorder (--turn-log, 2026-07-28): the FULL event
         # stream of every spawned turn, appended as JSONL. Off by default;
@@ -4043,6 +4044,7 @@ class Driver:
         question, not a second engine. It replaces WORK_BOOT_PROMPT as well,
         which is why INITIATIVE_PROMPT carries the boot orientation itself.
         """
+        self._work_attempt_unavailable = False
         sid = self.work_session_id
         prompt = prompt_override or (WORK_PROMPT if sid else WORK_BOOT_PROMPT)
         # Declare the lane BEFORE the delegate prepend below (0151): after
@@ -4092,6 +4094,9 @@ class Driver:
             # tool is scored `mcp-use`, and holding reception for that would
             # penalise a seat for working. Its only bound stays the strike
             # ledger in _chain_step.
+            self._work_attempt_unavailable = (
+                self._last_turn_stage in _TRANSPORT_STAGES
+                or self._last_turn_stage == "harness-config")
             if self._last_turn_stage in _TRANSPORT_STAGES:
                 self._note_failure(self._last_turn_stage or "harness",
                                    self._last_turn_detail)
@@ -4202,6 +4207,11 @@ class Driver:
                     strikes=self._strike_count(ck))
         chunk_started = time.time()
         ran = self.run_work_turn()
+        # Provider/harness unavailability is governed by infrastructure
+        # backoff. It is not evidence that this claim failed to progress.
+        # A quota outage must not retire valid work after three failed calls.
+        if not ran or self._work_attempt_unavailable:
+            return ran
         after = self._continuation_snapshot()
         if (after is not None and after[0] == channel and after[1] == key
                 and after[2] == version):

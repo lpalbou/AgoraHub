@@ -239,6 +239,45 @@ def test_receiptless_chunks_park_the_chain(home, monkeypatch):
     assert len(calls) == 1                    # chain resumed
 
 
+@pytest.mark.parametrize("stage", [None, "harness", "infrastructure", "mcp-init", "harness-config"])
+def test_provider_failure_does_not_retire_work_after_quota_recovery(home, monkeypatch, stage):
+    """Original AF/review fleets retired valid claims during a quota outage."""
+    unavailable = True
+
+    def spawn(prompt, sid):
+        d._last_turn_stage = stage if unavailable else None
+        return (None, False) if unavailable else ("recovered", True)
+
+    d = _driver(home, spawn)
+    snap = ("commons", "claim:release-audit", 7)
+    ck = "commons/claim:release-audit@7"
+    monkeypatch.setattr(d, "_continuation_snapshot", lambda: snap)
+    monkeypatch.setattr(d, "_receipt_elsewhere", lambda *_: False)
+    # Each simulated retry occurs after the existing backoff has elapsed.
+    monkeypatch.setattr(d, "_backoff_retry_after", lambda: 0)
+    for _ in range(WORK_STRIKES):
+        assert d._chain_step(snap)
+    assert d._strike_count(ck) == 0
+    unavailable = False
+    assert d._chain_step(snap)
+    assert d._strike_count(ck) == 1  # real receiptless work still counts
+
+
+@pytest.mark.parametrize("stage", ["reception", "mcp-use", "mcp-call", "tool"])
+def test_semantic_failures_still_retire_receiptless_work(home, monkeypatch, stage):
+    def spawn(prompt, sid):
+        d._last_turn_stage = stage
+        return "ran", False
+
+    d = _driver(home, spawn)
+    snap = ("commons", "claim:audit", 7)
+    monkeypatch.setattr(d, "_continuation_snapshot", lambda: snap)
+    monkeypatch.setattr(d, "_receipt_elsewhere", lambda *_: False)
+    for _ in range(WORK_STRIKES):
+        assert d._chain_step(snap)
+    assert d._chain_block(snap)[0] == "no-receipt"
+
+
 def test_obligation_preempts_chain(home, monkeypatch):
     """rc=2 between chunks always drives a RECEPTION turn, never a work
     chunk — answering outranks continuing."""
