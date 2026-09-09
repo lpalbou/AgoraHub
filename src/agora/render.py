@@ -34,18 +34,6 @@ from .models import elide, Envelope, MessageRow
 _TOKEN = "AGORA"  # marker stem; the real fence includes an unpredictable nonce
 
 
-def _asks_field(data: dict[str, Any] | None) -> str:
-    """Render structured asks as readable numbered text. Answering 'ask 2'
-    requires seeing ask 2's TEXT, not just a count (field-requested: counts
-    rode the envelope but the texts lived in data and were never shown)."""
-    asks = (data or {}).get("asks")
-    if not isinstance(asks, list):
-        return ""
-    parts = [f"[{a.get('id')}] {a.get('text', '')}" for a in asks
-             if isinstance(a, dict) and a.get("id") is not None]
-    return "; ".join(parts)
-
-
 def display_title(title: str, body: str, limit: int = 90) -> str:
     """The title a reader SEES: the author's, or the body's first line when
     they left it empty.
@@ -72,29 +60,6 @@ def display_title(title: str, body: str, limit: int = 90) -> str:
 def _neutralize(text: str) -> str:
     """Blunt any attempt to spoof the fence markers in untrusted text."""
     return text.replace("\u27e6", "(").replace("\u27e7", ")").replace(_TOKEN, "A-G-O-R-A")
-
-
-def _attachments_field(refs: Any, channel: str) -> str:
-    """One header line naming a message's attachments + the fetch verb.
-
-    Adversarial-eval P0 (2026-07-16): the hub delivered refs on every
-    envelope but NEITHER renderer showed them, so no agent ever learned a
-    file existed — the whole feature was invisible to recipients. Filenames
-    and content types are member-influenced text, but this lands in the
-    fence header, which _fence neutralizes like every other field."""
-    if not isinstance(refs, list) or not refs:
-        return ""
-    parts = []
-    for r in refs:
-        if not isinstance(r, dict) or not r.get("id"):
-            continue
-        parts.append(f"{r.get('filename', 'attachment')} "
-                     f"({r.get('content_type', '?')}, {r.get('size', '?')}B) "
-                     f"id={r['id']}")
-    if not parts:
-        return ""
-    return ("; ".join(parts)
-            + f" — fetch: read_attachment(channel={channel!r}, id, download_path)")
 
 
 def _fence(nonce: str, label: str, fields: dict[str, Any], content: str) -> str:
