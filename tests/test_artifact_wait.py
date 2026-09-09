@@ -160,12 +160,13 @@ def test_legacy_dependency_never_revives_finished_claim(room, monkeypatch, statu
 def test_provider_failure_and_crash_do_not_consume_success_opportunity(room):
     room.claim(); room.ready()
     def failed(prompt, sid):
-        room.driver._last_turn_stage = "provider"
+        room.driver._last_turn_stage = "infrastructure"
         return None, False
     room.driver._spawn = failed
     assert room.driver._chain_step(room.driver._continuation_snapshot())
+    assert room.driver._work_attempt_unavailable
+    assert room.driver._strike_count(f"task-1/{KEY}@1") == 0
     assert room.new_driver()._continuation_snapshot() is not None
-    room.driver._retry_after = 0
     def crash(prompt, sid):
         raise RuntimeError("injected process interruption before owner reconsideration")
     room.driver._spawn = crash
