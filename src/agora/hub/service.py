@@ -5879,6 +5879,11 @@ class HubService:
                                     f"'{current.updated_by}'. Ask them (an addressed "
                                     "open) to correct it; channel authority may "
                                     "overwrite it.")
+        if key.startswith("claim:") and not isinstance(value, dict):
+            existing = self.db.store_get(channel, key)
+            if (existing and isinstance(existing.value, dict)
+                    and existing.value.get("waiting_for_artifacts") is not None):
+                raise HubError(400, "artifact-dependent claims require an object; clear waiting_for_artifacts explicitly with CAS")
         if key.startswith("claim:") and isinstance(value, dict):
             # Identity fields inside store values are validated against the
             # caller (0068/ADR-0004; live-test finding): you may claim FOR
@@ -5907,6 +5912,40 @@ class HubService:
                 value = {**value, "owner": current_owner}
             previous_value = (current.value if current is not None
                               and isinstance(current.value, dict) else {})
+            # Artifact arrival requests one reconsideration, not acceptance or
+            # an automatic status rewrite. Only the CURRENT owner/operator may
+            # install/change/remove that request or revive its parked claim.
+            old_artifacts = previous_value.get("waiting_for_artifacts")
+            if "waiting_for_artifacts" not in value and old_artifacts is not None:
+                value = {**value, "waiting_for_artifacts": old_artifacts}
+            if old_artifacts is not None or value.get("waiting_for_artifacts") is not None:
+                if expect_version is None:
+                    raise HubError(400, "artifact-dependent claims require expect_version (0 to create)")
+                responsible = current_owner or value.get("owner") or agent.id
+                value = {**value, "owner": value.get("owner") or responsible}
+                # Partial progress writes cannot erase lifecycle guards.
+                value = {**{field: previous_value[field] for field in ("status", "state", "done")
+                            if field in previous_value and field not in value}, **value}
+                lifecycle_changed = (
+                    bool(value.get("done")) != bool(previous_value.get("done"))
+                    or any(self._claim_status_word({"status": value.get(field)})
+                           != self._claim_status_word({"status": previous_value.get(field)})
+                           for field in ("status", "state")))
+                # A peer may close work, but cannot move cancelled/paused
+                # history back into a blocked gate (nor activate the claim).
+                # Same-status progress writes do not acquire new authority.
+                revives = lifecycle_changed and not self._claim_done(value)
+                changed = value.get("waiting_for_artifacts") != old_artifacts
+                owner_changed = value.get("owner") != responsible
+                # An unchanged closing/progress write must remain possible if
+                # the owner has since lost access to a dependency room.
+                if value.get("waiting_for_artifacts") is not None and (changed or revives or owner_changed):
+                    value = {**value, "waiting_for_artifacts": self._validate_waiting_for_artifacts(
+                        channel, str(value["owner"]), value["waiting_for_artifacts"])}
+                changes_gate = value.get("waiting_for_artifacts") != old_artifacts
+                if (not agent.operator and agent.id != responsible
+                        and (changes_gate or revives or owner_changed)):
+                    raise HubError(403, "only the current claim owner or operator may change artifact waits, ownership, or resume this claim")
             if "source" not in value and "source_message_id" not in value:
                 # A progress/closure-only update does not erase provenance,
                 # just as omitting owner above does not erase ownership.
@@ -11449,6 +11488,37 @@ class HubService:
                            "leak hidden room/key data into another room.")
         return {"channel": target_ch, "key": target_key,
                 "at_version": target.version}
+
+    def _validate_waiting_for_artifacts(self, channel: str, owner: str, raw: Any) -> list[dict[str, Any]]:
+        """Exact all-of thresholds, including a future file's first version.
+
+        A file may not exist yet; the readable room and valid path must exist
+        as a namespace. Waiting for a revision requires observed_version + 1,
+        not an automatically restamped head that can race an arrival.
+        """
+        from ..artifact_wait import MAX_ARTIFACT_WAITS
+        if not isinstance(raw, list) or not 1 <= len(raw) <= MAX_ARTIFACT_WAITS:
+            raise HubError(400, f"waiting_for_artifacts must contain 1..{MAX_ARTIFACT_WAITS} exact artifact requirements")
+        result = []
+        seen = set()
+        for item in raw:
+            if not isinstance(item, dict) or set(item) - {"channel", "path", "min_version"}:
+                raise HubError(400, "artifact wait entries are {channel?, path, min_version}")
+            target = item.get("channel", channel)
+            if not isinstance(target, str) or not target or not self.db.is_member(target, owner):
+                raise HubError(403, "artifact wait must name a channel readable by the claim owner")
+            if not isinstance(item.get("path"), str):
+                raise HubError(400, "artifact wait needs an exact VFS path")
+            path = self._normalize_fs_path(item["path"])
+            version = item.get("min_version")
+            if isinstance(version, bool) or not isinstance(version, int) or not 1 <= version <= 2**62:
+                raise HubError(400, "artifact min_version must be a positive integer")
+            ref = (target, path)
+            if ref in seen:
+                raise HubError(400, "duplicate artifact wait path")
+            seen.add(ref)
+            result.append({"channel": target, "path": path, "min_version": version})
+        return sorted(result, key=lambda row: (row["channel"], row["path"]))
 
     def _waiting_on_sweep(self) -> list[str]:
         """Ring the owner of a parked claim whose declared dependency moved.

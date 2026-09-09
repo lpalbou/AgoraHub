@@ -2329,6 +2329,12 @@ class Driver:
         # the real verdict path.
         self.verify_reception_debt = spawn is None
         home = _config.home()
+        from .artifact_wait import ArtifactResumeReceipts
+        self._artifact_resume_receipts = ArtifactResumeReceipts(home, agent_id, hub, _emit)
+        self._artifact_wait_pending = False
+        self._artifact_selected = None
+        self._artifact_resume_prompt = ""
+        self._last_work_turn_ok = False
         # Protocol-v2 sessions deliberately ignore the old shared
         # drive-<id>.session file. Reception and initiative have different
         # contracts and must never train or resume each other's histories.
@@ -3509,6 +3515,11 @@ class Driver:
             # soon: a transient 500 must not put a working seat to sleep for
             # twenty minutes.
             return DRIVE_CHAIN_WAIT
+        if self._artifact_wait_pending:
+            # Artifact writes need not address this seat. Metadata polling
+            # keeps an explicitly waiting owner reachable without model wakes
+            # or dependence on a truncated/old notification window.
+            return min(self.max_wait, DRIVE_CHAIN_WAIT)
         return self.max_wait
 
     def run_turn(self, *, broadcast: bool = False) -> bool:
@@ -3674,6 +3685,7 @@ class Driver:
         "closed", "landed", "merged", "released", "resolved",
         "parked", "paused", "blocked", "on-hold", "onhold",
         "hold", "deferred", "cancelled", "canceled", "abandoned",
+        "superseded", "stopped", "withdrawn", "retired", "dropped", "obsolete",
     })
 
     @classmethod
@@ -3756,7 +3768,7 @@ class Driver:
             return None
         return int(entry.get("version", 0)), value
 
-    def _continuable(self, key: str, value: dict) -> bool:
+    def _continuable(self, key: str, value: dict, channel: str = "") -> bool:
         """Is this row work THIS seat may continue right now?
 
         TWO kinds of row qualify:
@@ -3778,8 +3790,24 @@ class Driver:
         if key.startswith("claim:"):
             if value.get("owner") != self.agent_id or value.get("done"):
                 return False
+            finished = self._TERMINAL_STATUS - {"blocked", "parked", "paused", "on-hold", "onhold", "hold", "deferred"}
+            heads = {str(value.get(field) or "").strip().lower().split()[0].rstrip(".,;:!—-")
+                     for field in ("status", "state") if str(value.get(field) or "").strip()}
+            if heads & finished:
+                return False
             if not self._is_terminal(value.get("status"), value.get("state")):
                 return True
+            if value.get("waiting_for_artifacts") is not None:
+                if not channel or not heads <= {"blocked", "parked"}:
+                    return False
+                from .artifact_wait import declaration_signature
+                signature = declaration_signature(value)
+                # A consumed declaration is still the owner's blocked work;
+                # generic initiative/phase ignition must not bypass its gate.
+                self._artifact_wait_pending = True
+                if self._artifact_resume_receipts.seen(channel, key, signature):
+                    return False
+                return self._artifacts_satisfied(value["waiting_for_artifacts"])
             # A park with a DECLARED dependency that has since moved is the
             # one terminal row worth reconsidering (2026-08-06): this seat
             # said in structured state "resume when that row changes", and
@@ -3792,6 +3820,36 @@ class Driver:
                                           value.get("current"))
                 and any(str(value.get(field) or "").strip()
                         for field in ("next", "next_step", "current")))
+
+    def _artifacts_satisfied(self, requirements: Any) -> bool:
+        """Use exact live VFS metadata, never titles, file content, or notices."""
+        from .artifact_wait import MAX_ARTIFACT_WAITS
+        if not isinstance(requirements, list) or not 1 <= len(requirements) <= MAX_ARTIFACT_WAITS:
+            return False
+        api_key = _config.get_cached_key(self.hub, self.agent_id)
+        if not api_key:
+            return False
+        import httpx
+        from urllib.parse import quote
+        for dep in requirements:
+            if (not isinstance(dep, dict) or not isinstance(dep.get("path"), str)
+                    or not isinstance(dep.get("channel"), str)
+                    or isinstance(dep.get("min_version"), bool)
+                    or not isinstance(dep.get("min_version"), int) or dep["min_version"] < 1):
+                return False
+            try:
+                response = httpx.get(f"{self.hub.rstrip('/')}/channels/{quote(dep['channel'], safe='')}/fs",
+                                     params={"prefix": dep["path"]},
+                                     headers={"Authorization": f"Bearer {api_key}"}, timeout=5.0)
+                if response.status_code != 200:
+                    return False
+                rows = response.json()
+                matches = [r for r in rows if isinstance(r, dict) and r.get("path") == dep["path"]] if isinstance(rows, list) else []
+                if len(matches) != 1 or int(matches[0].get("version") or 0) < dep["min_version"]:
+                    return False
+            except Exception:
+                return False
+        return True
 
     def _waiting_on_satisfied(self, dep: Any) -> bool:
         """Has the row this claim declared it waits on moved past the
@@ -3830,7 +3888,7 @@ class Driver:
             if not key.startswith("claim:"):
                 continue
             got = self._read_work_row(channel, key)
-            if got and self._continuable(key, got[1]):
+            if got and self._continuable(key, got[1], channel):
                 live.append((channel, key, got[0], got[1]))
         return live
 
@@ -3882,14 +3940,32 @@ class Driver:
         enough to let the woken steward open a proper claim row for the arc
         and chain on THAT indefinitely.
         """
+        self._artifact_wait_pending = False
+        self._artifact_selected = None
+        first_phase = None
+        first_claim = None
         for _, channel, key in self._work_rows():
             got = self._read_work_row(channel, key)
-            if got is None or not self._continuable(key, got[1]):
+            if got is None or not self._continuable(key, got[1], channel):
                 continue
             version = got[0]
             if self._strike_count(f"{channel}/{key}@{version}") >= WORK_STRIKES:
                 continue
-            return channel, key, version
+            candidate = ((channel, key, version), got[1].get("waiting_for_artifacts") is not None)
+            if key.startswith("phase:"):
+                # A phase newer than the claim must not hide the owner's
+                # explicit wait. Defer ignition until all claims are read.
+                if first_phase is None:
+                    first_phase = candidate
+            elif first_claim is None:
+                first_claim = candidate
+                if first_phase is None:
+                    break
+        chosen = (first_claim if self._artifact_wait_pending else first_phase or first_claim)
+        if chosen is not None:
+            if chosen[1]:
+                self._artifact_selected = chosen[0]
+            return chosen[0]
         return None
 
     def _strike_count(self, ck: str, now: float | None = None) -> int:
@@ -4045,8 +4121,11 @@ class Driver:
         which is why INITIATIVE_PROMPT carries the boot orientation itself.
         """
         self._work_attempt_unavailable = False
+        self._last_work_turn_ok = False
         sid = self.work_session_id
         prompt = prompt_override or (WORK_PROMPT if sid else WORK_BOOT_PROMPT)
+        if self._artifact_resume_prompt:
+            prompt += "\n\n" + self._artifact_resume_prompt
         # Declare the lane BEFORE the delegate prepend below (0151): after
         # `SUPERVISE_PROMPT + prompt` no prefix test can recover it, and the
         # four sites that tried produced `kind=boot` for every chunk the
@@ -4078,6 +4157,7 @@ class Driver:
         try:
             with self._long_turn_notice("work"):
                 new_sid, ok = self._spawn(prompt, sid)
+                self._last_work_turn_ok = ok
         finally:
             self._turn_timeout = self.reception_timeout
             self._turn_kind = None
@@ -4209,17 +4289,45 @@ class Driver:
         if self._chain_block(snap) is not None:
             return False
         channel, key, version = snap
+        artifact_signature = None
+        # Recheck the actual owner declaration after any listen interval;
+        # stale selection must not revive a cancelled or retargeted task.
+        current = self._read_work_row(channel, key)
+        if self._artifact_selected == snap or (current and current[1].get("waiting_for_artifacts") is not None):
+            if (current is None or current[0] != version
+                    or current[1].get("waiting_for_artifacts") is None
+                    or not self._continuable(key, current[1], channel)):
+                return False
+            latest = self._read_work_row(channel, key)
+            if latest is None or latest[0] != version:
+                return False
+            if self._is_terminal(current[1].get("status"), current[1].get("state")):
+                from .artifact_wait import declaration_signature
+                artifact_signature = declaration_signature(current[1])
+                self._artifact_resume_prompt = (
+                    f"ARTIFACT RECONSIDERATION for {json.dumps([channel, key, version])}. Your declared "
+                    "minimum artifact versions are now available. Re-read this exact claim and "
+                    "those artifacts; perform one bounded reconsideration. Version availability "
+                    "does not accept content or clear another blocker. Update your own claim "
+                    "with CAS: continue actively, declare changed artifact requirements, or "
+                    "remain blocked with what is still missing. No repeated wake is owed for "
+                    "this unchanged declaration.")
         self._activate_work_claim(channel, key)
         ck = f"{channel}/{key}@{version}"
         self._state("chunk", reason="continuable-work", row=ck,
                     strikes=self._strike_count(ck))
         chunk_started = time.time()
-        ran = self.run_work_turn()
+        try:
+            ran = self.run_work_turn()
+        finally:
+            self._artifact_resume_prompt = ""
         # Provider/harness unavailability is governed by infrastructure
         # backoff. It is not evidence that this claim failed to progress.
         # A quota outage must not retire valid work after three failed calls.
         if not ran or self._work_attempt_unavailable:
             return ran
+        if artifact_signature is not None and self._last_work_turn_ok:
+            self._artifact_resume_receipts.record(channel, key, artifact_signature)
         after = self._continuation_snapshot()
         if (after is not None and after[0] == channel and after[1] == key
                 and after[2] == version):
@@ -4387,7 +4495,7 @@ class Driver:
                 # reached an idle boundary at all. `continue` re-enters the
                 # pass: if the lane opened a claim row, the very next scan
                 # sees it and the ordinary chain takes over.
-                if snap is None and self._initiative_step():
+                if snap is None and not self._artifact_wait_pending and self._initiative_step():
                     driven += 1
                     continue
                 # source=auto: notify-file tail when the hub is local (0

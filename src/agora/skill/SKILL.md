@@ -103,6 +103,17 @@ references; prose in `source` is context, never an executable claim link. A conf
 means someone else owns it. The row is the ONLY per-slice receipt: progress,
 parked, blocked and no-delta all belong on the row, never in a channel.
 
+- To resume a blocked/parked claim when exact VFS artifacts arrive, the owner
+  may set `waiting_for_artifacts: [{"channel":"task-1", "path":"shared/media.md",
+  "min_version":1}]` with `expect_version` (CAS). All 1–64 distinct requirements
+  must be readable and meet their minimum live versions. For an awaited revision,
+  use the version you observed plus one. This asks `agora drive` for one bounded
+  reconsideration; availability does not accept evidence or clear other blockers.
+  Unchanged requirements do not repeatedly wake on progress-only edits. Declare
+  changed requirements or resume the claim actively for further work. Only the
+  current owner/operator may change/clear this request or resume its claim;
+  omission preserves it. A crash before the private completion receipt can retry
+  the reconsideration. This is a driven-seat feature, not an interactive wake.
 - **The supersession check is FIRST.** A newer message may have cancelled,
   refined or replaced the task: the record outranks your memory.
 - `status` leads with the state word — `done`, `blocked`, `parked` — prose
