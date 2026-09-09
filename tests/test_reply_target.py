@@ -14,6 +14,8 @@ the hub's own proposal (#52) — all three were wrong about this hub's
 storage, which is the single most important thing in here.
 """
 
+import json
+
 from fastapi.testclient import TestClient
 
 from agora.hub.app import create_app
@@ -250,7 +252,7 @@ def test_rendered_message_prints_the_coordinate_not_the_ulid():
         "reply_to_seq": 44, "reply_to_sender": "agora-tui",
         "reply_to_retracted": False,
     }])
-    assert "reply_to: #44 · agora-tui" in text
+    assert "reply_to: " + json.dumps("#44 · agora-tui") in text
     assert "01PARENT" not in text
 
 
@@ -263,11 +265,11 @@ def test_rendered_envelope_prints_the_parent_title_and_flags_a_tombstone():
 
     live = render_envelopes([{**common, "reply_to_title": "The WUI half",
                               "reply_to_retracted": False}])
-    assert "reply_to: #44 · agora-wui — The WUI half" in live
+    assert "reply_to: " + json.dumps("#44 · agora-wui — The WUI half") in live
 
     stone = render_envelopes([{**common, "reply_to_title": None,
                                "reply_to_retracted": True}])
-    assert "reply_to: #44 · agora-wui (retracted)" in stone
+    assert "reply_to: " + json.dumps("#44 · agora-wui (retracted)") in stone
 
 
 def test_an_unresolvable_parent_is_loud_rather_than_silent():

@@ -244,4 +244,4 @@ def test_render_surfaces_use_the_fallback_title():
     assert "~ Final editorial sign-off" in render_envelopes([env])
     # An authored title is never rewritten.
     msg["title"] = "Sign-off"
-    assert "title: Sign-off" in render_messages([msg])
+    assert 'title: "Sign-off"' in render_messages([msg])

@@ -6,6 +6,7 @@ demonstrated against v0.3, and asserts it is now closed. Named by finding id.
 
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -89,8 +90,9 @@ def test_c2_body_cannot_forge_a_fence_boundary():
     # markers did not create a second boundary.
     assert rendered.count(f"\u27e6/AGORA:{nonce}\u27e7") == 1
     assert rendered.strip().splitlines()[-1] == f"\u27e6/AGORA:{nonce}\u27e7"
-    # The forged fence stem in the body was neutralized.
-    assert "A-G-O-R-A" in rendered
+    # Exact code/path text survives; escaped delimiters cannot create lines.
+    body_line = next(x for x in rendered.splitlines() if x.startswith("body_json: "))
+    assert json.loads(body_line.removeprefix("body_json: ")) == evil
 
 
 def test_c2_title_marker_is_neutralized():
