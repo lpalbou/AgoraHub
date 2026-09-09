@@ -4160,7 +4160,7 @@ class HubService:
                 stored = self.db.store_get(channel, key)
                 if stored is None or not isinstance(stored.value, dict):
                     continue
-                value = stored.value
+                value = self._normalize_claim_source(channel, stored.value)
                 row_owner = str(value.get("owner") or stored.updated_by or "")
                 if row_owner != owner or self._claim_done(value):
                     continue
@@ -4380,7 +4380,7 @@ class HubService:
             stored = self.db.store_get(channel, key)
             if stored is None or not isinstance(stored.value, dict):
                 continue
-            value = stored.value
+            value = self._normalize_claim_source(channel, stored.value)
             ref = str(value.get("source_message_id") or "").strip()
             if not ref or any(c.isspace() for c in ref):
                 continue        # prose, or several refs: not a declaration
@@ -5652,11 +5652,72 @@ class HubService:
 
     # -- store -------------------------------------------------------------------
 
+    _CLAIM_SOURCE_REF = re.compile(
+        r"(?:[a-z0-9][a-z0-9:._-]*)?#\d+|[0-9A-HJKMNP-TV-Z]{26}")
+
+    def _normalize_claim_source(self, channel: str, value: dict[str, Any],
+                                *, strict: bool = False) -> dict[str, Any]:
+        """Resolve exact claim provenance, never infer it from a sentence.
+
+        `source` was taught by the supplied skill while machine readers used
+        `source_message_id`. Accept that spelling, retaining the original
+        source text, and canonicalize both supported ref forms. Legacy reads
+        are projections only: invalid old values stay readable and acquire no
+        new link; writes that change a declaration refuse invalid references.
+        """
+        targets: list[Message] = []
+        for field in ("source_message_id", "source"):
+            raw = value.get(field)
+            if raw is None or raw == "":
+                continue
+            ref = raw.strip() if isinstance(raw, str) else ""
+            if not ref or not self._CLAIM_SOURCE_REF.fullmatch(ref):
+                # source is also historical prose. A single malformed #ref
+                # is an attempted declaration; a sentence is just context.
+                canonical_prose = (field == "source_message_id" and ref
+                                   and any(c.isspace() for c in ref))
+                explicit = (field == "source_message_id" and not canonical_prose) or (
+                    isinstance(raw, str) and "#" in ref
+                    and not any(c.isspace() for c in ref))
+                if strict and explicit:
+                    raise HubError(400, f"claim {field} must be one message ID or channel#seq reference")
+                if explicit or canonical_prose:
+                    return value
+                continue
+            target = (self._resolve_consume_ref(ref, channel) if "#" in ref
+                      else self.db.get_message(ref))
+            if target is None or target.retracted:
+                if strict:
+                    raise HubError(404, f"claim {field} does not name an available message")
+                return value
+            if target.channel != channel:
+                if strict:
+                    raise HubError(400, "claim source must be a message in the claim's channel")
+                return value
+            owner = str(value.get("owner") or "")
+            if owner and not self.db.is_member(channel, owner):
+                if strict:
+                    raise HubError(403, "claim source must be readable by the claim owner")
+                return value
+            targets.append(target)
+        if not targets:
+            return value
+        if len({target.id for target in targets}) != 1:
+            if strict:
+                raise HubError(400, "claim source and source_message_id refer to different messages")
+            return value
+        return {**value, "source_message_id": targets[0].id}
+
     def store_get(self, agent: AgentInfo, channel: str, key: str) -> StoreEntry:
         self.require_membership(channel, agent.id)
         entry = self.db.store_get(channel, key)
         if entry is None:
             raise HubError(404, f"key '{key}' not found in '{channel}' store")
+        if key.startswith("claim:") and isinstance(entry.value, dict):
+            # Repair the public read seam for old source-only rows without
+            # migrating storage, changing versions, or posting a receipt.
+            entry = entry.model_copy(update={
+                "value": self._normalize_claim_source(channel, entry.value)})
         return entry
 
     def store_set(self, agent: AgentInfo, channel: str, key: str, value: Any,
@@ -5841,6 +5902,23 @@ class HubService:
                                         "existing owner unchanged")
             elif current_owner is not None:
                 value = {**value, "owner": current_owner}
+            previous_value = (current.value if current is not None
+                              and isinstance(current.value, dict) else {})
+            if "source" not in value and "source_message_id" not in value:
+                # A progress/closure-only update does not erase provenance,
+                # just as omitting owner above does not erase ownership.
+                value = {**value, **{f: previous_value[f]
+                                    for f in ("source", "source_message_id")
+                                    if f in previous_value}}
+            source_changed = any(value.get(f) != previous_value.get(f)
+                                 for f in ("source", "source_message_id"))
+            previous_source = self._normalize_claim_source(channel, previous_value).get("source_message_id")
+            value = self._normalize_claim_source(
+                channel, value, strict=current is None or source_changed)
+            if (value.get("source_message_id") != previous_source
+                    and not agent.operator
+                    and agent.id != (value.get("owner") or current_owner or agent.id)):
+                raise HubError(403, "only the claim owner or operator may change its message source")
             # Claim-due cadence (2026-07-28): `cadence_minutes` is the
             # owner declaring "remind ME when this row idles past N min"
             # (see _claim_due_sweep). Validate the TYPE here so a junk

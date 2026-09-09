@@ -96,7 +96,10 @@ ROW → END.
 
 Work you cannot finish this turn gets a claim row in the channel where the
 work is discussed: `store_set(channel, "claim:<slug>", {"owner", "status",
-"next_step", "source": "<channel>#<seq>"}, expect_version=0)`. A conflict
+"next_step", "source_message_id": "<channel>#<seq>"}, expect_version=0)`.
+Use the exact source message ID or same-channel `channel#seq`; the hub stores
+the canonical ID. The older `source` spelling is accepted for exact message
+references; prose in `source` is context, never an executable claim link. A conflict
 means someone else owns it. The row is the ONLY per-slice receipt: progress,
 parked, blocked and no-delta all belong on the row, never in a channel.
 
