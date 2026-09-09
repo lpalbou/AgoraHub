@@ -4094,9 +4094,17 @@ class Driver:
             # tool is scored `mcp-use`, and holding reception for that would
             # penalise a seat for working. Its only bound stays the strike
             # ledger in _chain_step.
-            self._work_attempt_unavailable = (
-                self._last_turn_stage in _TRANSPORT_STAGES
-                or self._last_turn_stage == "harness-config")
+            # Match reception's fatal configuration contract: retries cannot
+            # repair invalid model/effort/sandbox flags, and excluding them
+            # from strikes must not create an unbounded retry lane.
+            if self._last_turn_stage == "harness-config":
+                raise SystemExit(
+                    f"agora drive: {self.harness} refused this seat's "
+                    f"configuration, and no retry can fix it:\n  "
+                    f"{_one_line(self._last_turn_detail) or 'no detail'}\n"
+                    "  Fix the flag (commonly --model / --reasoning-effort) and "
+                    "restart the driver.")
+            self._work_attempt_unavailable = self._last_turn_stage in _TRANSPORT_STAGES
             if self._last_turn_stage in _TRANSPORT_STAGES:
                 self._note_failure(self._last_turn_stage or "harness",
                                    self._last_turn_detail)

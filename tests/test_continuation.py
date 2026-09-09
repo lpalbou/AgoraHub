@@ -239,7 +239,7 @@ def test_receiptless_chunks_park_the_chain(home, monkeypatch):
     assert len(calls) == 1                    # chain resumed
 
 
-@pytest.mark.parametrize("stage", [None, "harness", "infrastructure", "mcp-init", "harness-config"])
+@pytest.mark.parametrize("stage", [None, "harness", "infrastructure", "mcp-init"])
 def test_provider_failure_does_not_retire_work_after_quota_recovery(home, monkeypatch, stage):
     """Original AF/review fleets retired valid claims during a quota outage."""
     unavailable = True
@@ -261,6 +261,23 @@ def test_provider_failure_does_not_retire_work_after_quota_recovery(home, monkey
     unavailable = False
     assert d._chain_step(snap)
     assert d._strike_count(ck) == 1  # real receiptless work still counts
+
+
+def test_invalid_work_configuration_fails_once_without_retiring_claim(home, monkeypatch):
+    calls = []
+
+    def spawn(prompt, sid):
+        calls.append(prompt)
+        d._last_turn_stage = "harness-config"
+        d._last_turn_detail = "unsupported effort"
+        return None, False
+
+    d = _driver(home, spawn)
+    snap = ("commons", "claim:audit", 7)
+    monkeypatch.setattr(d, "_continuation_snapshot", lambda: snap)
+    with pytest.raises(SystemExit, match="unsupported effort"):
+        d._chain_step(snap)
+    assert len(calls) == 1 and d._strike_count("commons/claim:audit@7") == 0
 
 
 @pytest.mark.parametrize("stage", ["reception", "mcp-use", "mcp-call", "tool"])
