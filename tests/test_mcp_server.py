@@ -78,12 +78,17 @@ def test_full_member_missions_remain_retrievable_over_mcp(hub, monkeypatch):
                    headers={"Authorization": "Bearer k"}, timeout=5)
     r.raise_for_status()
     key = r.json()["api_key"]
+    response = httpx.put(hub + "/me/about", json={"about": "I only write summaries; I do not own cancellation."},
+                        headers={"Authorization": "Bearer " + key}, timeout=5)
+    response.raise_for_status()
     mcp = _server_against(hub, monkeypatch, key)
     identity = _call_tool(mcp, "whoami", {})
     assert identity["mission"] == mission
     compact = _call_tool(mcp, "describe_channel", {"channel": "commons"})
     member = next(m for m in compact["members"] if m["agent_id"] == "roster-reader")
     assert member["mission_available"] and "mission" not in member
+    assert "not an operator assignment" in compact["missions"]
+    assert "do not own cancellation" in member["about"]
     full = _call_tool(mcp, "describe_channel", {"channel": "commons", "include_missions": True})
     member = next(m for m in full["members"] if m["agent_id"] == "roster-reader")
     assert member["mission"] == mission

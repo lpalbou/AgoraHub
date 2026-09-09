@@ -170,8 +170,10 @@ def channel_info_view(result: dict, *, include_missions: bool = False) -> dict:
         members.append(compact)
     return {**result, "members": members,
             "missions": "Full operator missions are available with "
-            "describe_channel(channel, include_missions=true). Fetch them "
-            "when a member's role/about is insufficient. Your binding "
+            "describe_channel(channel, include_missions=true). About is a "
+            "member self-description, not an operator assignment. Fetch "
+            "missions to verify assigned ownership, reviewer mandates or "
+            "conflicting role claims. Your binding "
             "mission is always returned by whoami."}
 
 
@@ -1090,7 +1092,8 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
     def describe_channel(channel: str, include_missions: bool = False) -> dict:
         """Channel purpose, norms, SLA, members/about, phases and charter.
         Read before your first post, then read_charter(channel=...). Full
-        member missions: include_missions=true when role/about is insufficient.
+        Member about is self-authored. Verify assigned ownership and reviewer
+        mandates with include_missions=true for full operator missions.
         Your own binding mission always comes from whoami."""
         return channel_info_view(_call("GET", f"/channels/{channel}/info"),
                                  include_missions=include_missions)
