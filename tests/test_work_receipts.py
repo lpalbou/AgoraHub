@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from agora.drive import Driver, TurnEvidence, WORK_PROMPT
-from agora.work_receipts import RECENT_TURNS
+from agora.work_receipts import INDEX_MAX_BYTES, RECENT_COMMANDS, RECENT_NONZERO_EXITS, RECENT_TURNS
 
 
 ACTUAL = (Path(__file__).parent / "fixtures/runtime_work_command_returns.jsonl").read_text()
@@ -217,3 +217,58 @@ def test_receipt_failure_warns_once_and_cannot_break_turn(driver, monkeypatch, c
     assert spawn(driver, monkeypatch)[1]
     assert spawn(driver, monkeypatch)[1]
     assert capsys.readouterr().out.count("warn=work-receipts-unavailable") == 1
+
+
+def test_command_catalog_keeps_literal_metadata_and_nonzero_exits(driver, monkeypatch):
+    spawn(driver, monkeypatch)
+    index, turns = records(driver)
+    assert len(index["command_catalog"]) == 3
+    assert index["catalog_omitted_count"] == 0
+    assert index["nonzero_exit_count"] == len(index["nonzero_exit_refs"]) == 1
+    assert index["nonzero_exit_omitted_count"] == 0
+    for summary, receipt in zip(index["command_catalog"], turns[0]["receipts"]):
+        assert summary["receipt_id"] == receipt["receipt_id"]
+        assert summary["exit_code"] == receipt["exit_code"]
+        assert summary["tool_status"] == receipt["tool_status"]
+        assert summary["output_bytes"] == len(receipt["observed_output"].encode())
+        assert receipt["observed_output"].startswith(summary["output_head"])
+        assert receipt["observed_output"].endswith(summary["output_tail"])
+        assert summary["output_omitted_bytes"] == summary["output_bytes"] - len(summary["output_head"].encode()) - len(summary["output_tail"].encode())
+        full = json.loads((driver._work_receipts.directory / summary["file"]).read_text())
+        assert any(r == receipt for r in full["receipts"])
+    assert driver._work_receipts.index_path.stat().st_size <= INDEX_MAX_BYTES
+
+
+def test_catalog_bounds_and_failure_omissions_are_explicit_without_losing_full_returns(driver):
+    events = []
+    for n in range(35):
+        events.append(json.dumps({"type":"item.completed", "item": {
+            "type":"command_execution", "id":f"item-{n}", "command":"é\x00" * 300,
+            "exit_code":1 if n < 12 else 0, "status":"completed", "aggregated_output":"\x00🙂" * 1000}}))
+    driver._log_event(event="turn_start", kind="work", ts=1, session="work")
+    driver._log_lines(events)
+    driver._log_event(event="turn_end", ok=False)
+    index, turns = records(driver)
+    assert len(turns[0]["receipts"]) == index["receipt_count"] == 35
+    assert len(index["command_catalog"]) <= RECENT_COMMANDS
+    assert index["catalog_omitted_count"] == 35 - len(index["command_catalog"])
+    assert index["nonzero_exit_count"] == 12
+    assert len(index["nonzero_exit_refs"]) <= RECENT_NONZERO_EXITS
+    assert index["nonzero_exit_omitted_count"] == 12 - len(index["nonzero_exit_refs"])
+    assert driver._work_receipts.index_path.stat().st_size <= INDEX_MAX_BYTES
+    assert index["nonzero_exit_refs"], "older failures remain separately discoverable"
+
+
+def test_restart_catalog_matches_live_catalog_and_unknown_output_is_not_empty_success(driver, monkeypatch):
+    stream = ACTUAL + json.dumps({"type":"item.completed", "item": {
+        "type":"command_execution", "id":"unknown", "command":"unknown", "exit_code":None}})
+    spawn(driver, monkeypatch, stream=stream)
+    before, _ = records(driver)
+    restarted = Driver("runtime", "http://hub:1", harness="codex", turn_log="default")
+    restarted._work_receipts.brief()
+    after, _ = records(restarted)
+    assert before["command_catalog"] == after["command_catalog"]
+    assert before["nonzero_exit_refs"] == after["nonzero_exit_refs"]
+    unknown = after["command_catalog"][-1]
+    assert unknown["exit_code"] is unknown["output_bytes"] is unknown["output_head"] is None
+    assert not any("passed" in row for row in after["command_catalog"])
