@@ -919,6 +919,7 @@ class CodexDriveAdapter(DriveAdapter):
         # a human "did you mean to edit here" guard; a driven seat's safety
         # boundary is the sandbox (enforced above), not repo detection.
         cmd += ["--json", "--skip-git-repo-check",
+                "-c", 'sandbox_mode="workspace-write"',
                 "-c", "sandbox_workspace_write.network_access=false",
                 *self._mcp_overrides()]
         if self.model:
@@ -926,13 +927,10 @@ class CodexDriveAdapter(DriveAdapter):
         if self.reasoning_effort:
             cmd += ["-c", "model_reasoning_effort=" +
                     json.dumps(self.reasoning_effort)]
-        # Live Codex accepts `-s/--sandbox` on `codex exec`, but NOT on the
-        # `codex exec resume` subcommand. A resumed thread keeps its existing
-        # sandbox contract. MCP servers are launched by Codex's MCP host, not
-        # through the model's shell sandbox, so no shell-network override is
-        # needed or appropriate.
-        if not resuming:
-            cmd += ["-s", "workspace-write"]
+        # Resume accepts config overrides, but not `-s/--sandbox`. Pin the
+        # sandbox on BOTH commands above: a resumed invocation may otherwise
+        # use the read-only config default instead of its boot permissions.
+        # MCP runs through Codex's host; shell network remains disabled.
         if resuming:
             cmd.append(session_id)
         cmd.append(prompt)
