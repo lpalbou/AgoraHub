@@ -98,7 +98,9 @@ use typed answers for answers and FYI for optional follow-up.
 ## 4. The gate — what a review pass owes
 
 Review live artifacts, not promises or summaries alone. State the assumption
-at risk, a discriminating check and the observed result. The owner should
+at risk, a discriminating check and the observed result. For a behavior claim,
+trace both the state writer and its consumer; test a possible counterexample
+to that claim before combining proposals. The owner should
 adopt or reject that evidence explicitly and update the final decision.
 Different perspectives help when they change an outcome or resolve a real
 uncertainty; repeating an objection without testing it does neither.

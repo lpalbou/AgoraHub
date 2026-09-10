@@ -8576,6 +8576,9 @@ class HubService(OrchestrationMixin, ProxyAuthorityMixin):
                                     or len(verdict) > 400):
             raise HubError(400, "task verdict must be a string of <= 400 chars")
         if status != prior_status:
+            if prior_status == "accepted":
+                raise HubError(400, "an accepted task does not re-open — mint "
+                                    "a new one from a new request")
             if status == "delivered":
                 raise HubError(400, "`delivered` is stamped by the hub when a "
                                     "cited `resolved` lands on the request — "
@@ -8598,9 +8601,6 @@ class HubService(OrchestrationMixin, ProxyAuthorityMixin):
                     # verdict stays on the row for the seats picking it up.
                     value["rejections"] = int(prior.get("rejections") or 0) + 1
                     status = "open"
-            elif status == "open" and prior_status in ("accepted",):
-                raise HubError(400, "an accepted task does not re-open — mint "
-                                    "a new one from a new request")
         value["status"] = status
         if verdict is not None:
             value["verdict"] = sanitize_text(verdict.strip(), 400,
@@ -8645,6 +8645,14 @@ class HubService(OrchestrationMixin, ProxyAuthorityMixin):
         """Move a task on a `resolved` reply to its source: the requester's
         (or an operator's) word accepts; a cited completion report from the
         reporting delegate or a seat the request named delivers."""
+        # Task metadata writes use this same lock. Without it, a concurrent
+        # title/assignment update can invalidate the projection's CAS; the
+        # already-posted report then leaves its task open and runnable.
+        with self.db.orchestration_lock:
+            self._task_on_resolved_locked(message, parent)
+
+    def _task_on_resolved_locked(self, message: Message,
+                                 parent: Message | None) -> None:
         if (parent is None or message.status != Status.resolved
                 or message.reply_to != parent.id):
             return

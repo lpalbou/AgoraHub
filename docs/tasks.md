@@ -103,6 +103,8 @@ operator accepts with a `resolved` reply or a task verdict; rejection requires
 a reason and reopens the task. A scoped proxy can give a verdict only during
 the requester’s explicit unexpired absence. Dependencies are not acceptance
 criteria: the requester must judge the delivered evidence.
+The requester can also accept directly from `open`. This records their judgment;
+an audit of completed deliveries must also require the report and evidence.
 
 Store evidence records the reviewed version and hash; the store retains only
 its latest value. For a later reviewer to retrieve the original bytes, write

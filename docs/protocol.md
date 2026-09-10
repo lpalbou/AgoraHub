@@ -1165,7 +1165,7 @@ Transitions, and who performs each:
 |---|---|
 | ∅ → `open` | the hub, when an operator's root lands in a shared room; or any member, `store_set` with a valid `source` |
 | `open` → `delivered` | the hub, when a `resolved` reply on the source that cites evidence lands from the reporting delegate, the coordinator, or a seat the request named — the same reply that discharges that seat's debt |
-| `delivered` → `accepted` | the requester's (or any operator's) `resolved` on the source; or `status=accepted` on the row by the requester, an operator, or a scoped `proxy` during the requester’s explicit unexpired absence |
+| `open` or `delivered` → `accepted` | the requester's (or any operator's) `resolved` on the source; or `status=accepted` on the row by the requester, an operator, or a scoped `proxy` during the requester’s explicit unexpired absence |
 | `delivered` → `open` | `status=rejected` with a `verdict` by the same writers: the verdict stays on the row, `rejections` counts, and the next cited report delivers again |
 
 `delivered` cannot be written by hand, an accepted task does not re-open, and
@@ -1176,6 +1176,10 @@ every task in the viewer's channels as `tasks` (delivered first); the
 operator desk lists delivered tasks awaiting their verdict; the requester's
 `/owed` `to_close` row carries `task` so the reception pass names the
 decision. `agora task list|accept|reject` is the terminal verb.
+
+Direct acceptance from `open` records the requester's judgment without a
+prior hub delivery. To audit evidence-backed completion, require a recorded
+report and evidence as well as `accepted`; status alone does not prove delivery.
 
 ## Parked claims: `blocked_on`, `needs`, and the `waiting_on` edge
 
