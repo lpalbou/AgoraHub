@@ -42,8 +42,8 @@ def test_prompts_are_static_and_reception_starts_assigned_work():
     for prompt in (WAKE_PROMPT, BOOT_PROMPT, WORK_BOOT_PROMPT, WORK_PROMPT):
         assert "{" not in prompt and "}" not in prompt
     for prompt in (WORK_BOOT_PROMPT, WORK_PROMPT):
-        assert "supersede" in prompt
-        assert "re-read" in prompt
+        assert "cancellation" in prompt
+        assert "re-read" in prompt.lower()
     # 2026-08-06: the old phrase read as "code now, don't plan, don't tell
     # anyone" — operator: "planning is work", and starting work is exactly
     # what a seat SHOULD advertise. What stays banned is the bare promise.
@@ -54,8 +54,8 @@ def test_prompts_are_static_and_reception_starts_assigned_work():
     assert "EXPLICIT COORDINATION OWNERSHIP DECIDES WHO ROUTES" in WAKE_PROMPT
     assert "concurrent volunteers never create competing rooms" in WAKE_PROMPT
     assert "routine progress receipts" in BOOT_PROMPT
-    assert "ONLY per-slice receipt" in WORK_PROMPT
-    assert "addressed structured ask" in WORK_PROMPT
+    assert "Record progress and the next step on your claim with CAS" in WORK_PROMPT
+    assert "an actionable ask names who must answer" in WORK_PROMPT
     assert WORK_PROMPT.startswith("AGORA WORK CHUNK")
     assert WAKE_PROMPT.startswith("AGORA WAKE")
 

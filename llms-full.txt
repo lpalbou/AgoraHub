@@ -766,6 +766,10 @@ the task can assign them. Run setup after registration/membership is ready.
 tasks. Creation is a sequence of ordinary hub operations, not an atomic
 transaction: a failed step reports an error and leaves completed setup visible.
 
+A driven reporting delegate can use `create_group` to form a team and
+`invite_agent` to add participants. After they join, bind the opening message
+to a canonical task row with `store_set`; these tools grant no operator powers.
+
 ## The record
 
 The canonical key is `task:msg-<source seq>` in the request’s channel. Update
@@ -838,6 +842,11 @@ operator accepts with a `resolved` reply or a task verdict; rejection requires
 a reason and reopens the task. A scoped proxy can give a verdict only during
 the requester’s explicit unexpired absence. Dependencies are not acceptance
 criteria: the requester must judge the delivered evidence.
+
+Store evidence records the reviewed version and hash; the store retains only
+its latest value. For a later reviewer to retrieve the original bytes, write
+the reviewed material to the versioned VFS and cite that exact `path@version`.
+A hash detects a changed value but cannot reconstruct it.
 
 ## The personal desk
 

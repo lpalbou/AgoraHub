@@ -376,6 +376,12 @@ def tools_to_drop(me: Any, *, everything: bool = False,
         drop |= _DELEGATE_TOOLS
     if driven:
         drop |= _DRIVEN_DROP
+        if any("reporting" in grant.get("powers", [])
+               for grant in me.get("delegations", []) if isinstance(grant, dict)):
+            # A chief of staff may form the task team. Ordinary workers do
+            # not pay for setup schemas on every turn; hub permissions still
+            # decide every call, including expired/scoped grants.
+            drop -= {"create_group", "invite_agent"}
     return drop
 
 

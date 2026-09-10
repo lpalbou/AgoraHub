@@ -588,10 +588,9 @@ def test_a_proxy_holder_answers_a_gate_for_an_absent_owner(hub):
     hub.store_set(lead, "room", "gate:ratify",
                   {"owner": "boss", "asked_by": "lead", "status": "asked",
                    "q": "which shape?"})
-    # The owner is OUT OF CONTACT — that is the whole precondition. Proxy is
-    # the owner's hand while they are away, never a second vote while they
-    # are here (the conditional was inverted until 2026-08-07).
-    assert hub._out_of_contact("boss")   # never touched the hub
+    # A missing heartbeat is insufficient: the named operator declares absence.
+    import time
+    hub.set_availability(boss, time.time() + 3600)
     # The proxy holder rules on the absent owner's behalf.
     hub.store_set(lead, "room", "gate:ratify",
                   {"owner": "boss", "asked_by": "lead", "status": "granted",
@@ -955,9 +954,12 @@ def test_proxy_changes_what_the_supervisor_may_do(hub):
     hub.db.add_member("room", "lead")
     hub.set_delegation("lead", ["reporting", "proxy"], ttl_seconds=86400.0,
                        scope="room")
+    import time
+    hub.set_availability(boss, time.time() + 3600)
     hub.store_set(lead, "room", "claim:b",
                   {"owner": "lead", "status": "parked",
-                   "blocked_on": "operator", "needs": "which art direction"})
+                   "blocked_on": "operator", "needs_from": "boss",
+                   "needs": "which art direction"})
     b = hub.supervise(lead, "room")["blocked"][0]
     assert b["you_can_act"] is True
     assert "proxy" in b["move"]

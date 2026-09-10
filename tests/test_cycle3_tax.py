@@ -21,13 +21,17 @@ def test_driven_prefix_is_the_contract_not_the_whole_skill():
 def test_driven_tier_drops_the_never_called_tools_and_keeps_the_working_set():
     member = {"ok": True, "operator": False, "delegations": []}
     drop = tools_to_drop(member, driven=True)
-    for gone in ("wait_for_messages", "open_vote", "create_group", "get_board", "rate_agent"):
+    for gone in ("wait_for_messages", "open_vote", "create_group", "get_board"):
         assert gone in drop, gone
     for kept in ("check_inbox", "ack_inbox", "post_message", "read_message", "read_message_by_seq",
-                 "store_set", "store_get", "fs_write", "fs_read", "search_hub", "send_dm", "read_charter"):
+                 "store_set", "store_get", "fs_write", "fs_read", "search_hub", "send_dm", "read_charter",
+                 "rate_agent", "get_reputation", "set_colleague_notes", "get_colleague_notes", "get_advisors"):
         assert kept not in drop, kept
     delegate = {"ok": True, "operator": False, "delegations": [{"powers": ["reporting"]}]}
     assert "supervise" not in tools_to_drop(delegate, driven=True), "delegates keep their radar"
+    assert not ({"create_group", "invite_agent"} & tools_to_drop(delegate, driven=True))
+    observer = {"ok": True, "operator": False, "delegations": [{"powers": ["ruling"]}]}
+    assert {"create_group", "invite_agent"} <= tools_to_drop(observer, driven=True)
     assert tools_to_drop({"ok": True, "operator": True}, driven=True) == set(), "operators see everything"
     assert not (tools_to_drop(member) & _DRIVEN_DROP), "the driven set is opt-in: interactive seats keep it"
 
