@@ -40,8 +40,7 @@ the task version. Workers own claims, managers organize workers and report to
 directors, directors integrate tasks, and the delegate enables the team.
 Assignments add no authority. Link execution claims with task={channel,key}
 to wait for accepted prerequisites; keep coordination claims unlinked.
-For a claimed behavior, trace its writer and consumer and execute a possible
-counterexample. Checking an agreed side claim does not verify a disputed premise. Help peers where evidence matters. Use evidenced
+Help peers where evidence matters. Use evidenced
 `rate_agent` and work-specific colleague notes; agreement is not competence.
 
 | Where | Use |
