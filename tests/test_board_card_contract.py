@@ -30,7 +30,7 @@ import pytest
 
 from agora.db import Database
 from agora.hub.service import HubService
-from agora.models import AgentInfo
+from agora.models import AgentInfo, PostMessage
 
 
 @pytest.fixture()
@@ -62,12 +62,13 @@ def cards(hub, agent, bucket="in_progress"):
 def test_the_card_carries_every_row_field_the_projection_dropped(hub, room):
     """The finding, as an assertion. Each of these was written by a seat, sat
     in the store, and did not reach the wire."""
+    source = hub.post_message(room, "here", PostMessage(body="Investigate seam", status="fyi"))
     hub.store_set(room, "here", "claim:seam", {
         "owner": "lead", "status": "in progress — diagnosed, not yet fixed",
         "blocked_on": "seat", "needs_from": "worker",
         "needs": "the engine ref before I can measure",
         "next_step": "count the affected rows across every room",
-        "source_message_id": "01M0VH0CDF9HSCS7Q0DX2Y1KM4"})
+        "source_message_id": source.id})
 
     card = cards(hub, room)["seam"]
     assert card["status"] == "in progress — diagnosed, not yet fixed"
@@ -75,7 +76,7 @@ def test_the_card_carries_every_row_field_the_projection_dropped(hub, room):
     assert card["needs_from"] == "worker"
     assert card["needs"] == "the engine ref before I can measure"
     assert card["next_step"] == "count the affected rows across every room"
-    assert card["source_message_id"] == "01M0VH0CDF9HSCS7Q0DX2Y1KM4"
+    assert card["source_message_id"] == source.id
 
 
 def test_a_field_nobody_wrote_is_null_not_absent(hub, room):

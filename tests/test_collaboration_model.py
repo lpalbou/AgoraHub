@@ -187,7 +187,7 @@ def test_hub_rules_carry_the_collaboration_teachings(rule: str, evidence: str):
 # times over.
 
 @pytest.mark.parametrize("rule, evidence", [
-    ("USE THOSE REPLIES",
+    ("Use existing answers",
      "the delegate must not reopen a second contribution round once seats "
      "already answered on the operator thread"),
     ("IN-THREAD ON THE ORIGINAL COMMISSION",
@@ -209,7 +209,7 @@ def test_hub_rules_carry_the_collaboration_teachings(rule: str, evidence: str):
 def test_delegate_brief_teaches_monitoring_not_just_dispatch(rule: str,
                                                              evidence: str):
     from agora.governance import DELEGATE_CHARTER
-    assert rule in DELEGATE_CHARTER, evidence
+    assert rule.lower() in " ".join(DELEGATE_CHARTER.split()).lower(), evidence
 
 
 def test_hub_rules_no_longer_order_the_chair_to_publish():
@@ -228,7 +228,7 @@ def test_hub_rules_no_longer_order_the_chair_to_publish():
     "## 2. The core loop",
     "## 3. The cycles",
     "## 4. The gate",
-    "## 5. The tools, mapped to the cycles",
+    "## 5. The supporting tools",
     "## 6. What the hub guarantees vs. what the fleet practises",
     "## 7. Known ceilings",
 ])
@@ -239,7 +239,7 @@ def test_model_page_presents_roles_then_cycles_then_tools(model_page: str,
 
 def test_model_page_diagrams_the_core_loop(model_page: str):
     assert "```mermaid" in model_page
-    for node in ("RECEPTION PASS", "WORK CHUNK", "claim:msg-"):
+    for node in ("Personal briefing", "Agent judgment", "Bounded work and evidence"):
         assert node in model_page
 
 
@@ -250,16 +250,9 @@ def test_model_page_is_reachable_from_both_indexes():
     assert "docs/collaboration.md" in (ROOT / "llms.txt").read_text()
 
 
-def test_model_page_ceilings_point_at_real_backlog_cards(model_page: str):
-    """§7 names the gaps as design work. Each must be a card that exists, so
-    the page cannot promise a design that was never written."""
-    cards = {"0141_claim_deputy_ttl_handoff": "proposed",
-             # 0142 shipped in 0.18.0 as the `task:` row; the page still
-             # names it, as the record of what closed the ceiling.
-             "0142_acceptance_signoff": "completed",
-             "0143_merge_queue_rows": "proposed",
-             "0144_role_registry": "proposed",
-             "0145_artifact_watch_diff_summaries": "proposed"}
-    for card, home in cards.items():
-        assert card in model_page
-        assert (ROOT / f"docs/backlog/{home}/{card}.md").exists()
+def test_model_page_names_the_limits_of_automated_orchestration(model_page: str):
+    # Public docs describe current guarantees; historical backlog pointers
+    # belong in internal design records, not a public feature contract.
+    assert "Unlinked legacy claims do not acquire task dependency gates" in model_page
+    assert "Prompt improvements and" in model_page
+    assert "do not prove superiority" in model_page

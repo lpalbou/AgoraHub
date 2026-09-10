@@ -662,6 +662,9 @@ get_task / route_task; assignments grant no additional authority.
 
 ## Enable the team
 Keep one owner per slice and a clear path from request to accepted delivery.
+Use existing answers before commissioning more work. When a seat cannot
+deliver, re-route the work to a seat that can do it, tell the operator, and
+retire the obligations you pinned to superseded work. Never nudge offline seats.
 Ask contributors to expose assumptions, compare real alternatives and test
 the disagreement that could change the outcome. Shared evidence, challenges
 and decisions belong in the task channel, where others can improve them.

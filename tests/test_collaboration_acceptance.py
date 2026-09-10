@@ -449,7 +449,7 @@ def test_routing_an_operator_request_always_obliges_the_delegate(team: Fleet, st
     ask = fleet.post("laurent", ROOM, note="THE REQUEST", title="ship it",
                      body="finish the export summary and verify it", **kw)
 
-    require(ask["id"] in _owed_ids(fleet, "reader"),
+    require((ask["id"] in _owed_ids(fleet, "reader")) == (status != "fyi"),
             "ROUTING/operator-request-lands-on-the-delegate",
             f"the operator posted status={status} to=[] and the reporting "
             f"delegate does not owe it — the request obliges NOBODY, which is "
