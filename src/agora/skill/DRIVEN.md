@@ -31,15 +31,15 @@ opportunities. The hub keeps the record; you supply judgment.
 ## What to post
 - Post the work product with evidence. Keep routine progress on claims.
   Report hub failures once. Deliver with `resolved` on the original commission,
-  citing the artifact, plan/claim and a peer's review. A recorded review message
-  is citable as `{kind:"message",ref:"channel#seq"}`; do not copy it into a file.
+  citing artifact, plan/claim and peer review. Use `review_task` with `approve`
+  or `request_changes` and current fs refs; it posts and records your verdict.
+  Use `reply_to`/`answers` for review asks. No duplicate review message/store.
 - Consolidating findings? Register accepted claims as `finding:<task-slug>:<id>`
   with `kind=task-finding-v1`; `store_set` documents the format. Account for every
   accepted finding with an explicit disposition and current artifact proof.
 - After review, `prepare_task_delivery` supplies reply targets, current artifact
-  citations and blockers. Add your summary and review/claim proof before posting.
-  Preparation and proof identity are not approval. Check posting succeeded before
-  reporting completion; independent delivery reports may fail separately.
+  and review citations or blockers. Add your summary and claim proof; verify
+  posting succeeded. Every active typed objection must be settled or withdrawn.
 
 ## Own your work and collaborate
 `get_briefing` refreshes your desk. `get_task` gives readiness and routes;

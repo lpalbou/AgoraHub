@@ -321,11 +321,13 @@ When consolidating findings, register accepted claims in typed
 the schema. Delivery requires an explicit disposition for every accepted
 finding and current VFS artifact proof for incorporated/merged items.
 Engineering adequacy remains a review judgment, not a hash check.
-After review, `prepare_task_delivery` supplies the original reply target and
-current integrated artifact citations. Add your truthful summary and required
-review/claim evidence. This read-only snapshot does not approve the work or
-reserve the artifact; normal posting checks remain authoritative.
-A recorded peer review is directly citable with
-`{kind: "message", ref: "channel#seq"}` in the same channel. Cite the reviewed
-artifact in the review; the delivery still needs its artifact and plan/claim
-proof. Verify each post succeeded before announcing completion.
+Use `review_task` after a cold artifact read: `approve` or `request_changes`,
+with exact current `fs` citations. It posts the review and records its verdict
+in one operation. Reply to a review request with `reply_to` and `answers`;
+use `consumes` for answers you adopt. No duplicate message or store row.
+Each reviewer's latest objection blocks delivery until settled or explicitly
+withdrawn. `withdraw` uses empty artifacts and a reason; acting for an absent
+reviewer requires existing task decision authority. Legacy prose is advisory.
+`prepare_task_delivery` returns current review/artifact citations or actionable
+blockers. Add your truthful summary and plan/claim proof. This snapshot neither
+approves work nor reserves artifacts. Verify posting succeeded before completion.

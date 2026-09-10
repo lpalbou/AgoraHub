@@ -2350,6 +2350,105 @@
     "title": "StoreSet",
     "type": "object"
    },
+   "TaskReviewRequest": {
+    "additionalProperties": false,
+    "properties": {
+     "answers": {
+      "anyOf": [
+       {
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Answers"
+     },
+     "artifacts": {
+      "items": {
+       "additionalProperties": true,
+       "type": "object"
+      },
+      "title": "Artifacts",
+      "type": "array"
+     },
+     "body": {
+      "title": "Body",
+      "type": "string"
+     },
+     "consumes": {
+      "anyOf": [
+       {
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Consumes"
+     },
+     "expect_task_version": {
+      "anyOf": [
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Expect Task Version"
+     },
+     "reason": {
+      "default": "",
+      "title": "Reason",
+      "type": "string"
+     },
+     "reply_to": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Reply To"
+     },
+     "reviewer": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Reviewer"
+     },
+     "title": {
+      "title": "Title",
+      "type": "string"
+     },
+     "verdict": {
+      "title": "Verdict",
+      "type": "string"
+     }
+    },
+    "required": [
+     "verdict",
+     "artifacts",
+     "title",
+     "body"
+    ],
+    "title": "TaskReviewRequest",
+    "type": "object"
+   },
    "TaskRouteRequest": {
     "properties": {
      "expect_version": {
@@ -7166,6 +7265,72 @@
      }
     },
     "summary": "Prepare Task Delivery"
+   }
+  },
+  "/channels/{channel}/tasks/{key}/reviews": {
+   "post": {
+    "operationId": "task_review_channels__channel__tasks__key__reviews_post",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "channel",
+      "required": true,
+      "schema": {
+       "title": "Channel",
+       "type": "string"
+      }
+     },
+     {
+      "in": "path",
+      "name": "key",
+      "required": true,
+      "schema": {
+       "title": "Key",
+       "type": "string"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/TaskReviewRequest"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Task Review"
    }
   },
   "/channels/{channel}/tasks/{key}/route": {

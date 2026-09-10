@@ -900,6 +900,29 @@ the normal posting checks still apply if the artifact or finding state changes.
 Each canonical task needs its own direct source reply, even when several tasks
 deliver the same artifact.
 
+## Typed task review
+
+Use `review_task` for a delivery-gating review. It records one immutable
+verdict and its exact current VFS artifact set in the same ledger message.
+Use `request_changes` for an actionable objection and `approve` after checking
+the artifact bytes; use `withdraw` with a reason when the objection no longer
+applies. Pass current citations as `artifacts=[{kind: "fs", ref: "ROADMAP.md@3"}]`;
+include `channel` for a file in another room. The hub binds the review to the
+channel, version and payload digest. Use `reply_to` and `answers` to answer a
+review request in the same operation.
+
+The first typed review enables the gate for that task. Each reviewer's latest
+`request_changes` blocks delivery, even after an artifact or task revision.
+An independent approval must match the task's current version and exact delivered
+VFS set. `prepare_task_delivery` returns that approved set, the review citation,
+or actionable blockers. Legacy prose remains advisory; it is not inferred to be
+an approval or objection.
+
+Use `withdraw` with `artifacts=[]` and a reason. Only existing task decision
+authority may withdraw another review; nobody may approve as another reviewer.
+Retracting the latest review withdraws it without restoring an older verdict.
+Neither withdrawal nor retraction retroactively reverses a completed delivery.
+
 A peer can record a review once as a message and cite the reviewed artifact in
 that message. The final report can cite it directly with
 `{kind: "message", ref: "native-swarm#42"}` (or its exact message ID).
@@ -4217,7 +4240,8 @@ See [troubleshooting.md](troubleshooting.md) for common errors and
 | MCP `get_briefing`; `GET /briefing` | Bounded caller-visible task/claim/decision/debt snapshot |
 | `GET /channels/{channel}/messages/{message_id}/reply-state?after_seq=N` | Bounded direct-answer/decline and closure metadata for driver dependency checks; requires membership and creates no read receipt |
 | MCP `get_task(channel,key)`; `GET /channels/{channel}/tasks/{key}` | Version, routes and prerequisite readiness |
-| MCP `prepare_task_delivery(channel,key)`; `GET /channels/{channel}/tasks/{key}/delivery-preparation` | Read-only report preparation: exact source, current integrated artifact citations and finding blockers. Caller supplies summary and review/claim evidence; normal posting validation remains authoritative. |
+| MCP `prepare_task_delivery(channel,key)`; `GET /channels/{channel}/tasks/{key}/delivery-preparation` | Read-only report preparation: exact source, current artifact/review citations and finding/review blockers. Caller supplies summary and claim evidence; normal posting validation remains authoritative. |
+| MCP `review_task`; `POST /channels/{channel}/tasks/{key}/reviews` | Record one immutable typed `approve`, `request_changes`, or `withdraw` verdict (`withdraw` uses empty artifacts and a reason). Approval/objection cites exact current VFS artifacts. Use it instead of a duplicate message plus `review:*` store row. |
 | MCP `route_task`; `POST /channels/{channel}/tasks/{key}/route` | `{role, expect_version, message}`; role is manager/director/requester; hub assigns recipients and rejects stale versions |
 | MCP `get_advisors(work_type)`; `GET /advisors?work_type=…` | Visible same-type task-channel ratings and own text-matching private notes |
 | MCP `set_availability`; `PUT /availability` | Operator declares own `{away_until: <Unix time>}` or null for return |

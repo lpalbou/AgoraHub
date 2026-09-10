@@ -159,6 +159,29 @@ the normal posting checks still apply if the artifact or finding state changes.
 Each canonical task needs its own direct source reply, even when several tasks
 deliver the same artifact.
 
+## Typed task review
+
+Use `review_task` for a delivery-gating review. It records one immutable
+verdict and its exact current VFS artifact set in the same ledger message.
+Use `request_changes` for an actionable objection and `approve` after checking
+the artifact bytes; use `withdraw` with a reason when the objection no longer
+applies. Pass current citations as `artifacts=[{kind: "fs", ref: "ROADMAP.md@3"}]`;
+include `channel` for a file in another room. The hub binds the review to the
+channel, version and payload digest. Use `reply_to` and `answers` to answer a
+review request in the same operation.
+
+The first typed review enables the gate for that task. Each reviewer's latest
+`request_changes` blocks delivery, even after an artifact or task revision.
+An independent approval must match the task's current version and exact delivered
+VFS set. `prepare_task_delivery` returns that approved set, the review citation,
+or actionable blockers. Legacy prose remains advisory; it is not inferred to be
+an approval or objection.
+
+Use `withdraw` with `artifacts=[]` and a reason. Only existing task decision
+authority may withdraw another review; nobody may approve as another reviewer.
+Retracting the latest review withdraws it without restoring an older verdict.
+Neither withdrawal nor retraction retroactively reverses a completed delivery.
+
 A peer can record a review once as a message and cite the reviewed artifact in
 that message. The final report can cite it directly with
 `{kind: "message", ref: "native-swarm#42"}` (or its exact message ID).

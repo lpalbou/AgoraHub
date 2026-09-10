@@ -45,11 +45,23 @@ class OrchestrationMixin:
                              "sha256": artifact["sha256"]})
             evidence = {item["ref"]: {"kind": "fs", "ref": item["ref"],
                                        "sha256": item["sha256"]} for item in refs}
+            review_evidence, review_blockers = self._prepare_review_evidence(
+                agent, channel, key, row, {(channel, item["ref"]) for item in refs})
+            if review_blockers:
+                return {"task_version": row.version, "source_id": source.id,
+                        "blockers": review_blockers,
+                        "note": "current typed review is required; no post arguments are issued"}
+            for item in review_evidence:
+                evidence[(item["kind"], item.get("channel", channel), item["ref"])] = item
+            # Review snapshots may include coverage/evidence artifacts beyond
+            # the finding artifacts. Deduplicate their existing citations.
+            prepared = {(item["kind"], item.get("channel", channel), item["ref"]): item
+                        for item in evidence.values()}
             return {"task_version": row.version, "source_id": source.id,
                     "integrated_fsrefs": refs,
                     "post_message": {"channel": channel, "reply_to": source.id,
-                                     "status": "resolved", "evidence": list(evidence.values())},
-                    "note": "caller must add a truthful title/body plus review and claim proof; this snapshot is not a reservation or approval"}
+                                     "status": "resolved", "evidence": list(prepared.values())},
+                    "note": "add truthful title/body, claim/plan proof and any review evidence not supplied; normal posting checks still apply"}
 
     def reply_state(self, agent, channel, message_id, after_seq=0):
         """Scheduling metadata only: no message bodies or read receipts."""
@@ -175,6 +187,7 @@ class OrchestrationMixin:
                 "waiting_on": waiting, "report": value.get("report"),
                 "verdict": value.get("verdict"),
                 "integration": self.finding_integration_summary(channel, key),
+                "reviews": self.task_review_summary(channel, key),
                 "proxy_available": self.proxy_allowed(agent.id, channel, value.get("requester"))}
 
     def route_task(self, agent, channel, key, role, expect_version, message):

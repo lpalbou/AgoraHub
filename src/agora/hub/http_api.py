@@ -13,7 +13,7 @@ from typing import Any
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
-from pydantic import BaseModel, StrictInt
+from pydantic import BaseModel, ConfigDict, StrictInt
 from starlette.concurrency import run_in_threadpool
 
 from ..db import StoreConflict
@@ -2104,6 +2104,19 @@ class TaskRouteRequest(BaseModel):
     expect_version: StrictInt
     message: PostMessage
 
+class TaskReviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    verdict: str
+    artifacts: list[dict[str, Any]]
+    title: str
+    body: str
+    reply_to: str | None = None
+    answers: list[str] | None = None
+    consumes: list[str] | None = None
+    reviewer: str | None = None
+    reason: str = ""
+    expect_task_version: StrictInt | None = None
+
 
 @router.get("/briefing")
 def personal_briefing(agent: AgentInfo = Depends(current_agent),
@@ -2123,6 +2136,13 @@ def task_route(channel: str, key: str, body: TaskRouteRequest,
                service: HubService = Depends(get_service)):
     return _run(service.route_task, agent, channel, key, body.role,
                 body.expect_version, body.message)
+
+@router.post("/channels/{channel}/tasks/{key}/reviews")
+def task_review(channel: str, key: str, body: TaskReviewRequest,
+                agent: AgentInfo = Depends(current_agent), service: HubService = Depends(get_service)):
+    return _run(service.review_task, agent, channel, key, body.verdict, body.artifacts,
+                body.title, body.body, body.reply_to, body.answers, body.consumes,
+                body.reviewer, body.reason, body.expect_task_version).model_dump()
 
 
 @router.get("/channels/{channel}/tasks/{key}/delivery-preparation")

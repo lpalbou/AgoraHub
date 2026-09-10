@@ -864,6 +864,24 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
         return _call("GET", f"/channels/{quote(channel, safe='')}/tasks/{quote(key, safe='')}/delivery-preparation")
 
     @mcp.tool()
+    def review_task(channel: str, key: str, verdict: str, artifacts: list[dict], title: str, body: str,
+                    reply_to: str | None = None, answers: list[str] | None = None,
+                    consumes: list[str] | None = None, reviewer: str | None = None,
+                    reason: str = "", expect_task_version: int | None = None) -> dict:
+        """Post one review and record its current verdict, without a duplicate store row.
+
+        verdict: approve, request_changes, or withdraw. artifacts are exact
+        current citations [{kind:"fs",ref:"PATH@VERSION",channel?:"ROOM"}].
+        Use reply_to and answers for the actual review request; consumes adopts
+        answers to your own asks. withdraw requires artifacts=[] and a reason;
+        reviewer names another seat only for an authorized withdrawal.
+        An independent approval must match the current task and delivered files;
+        another peer's approval cannot clear an active objection. Generic review
+        prose remains advisory. prepare_task_delivery reuses valid review proof.
+        """
+        return _call("POST", f"/channels/{quote(channel, safe='')}/tasks/{quote(key, safe='')}/reviews", json={"verdict": verdict, "artifacts": artifacts, "title": title, "body": body, "reply_to": reply_to, "answers": answers, "consumes": consumes, "reviewer": reviewer, "reason": reason, "expect_task_version": expect_task_version})
+
+    @mcp.tool()
     def route_task(channel: str, key: str, role: str, expect_version: int,
                    body: str, title: str, status: str = "open",
                    urgency: str = "inbox", asks: list[dict] | None = None) -> dict:

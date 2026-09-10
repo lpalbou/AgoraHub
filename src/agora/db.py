@@ -126,6 +126,8 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS idx_messages_channel_seq ON messages (channel, seq);
 CREATE INDEX IF NOT EXISTS idx_messages_reply_to ON messages (reply_to);
+CREATE INDEX IF NOT EXISTS idx_messages_task_review ON messages
+ (channel, json_extract(data, '$.task_review.task_key'), seq);
 -- `agora stats` asks "is the hub moving RIGHT NOW?" on a short trailing
 -- window. Without this the answer costs a full table scan of all history,
 -- so the cheap question would get more expensive every day the hub lives.
@@ -1598,7 +1600,7 @@ class Database:
         now = time.time()
         msg_id = new_ulid()
         to = to or []
-        with self._lock:
+        with self._lock, self._conn:
             if dedupe_key:
                 # Dedupe is per (channel, SENDER, key) — genuine idempotency: a
                 # seat retrying its own post must not double-announce.
@@ -1758,6 +1760,26 @@ class Database:
         with self._lock:
             row = self._conn.execute("SELECT * FROM messages WHERE id = ?", (message_id,)).fetchone()
         return self._row_to_message(row, redact=redact) if row else None
+
+    def latest_task_reviews(self, channel: str, key: str) -> list[dict[str, Any]]:
+        """Latest typed event per reviewer, including withdrawal tombstones.
+
+        Exact task-key expression index; no prose scan or truncated ledger
+        page can hide an objection. Return metadata only, never message prose.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT m.id, m.seq, m.sender, m.data, m.retracted_at FROM messages m "
+                "JOIN (SELECT MAX(seq) seq FROM messages WHERE channel=? "
+                "AND json_extract(data, '$.task_review.task_key')=? "
+                "AND json_extract(data, '$.task_review.kind')='task-review-v1' "
+                "GROUP BY json_extract(data, '$.task_review.reviewer')) latest "
+                "ON m.seq=latest.seq WHERE m.channel=? ORDER BY m.seq",
+                (channel, key, channel),
+            ).fetchall()
+        return [{"id": row["id"], "seq": row["seq"], "sender": row["sender"],
+                 "review": json.loads(row["data"])["task_review"],
+                 "retracted": row["retracted_at"] is not None} for row in rows]
 
     def get_messages(self, channel: str, since_seq: int = 0, limit: int = 200) -> list[Message]:
         with self._lock:

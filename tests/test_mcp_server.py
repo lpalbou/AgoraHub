@@ -280,9 +280,9 @@ def test_a_seat_is_served_the_tools_it_can_use(hub, monkeypatch):
     for present in ("whoami", "check_inbox", "post_message", "store_set",
                     "create_group", "open_vote", "list_machines",
                     "search_hub", "rate_agent", "get_colleague_notes",
-                    "get_briefing", "get_task", "route_task", "get_advisors"):
+                    "get_briefing", "get_task", "route_task", "get_advisors", "review_task"):
         assert present in names
-    assert len(names) <= 50
+    assert len(names) <= 51  # one typed-review operation replaces separate review bookkeeping
 
     boss = _make_agent(hub, "boss2", operator=True)
     assert len(_tool_names(_server_against(hub, monkeypatch, boss))) > len(names)

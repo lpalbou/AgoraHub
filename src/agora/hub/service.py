@@ -284,7 +284,10 @@ class HubError(Exception):
         self.detail = detail
 
 
-class HubService(OrchestrationMixin, ProxyAuthorityMixin):
+from .task_reviews import TaskReviewsMixin
+
+
+class HubService(TaskReviewsMixin, OrchestrationMixin, ProxyAuthorityMixin):
     def __init__(self, db: Database, *, rate_per_minute: float = 60.0,
                  interrupts_per_hour: int = 6, criticals_per_hour: int = 5,
                  notify_sink=None,
@@ -2925,12 +2928,15 @@ class HubService(OrchestrationMixin, ProxyAuthorityMixin):
             "Expect delay; consider also routing to a live seat or a "
             "reporting delegate.")
 
-    def post_message(self, agent: AgentInfo, channel: str, payload: PostMessage) -> Message:
+    def post_message(self, agent: AgentInfo, channel: str, payload: PostMessage,
+                     *, _task_review: dict | None = None) -> Message:
         """Post with a refusal audit: a refused send previously left no trace
         anywhere, so "agent X never answers" was indistinguishable from
         "agent X is being blocked" (field finding). Every HubError is recorded
         per agent and surfaced in the operator status overview."""
         try:
+            if _task_review is not None:
+                return self._post_message(agent, channel, payload, _task_review=_task_review)
             return self._post_message(agent, channel, payload)
         except HubError as e:
             # Pause 423s are EXPECTED refusals fleet-wide: logging them would
@@ -2942,7 +2948,8 @@ class HubService(OrchestrationMixin, ProxyAuthorityMixin):
                             "code": e.status_code, "detail": e.detail})
             raise
 
-    def _post_message(self, agent: AgentInfo, channel: str, payload: PostMessage) -> Message:
+    def _post_message(self, agent: AgentInfo, channel: str, payload: PostMessage,
+                      *, _task_review: dict | None = None) -> Message:
         self.require_membership(channel, agent.id)
         self._require_unpaused(agent, channel)
         state = self.channel_state(channel)
@@ -3008,6 +3015,10 @@ class HubService(OrchestrationMixin, ProxyAuthorityMixin):
             if parent is None or parent.channel != channel:
                 raise HubError(400, "reply_to must reference a message in this channel")
         data = self._prepare_structured(payload, sender=agent.id, channel=channel)
+        if data and "task_review" in data:
+            raise HubError(400, "task_review is reserved; use review_task")
+        if _task_review is not None:
+            data = {**(data or {}), "task_review": _task_review}
         # Batched consumption (0140/3): validated BEFORE the insert so a bad
         # ref refuses with nothing posted, and normalized to server-truth
         # message ids so the transcript records WHICH debts this settled.
@@ -3082,6 +3093,14 @@ class HubService(OrchestrationMixin, ProxyAuthorityMixin):
                     critical=payload.critical, downgraded=downgraded,
                     to=payload.to, dedupe_key=dedupe_key,
                 )
+                if message.reply_to is not None and message.status == Status.resolved:
+                    # Keep the delivery decision and task projection in the
+                    # same lock span as review/VFS writers. Existing durable
+                    # task projection is still a separate database commit.
+                    try:
+                        self._task_on_resolved(message, parent)
+                    except Exception:
+                        logging.getLogger("agora.hub.tasks").exception("task projection failed (post succeeded)")
         except DuplicateMessage as exc:
             raise HubError(
                 409,
@@ -3110,8 +3129,6 @@ class HubService(OrchestrationMixin, ProxyAuthorityMixin):
         try:
             if message.reply_to is None:
                 self._task_mint(message)
-            elif message.status == Status.resolved:
-                self._task_on_resolved(message, parent)
         except Exception:
             pass
         self._wake(message)
@@ -4243,28 +4260,33 @@ class HubService(OrchestrationMixin, ProxyAuthorityMixin):
         phantom-debt case). Anytime — regret has no window. Idempotent.
         The original bytes stay in the row for operator audit and for the
         ledger hash (retraction is presentation, never a chain rewrite)."""
-        self.require_membership(channel, agent.id)
-        # Read RAW (redact=False) so authorship is checkable even after a
-        # prior retraction redacted the agent-facing view.
-        message = self.db.get_message(message_id, redact=False)
-        if message is None or message.channel != channel:
-            raise HubError(404, f"message '{message_id}' not found in '{channel}'")
-        if message.sender != agent.id and not agent.operator:
-            raise HubError(403, "only the author (or an operator) can retract "
-                                "a message — you can retract what YOU said, "
-                                "not what others said")
-        if message.kind != Kind.message and not agent.operator:
-            # A system row is authored by `hub`, so author-retraction can
-            # never reach it: without an operator door, a hub notice posted
-            # into someone's room is unremovable by anyone, forever. The
-            # operator is the one principal who can be trusted to unsay the
-            # hub's own words — and had to be, the first time the hub put a
-            # notice where a human was holding a conversation.
-            raise HubError(403, "only an operator can retract a system/fs "
-                                "event — they are the hub's own words, not "
-                                "yours")
-        self.db.retract_message(message_id, agent.id)
-        redacted = self.db.get_message(message_id)  # redacted view for the wire
+        # Delivery validation/insertion and VFS writes use this same outer
+        # lock.  A typed-review retraction changes the live delivery gate, so
+        # it must not slip between that validation and the report append.
+        # Keep the established lock order (orchestration, then Database).
+        with self.db.orchestration_lock:
+            self.require_membership(channel, agent.id)
+            # Read RAW (redact=False) so authorship is checkable even after a
+            # prior retraction redacted the agent-facing view.
+            message = self.db.get_message(message_id, redact=False)
+            if message is None or message.channel != channel:
+                raise HubError(404, f"message '{message_id}' not found in '{channel}'")
+            if message.sender != agent.id and not agent.operator:
+                raise HubError(403, "only the author (or an operator) can retract "
+                                    "a message — you can retract what YOU said, "
+                                    "not what others said")
+            if message.kind != Kind.message and not agent.operator:
+                # A system row is authored by `hub`, so author-retraction can
+                # never reach it: without an operator door, a hub notice posted
+                # into someone's room is unremovable by anyone, forever. The
+                # operator is the one principal who can be trusted to unsay the
+                # hub's own words — and had to be, the first time the hub put a
+                # notice where a human was holding a conversation.
+                raise HubError(403, "only an operator can retract a system/fs "
+                                    "event — they are the hub's own words, not "
+                                    "yours")
+            self.db.retract_message(message_id, agent.id)
+            redacted = self.db.get_message(message_id)  # redacted view for the wire
         # Broadcast the retraction so live subscribers redact in place (the
         # tombstone is the payload; the words never ride the wire again).
         self._wake(redacted)
@@ -4549,31 +4571,33 @@ class HubService(OrchestrationMixin, ProxyAuthorityMixin):
         verb refuses them, and one join notice must not veto a retraction.
         Already-retracted members are counted, not re-stamped. Idempotent;
         the ledger is untouched (presentation, never a chain rewrite)."""
-        self.require_membership(channel, agent.id)
-        trail = self.db.thread_messages(channel, message_id)
-        if not trail:
-            raise HubError(404, f"message '{message_id}' not found in '{channel}'")
-        others = sorted({m.sender for m in trail
-                         if m.sender != agent.id and m.kind == Kind.message})
-        if others and not agent.operator:
-            raise HubError(403,
-                           "only the author (or an operator) can retract a "
-                           f"message — this trail has {len(others)} other "
-                           f"author(s) ({', '.join(others)}), so NOTHING was "
-                           "retracted. Retract your own messages one by one, "
-                           "or ask an operator to retract the thread.")
-        targets = [m for m in trail if m.kind == Kind.message]
-        skipped = [m.id for m in trail if m.kind != Kind.message]
-        already = [m.id for m in targets if m.retracted]
-        self.db.retract_messages([m.id for m in targets], agent.id)
-        # One transaction above, then one tombstone per message on the wire:
-        # every existing consumer (CLI, MCP, web client) already knows how to
-        # redact a message in place from its id, and inventing a thread frame
-        # would leave each of them silently ignoring it until it shipped.
-        redacted = []
-        for message in targets:
-            row = self.db.get_message(message.id)
-            redacted.append(row)
+        # A thread can contain a typed-review message.  Serialize the whole
+        # target selection and retraction with delivery validation, exactly as
+        # the single-message form does.
+        with self.db.orchestration_lock:
+            self.require_membership(channel, agent.id)
+            trail = self.db.thread_messages(channel, message_id)
+            if not trail:
+                raise HubError(404, f"message '{message_id}' not found in '{channel}'")
+            others = sorted({m.sender for m in trail
+                             if m.sender != agent.id and m.kind == Kind.message})
+            if others and not agent.operator:
+                raise HubError(403,
+                               "only the author (or an operator) can retract a "
+                               f"message — this trail has {len(others)} other "
+                               f"author(s) ({', '.join(others)}), so NOTHING was "
+                               "retracted. Retract your own messages one by one, "
+                               "or ask an operator to retract the thread.")
+            targets = [m for m in trail if m.kind == Kind.message]
+            skipped = [m.id for m in trail if m.kind != Kind.message]
+            already = [m.id for m in targets if m.retracted]
+            self.db.retract_messages([m.id for m in targets], agent.id)
+            # One transaction above, then one tombstone per message on the wire:
+            # every existing consumer (CLI, MCP, web client) already knows how to
+            # redact a message in place from its id, and inventing a thread frame
+            # would leave each of them silently ignoring it until it shipped.
+            redacted = [self.db.get_message(message.id) for message in targets]
+        for row in redacted:
             self._wake(row)
         return {"channel": channel, "root": message_id,
                 "count": len(redacted),
@@ -8921,6 +8945,7 @@ class HubService(OrchestrationMixin, ProxyAuthorityMixin):
                 missing.append(f"{key} -> {ref}")
         if missing:
             raise HubError(409, "delivery evidence must cite each current integrated finding artifact: " + ", ".join(missing))
+        self._validate_review_delivery(agent, channel, task_key, task, data)
 
     def _task_on_resolved(self, message: Message, parent: Message | None) -> None:
         """Move a task on a `resolved` reply to its source: the requester's
