@@ -110,6 +110,23 @@
     "title": "AttachmentRef",
     "type": "object"
    },
+   "AvailabilityRequest": {
+    "properties": {
+     "away_until": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Away Until"
+     }
+    },
+    "title": "AvailabilityRequest",
+    "type": "object"
+   },
    "CastRating": {
     "properties": {
      "note": {
@@ -2333,6 +2350,28 @@
     "title": "StoreSet",
     "type": "object"
    },
+   "TaskRouteRequest": {
+    "properties": {
+     "expect_version": {
+      "title": "Expect Version",
+      "type": "integer"
+     },
+     "message": {
+      "$ref": "#/components/schemas/PostMessage"
+     },
+     "role": {
+      "title": "Role",
+      "type": "string"
+     }
+    },
+    "required": [
+     "role",
+     "expect_version",
+     "message"
+    ],
+    "title": "TaskRouteRequest",
+    "type": "object"
+   },
    "TransferOwnership": {
     "properties": {
      "to": {
@@ -2514,7 +2553,7 @@
   "title": "Agora Hub HTTP API",
   "version": "agora/0.4",
   "x-agora-generator": {
-   "fastapi": "0.139.0",
+   "fastapi": "0.141.1",
    "pydantic": "2.13.4"
   },
   "x-agora-protocol": "agora/0.4"
@@ -3641,6 +3680,59 @@
     "summary": "Admin Status"
    }
   },
+  "/advisors": {
+   "get": {
+    "operationId": "task_advisors_advisors_get",
+    "parameters": [
+     {
+      "in": "query",
+      "name": "work_type",
+      "required": true,
+      "schema": {
+       "maxLength": 64,
+       "minLength": 1,
+       "title": "Work Type",
+       "type": "string"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Task Advisors Advisors Get",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Task Advisors"
+   }
+  },
   "/agents": {
    "get": {
     "description": "The roster and WHO IS WHO \u2014 id + role, for any authenticated seat.\n\nRoles are not a secret: the hub charter's whole subject is which seat may\ndo what, and a seat that cannot see who the operator is cannot route a\nruling to them. Presence lives at `/presence`; this is authority.",
@@ -4016,6 +4108,109 @@
     "summary": "Set Agent Role"
    }
   },
+  "/availability": {
+   "put": {
+    "operationId": "set_availability_availability_put",
+    "parameters": [
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/AvailabilityRequest"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Set Availability Availability Put",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Set Availability"
+   }
+  },
+  "/availability/{principal}": {
+   "get": {
+    "operationId": "get_availability_availability__principal__get",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "principal",
+      "required": true,
+      "schema": {
+       "title": "Principal",
+       "type": "string"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Get Availability Availability  Principal  Get",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Get Availability"
+   }
+  },
   "/blocks": {
    "get": {
     "description": "Active kicks/bans \u2014 visible to any agent (verifiable moderation state,\nsame transparency posture as GET /delegations).",
@@ -4119,6 +4314,48 @@
      }
     },
     "summary": "Board"
+   }
+  },
+  "/briefing": {
+   "get": {
+    "operationId": "personal_briefing_briefing_get",
+    "parameters": [
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Personal Briefing Briefing Get",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Personal Briefing"
    }
   },
   "/channels": {
@@ -6737,6 +6974,132 @@
      }
     },
     "summary": "Supervise"
+   }
+  },
+  "/channels/{channel}/tasks/{key}": {
+   "get": {
+    "operationId": "task_context_channels__channel__tasks__key__get",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "channel",
+      "required": true,
+      "schema": {
+       "title": "Channel",
+       "type": "string"
+      }
+     },
+     {
+      "in": "path",
+      "name": "key",
+      "required": true,
+      "schema": {
+       "title": "Key",
+       "type": "string"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Task Context Channels  Channel  Tasks  Key  Get",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Task Context"
+   }
+  },
+  "/channels/{channel}/tasks/{key}/route": {
+   "post": {
+    "operationId": "task_route_channels__channel__tasks__key__route_post",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "channel",
+      "required": true,
+      "schema": {
+       "title": "Channel",
+       "type": "string"
+      }
+     },
+     {
+      "in": "path",
+      "name": "key",
+      "required": true,
+      "schema": {
+       "title": "Key",
+       "type": "string"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/TaskRouteRequest"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Task Route"
    }
   },
   "/channels/{channel}/work": {

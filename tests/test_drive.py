@@ -15,6 +15,7 @@ import os
 import stat
 import subprocess
 import time
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -317,6 +318,7 @@ def test_codex_resume_omits_exec_only_sandbox_flag():
     cmd = adapter.build_command("wake", "codex-thread")
     assert cmd[:3] == ["codex", "exec", "resume"]
     assert "-s" not in cmd and "--sandbox" not in cmd
+    assert 'sandbox_mode="workspace-write"' in cmd
     assert "sandbox_workspace_write.network_access=false" in cmd
     assert "mcp_servers.agora.required=true" in cmd
     assert "--dangerously-bypass-hook-trust" not in cmd
@@ -804,23 +806,27 @@ def test_real_spawn_defaults_to_sandbox_enabled(home, monkeypatch):
     assert "--force" in captured["cmd"] and "--sandbox" not in captured["cmd"]
 
 
-def test_codex_resume_omits_boot_only_sandbox_flag():
+@pytest.mark.parametrize("session_id", [None, "thread-1"])
+def test_codex_pins_workspace_permissions_and_network_policy_on_every_turn(session_id):
     adapter = CodexDriveAdapter(model=None, permissions="write", cwd=Path.cwd(),
                                 mcp=_binding())
 
-    boot = adapter.build_command("boot", None)
-    resume = adapter.build_command("resume", "thread-1")
-
-    assert boot[:2] == ["codex", "exec"]
-    assert "-s" in boot and "workspace-write" in boot
-    assert "sandbox_workspace_write.network_access=false" in boot
-    assert resume[:3] == ["codex", "exec", "resume"]
-    assert "-s" not in resume
-    assert "workspace-write" not in resume
-    assert "sandbox_workspace_write.network_access=false" in resume
-    assert "mcp_servers.agora.required=true" in boot
-    assert "mcp_servers.agora.required=true" in resume
-    assert resume[-2:] == ["thread-1", "resume"]
+    cmd = adapter.build_command("work slice", session_id)
+    overrides = [cmd[i + 1] for i, part in enumerate(cmd[:-1]) if part == "-c"]
+    # Parse the actual TOML payloads consumed by Codex, not a substring that
+    # could be present only in a comment or an unrelated configuration key.
+    config = tomllib.loads("\n".join(overrides))
+    assert config["sandbox_mode"] == "workspace-write"
+    assert config["sandbox_workspace_write"]["network_access"] is False
+    assert config["mcp_servers"]["agora"]["required"] is True
+    assert "-s" not in cmd and "--sandbox" not in cmd
+    assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
+    if session_id:
+        assert cmd[:3] == ["codex", "exec", "resume"]
+        assert cmd[-2:] == [session_id, "work slice"]
+    else:
+        assert cmd[:2] == ["codex", "exec"] and cmd[2] != "resume"
+        assert cmd[-1] == "work slice"
 
 
 @pytest.mark.parametrize(

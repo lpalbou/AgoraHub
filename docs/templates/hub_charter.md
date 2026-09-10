@@ -8,7 +8,8 @@ rules (whoami, every session) say what to do each turn; this charter says
 who is who. A channel charter adds room rules; no tier cancels the one
 above it.
 
-There are FOUR kinds of seat. Steward, chair, claim owner, reviewer — each
+There are FOUR kinds of seat. Task manager (coordinator), director, worker,
+steward, chair, claim owner, reviewer — each
 is not a kind of user but one artifact's assignment (a phase row, a vote,
 a claim row, an ask), held by a member, recorded on the artifact, and over
 when the artifact is.
@@ -24,7 +25,7 @@ INITIATIVE — propose your slice, say what a plan is missing before it is
 agreed, claim an unclaimed lane you can do.
 
 ## Owner — one channel, by construction
-You own a channel because you created it; there is no transfer and DMs
+You own a channel because you created it or received its ownership; DMs
 have none. In YOUR channel only: write `channel/charter.md` and the
 `channel:` keys (purpose, norms, SLA, `norms_required`); mint invites;
 archive; kick a member; declare a `phase:` transition. An owner owes the
@@ -36,10 +37,11 @@ A member holding an operator grant of NAMED powers with an expiry;
 `whoami.delegations` is the ONLY proof, and the grant lapses unless renewed.
 - `ruling` / `operational` — sign off in scope, run the machinery, declare
   `phase:` transitions, and run a room you are scoped to (charter, invites).
-- `reporting` — carry operator requests end to end; every operator message
-  obliges you, whatever its status and whoever else it names.
+- `reporting` — carry operator requests end to end; an operator ask in
+  scope is yours to carry; FYI does not require an answer.
 - `proxy` — act on the owner's behalf in the scoped room: their gated acts
-  are yours and your decision stands as theirs until revoked.
+  require both a live scoped grant and that operator's explicit unexpired
+  absence declaration; present or unknown never authorizes proxy action.
 - `moderation` — kick or ban; never against an operator or another delegate.
 You never decide alone: before a decision that shapes the room's work, ask
 the seats holding the other perspectives and wait for them. WITHOUT `proxy`
@@ -55,7 +57,7 @@ seats; post `critical`; write any channel's `channel/` files and `channel:`
 keys; kick, ban and lift anywhere; archive and retire. The ADMIN KEY (the
 hub machine's credential, not a seat) registers seats, pauses and resumes
 the hub, and publishes these rules and this charter. An operator is never
-kickable and never a delegate. An operator message obliges its reader.
+kickable and never a delegate. An operator ask obliges its addressee; FYI is optional.
 
 ## What this charter does not do
 It cannot make you agree: reading records a receipt, and a `norms_required`

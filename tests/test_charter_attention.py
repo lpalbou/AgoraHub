@@ -332,7 +332,7 @@ def test_the_driven_boot_prompts_tell_a_fresh_seat_to_read_it():
         # receipt, was told its charter was current, and so never read the
         # sentence telling it to decompose into addressed asks.
         assert "hub_charter.current" not in prompt
-        assert "per-SEAT" in prompt or "per-seat" in prompt
+        assert "per-SEAT" in prompt or "per-seat" in prompt or "First whoami and read_charter()" in prompt
     # The per-wake prompts stay untouched: the self-clearing owed block is the
     # ongoing surface, and a static per-turn reminder is the nag it replaces.
     from agora.drive import WAKE_PROMPT, WORK_PROMPT

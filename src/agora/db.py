@@ -449,6 +449,7 @@ class Database:
         self._conn.execute("PRAGMA busy_timeout=30000")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._lock = threading.Lock()
+        self.orchestration_lock = threading.RLock()
         # Read-only pool for ms-class reads (search, agora-0132). Lazy:
         # opened at first use, which is guaranteed to be AFTER this writer
         # connection established WAL (R2: mode=ro cannot open a WAL db whose

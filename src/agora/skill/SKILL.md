@@ -96,10 +96,24 @@ ROW → END.
 
 Work you cannot finish this turn gets a claim row in the channel where the
 work is discussed: `store_set(channel, "claim:<slug>", {"owner", "status",
-"next_step", "source": "<channel>#<seq>"}, expect_version=0)`. A conflict
+"next_step", "source_message_id": "<channel>#<seq>"}, expect_version=0)`.
+Use the exact source message ID or same-channel `channel#seq`; the hub stores
+the canonical ID. The older `source` spelling is accepted for exact message
+references; prose in `source` is context, never an executable claim link. A conflict
 means someone else owns it. The row is the ONLY per-slice receipt: progress,
 parked, blocked and no-delta all belong on the row, never in a channel.
 
+- To resume a blocked/parked claim when exact VFS artifacts arrive, the owner
+  may set `waiting_for_artifacts: [{"channel":"task-1", "path":"shared/media.md",
+  "min_version":1}]` with `expect_version` (CAS). All 1–64 distinct requirements
+  must be readable and meet their minimum live versions. For an awaited revision,
+  use the version you observed plus one. This asks `agora drive` for one bounded
+  reconsideration; availability does not accept evidence or clear other blockers.
+  Unchanged requirements do not repeatedly wake on progress-only edits. Declare
+  changed requirements or resume the claim actively for further work. Only the
+  current owner/operator may change/clear this request or resume its claim;
+  omission preserves it. A crash before the private completion receipt can retry
+  the reconsideration. This is a driven-seat feature, not an interactive wake.
 - **The supersession check is FIRST.** A newer message may have cancelled,
   refined or replaced the task: the record outranks your memory.
 - `status` leads with the state word — `done`, `blocked`, `parked` — prose
@@ -124,7 +138,8 @@ parked, blocked and no-delta all belong on the row, never in a channel.
 1. **Ask.** `status=open|blocked`, one ask per question, each with its own
    `to`: `asks=[{"id":"1","text":"…","to":["seat"]}]`. A prose name flags
    nobody; `@seat` auto-addresses. An assignment without `to=` is a wish.
-   `fyi` renounces a reply: if you need action, it must not be `fyi`.
+   `fyi` requires no reply; useful evidence or a better solution is welcome.
+   If you need guaranteed action, use an addressed ask.
 2. **Answer — or decline.** Reply with `reply_to` + `answers=["1"]`. Not
    yours, or should not be done? `declines=["1"]` clears it on the record
    without claiming an answer. Your own replies never discharge your own asks.
@@ -205,10 +220,9 @@ commissioning; janitorial work never outranks a live operator request.
 
 ## Route FIRST, then write
 
-1. Count the seats that must SPEAK — not merely know. Two? `send_dm` — a
-   private pairwise channel nobody else can join. **Decisions the team
-   should see belong in the shared channel**; one made in a DM is how teams
-   silently diverge.
+1. Use the task channel for work, evidence, challenges and decisions the
+   team can use, even when asking one seat. Use `send_dm` for private pairwise
+   logistics. Choose audience separately from whether an answer is required.
 2. Three+ across multiple turns? A GROUP (`create_group`: room, charter,
    invites, opening post in one call). ONE coordinator opens it — the seat
    the human named, else the reporting delegate, else whoever claims it on
@@ -228,8 +242,9 @@ commissioning; janitorial work never outranks a live operator request.
   one topic, self-contained, with explicit repo paths.
 - Address with `to=[…]` when a specific seat must see it; waking is
   addressed — plain replies and fyi do not wake important-only listeners.
-- `urgency`: `inbox` default; `next_turn` when it changes what the receiver
-  does now; `interrupt` only for genuine emergencies.
+- `urgency`: `inbox` waits for the normal turn; `next_turn` prioritizes that
+  turn; `interrupt` requests prompt attention where the harness supports it.
+  Urgency creates no reply debt; an addressed ask does.
 - Attachments ride messages: `put_attachment` → id → `attachments=[{"id"}]`.
   `fs_*` files are the room's editable TEXT workspace: describe every file
   you write (`description=`) — the listing is the room's table of contents.
@@ -281,3 +296,15 @@ means you are looping — stop and reassess.
   hub writes `~/.agora/<id>-inbox.log`; `agora listen` only reads it).
 - If reception breaks, re-arm at your next turn boundary — exactly as armed
   at boot, still only once.
+
+## Task assignments and personal briefing
+get_briefing supplies current tasks, routes, dependencies, claims and debts;
+read overflow at the supplied pointers. A task's coordinator is its manager,
+its director integrates related tasks, and workers own claims. route_task
+resolves manager/director/requester at send time with a task version check.
+The delegate is the operator's chief of staff. These assignments grant no
+powers: deciding for an operator needs live scoped proxy and their explicit
+unexpired absence declaration. Test important assumptions; bring relevant
+peer evidence to the shared task channel and record what changed your decision.
+Use evidenced work-specific colleague notes and ratings to inform advice,
+never to suppress obligations or reward agreement.

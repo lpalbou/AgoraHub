@@ -130,6 +130,8 @@ def test_proxy_clears_the_gate_in_its_scope_only(lab):
     service.set_delegation("dele", ["reporting", "proxy"], scope="lab")
     assert service.has_proxy("dele", "lab") is True
     assert service.has_proxy("dele", "other") is False
+    import time
+    service.set_availability(owner, time.time() + 300)
     assert service.fs_delete(delegate, "lab", "draft.md") is True
 
 

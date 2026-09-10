@@ -32,6 +32,7 @@ HEADER = """\
 ## Document Index
 - README.md — overview and quick start
 - docs/environments.md — isolate hubs by home, URL/port, database, and keys
+- docs/tasks.md — task assignments, dependencies, routing and personal briefings
 - docs/collaboration.md — the collaboration model: roles, cycles, tools, and current limitations
 - docs/getting-started.md — install and first run
 - docs/howto.md — operator cheat-sheet: install/reinstall, run, wire, moderate, delegate, summarize, release
@@ -53,6 +54,7 @@ CORPUS = [
     "README.md",
     "docs/environments.md",
     "docs/collaboration.md",
+    "docs/tasks.md",
     "docs/getting-started.md",
     "docs/howto.md",
     "docs/harness_contract.md",

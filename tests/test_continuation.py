@@ -42,8 +42,8 @@ def test_prompts_are_static_and_reception_starts_assigned_work():
     for prompt in (WAKE_PROMPT, BOOT_PROMPT, WORK_BOOT_PROMPT, WORK_PROMPT):
         assert "{" not in prompt and "}" not in prompt
     for prompt in (WORK_BOOT_PROMPT, WORK_PROMPT):
-        assert "supersede" in prompt
-        assert "re-read" in prompt
+        assert "cancellation" in prompt
+        assert "re-read" in prompt.lower()
     # 2026-08-06: the old phrase read as "code now, don't plan, don't tell
     # anyone" — operator: "planning is work", and starting work is exactly
     # what a seat SHOULD advertise. What stays banned is the bare promise.
@@ -54,8 +54,8 @@ def test_prompts_are_static_and_reception_starts_assigned_work():
     assert "EXPLICIT COORDINATION OWNERSHIP DECIDES WHO ROUTES" in WAKE_PROMPT
     assert "concurrent volunteers never create competing rooms" in WAKE_PROMPT
     assert "routine progress receipts" in BOOT_PROMPT
-    assert "ONLY per-slice receipt" in WORK_PROMPT
-    assert "addressed structured ask" in WORK_PROMPT
+    assert "Record progress and the next step on your claim with CAS" in WORK_PROMPT
+    assert "an actionable ask names who must answer" in WORK_PROMPT
     assert WORK_PROMPT.startswith("AGORA WORK CHUNK")
     assert WAKE_PROMPT.startswith("AGORA WAKE")
 
@@ -237,6 +237,62 @@ def test_receiptless_chunks_park_the_chain(home, monkeypatch):
                         lambda: ("commons", "claim:x", 8))   # row touched
     _run_loop(d, [0], monkeypatch)
     assert len(calls) == 1                    # chain resumed
+
+
+@pytest.mark.parametrize("stage", [None, "harness", "infrastructure", "mcp-init"])
+def test_provider_failure_does_not_retire_work_after_quota_recovery(home, monkeypatch, stage):
+    """Original AF/review fleets retired valid claims during a quota outage."""
+    unavailable = True
+
+    def spawn(prompt, sid):
+        d._last_turn_stage = stage if unavailable else None
+        return (None, False) if unavailable else ("recovered", True)
+
+    d = _driver(home, spawn)
+    snap = ("commons", "claim:release-audit", 7)
+    ck = "commons/claim:release-audit@7"
+    monkeypatch.setattr(d, "_continuation_snapshot", lambda: snap)
+    monkeypatch.setattr(d, "_receipt_elsewhere", lambda *_: False)
+    # Each simulated retry occurs after the existing backoff has elapsed.
+    monkeypatch.setattr(d, "_backoff_retry_after", lambda: 0)
+    for _ in range(WORK_STRIKES):
+        assert d._chain_step(snap)
+    assert d._strike_count(ck) == 0
+    unavailable = False
+    assert d._chain_step(snap)
+    assert d._strike_count(ck) == 1  # real receiptless work still counts
+
+
+def test_invalid_work_configuration_fails_once_without_retiring_claim(home, monkeypatch):
+    calls = []
+
+    def spawn(prompt, sid):
+        calls.append(prompt)
+        d._last_turn_stage = "harness-config"
+        d._last_turn_detail = "unsupported effort"
+        return None, False
+
+    d = _driver(home, spawn)
+    snap = ("commons", "claim:audit", 7)
+    monkeypatch.setattr(d, "_continuation_snapshot", lambda: snap)
+    with pytest.raises(SystemExit, match="unsupported effort"):
+        d._chain_step(snap)
+    assert len(calls) == 1 and d._strike_count("commons/claim:audit@7") == 0
+
+
+@pytest.mark.parametrize("stage", ["reception", "mcp-use", "mcp-call", "tool"])
+def test_semantic_failures_still_retire_receiptless_work(home, monkeypatch, stage):
+    def spawn(prompt, sid):
+        d._last_turn_stage = stage
+        return "ran", False
+
+    d = _driver(home, spawn)
+    snap = ("commons", "claim:audit", 7)
+    monkeypatch.setattr(d, "_continuation_snapshot", lambda: snap)
+    monkeypatch.setattr(d, "_receipt_elsewhere", lambda *_: False)
+    for _ in range(WORK_STRIKES):
+        assert d._chain_step(snap)
+    assert d._chain_block(snap)[0] == "no-receipt"
 
 
 def test_obligation_preempts_chain(home, monkeypatch):

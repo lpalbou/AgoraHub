@@ -20,6 +20,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from .orchestration import OrchestrationMixin
+from .proxy_authority import ProxyAuthorityMixin
 from ..agent_id import validate_agent_id
 from ..db import (
     Database,
@@ -274,7 +276,7 @@ class HubError(Exception):
         self.detail = detail
 
 
-class HubService:
+class HubService(OrchestrationMixin, ProxyAuthorityMixin):
     def __init__(self, db: Database, *, rate_per_minute: float = 60.0,
                  interrupts_per_hour: int = 6, criticals_per_hour: int = 5,
                  notify_sink=None,
@@ -4160,7 +4162,7 @@ class HubService:
                 stored = self.db.store_get(channel, key)
                 if stored is None or not isinstance(stored.value, dict):
                     continue
-                value = stored.value
+                value = self._normalize_claim_source(channel, stored.value)
                 row_owner = str(value.get("owner") or stored.updated_by or "")
                 if row_owner != owner or self._claim_done(value):
                     continue
@@ -4380,7 +4382,7 @@ class HubService:
             stored = self.db.store_get(channel, key)
             if stored is None or not isinstance(stored.value, dict):
                 continue
-            value = stored.value
+            value = self._normalize_claim_source(channel, stored.value)
             ref = str(value.get("source_message_id") or "").strip()
             if not ref or any(c.isspace() for c in ref):
                 continue        # prose, or several refs: not a declaration
@@ -4664,9 +4666,8 @@ class HubService:
         exactly the excuse behind silently dropped directives (operator,
         2026-07-19: 'it MUST be'). The rule, mechanical:
 
-        - OPERATOR sender, status reply/fyi: obliges the named seats and the
-          reporting delegate. Humans are allowed to be sloppy about status;
-          the fleet still owes the work.
+        - OPERATOR sender, status reply: obliges the named seats and scoped
+          reporting delegate. FYI is optional; critical requires reading.
         - PEER sender, status reply: obliges the named seats UNLESS it is
           the sender's answer coming back to you — i.e. it replies to YOUR
           OWN message. Your debt for an answer is CONSUMPTION (0078's
@@ -4684,7 +4685,7 @@ class HubService:
         if (m.kind != Kind.message or m.retracted
                 or m.status not in (Status.reply, Status.fyi)):
             return False
-        if m.sender == viewer_id:
+        if m.sender == viewer_id or (m.status == Status.fyi and (not m.critical or self.db.has_read(m.id, viewer_id))):
             return False
         if (viewer_id not in m.to and m.critical
                 and not self._operator_delegate_debt(viewer_id, m)
@@ -4997,7 +4998,7 @@ class HubService:
             return False  # an answer, not a request
         if m.sender not in self.operator_ids():
             return False
-        return viewer_id in self.reporting_delegate_ids()
+        return m.status != Status.fyi and self._delegation_reaches(viewer_id, m.channel, ("reporting",))
 
     def _addressed_debts(self, agent_id: str,
                          channels: list[str]) -> list[Message]:
@@ -5652,15 +5653,83 @@ class HubService:
 
     # -- store -------------------------------------------------------------------
 
+    _CLAIM_SOURCE_REF = re.compile(
+        # Match admitted channel names, not a narrower lowercase slug rule.
+        # A channel can itself contain '#'; the existing resolver separates
+        # the final '#seq' using rpartition. Whitespace prose is not a link.
+        r"[^/\x00-\x20\x7f]*#\d+|[0-9A-HJKMNP-TV-Z]{26}")
+
+    def _normalize_claim_source(self, channel: str, value: dict[str, Any],
+                                *, strict: bool = False) -> dict[str, Any]:
+        """Resolve exact claim provenance, never infer it from a sentence.
+
+        `source` was taught by the supplied skill while machine readers used
+        `source_message_id`. Accept that spelling, retaining the original
+        source text, and canonicalize both supported ref forms. Legacy reads
+        are projections only: invalid old values stay readable and acquire no
+        new link; writes that change a declaration refuse invalid references.
+        """
+        targets: list[Message] = []
+        for field in ("source_message_id", "source"):
+            raw = value.get(field)
+            if raw is None or raw == "":
+                continue
+            ref = raw.strip() if isinstance(raw, str) else ""
+            if not ref or not self._CLAIM_SOURCE_REF.fullmatch(ref):
+                # source is also historical prose. A single malformed #ref
+                # is an attempted declaration; a sentence is just context.
+                canonical_prose = (field == "source_message_id" and ref
+                                   and any(c.isspace() for c in ref))
+                explicit = (field == "source_message_id" and not canonical_prose) or (
+                    isinstance(raw, str) and "#" in ref
+                    and not any(c.isspace() for c in ref))
+                if strict and explicit:
+                    raise HubError(400, f"claim {field} must be one message ID or channel#seq reference")
+                if explicit or canonical_prose:
+                    return value
+                continue
+            target = (self._resolve_consume_ref(ref, channel) if "#" in ref
+                      else self.db.get_message(ref))
+            if target is None or target.retracted:
+                if strict:
+                    raise HubError(404, f"claim {field} does not name an available message")
+                return value
+            if target.channel != channel:
+                if strict:
+                    raise HubError(400, "claim source must be a message in the claim's channel")
+                return value
+            owner = str(value.get("owner") or "")
+            if owner and not self.db.is_member(channel, owner):
+                if strict:
+                    raise HubError(403, "claim source must be readable by the claim owner")
+                return value
+            targets.append(target)
+        if not targets:
+            return value
+        if len({target.id for target in targets}) != 1:
+            if strict:
+                raise HubError(400, "claim source and source_message_id refer to different messages")
+            return value
+        return {**value, "source_message_id": targets[0].id}
+
     def store_get(self, agent: AgentInfo, channel: str, key: str) -> StoreEntry:
         self.require_membership(channel, agent.id)
         entry = self.db.store_get(channel, key)
         if entry is None:
             raise HubError(404, f"key '{key}' not found in '{channel}' store")
+        if key.startswith("claim:") and isinstance(entry.value, dict):
+            # Repair the public read seam for old source-only rows without
+            # migrating storage, changing versions, or posting a receipt.
+            entry = entry.model_copy(update={
+                "value": self._normalize_claim_source(channel, entry.value)})
         return entry
 
     def store_set(self, agent: AgentInfo, channel: str, key: str, value: Any,
                   expect_version: int | None = None) -> StoreEntry:
+        with self.db.orchestration_lock:
+            return self._store_set_locked(agent, channel, key, value, expect_version)
+
+    def _store_set_locked(self, agent, channel, key, value, expect_version=None):
         park_ring = ""
         undeliverable_ring = ""
         self.require_membership(channel, agent.id)
@@ -5801,7 +5870,10 @@ class HubService:
             refusal = self._task_writer_refusal(channel, agent, current)
             if refusal is not None:
                 raise HubError(403, refusal)
+            if isinstance(value, dict) and any(f in value for f in ("primary_channel", "depends_on", "director", "work_type")) and expect_version is None:
+                raise HubError(400, "structured task updates require expect_version")
             self._validate_task_row(channel, value, agent, current)
+            self._validate_task_graph(agent, channel, key, value, current.value if current else {})
         if key.startswith("fact:"):
             # A shared number has ONE owner — its first writer (fleet review
             # F6, 2026-09-09: `fact:` rows were writable by any member and a
@@ -5815,7 +5887,36 @@ class HubService:
                                     f"'{current.updated_by}'. Ask them (an addressed "
                                     "open) to correct it; channel authority may "
                                     "overwrite it.")
+        if key.startswith("claim:"):
+            prior_row = self.db.store_get(channel, key)
+            prior_claim = prior_row.value if prior_row and isinstance(prior_row.value, dict) else {}
+            linked = prior_claim.get("task") is not None or (isinstance(value, dict) and value.get("task") is not None)
+            if linked:
+                if not isinstance(value, dict):
+                    raise HubError(400, "task-linked claims require an object")
+                if expect_version is None:
+                    raise HubError(400, "task-linked claims require expect_version")
+                owner = prior_claim.get("owner") or value.get("owner") or agent.id
+                effective = {**prior_claim, **value}
+                if not agent.operator and agent.id != owner and effective != prior_claim:
+                    raise HubError(403, "only the owner or operator may update a linked claim; ask its owner instead")
+                value = effective
+        if key.startswith("claim:") and not isinstance(value, dict):
+            existing = self.db.store_get(channel, key)
+            if (existing and isinstance(existing.value, dict)
+                    and existing.value.get("waiting_for_artifacts") is not None):
+                raise HubError(400, "artifact-dependent claims require an object; clear waiting_for_artifacts explicitly with CAS")
         if key.startswith("claim:") and isinstance(value, dict):
+            old = self.db.store_get(channel, key)
+            if old and isinstance(old.value, dict) and "task" in old.value and "task" not in value:
+                value = {**value, "task": old.value["task"]}
+            previous = old.value if old and isinstance(old.value, dict) else {}
+            if previous.get("task") is not None and not agent.operator and agent.id != previous.get("owner"):
+                if any(f in value and value[f] != previous.get(f) for f in ("task", "owner", "status", "state", "done")):
+                    raise HubError(403, "only the owner or operator may change linked claim lifecycle or task")
+            if value.get("task") is not None:
+                self._task_ref(agent, value["task"])
+
             # Identity fields inside store values are validated against the
             # caller (0068/ADR-0004; live-test finding): you may claim FOR
             # yourself, take a claim over in your own name, or leave
@@ -5841,6 +5942,57 @@ class HubService:
                                         "existing owner unchanged")
             elif current_owner is not None:
                 value = {**value, "owner": current_owner}
+            previous_value = (current.value if current is not None
+                              and isinstance(current.value, dict) else {})
+            # Artifact arrival requests one reconsideration, not acceptance or
+            # an automatic status rewrite. Only the CURRENT owner/operator may
+            # install/change/remove that request or revive its parked claim.
+            old_artifacts = previous_value.get("waiting_for_artifacts")
+            if "waiting_for_artifacts" not in value and old_artifacts is not None:
+                value = {**value, "waiting_for_artifacts": old_artifacts}
+            if old_artifacts is not None or value.get("waiting_for_artifacts") is not None:
+                if expect_version is None:
+                    raise HubError(400, "artifact-dependent claims require expect_version (0 to create)")
+                responsible = current_owner or value.get("owner") or agent.id
+                value = {**value, "owner": value.get("owner") or responsible}
+                # Partial progress writes cannot erase lifecycle guards.
+                value = {**{field: previous_value[field] for field in ("status", "state", "done")
+                            if field in previous_value and field not in value}, **value}
+                lifecycle_changed = (
+                    bool(value.get("done")) != bool(previous_value.get("done"))
+                    or any(self._claim_status_word({"status": value.get(field)})
+                           != self._claim_status_word({"status": previous_value.get(field)})
+                           for field in ("status", "state")))
+                # A peer may close work, but cannot move cancelled/paused
+                # history back into a blocked gate (nor activate the claim).
+                # Same-status progress writes do not acquire new authority.
+                revives = lifecycle_changed and not self._claim_done(value)
+                changed = value.get("waiting_for_artifacts") != old_artifacts
+                owner_changed = value.get("owner") != responsible
+                # An unchanged closing/progress write must remain possible if
+                # the owner has since lost access to a dependency room.
+                if value.get("waiting_for_artifacts") is not None and (changed or revives or owner_changed):
+                    value = {**value, "waiting_for_artifacts": self._validate_waiting_for_artifacts(
+                        channel, str(value["owner"]), value["waiting_for_artifacts"])}
+                changes_gate = value.get("waiting_for_artifacts") != old_artifacts
+                if (not agent.operator and agent.id != responsible
+                        and (changes_gate or revives or owner_changed)):
+                    raise HubError(403, "only the current claim owner or operator may change artifact waits, ownership, or resume this claim")
+            if "source" not in value and "source_message_id" not in value:
+                # A progress/closure-only update does not erase provenance,
+                # just as omitting owner above does not erase ownership.
+                value = {**value, **{f: previous_value[f]
+                                    for f in ("source", "source_message_id")
+                                    if f in previous_value}}
+            source_changed = any(value.get(f) != previous_value.get(f)
+                                 for f in ("source", "source_message_id"))
+            previous_source = self._normalize_claim_source(channel, previous_value).get("source_message_id")
+            value = self._normalize_claim_source(
+                channel, value, strict=current is None or source_changed)
+            if (value.get("source_message_id") != previous_source
+                    and not agent.operator
+                    and agent.id != (value.get("owner") or current_owner or agent.id)):
+                raise HubError(403, "only the claim owner or operator may change its message source")
             # Claim-due cadence (2026-07-28): `cadence_minutes` is the
             # owner declaring "remind ME when this row idles past N min"
             # (see _claim_due_sweep). Validate the TYPE here so a junk
@@ -6875,8 +7027,12 @@ class HubService:
                                         f"which is not in '{cited}' — write "
                                         "the artifact to the channel before "
                                         "citing it as delivered")
+                value = row["value"] if isinstance(row["value"], dict) else {}
+                b64 = value.get("content_b64")
+                size = (_b64_decoded_size(b64) if isinstance(b64, str)
+                        else len(value.get("content", "").encode("utf-8")))
                 fs_item = {"kind": "fs", "ref": f"{norm}@{int(version)}",
-                           "size_bytes": len(str(row["value"])),
+                           "size_bytes": size,
                            "updated_by": row["updated_by"],
                            "updated_at": row["updated_at"], "verified": True}
                 if cited != channel:
@@ -7841,7 +7997,8 @@ class HubService:
             return
         if agent.operator or self._is_channel_owner(channel, agent.id):
             return
-        if self.has_proxy(agent.id, channel):
+        principal = self.db.get_channel(channel).created_by
+        if self.proxy_allowed(agent.id, channel, principal):
             return
         for entry in self.db.store_keys(channel):
             key = entry["key"]
@@ -7872,8 +8029,9 @@ class HubService:
             return
         raise HubError(
             403, f"'{act_class}' is a GATED act in #{channel}: its owner "
-                 f"requires the owner's word before it happens. You hold no "
-                 f"'proxy' power here, so ask instead of acting — post "
+                 f"requires the owner's word before it happens. Acting under "
+                 f"proxy needs a scoped grant AND this operator's explicit "
+                 f"unexpired absence; otherwise ask instead of acting — post "
                  f"status=blocked, to=[owner], title 'gate: <slug>', with at "
                  f"most three plain questions, and write a gate:<slug> row "
                  f"naming the owner. Passing this act to another seat is "
@@ -7942,7 +8100,8 @@ class HubService:
             return True
         if agent.id in self.ruling_delegate_ids(channel):
             return True
-        return self.has_proxy(agent.id, channel)
+        info = self.db.get_channel(channel)
+        return bool(info and self.proxy_allowed(agent.id, channel, info.created_by))
 
     def transfer_channel_ownership(self, agent: AgentInfo, channel: str,
                                    new_owner: str) -> dict[str, Any]:
@@ -8088,9 +8247,8 @@ class HubService:
             # opposite antecedent ("and the user is not connected to the
             # hub"). Proxy is the owner's hand while they are away, not a
             # second vote while they are here.
-            proxy_ok = (channel is not None and self.has_proxy(agent.id, channel)
-                        and decider not in ("", agent.id)
-                        and self._out_of_contact(decider))
+            proxy_ok = (channel is not None
+                        and self.proxy_allowed(agent.id, channel, decider))
             # The DECIDER is stamped by the hub, never supplied: `updated_by`
             # records who typed, which is a different fact whenever a
             # delegate transcribes an absent owner's answer.
@@ -8299,7 +8457,8 @@ class HubService:
     _TASK_FIELDS = {"source", "requester", "coordinator", "rooms", "status",
                     "title", "report", "evidence", "delivered_by",
                     "delivered_at", "decided_by", "decided_at", "verdict",
-                    "rejections", "declared_by", "declared_at"}
+                    "rejections", "declared_by", "declared_at",
+                    "primary_channel", "director", "depends_on", "work_type"}
     _TASK_STAMPED = {"requester", "report", "evidence", "delivered_by",
                      "delivered_at", "decided_by", "decided_at", "rejections",
                      "declared_by", "declared_at"}
@@ -8348,8 +8507,9 @@ class HubService:
         if agent.id in (value.get("requester"), value.get("coordinator")):
             return None
         if self._delegation_reaches(agent.id, channel,
-                                    ("reporting", "ruling", "operational",
-                                     "proxy")):
+                                    ("reporting", "ruling", "operational")):
+            return None
+        if self.proxy_allowed(agent.id, channel, value.get("requester")):
             return None
         if current is None:
             return None   # anyone may mint a task from a root they can read
@@ -8386,6 +8546,8 @@ class HubService:
         if source.reply_to is not None:
             raise HubError(400, "a task tracks a thread ROOT (the request "
                                 "itself), not a reply")
+        if prior.get("source") and prior["source"] != f"{channel}#{source.seq}":
+            raise HubError(403, "a task source and requester are immutable")
         value["source"] = f"{channel}#{source.seq}"
         value["requester"] = source.sender
         title = value.get("title", prior.get("title") or source.title or "")
@@ -8414,6 +8576,9 @@ class HubService:
                                     or len(verdict) > 400):
             raise HubError(400, "task verdict must be a string of <= 400 chars")
         if status != prior_status:
+            if prior_status == "accepted":
+                raise HubError(400, "an accepted task does not re-open — mint "
+                                    "a new one from a new request")
             if status == "delivered":
                 raise HubError(400, "`delivered` is stamped by the hub when a "
                                     "cited `resolved` lands on the request — "
@@ -8421,8 +8586,7 @@ class HubService:
             if status in ("accepted", "rejected"):
                 requester = value["requester"]
                 if not (agent.operator or agent.id == requester
-                        or self._delegation_reaches(agent.id, channel,
-                                                    ("proxy",))):
+                        or self.proxy_allowed(agent.id, channel, requester)):
                     raise HubError(403, f"only {requester} (who asked), an "
                                         "operator, or a proxy delegate for "
                                         "this channel may accept or reject "
@@ -8437,9 +8601,6 @@ class HubService:
                     # verdict stays on the row for the seats picking it up.
                     value["rejections"] = int(prior.get("rejections") or 0) + 1
                     status = "open"
-            elif status == "open" and prior_status in ("accepted",):
-                raise HubError(400, "an accepted task does not re-open — mint "
-                                    "a new one from a new request")
         value["status"] = status
         if verdict is not None:
             value["verdict"] = sanitize_text(verdict.strip(), 400,
@@ -8484,6 +8645,14 @@ class HubService:
         """Move a task on a `resolved` reply to its source: the requester's
         (or an operator's) word accepts; a cited completion report from the
         reporting delegate or a seat the request named delivers."""
+        # Task metadata writes use this same lock. Without it, a concurrent
+        # title/assignment update can invalidate the projection's CAS; the
+        # already-posted report then leaves its task open and runnable.
+        with self.db.orchestration_lock:
+            self._task_on_resolved_locked(message, parent)
+
+    def _task_on_resolved_locked(self, message: Message,
+                                 parent: Message | None) -> None:
         if (parent is None or message.status != Status.resolved
                 or message.reply_to != parent.id):
             return
@@ -8537,6 +8706,7 @@ class HubService:
                 "requester": str(v.get("requester") or ""),
                 "coordinator": v.get("coordinator"),
                 "rooms": [str(r) for r in (v.get("rooms") or [])],
+                **{f: v.get(f) for f in ("primary_channel", "director", "depends_on", "work_type")},
                 "status": str(v.get("status") or "open"),
                 "report": v.get("report"),
                 "delivered_by": v.get("delivered_by"),
@@ -8905,12 +9075,11 @@ class HubService:
             who = str(v.get("needs_from") or "").strip()
             if tag == "seat" and who:
                 can, move = True, f"chase {who} — they are named and can end it"
-            elif tag == "operator" and PROXY_POWER in powers and any(
-                    self._out_of_contact(o) for o in ops):
+            elif tag == "operator" and self.proxy_allowed(agent.id, channel, who):
                 can, move = True, ("decide it yourself under `proxy` — the "
                                    "owner's call is yours while they are away")
             elif tag == "operator" and PROXY_POWER in powers:
-                can, move = False, ("the operator is reachable — ask them. "
+                can, move = False, ("the named operator has not explicitly declared absence — ask them. "
                                     "`proxy` is for their absence, and the "
                                     "hub will refuse it while they are here")
             elif tag == "operator":
@@ -11368,6 +11537,37 @@ class HubService:
                            "leak hidden room/key data into another room.")
         return {"channel": target_ch, "key": target_key,
                 "at_version": target.version}
+
+    def _validate_waiting_for_artifacts(self, channel: str, owner: str, raw: Any) -> list[dict[str, Any]]:
+        """Exact all-of thresholds, including a future file's first version.
+
+        A file may not exist yet; the readable room and valid path must exist
+        as a namespace. Waiting for a revision requires observed_version + 1,
+        not an automatically restamped head that can race an arrival.
+        """
+        from ..artifact_wait import MAX_ARTIFACT_WAITS
+        if not isinstance(raw, list) or not 1 <= len(raw) <= MAX_ARTIFACT_WAITS:
+            raise HubError(400, f"waiting_for_artifacts must contain 1..{MAX_ARTIFACT_WAITS} exact artifact requirements")
+        result = []
+        seen = set()
+        for item in raw:
+            if not isinstance(item, dict) or set(item) - {"channel", "path", "min_version"}:
+                raise HubError(400, "artifact wait entries are {channel?, path, min_version}")
+            target = item.get("channel", channel)
+            if not isinstance(target, str) or not target or not self.db.is_member(target, owner):
+                raise HubError(403, "artifact wait must name a channel readable by the claim owner")
+            if not isinstance(item.get("path"), str):
+                raise HubError(400, "artifact wait needs an exact VFS path")
+            path = self._normalize_fs_path(item["path"])
+            version = item.get("min_version")
+            if isinstance(version, bool) or not isinstance(version, int) or not 1 <= version <= 2**62:
+                raise HubError(400, "artifact min_version must be a positive integer")
+            ref = (target, path)
+            if ref in seen:
+                raise HubError(400, "duplicate artifact wait path")
+            seen.add(ref)
+            result.append({"channel": target, "path": path, "min_version": version})
+        return sorted(result, key=lambda row: (row["channel"], row["path"]))
 
     def _waiting_on_sweep(self) -> list[str]:
         """Ring the owner of a parked claim whose declared dependency moved.

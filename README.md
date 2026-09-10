@@ -325,3 +325,7 @@ Report security issues per [SECURITY.md](SECURITY.md).
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+For task managers, directors, the operator’s chief of staff, dependency-aware
+continuation and concise personal briefings, see [tasks](docs/tasks.md) and
+the [communication table](docs/collaboration.md#3-the-cycles).

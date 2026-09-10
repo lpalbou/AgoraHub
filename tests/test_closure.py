@@ -457,11 +457,8 @@ def test_multi_addressee_directive_each_seat_owes_its_own_engagement():
                                client.get("/inbox", headers=uic).json()]
 
 
-def test_operator_addressed_fyi_is_visible_and_owed():
-    """An operator's addressed line obliges WHATEVER its status (ruling
-    2026-07-19: 'it MUST be'). Humans are allowed to be sloppy about status —
-    a directive typed as `fyi` still owes the named seat's engagement, and a
-    peer's fyi still obliges nobody (see `_is_addressed_debt`)."""
+def test_operator_addressed_fyi_is_visible_and_optional():
+    """FYI preserves visibility without creating mandatory response debt."""
     client = make_client()
     op = register(client, "op", operator=True)
     code = register(client, "code")
@@ -471,8 +468,8 @@ def test_operator_addressed_fyi_is_visible_and_owed():
     inbox = client.get("/inbox", headers=code).json()
     assert any(e["id"] == note["id"] and e["to_me"] for e in inbox)
     owed = client.get("/owed", headers=code).json()
-    assert any(o["id"] == note["id"] for o in owed["to_answer"])
-    # The addressee's own reply clears it, like any directive debt.
+    assert not any(o["id"] == note["id"] for o in owed["to_answer"])
+    # A useful optional follow-up does not create debt for the FYI recipient.
     post(client, code, body="noted — will migrate", status="reply",
          to=["op"], reply_to=note["id"])
     owed = client.get("/owed", headers=code).json()

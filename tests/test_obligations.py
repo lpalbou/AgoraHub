@@ -752,13 +752,22 @@ def test_evidence_must_resolve_in_this_channel():
         assert e.value.status_code == 400, why
 
 
-def test_evidence_size_comes_from_the_server_not_the_sender():
+@pytest.mark.parametrize(("content", "content_b64", "expected_size"), [
+    ("# ch1\n", None, 6),
+    ("é🐝\n", None, 7),
+    ("", None, 0),
+    (None, "AP8=", 2),
+])
+def test_evidence_size_comes_from_the_server_not_the_sender(content, content_b64, expected_size):
     """Attachments already refuse to let a message misdescribe its file
     ("size/content_type always come from the blob row"). A delivery claim
     gets the same treatment: the sender's 5.1MB is overwritten by the truth."""
     service, op, delegate = _novel_room()
-    service.fs_write(delegate, "novel", "the_novel.md", "# ch1\n",
-                     description="the manuscript")
+    first = service.fs_write(delegate, "novel", "the_novel.md", content,
+                             content_b64=content_b64, description="the manuscript")
+    assert first.size_bytes == expected_size
+    service.fs_write(delegate, "novel", "the_novel.md", "A different later version",
+                     expect_version=1, description="Metadata is not file content")
     m = service.post_message(delegate, "novel", PostMessage(
         body="delivered", status=Status.fyi,
         data={"evidence": [{"kind": "fs", "ref": "the_novel.md@1",
@@ -766,7 +775,7 @@ def test_evidence_size_comes_from_the_server_not_the_sender():
                             "updated_by": "somebody-else",
                             "verified": True}]}))
     ref = m.data["evidence"][0]
-    assert ref["size_bytes"] != 5_100_000       # server truth won
+    assert ref["size_bytes"] == expected_size  # bytes of the cited version, not its wrapper or HEAD
     assert ref["updated_by"] == "assistant"     # attribution is the hub's
     assert ref["verified"] is True
 

@@ -89,8 +89,8 @@ def test_operator_message_naming_nobody_obliges_the_delegate(
     kw = {"reply_to": parent.id} if status == "reply" else {}
     m = service.post_message(op, "at-test", PostMessage(
         body="rebuild the PDF end to end", status=status, title="task", **kw))
-    assert m.id in _owed_ids(service, reader), \
-        f"operator {status} with to=[] obliged nobody"
+    assert (m.id in _owed_ids(service, reader)) == (status != "fyi"), \
+        f"operator {status} debt must match its obligation semantics"
     # Deliberately NOT oblige-all-members: that is the wake-storm shape
     # 0.12.55 killed. The delegate is the routing point, and only them.
     assert m.id not in _owed_ids(service, editor)

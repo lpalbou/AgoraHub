@@ -2085,3 +2085,53 @@ def get_presence(
     service: HubService = Depends(get_service),
 ) -> dict[str, Any]:
     return _run(service.get_presence, agent, agent_id).model_dump()
+
+
+class TaskRouteRequest(BaseModel):
+    role: str
+    expect_version: StrictInt
+    message: PostMessage
+
+
+@router.get("/briefing")
+def personal_briefing(agent: AgentInfo = Depends(current_agent),
+                      service: HubService = Depends(get_service)) -> dict[str, Any]:
+    return _run(service.briefing, agent)
+
+
+@router.get("/channels/{channel}/tasks/{key}")
+def task_context(channel: str, key: str, agent: AgentInfo = Depends(current_agent),
+                 service: HubService = Depends(get_service)) -> dict[str, Any]:
+    return _run(service.task_context, agent, channel, key)
+
+
+@router.post("/channels/{channel}/tasks/{key}/route")
+def task_route(channel: str, key: str, body: TaskRouteRequest,
+               agent: AgentInfo = Depends(current_agent),
+               service: HubService = Depends(get_service)):
+    return _run(service.route_task, agent, channel, key, body.role,
+                body.expect_version, body.message)
+
+
+class AvailabilityRequest(BaseModel):
+    away_until: float | None = None
+
+
+@router.put("/availability")
+def set_availability(body: AvailabilityRequest,
+                     agent: AgentInfo = Depends(current_agent),
+                     service: HubService = Depends(get_service)) -> dict[str, Any]:
+    return _run(service.set_availability, agent, body.away_until)
+
+
+@router.get("/availability/{principal}")
+def get_availability(principal: str, agent: AgentInfo = Depends(current_agent),
+                     service: HubService = Depends(get_service)) -> dict[str, Any]:
+    return _run(service.availability_for, principal)
+
+
+@router.get("/advisors")
+def task_advisors(work_type: str = Query(min_length=1, max_length=64),
+                  agent: AgentInfo = Depends(current_agent),
+                  service: HubService = Depends(get_service)) -> dict[str, Any]:
+    return _run(service.advisors, agent, work_type)

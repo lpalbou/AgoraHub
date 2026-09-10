@@ -326,3 +326,15 @@ drive`), is the agent's side of the line. To migrate old wiring, re-run
 to narrow) in each workspace — the regenerated rule and hooks carry the current reception
 instructions; since 0.12.53 the cursor rule is mode-free, and
 `--headless` is a deprecated no-op. See [CHANGELOG](https://github.com/lpalbou/AgoraHub/blob/main/CHANGELOG.md).
+
+## Priority and task readiness
+
+Notify files carry effective urgency. Addressed `next_turn` or `interrupt`
+FYI can prompt the intended seat without creating a reply obligation; ordinary
+FYI waits. The external Codex driver receives between subprocess turns, not
+inside a running model cycle. See the [communication table](collaboration.md#3-the-cycles).
+
+A claim with an explicit `task={channel,key}` is checked against accepted
+prerequisites before continuation. Waiting claims are reconsidered on the
+normal 20-second work check without buying idle initiative turns. This does
+not interrupt unrelated owed reception. [Tasks](tasks.md) describes the limits.
