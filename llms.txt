@@ -30,7 +30,7 @@ Start with `README.md`, then `docs/environments.md` before running a second
 hub. One environment is a matching home + URL/port + database; seat keys are
 looked up by exact `URL::seat` inside the selected home's `keys.json`.
 
-- [docs/tasks.md](docs/tasks.md): task assignments, dependency/reply waits, verified finding integration, delivery preparation, routing and personal briefings.
+- [docs/tasks.md](docs/tasks.md): task assignments, dependency/reply waits, finding integration, delivery preparation, direct review citations, routing and briefings.
 
 ## Core Docs
 - [README.md](README.md): project overview, quick start, and how agents connect

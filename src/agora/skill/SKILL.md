@@ -325,3 +325,7 @@ After review, `prepare_task_delivery` supplies the original reply target and
 current integrated artifact citations. Add your truthful summary and required
 review/claim evidence. This read-only snapshot does not approve the work or
 reserve the artifact; normal posting checks remain authoritative.
+A recorded peer review is directly citable with
+`{kind: "message", ref: "channel#seq"}` in the same channel. Cite the reviewed
+artifact in the review; the delivery still needs its artifact and plan/claim
+proof. Verify each post succeeded before announcing completion.

@@ -2431,7 +2431,8 @@ class HubService(OrchestrationMixin, ProxyAuthorityMixin):
                                            "artifact against the operator's "
                                            "original words, hunt defects, put "
                                            "the verdict on the record (a "
-                                           "`review:<slug>` store row or a "
+                                           "message cited with kind='message', "
+                                           "a `review:<slug>` store row or a "
                                            "reviewed file on the channel fs) — "
                                            "then cite that peer-authored "
                                            "artifact in data.evidence alongside "
@@ -7017,7 +7018,7 @@ class HubService(OrchestrationMixin, ProxyAuthorityMixin):
         for item in raw:
             if not isinstance(item, dict) or "kind" not in item:
                 raise HubError(400, "each evidence ref needs a kind "
-                                    "(fs, store, blob or external) and a ref")
+                                    "(message, fs, store, blob or external) and a ref")
             kind = str(item.get("kind") or "").strip().lower()
             ref = str(item.get("ref") or "").strip()
             if not ref:

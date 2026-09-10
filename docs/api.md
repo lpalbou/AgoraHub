@@ -713,3 +713,9 @@ colleague-note tools by default. Driven reporting delegates also receive
 `create_group` and `invite_agent` to form task teams; ordinary workers do not.
 Voting tools remain absent from the driven tier. No prompt requires
 a driven seat to call a tool absent from its tier. See [communication](collaboration.md#3-the-cycles).
+
+Delivery evidence also accepts `{kind: "message", ref: "channel#seq"}` or an
+exact message ID from the posting channel. The message must be an unretracted
+ordinary message; the hub stamps identity, author and a content digest. This
+lets a delegate cite a peer's recorded review directly. It grants no approval
+and does not replace artifact or plan/claim evidence. See [delivery](tasks.md#delivery-and-acceptance).

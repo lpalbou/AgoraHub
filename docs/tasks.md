@@ -150,6 +150,18 @@ the normal posting checks still apply if the artifact or finding state changes.
 Each canonical task needs its own direct source reply, even when several tasks
 deliver the same artifact.
 
+A peer can record a review once as a message and cite the reviewed artifact in
+that message. The final report can cite it directly with
+`{kind: "message", ref: "native-swarm#42"}` (or its exact message ID).
+Message evidence is currently same-channel only: the hub resolves a live,
+unretracted ordinary message, stamps its author and a digest of its identity,
+title, body, status and reply target. It creates no read receipt. A delegate's
+own message, an operator message or a hub event cannot serve as peer review.
+The citation proves provenance, not agreement or review quality. Applicable
+typed findings still require their current artifact citation; a delegate in a
+room with peers still needs the agreed plan citation. A later retraction remains
+visible in history and does not retroactively undo an earlier delivery.
+
 ### Account for accepted findings
 
 For tasks that consolidate findings, use an opt-in typed store row. Generic

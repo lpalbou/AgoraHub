@@ -664,9 +664,11 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
         answers: ask ids this reply discharges; declines: ask ids you refuse
         on the record (why in the body). consumes: refs ("chan#seq" or ids,
         ≤32) whose answers you have used. evidence: on a resolved that
-        delivers, [{"kind":"store|fs|blob|external","ref":...}] — store
-        key@version, fs path@version, blob sha; add "channel" to cite a row
-        in another room you belong to. Uncited, nothing closes. settled_by:
+        delivers, [{"kind":"store|fs|blob|message|external","ref":...}] — store
+        key@version, fs path@version, blob sha, message channel#seq or id.
+        Message refs must be in this channel; a peer's recorded review can
+        be cited directly. Add "channel" to store/fs refs in another room
+        you belong to. Uncited, nothing closes. settled_by:
         message id, to close a thread on someone else's authority.
         notice_kind/notice_key: a stable key for a discrete event so a repost
         cannot double-announce it. urgency: inbox|next_turn|interrupt."""
