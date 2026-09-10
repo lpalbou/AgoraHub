@@ -27,7 +27,7 @@ def _lab():
 def _artifact(hub, lead, text="The cancellation result must be suppressed in history."):
     f = hub.fs_write(lead, "room", "ROADMAP.md", content=text, description="current roadmap")
     return {"path": f.path, "version": f.version,
-            "sha256": hashlib.sha256(text.encode()).hexdigest(), "excerpt": text}
+            "sha256": f.sha256, "excerpt": text}
 
 
 def _accepted(hub, lead, task, root, suffix="cancel"):

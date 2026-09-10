@@ -9,6 +9,7 @@ service layer and the HTTP surface, mirroring tests/test_fs.py.
 from __future__ import annotations
 
 import base64
+import hashlib
 
 import pytest
 from fastapi.testclient import TestClient
@@ -72,6 +73,26 @@ def test_binary_roundtrip_with_encoding_marker_and_default_mime(service, agents)
     assert r.encoding == "base64" and r.content == ""
     assert r.mime == "application/octet-stream"
     assert r.size_bytes == len(PNG_ISH)
+
+
+def test_digest_uses_exact_text_and_archived_binary_bytes(service, agents):
+    alice, bob = agents
+    text = "Résumé — snowman ☃\n"
+    text_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    first = service.fs_write(alice, "design", "evidence.txt", text, expect_version=0)
+    assert first.sha256 == text_digest
+    assert len(first.sha256) == 64 and first.sha256.islower()
+    assert service.fs_read(bob, "design", "evidence.txt").sha256 == text_digest
+
+    second = service.fs_write(alice, "design", "evidence.txt",
+                              content_b64=PNG_ISH_B64, expect_version=first.version)
+    binary_digest = hashlib.sha256(PNG_ISH).hexdigest()
+    assert second.sha256 == binary_digest
+    assert second.sha256 != text_digest
+    assert service.fs_read(bob, "design", "evidence.txt", version=1).sha256 == text_digest
+    archived_binary = service.fs_read(bob, "design", "evidence.txt", version=2)
+    assert archived_binary.sha256 == binary_digest
+    assert archived_binary.sha256 != hashlib.sha256(PNG_ISH_B64.encode()).hexdigest()
 
 
 def test_binary_explicit_mime_is_kept(service, agents):
@@ -270,9 +291,11 @@ def test_http_binary_roundtrip_and_archived_version(http):
     assert body["encoding"] == "base64" and body["content"] == ""
     assert body["mime"] == "application/octet-stream"
     assert body["size_bytes"] == len(PNG_ISH)
+    assert body["sha256"] == hashlib.sha256(PNG_ISH).hexdigest()
 
     r = http.get("/channels/design/fs/assets/logo.png", headers=alice).json()
     assert base64.b64decode(r["content_b64"]) == PNG_ISH
+    assert r["sha256"] == hashlib.sha256(PNG_ISH).hexdigest()
 
     # Overwrite with text; the archived binary version still reads verbatim.
     http.put("/channels/design/fs/assets/logo.png",
@@ -281,8 +304,10 @@ def test_http_binary_roundtrip_and_archived_version(http):
                    headers=alice).json()
     assert old["encoding"] == "base64"
     assert base64.b64decode(old["content_b64"]) == PNG_ISH
+    assert old["sha256"] == hashlib.sha256(PNG_ISH).hexdigest()
     head = http.get("/channels/design/fs/assets/logo.png", headers=alice).json()
     assert head["content"] == "replaced by text" and head["encoding"] is None
+    assert head["sha256"] == hashlib.sha256(b"replaced by text").hexdigest()
 
     listing = _authored(http.get("/channels/design/fs", headers=alice).json())
     assert listing[0]["size"] == len("replaced by text")
@@ -302,11 +327,13 @@ def test_http_exactly_one_content_field(http):
 
 
 def test_render_fs_file_marks_binary_instead_of_empty_fence():
-    # An MCP fs_read of a binary entry must say what it is — an empty fenced
-    # body read as "empty text file", indistinguishable and misleading.
+    # MCP fs_read uses this renderer. Its fence must retain the digest while a
+    # binary body stays out of the prompt.
     from agora.render import render_fs_file
     out = render_fs_file({"path": "assets/logo.png", "version": 2, "mime": "image/png",
                           "encoding": "base64", "content": "", "content_b64": "aGk=",
-                          "size_bytes": 2, "updated_by": "laurent", "updated_at": 1.0})
+                          "size_bytes": 2, "sha256": hashlib.sha256(b"hi").hexdigest(),
+                          "updated_by": "laurent", "updated_at": 1.0})
     assert "binary file — image/png, 2 bytes" in out
     assert "aGk=" not in out  # base64 payload never rides the fence
+    assert hashlib.sha256(b"hi").hexdigest() in out

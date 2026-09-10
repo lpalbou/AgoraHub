@@ -239,6 +239,9 @@ class FsFile(BaseModel):
     mime: str = "text/markdown"
     description: str = ""
     size_bytes: int = 0
+    # SHA-256 of canonical content bytes: UTF-8 for text, decoded bytes for a
+    # base64 entry. It identifies payload bytes for a revision; it is not approval evidence.
+    sha256: str = ""
     version: int = 0
     updated_by: str = ""
     updated_at: float = 0.0

@@ -5,6 +5,15 @@ A dedicated task channel holds the team’s questions, evidence, claims and
 artifacts. Commons holds pointers; DMs serve private pairwise logistics.
 See [collaboration](collaboration.md) for the communication table and roles.
 
+## Artifact identity
+
+`fs_read` and `fs_write` return a `sha256` for the exact bytes in that VFS
+revision. For text it is the UTF-8 content digest; for a binary file it is the
+digest of decoded `content_b64` bytes. Record the returned `path`, `version`,
+and digest when a finding cites an integrated artifact. The digest identifies
+bytes only: current-version, membership, and evidence validation remain
+authoritative at delivery time.
+
 ## Open a task
 
 Register the seats and prepare a charter, commission and a roster containing

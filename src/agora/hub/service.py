@@ -269,6 +269,13 @@ def _b64_decoded_size(b64: str) -> int:
     return len(b64) * 3 // 4 - pad
 
 
+def _fs_sha256(*, content: str | None = None, content_b64: str | None = None) -> str:
+    """Digest exact VFS payload bytes, never its JSON/base64 transport."""
+    if content_b64 is not None:
+        return hashlib.sha256(base64.b64decode(content_b64, validate=True)).hexdigest()
+    return hashlib.sha256((content or "").encode("utf-8")).hexdigest()
+
+
 class HubError(Exception):
     def __init__(self, status_code: int, detail: Any) -> None:
         text = detail if isinstance(detail, str) else json.dumps(detail, sort_keys=True)
@@ -7350,7 +7357,8 @@ class HubService(OrchestrationMixin, ProxyAuthorityMixin):
                       content_b64=content_b64,
                       encoding="base64" if content_b64 is not None else None,
                       mime=mime, description=description,
-                      size_bytes=size, version=entry.version,
+                      size_bytes=size, sha256=_fs_sha256(content=content, content_b64=content_b64),
+                      version=entry.version,
                       updated_by=entry.updated_by, updated_at=entry.updated_at)
 
     def fs_read(self, agent: AgentInfo, channel: str, path: str,
@@ -7386,12 +7394,13 @@ class HubService(OrchestrationMixin, ProxyAuthorityMixin):
             return FsFile(path=norm, content="", content_b64=b64, encoding="base64",
                           mime=value.get("mime", "application/octet-stream"),
                           description=value.get("description", ""),
-                          size_bytes=_b64_decoded_size(b64), version=row["version"],
+                          size_bytes=_b64_decoded_size(b64), sha256=_fs_sha256(content_b64=b64),
+                          version=row["version"],
                           updated_by=row["updated_by"], updated_at=row["updated_at"])
         content = value.get("content", "")
         return FsFile(path=norm, content=content, mime=value.get("mime", "text/markdown"),
                       description=value.get("description", ""),
-                      size_bytes=len(content.encode()), version=row["version"],
+                      size_bytes=len(content.encode()), sha256=_fs_sha256(content=content), version=row["version"],
                       updated_by=row["updated_by"], updated_at=row["updated_at"])
 
     def fs_list(self, agent: AgentInfo, channel: str, prefix: str = "") -> list[dict[str, Any]]:

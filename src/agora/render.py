@@ -276,6 +276,7 @@ def render_fs_file(row: dict[str, Any], channel: str = "") -> str:
     fields = {
         "channel": channel, "version": version,
         "by": row.get("updated_by", ""), "mime": row.get("mime", ""),
+        "sha256": row.get("sha256", ""),
         "description": row.get("description", ""),
     }
     header = "\n".join(f"{k}: {json.dumps(v, ensure_ascii=True)}" for k, v in fields.items()
