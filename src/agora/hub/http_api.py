@@ -2125,6 +2125,13 @@ def task_route(channel: str, key: str, body: TaskRouteRequest,
                 body.expect_version, body.message)
 
 
+@router.get("/channels/{channel}/tasks/{key}/delivery-preparation")
+def prepare_task_delivery(channel: str, key: str,
+                          agent: AgentInfo = Depends(current_agent),
+                          service: HubService = Depends(get_service)) -> dict[str, Any]:
+    return _run(service.prepare_task_delivery, agent, channel, key)
+
+
 class AvailabilityRequest(BaseModel):
     away_until: float | None = None
 

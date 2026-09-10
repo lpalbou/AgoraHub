@@ -702,6 +702,7 @@ See [troubleshooting.md](troubleshooting.md) for common errors and
 | MCP `get_briefing`; `GET /briefing` | Bounded caller-visible task/claim/decision/debt snapshot |
 | `GET /channels/{channel}/messages/{message_id}/reply-state?after_seq=N` | Bounded direct-answer/decline and closure metadata for driver dependency checks; requires membership and creates no read receipt |
 | MCP `get_task(channel,key)`; `GET /channels/{channel}/tasks/{key}` | Version, routes and prerequisite readiness |
+| MCP `prepare_task_delivery(channel,key)`; `GET /channels/{channel}/tasks/{key}/delivery-preparation` | Read-only report preparation: exact source, current integrated artifact citations and finding blockers. Caller supplies summary and review/claim evidence; normal posting validation remains authoritative. |
 | MCP `route_task`; `POST /channels/{channel}/tasks/{key}/route` | `{role, expect_version, message}`; role is manager/director/requester; hub assigns recipients and rejects stale versions |
 | MCP `get_advisors(work_type)`; `GET /advisors?work_type=…` | Visible same-type task-channel ratings and own text-matching private notes |
 | MCP `set_availability`; `PUT /availability` | Operator declares own `{away_until: <Unix time>}` or null for return |

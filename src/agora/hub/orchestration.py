@@ -13,6 +13,44 @@ def refuse(code, detail):
 
 
 class OrchestrationMixin:
+    def prepare_task_delivery(self, agent, channel, key):
+        """Read-only, race-bounded facts needed to draft a task delivery.
+
+        This is deliberately not a reservation, approval, or posting shortcut:
+        the normal resolved-reply gate remains authoritative at send time.
+        """
+        with self.db.orchestration_lock:
+            self.require_membership(channel, agent.id)
+            row = self._task_ref(agent, {"channel": channel, "key": key})
+            task = row.value
+            source = self._resolve_source(channel, task.get("source"))
+            if (source is None or source.retracted or source.channel != channel
+                    or key != f"task:msg-{source.seq}"
+                    or task.get("source") != f"{channel}#{source.seq}"):
+                refuse(409, "task source is not a live canonical source; read get_task and store_get before delivery")
+            if task.get("status") != "open":
+                refuse(409, "only an open canonical task can prepare delivery")
+            summary = self.finding_integration_summary(channel, key)
+            if summary["pending"]:
+                return {"task_version": row.version, "source_id": source.id,
+                        "blockers": [{"key": finding, "read": {"tool": "store_get", "arguments": {
+                            "channel": channel, "key": finding}}} for finding in summary["pending"]],
+                        "note": "pending or stale typed findings block delivery preparation; no post arguments are issued"}
+            refs = []
+            for finding, value in self._typed_findings(channel, key):
+                if value.get("disposition") not in ("incorporated", "merged"):
+                    continue
+                artifact = self._finding_artifact(channel, value.get("artifact"), current=True)
+                refs.append({"finding": finding, "ref": f"{artifact['path']}@{artifact['version']}",
+                             "sha256": artifact["sha256"]})
+            evidence = {item["ref"]: {"kind": "fs", "ref": item["ref"],
+                                       "sha256": item["sha256"]} for item in refs}
+            return {"task_version": row.version, "source_id": source.id,
+                    "integrated_fsrefs": refs,
+                    "post_message": {"channel": channel, "reply_to": source.id,
+                                     "status": "resolved", "evidence": list(evidence.values())},
+                    "note": "caller must add a truthful title/body plus review and claim proof; this snapshot is not a reservation or approval"}
+
     def reply_state(self, agent, channel, message_id, after_seq=0):
         """Scheduling metadata only: no message bodies or read receipts."""
         from .obligations import declines_of, substantive_answers_of

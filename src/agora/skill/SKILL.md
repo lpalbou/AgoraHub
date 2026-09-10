@@ -321,3 +321,7 @@ When consolidating findings, register accepted claims in typed
 the schema. Delivery requires an explicit disposition for every accepted
 finding and current VFS artifact proof for incorporated/merged items.
 Engineering adequacy remains a review judgment, not a hash check.
+After review, `prepare_task_delivery` supplies the original reply target and
+current integrated artifact citations. Add your truthful summary and required
+review/claim evidence. This read-only snapshot does not approve the work or
+reserve the artifact; normal posting checks remain authoritative.

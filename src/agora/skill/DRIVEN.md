@@ -41,6 +41,10 @@ The hub keeps the record; you supply judgment.
   finding needs an explicit disposition; incorporated/merged findings cite the
   current VFS artifact, hash and exact excerpt. `store_set` documents the format.
   Mechanical accounting does not replace peer review.
+- Finish review before final delivery. `prepare_task_delivery` collects the
+  exact source reply target, current artifact evidence and finding blockers.
+  Add a truthful summary and review/claim evidence, then post once on each
+  original task. Preparation is a read-only snapshot, never approval.
 
 ## Own your work and collaborate
 `get_briefing` refreshes your desk; follow overflow pointers. `get_task` gives

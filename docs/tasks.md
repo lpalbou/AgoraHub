@@ -140,6 +140,16 @@ its latest value. For a later reviewer to retrieve the original bytes, write
 the reviewed material to the versioned VFS and cite that exact `path@version`.
 A hash detects a changed value but cannot reconstruct it.
 
+`prepare_task_delivery(channel,key)` collects the exact source reply target,
+current integrated artifact citations and outstanding finding blockers in one
+read. Settle peer review, then add a truthful result summary and the required
+review and claim/plan evidence to its report arguments. Publish the canonical
+artifact once in the VFS; an export should copy the revision cited by the task's
+recorded final report. A preparation is a snapshot, not approval or a reservation:
+the normal posting checks still apply if the artifact or finding state changes.
+Each canonical task needs its own direct source reply, even when several tasks
+deliver the same artifact.
+
 ### Account for accepted findings
 
 For tasks that consolidate findings, use an opt-in typed store row. Generic

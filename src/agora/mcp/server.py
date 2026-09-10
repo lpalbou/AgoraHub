@@ -852,6 +852,16 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
         return _call("GET", f"/channels/{quote(channel, safe='')}/tasks/{quote(key, safe='')}")
 
     @mcp.tool()
+    def prepare_task_delivery(channel: str, key: str) -> dict:
+        """Prepare a final report: exact source reply target, current artifact
+        evidence, and finding blockers. Read-only snapshot, not approval or a
+        reservation. Settle outstanding reviews first; add your truthful summary
+        and required review/claim evidence before posting the returned arguments.
+        Publish one canonical VFS artifact; consumers can export its cited bytes.
+        """
+        return _call("GET", f"/channels/{quote(channel, safe='')}/tasks/{quote(key, safe='')}/delivery-preparation")
+
+    @mcp.tool()
     def route_task(channel: str, key: str, role: str, expect_version: int,
                    body: str, title: str, status: str = "open",
                    urgency: str = "inbox", asks: list[dict] | None = None) -> dict:
