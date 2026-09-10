@@ -2415,7 +2415,10 @@ class HubService(OrchestrationMixin, ProxyAuthorityMixin):
                         authors = {r.get("updated_by") or r.get("created_by")
                                    for r in refs if isinstance(r, dict)
                                    and not (r.get("kind") == "store"
-                                            and str(r.get("ref", "")).startswith("plan:"))}
+                                            and str(r.get("ref", "")).startswith("plan:"))
+                                   and not (r.get("kind") == "message" and
+                                            (r.get("sender") in (sender, "hub") or
+                                             r.get("sender") in self.operator_ids()))}
                         authors.discard(None)
                         if not (authors - {sender}):
                             raise HubError(400,
@@ -7040,7 +7043,21 @@ class HubService(OrchestrationMixin, ProxyAuthorityMixin):
                 if agent_id and not self.db.is_member(cited, agent_id):
                     raise HubError(400, f"evidence cites '{cited}', a channel "
                                         "you are not a member of")
-            if kind == "fs":
+            if kind == "message":
+                if cited != channel:
+                    raise HubError(400, "message evidence must be in the posting channel")
+                message = self._resolve_source(channel, ref)
+                if message is None or message.kind != Kind.message or message.retracted:
+                    raise HubError(400, "message evidence needs a live message in this channel")
+                immutable = {"id": message.id, "seq": message.seq, "sender": message.sender,
+                             "title": message.title, "body": message.body, "status": message.status.value,
+                             "reply_to": message.reply_to}
+                out.append({"kind": "message", "ref": f"{channel}#{message.seq}",
+                            "id": message.id, "seq": message.seq, "sender": message.sender,
+                            "updated_by": message.sender,
+                            "sha256": hashlib.sha256(json.dumps(immutable, sort_keys=True,
+                                separators=(",", ":")).encode()).hexdigest(), "verified": True})
+            elif kind == "fs":
                 # "path@version" — the version is what makes it a citation
                 # rather than a gesture at a moving file.
                 path, _, version = ref.rpartition("@")
@@ -7153,7 +7170,7 @@ class HubService(OrchestrationMixin, ProxyAuthorityMixin):
                             "verified": False})
             else:
                 raise HubError(400, f"unknown evidence kind '{kind}' — use "
-                                    "fs, store, blob or external")
+                                    "message, fs, store, blob or external")
         return out
 
     def _validate_attachments(self, raw: Any, channel: str) -> list[dict[str, Any]]:
