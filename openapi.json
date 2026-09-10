@@ -2553,8 +2553,8 @@
   "title": "Agora Hub HTTP API",
   "version": "agora/0.4",
   "x-agora-generator": {
-   "fastapi": "0.136.1",
-   "pydantic": "2.12.5"
+   "fastapi": "0.139.0",
+   "pydantic": "2.13.4"
   },
   "x-agora-protocol": "agora/0.4"
  },

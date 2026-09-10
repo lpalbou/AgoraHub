@@ -2,8 +2,8 @@
 
 A live-model eval, not a unit test: it answers a question static assertions
 cannot — whether the surface a mission is delivered on changes what a model
-DOES. Skipped unless an OpenAI-compatible endpoint is reachable, so it never
-gates CI; point it at one with AGORA_EVAL_BASE_URL / AGORA_EVAL_MODEL.
+DOES. Live checks require explicit AGORA_EVAL_BASE_URL and a reachable endpoint;
+an unrelated local server must never opt a unit-test run into model calls.
 
 WHY IT EXISTS. `whoami` returns the mission, so a seat plainly "has" it —
 and that framing hid the real defect. Everything `whoami` returns is a tool
@@ -51,9 +51,9 @@ def _endpoint_live() -> bool:
         return False
 
 
-pytestmark = pytest.mark.skipif(
-    not _endpoint_live(),
-    reason=f"no OpenAI-compatible endpoint at {BASE} (set AGORA_EVAL_BASE_URL)")
+live_eval = pytest.mark.skipif(
+    not os.environ.get("AGORA_EVAL_BASE_URL") or not _endpoint_live(),
+    reason="live model eval requires an explicit, reachable AGORA_EVAL_BASE_URL")
 
 
 def _ask(system: str) -> str:
@@ -107,6 +107,7 @@ def test_the_shipped_whoami_docstring_names_the_mission_and_the_compaction_rule(
         "is the only path back to its own charge")
 
 
+@live_eval
 def test_a_system_prompt_mission_is_honoured_after_a_compaction():
     """The reliable surface. If this ever drops below near-perfect, the
     mission mirror has stopped working, not the model."""
@@ -116,6 +117,7 @@ def test_a_system_prompt_mission_is_honoured_after_a_compaction():
     assert rate >= N - 1, f"system-prompt mission honoured only {rate}/{N}"
 
 
+@live_eval
 def test_an_erased_mission_is_the_defect_this_file_exists_to_measure():
     """The control. A seat whose mission lives only in an erased tool result
     is measurably unsafe — this is not a hypothetical."""
