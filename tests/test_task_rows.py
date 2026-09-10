@@ -210,6 +210,8 @@ def test_only_the_requester_an_operator_or_a_proxy_may_accept_or_reject():
     with pytest.raises(HubError):
         service.store_set(peer, "room", key, {"coordinator": "peer"})
     service.set_delegation("worker", ["proxy"], scope="room")
+    import time
+    service.set_availability(op, time.time() + 300)
     service.store_set(worker, "room", key, {"status": "accepted"})
     assert _task(service, m.seq)["status"] == "accepted"
 
@@ -250,6 +252,8 @@ def test_rooms_and_coordinator_are_the_coordinators_to_edit():
     service, op, lead, worker, peer = _room()
     m = _commission(service, op)
     key = f"task:msg-{m.seq}"
+    service.create_channel(op, "ssg-build", private=False)
+    service.join_channel(lead, "ssg-build", None)
     service.store_set(lead, "room", key, {"rooms": ["ssg-build"],
                                           "coordinator": "worker"})
     task = _task(service, m.seq)

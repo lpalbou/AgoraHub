@@ -74,6 +74,7 @@ def notify_line(envelope: Envelope) -> str:
         "sender": envelope.sender, "id": envelope.id,
         "kind": envelope.kind.value,
         "status": envelope.status.value, "title": envelope.title,
+        "urgency": envelope.effective_urgency.value,
         "retracted": envelope.retracted,
         "flags": flags, **({"preview": preview} if preview else {}),
         # Hub-computed count (same trust class as seq/flags): a body-less

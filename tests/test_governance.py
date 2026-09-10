@@ -1279,7 +1279,7 @@ def test_no_rule_that_binds_every_seat_hides_inside_a_role_section():
     member = charter_view(ROLE_CHARTER, roles=("member",)).text
     assert "## Operator" not in member
     assert "Settle OPERATOR debts before peer courtesy" in HUB_RULES_DEFAULT
-    assert "operator always" in HUB_RULES_DEFAULT
+    assert "FYI from any sender is optional" in HUB_RULES_DEFAULT
     # The member view still tells a member what it owes: the two obligations
     # that are a member's by virtue of being one, and an explicit pointer to
     # the rules for the per-turn ones (which every seat is served anyway).

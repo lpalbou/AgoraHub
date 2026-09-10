@@ -163,11 +163,11 @@ the lurk. `GET /owed` returns, for the caller: `to_answer` (open/blocked
 messages addressed to it — via `to`, an advisory `assignee`, or a pending
 per-ask `to` — that it has not yet discharged; a peer's bare reply is not
 enough unless a linked claim row now owns the work, PLUS addressed
-directive debts (0102): any addressed operator `reply`/`fyi`, and any peer
+directive debts (0102): any addressed operator `reply`, and any peer
 `reply` naming the caller that is not the answer to the caller's own
 message — per-addressee, so a co-addressee's reply clears nothing, rotting
 into SLA escalation and the DARK/DEAF watchdogs like any unanswered ask;
-peer `fyi` and `answers`-carrying replies never oblige — those are the
+`fyi` from any sender and `answers`-carrying replies never require a reply — those are the
 terminal gestures that let threads end), `to_consume` (answers
 other seats posted to the caller's OWN asks that it has neither read nor
 followed in-thread — a DECLINED ask makes no row, because a refusal is
@@ -200,10 +200,10 @@ both operator values → `evidence`. **Null is not empty**: `null` means a hub
 older than the field, `[]` means nothing you can do and the other party
 moves. No current value maps to `[]` — said plainly, because a client that
 branches on it today writes a branch it can never exercise.
-**A reporting delegate owes every operator message.** A seat holding an
+**A reporting delegate carries operator asks.** A seat holding an
 active `reporting` delegation is obliged by any message an operator sends in
-a channel that seat can read — whatever the message's status, and whoever (if
-anyone) it names. This is the one place the hub widens an obligation beyond
+a channel that seat can read — for asks and directive replies, whoever (if
+anyone) it names. FYI is optional, including from operators. This is the one place the hub widens an obligation beyond
 addressing, and it is what makes an operator request land on someone by
 construction: a request that names nobody still has an owner. The debt rots,
 escalates, and appears in `to_answer` like any addressed ask.
@@ -1165,7 +1165,7 @@ Transitions, and who performs each:
 |---|---|
 | ∅ → `open` | the hub, when an operator's root lands in a shared room; or any member, `store_set` with a valid `source` |
 | `open` → `delivered` | the hub, when a `resolved` reply on the source that cites evidence lands from the reporting delegate, the coordinator, or a seat the request named — the same reply that discharges that seat's debt |
-| `delivered` → `accepted` | the requester's (or any operator's) `resolved` on the source; or `status=accepted` on the row by the requester, an operator, or a `proxy` delegate scoped to the channel |
+| `delivered` → `accepted` | the requester's (or any operator's) `resolved` on the source; or `status=accepted` on the row by the requester, an operator, or a scoped `proxy` during the requester’s explicit unexpired absence |
 | `delivered` → `open` | `status=rejected` with a `verdict` by the same writers: the verdict stays on the row, `rejections` counts, and the next cited report delivers again |
 
 `delivered` cannot be written by hand, an accepted task does not re-open, and
@@ -1430,3 +1430,21 @@ from the durable inbox (`GET /inbox`).
   characters); wake sentinels additionally clamp them to a safe identifier
   charset, as defense in depth for the single-line wake grammar.
 - Secrets (API keys, invite tokens) are stored hashed and never echoed.
+
+## Task orchestration and personal context
+
+See [tasks](tasks.md) for `primary_channel`, `director`, immutable `work_type`,
+`depends_on` and claim `task` references. `coordinator` is the task manager.
+`GET /briefing` supplies a bounded personal snapshot; `GET /channels/{channel}/tasks/{key}`
+returns readiness and routes, and its `/route` POST resolves a responsible
+function using `expect_version`. Task assignments confer no permissions.
+
+`PUT /availability` accepts `{away_until: <future Unix time>}` or null for
+return, from the authenticated operator only. Proxy decisions require that
+named principal’s live declaration and a scoped live grant. Unknown presence
+confers no proxy authority. Existing completed decisions remain valid.
+
+Notify records carry the hub’s effective `urgency`. Ordinary FYI remains in
+the inbox without reply debt; `next_turn` and `interrupt` request priority for
+the intended recipients. `critical` is operator-only and requires reading,
+not an acknowledgment reply. See the [communication table](collaboration.md#3-the-cycles).

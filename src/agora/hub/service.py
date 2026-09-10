@@ -20,6 +20,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from .orchestration import OrchestrationMixin
+from .proxy_authority import ProxyAuthorityMixin
 from ..agent_id import validate_agent_id
 from ..db import (
     Database,
@@ -274,7 +276,7 @@ class HubError(Exception):
         self.detail = detail
 
 
-class HubService:
+class HubService(OrchestrationMixin, ProxyAuthorityMixin):
     def __init__(self, db: Database, *, rate_per_minute: float = 60.0,
                  interrupts_per_hour: int = 6, criticals_per_hour: int = 5,
                  notify_sink=None,
@@ -4664,9 +4666,8 @@ class HubService:
         exactly the excuse behind silently dropped directives (operator,
         2026-07-19: 'it MUST be'). The rule, mechanical:
 
-        - OPERATOR sender, status reply/fyi: obliges the named seats and the
-          reporting delegate. Humans are allowed to be sloppy about status;
-          the fleet still owes the work.
+        - OPERATOR sender, status reply: obliges the named seats and scoped
+          reporting delegate. FYI is optional; critical requires reading.
         - PEER sender, status reply: obliges the named seats UNLESS it is
           the sender's answer coming back to you — i.e. it replies to YOUR
           OWN message. Your debt for an answer is CONSUMPTION (0078's
@@ -4684,7 +4685,7 @@ class HubService:
         if (m.kind != Kind.message or m.retracted
                 or m.status not in (Status.reply, Status.fyi)):
             return False
-        if m.sender == viewer_id:
+        if m.sender == viewer_id or (m.status == Status.fyi and (not m.critical or self.db.has_read(m.id, viewer_id))):
             return False
         if (viewer_id not in m.to and m.critical
                 and not self._operator_delegate_debt(viewer_id, m)
@@ -4997,7 +4998,7 @@ class HubService:
             return False  # an answer, not a request
         if m.sender not in self.operator_ids():
             return False
-        return viewer_id in self.reporting_delegate_ids()
+        return m.status != Status.fyi and self._delegation_reaches(viewer_id, m.channel, ("reporting",))
 
     def _addressed_debts(self, agent_id: str,
                          channels: list[str]) -> list[Message]:
@@ -5725,6 +5726,10 @@ class HubService:
 
     def store_set(self, agent: AgentInfo, channel: str, key: str, value: Any,
                   expect_version: int | None = None) -> StoreEntry:
+        with self.db.orchestration_lock:
+            return self._store_set_locked(agent, channel, key, value, expect_version)
+
+    def _store_set_locked(self, agent, channel, key, value, expect_version=None):
         park_ring = ""
         undeliverable_ring = ""
         self.require_membership(channel, agent.id)
@@ -5865,7 +5870,10 @@ class HubService:
             refusal = self._task_writer_refusal(channel, agent, current)
             if refusal is not None:
                 raise HubError(403, refusal)
+            if isinstance(value, dict) and any(f in value for f in ("primary_channel", "depends_on", "director", "work_type")) and expect_version is None:
+                raise HubError(400, "structured task updates require expect_version")
             self._validate_task_row(channel, value, agent, current)
+            self._validate_task_graph(agent, channel, key, value, current.value if current else {})
         if key.startswith("fact:"):
             # A shared number has ONE owner — its first writer (fleet review
             # F6, 2026-09-09: `fact:` rows were writable by any member and a
@@ -5879,12 +5887,36 @@ class HubService:
                                     f"'{current.updated_by}'. Ask them (an addressed "
                                     "open) to correct it; channel authority may "
                                     "overwrite it.")
+        if key.startswith("claim:"):
+            prior_row = self.db.store_get(channel, key)
+            prior_claim = prior_row.value if prior_row and isinstance(prior_row.value, dict) else {}
+            linked = prior_claim.get("task") is not None or (isinstance(value, dict) and value.get("task") is not None)
+            if linked:
+                if not isinstance(value, dict):
+                    raise HubError(400, "task-linked claims require an object")
+                if expect_version is None:
+                    raise HubError(400, "task-linked claims require expect_version")
+                owner = prior_claim.get("owner") or value.get("owner") or agent.id
+                effective = {**prior_claim, **value}
+                if not agent.operator and agent.id != owner and effective != prior_claim:
+                    raise HubError(403, "only the owner or operator may update a linked claim; ask its owner instead")
+                value = effective
         if key.startswith("claim:") and not isinstance(value, dict):
             existing = self.db.store_get(channel, key)
             if (existing and isinstance(existing.value, dict)
                     and existing.value.get("waiting_for_artifacts") is not None):
                 raise HubError(400, "artifact-dependent claims require an object; clear waiting_for_artifacts explicitly with CAS")
         if key.startswith("claim:") and isinstance(value, dict):
+            old = self.db.store_get(channel, key)
+            if old and isinstance(old.value, dict) and "task" in old.value and "task" not in value:
+                value = {**value, "task": old.value["task"]}
+            previous = old.value if old and isinstance(old.value, dict) else {}
+            if previous.get("task") is not None and not agent.operator and agent.id != previous.get("owner"):
+                if any(f in value and value[f] != previous.get(f) for f in ("task", "owner", "status", "state", "done")):
+                    raise HubError(403, "only the owner or operator may change linked claim lifecycle or task")
+            if value.get("task") is not None:
+                self._task_ref(agent, value["task"])
+
             # Identity fields inside store values are validated against the
             # caller (0068/ADR-0004; live-test finding): you may claim FOR
             # yourself, take a claim over in your own name, or leave
@@ -7965,7 +7997,8 @@ class HubService:
             return
         if agent.operator or self._is_channel_owner(channel, agent.id):
             return
-        if self.has_proxy(agent.id, channel):
+        principal = self.db.get_channel(channel).created_by
+        if self.proxy_allowed(agent.id, channel, principal):
             return
         for entry in self.db.store_keys(channel):
             key = entry["key"]
@@ -7996,8 +8029,9 @@ class HubService:
             return
         raise HubError(
             403, f"'{act_class}' is a GATED act in #{channel}: its owner "
-                 f"requires the owner's word before it happens. You hold no "
-                 f"'proxy' power here, so ask instead of acting — post "
+                 f"requires the owner's word before it happens. Acting under "
+                 f"proxy needs a scoped grant AND this operator's explicit "
+                 f"unexpired absence; otherwise ask instead of acting — post "
                  f"status=blocked, to=[owner], title 'gate: <slug>', with at "
                  f"most three plain questions, and write a gate:<slug> row "
                  f"naming the owner. Passing this act to another seat is "
@@ -8066,7 +8100,8 @@ class HubService:
             return True
         if agent.id in self.ruling_delegate_ids(channel):
             return True
-        return self.has_proxy(agent.id, channel)
+        info = self.db.get_channel(channel)
+        return bool(info and self.proxy_allowed(agent.id, channel, info.created_by))
 
     def transfer_channel_ownership(self, agent: AgentInfo, channel: str,
                                    new_owner: str) -> dict[str, Any]:
@@ -8212,9 +8247,8 @@ class HubService:
             # opposite antecedent ("and the user is not connected to the
             # hub"). Proxy is the owner's hand while they are away, not a
             # second vote while they are here.
-            proxy_ok = (channel is not None and self.has_proxy(agent.id, channel)
-                        and decider not in ("", agent.id)
-                        and self._out_of_contact(decider))
+            proxy_ok = (channel is not None
+                        and self.proxy_allowed(agent.id, channel, decider))
             # The DECIDER is stamped by the hub, never supplied: `updated_by`
             # records who typed, which is a different fact whenever a
             # delegate transcribes an absent owner's answer.
@@ -8423,7 +8457,8 @@ class HubService:
     _TASK_FIELDS = {"source", "requester", "coordinator", "rooms", "status",
                     "title", "report", "evidence", "delivered_by",
                     "delivered_at", "decided_by", "decided_at", "verdict",
-                    "rejections", "declared_by", "declared_at"}
+                    "rejections", "declared_by", "declared_at",
+                    "primary_channel", "director", "depends_on", "work_type"}
     _TASK_STAMPED = {"requester", "report", "evidence", "delivered_by",
                      "delivered_at", "decided_by", "decided_at", "rejections",
                      "declared_by", "declared_at"}
@@ -8472,8 +8507,9 @@ class HubService:
         if agent.id in (value.get("requester"), value.get("coordinator")):
             return None
         if self._delegation_reaches(agent.id, channel,
-                                    ("reporting", "ruling", "operational",
-                                     "proxy")):
+                                    ("reporting", "ruling", "operational")):
+            return None
+        if self.proxy_allowed(agent.id, channel, value.get("requester")):
             return None
         if current is None:
             return None   # anyone may mint a task from a root they can read
@@ -8510,6 +8546,8 @@ class HubService:
         if source.reply_to is not None:
             raise HubError(400, "a task tracks a thread ROOT (the request "
                                 "itself), not a reply")
+        if prior.get("source") and prior["source"] != f"{channel}#{source.seq}":
+            raise HubError(403, "a task source and requester are immutable")
         value["source"] = f"{channel}#{source.seq}"
         value["requester"] = source.sender
         title = value.get("title", prior.get("title") or source.title or "")
@@ -8545,8 +8583,7 @@ class HubService:
             if status in ("accepted", "rejected"):
                 requester = value["requester"]
                 if not (agent.operator or agent.id == requester
-                        or self._delegation_reaches(agent.id, channel,
-                                                    ("proxy",))):
+                        or self.proxy_allowed(agent.id, channel, requester)):
                     raise HubError(403, f"only {requester} (who asked), an "
                                         "operator, or a proxy delegate for "
                                         "this channel may accept or reject "
@@ -8661,6 +8698,7 @@ class HubService:
                 "requester": str(v.get("requester") or ""),
                 "coordinator": v.get("coordinator"),
                 "rooms": [str(r) for r in (v.get("rooms") or [])],
+                **{f: v.get(f) for f in ("primary_channel", "director", "depends_on", "work_type")},
                 "status": str(v.get("status") or "open"),
                 "report": v.get("report"),
                 "delivered_by": v.get("delivered_by"),
@@ -9029,12 +9067,11 @@ class HubService:
             who = str(v.get("needs_from") or "").strip()
             if tag == "seat" and who:
                 can, move = True, f"chase {who} — they are named and can end it"
-            elif tag == "operator" and PROXY_POWER in powers and any(
-                    self._out_of_contact(o) for o in ops):
+            elif tag == "operator" and self.proxy_allowed(agent.id, channel, who):
                 can, move = True, ("decide it yourself under `proxy` — the "
                                    "owner's call is yours while they are away")
             elif tag == "operator" and PROXY_POWER in powers:
-                can, move = False, ("the operator is reachable — ask them. "
+                can, move = False, ("the named operator has not explicitly declared absence — ask them. "
                                     "`proxy` is for their absence, and the "
                                     "hub will refuse it while they are here")
             elif tag == "operator":

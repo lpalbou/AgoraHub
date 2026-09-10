@@ -273,6 +273,8 @@ def qualifies(event: dict[str, Any], agent_id: str, important_only: bool = False
         return False
     if not important_only:
         return True
+    if event.get("urgency") in ("next_turn", "interrupt") and ("to-me" in tokens or "addressed" not in tokens):
+        return True
     if str(event.get("status", "")) == "fyi":
         return bool(tokens & {"critical", "escalated"})
     if str(event.get("status", "")) in ("open", "blocked"):
@@ -1001,6 +1003,12 @@ def _deliver_wake(batch, agent_id, *, preview: bool, once: bool,
                 # and it already rang for it (cycle 2: lead and gamma woke
                 # on an open addressed to beta because they owed something
                 # else).
+                priority = any(e.get("urgency") in ("next_turn", "interrupt")
+                               and ("to-me" in str(e.get("flags", "")).split(",")
+                                    or "addressed" not in str(e.get("flags", "")).split(","))
+                               for e in batch)
+                if priority:
+                    return 2 if "to-me" in flags else _DRIVER_BROADCAST_WAKE
                 mine = flags & {"to-me", "reply-to-me", "critical"}
                 operator_room_wide = any(
                     "from-operator" in str(e.get("flags", ""))

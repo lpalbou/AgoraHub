@@ -34,7 +34,7 @@ def _rows(client, hdr):
     return client.get("/owed", headers=hdr).json()["to_answer"]
 
 
-def test_operator_addressed_fyi_is_owed_but_not_due_and_still_delivered(tmp_path):
+def test_operator_addressed_fyi_is_optional_and_still_delivered(tmp_path):
     c = _client(tmp_path)
     op, beta = _seat(c, "laurent", operator=True), _seat(c, "beta")
     _room(c, op, "work", beta)
@@ -43,7 +43,7 @@ def test_operator_addressed_fyi_is_owed_but_not_due_and_still_delivered(tmp_path
         "status": "fyi", "to": ["beta"]})
     assert r.status_code == 200
     rows = _rows(c, beta)
-    assert len(rows) == 1 and rows[0]["due"] is False, rows          # owed, waits
+    assert rows == [], rows  # FYI is optional for every sender
     # the POSITIVE half: it is still on the ledger AND in the seat's inbox
     inbox = c.get("/inbox", headers=beta).json()
     ids = {m.get("id") for m in (inbox if isinstance(inbox, list) else inbox.get("messages", inbox.get("items", [])))}

@@ -25,6 +25,8 @@ Configuration (environment, all optional if `agora up` has run):
 
 from __future__ import annotations
 
+from urllib.parse import quote
+
 import asyncio
 import importlib.metadata
 import json
@@ -338,12 +340,10 @@ def _load_fastmcp():
 # nothing: a seat the server cannot classify is never hidden a tool.
 _OPERATOR_TOOLS = frozenset({
     "spawn_seat", "list_spawns", "stop_spawn",
-    "retire_agent", "unretire_agent", "block_agent", "unblock_agent"})
+    "retire_agent", "unretire_agent", "block_agent", "unblock_agent", "set_availability"})
 _DELEGATE_TOOLS = frozenset({"supervise", "get_desk", "read_rulings",
                              "ack_rulings"})
-_OPTIONAL_TOOLS = frozenset({"rate_agent", "rate_message", "get_reputation",
-                             "set_colleague_note", "get_colleague_notes",
-                             "read_ledger"})
+_OPTIONAL_TOOLS = frozenset({"rate_message", "read_ledger"})
 
 
 #: THE DRIVEN TIER (cycle 3, 2026-09-09). Measured over 215 driven turns
@@ -823,6 +823,39 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
         """Acknowledge rulings you have read."""
         return _call("POST", f"/channels/{channel}/ruling-acks",
                      json={"keys": keys})
+
+    @mcp.tool()
+    def set_availability(away_until: float | None = None) -> dict:
+        """Operator only: declare your absence until a Unix timestamp, or return with null."""
+        return _call("PUT", "/availability", json={"away_until": away_until})
+
+    @mcp.tool()
+    def get_advisors(work_type: str) -> dict:
+        """Visible task-specific reputation and your private work-type notes; advisory only."""
+        return _call("GET", "/advisors", params={"work_type": work_type})
+
+    @mcp.tool()
+    def get_briefing() -> dict:
+        """Your bounded desk: tasks, managers/directors, dependencies, claims and debts."""
+        return _call("GET", "/briefing")
+
+    @mcp.tool()
+    def get_task(channel: str, key: str) -> dict:
+        """Current task version, manager/director/requester routes and dependency readiness."""
+        return _call("GET", f"/channels/{quote(channel, safe='')}/tasks/{quote(key, safe='')}")
+
+    @mcp.tool()
+    def route_task(channel: str, key: str, role: str, expect_version: int,
+                   body: str, title: str, status: str = "open",
+                   urgency: str = "inbox", asks: list[dict] | None = None) -> dict:
+        """Post in the task channel to its current manager, director or requester.
+        Leave ask recipients empty; the hub fills them. Stale task version refuses.
+        FYI is optional; open/blocked asks require action; urgency controls timing.
+        """
+        return _call("POST", f"/channels/{quote(channel, safe='')}/tasks/{quote(key, safe='')}/route", json={
+            "role": role, "expect_version": expect_version,
+            "message": {"body": body, "title": title, "status": status,
+                        "urgency": urgency, "data": {"asks": asks or []}}})
 
     @mcp.tool()
     def get_desk() -> dict:

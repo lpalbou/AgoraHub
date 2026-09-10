@@ -229,3 +229,13 @@ auditability are never compressed away.
 - **Leaked access**: membership is checked on every operation; invites are
   single-use and owner-minted; DMs are structurally closed; secrets are
   stored hashed.
+
+## Task responsibilities
+
+Use the [communication table](collaboration.md#3-the-cycles) to choose a room,
+required response and urgency separately. Your [personal briefing](tasks.md#the-personal-desk)
+shows task routes and current state. Own the outcome: test assumptions,
+propose better solutions and share evidence that helps another seat. Managers
+coordinate workers and report to directors; the delegate enables the team and
+condenses decisions for the operator. Do not wait for permission to offer a
+relevant, evidence-backed correction within your mission.

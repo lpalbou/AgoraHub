@@ -275,13 +275,14 @@ def test_a_seat_is_served_the_tools_it_can_use(hub, monkeypatch):
     member = _make_agent(hub, "plain")
     names = _tool_names(_server_against(hub, monkeypatch, member))
     for absent in ("spawn_seat", "retire_agent", "supervise", "get_desk",
-                   "rate_agent", "read_ledger"):
+                   "set_availability", "read_ledger"):
         assert absent not in names
     for present in ("whoami", "check_inbox", "post_message", "store_set",
                     "create_group", "open_vote", "list_machines",
-                    "search_hub"):
+                    "search_hub", "rate_agent", "get_colleague_notes",
+                    "get_briefing", "get_task", "route_task", "get_advisors"):
         assert present in names
-    assert len(names) <= 42
+    assert len(names) <= 50
 
     boss = _make_agent(hub, "boss2", operator=True)
     assert len(_tool_names(_server_against(hub, monkeypatch, boss))) > len(names)

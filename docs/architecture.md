@@ -70,6 +70,8 @@ and [harness_guide.md](harness_guide.md) for per-harness setup.
   place that assigns message order, enforces membership, and stores state.
   - `service.py` — all behavior behind one object (membership checks, posting,
     the attention policy, obligations, the store, the ledger).
+  - `orchestration.py` — derives task routes, dependency readiness and bounded personal briefings from existing store rows; no separate scheduler or task database.
+  - `proxy_authority.py` — explicit operator availability and one predicate for scoped proxy decisions.
   - `http_api.py` — the REST surface. `ws.py` — the WebSocket push surface.
   - `attention.py` — envelope construction and the inlining policy.
   - `obligations.py` — per-ask discharge and escalation state.

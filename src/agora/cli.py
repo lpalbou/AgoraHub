@@ -1149,7 +1149,10 @@ def cmd_task_open(args: argparse.Namespace) -> None:
     from .models import Status
 
     slug = args.channel
-    if not (args.charter and args.roster and args.delegate):
+    manager = getattr(args, "manager", None) or args.delegate
+    if getattr(args, "manager", None) and not args.commission:
+        sys.exit("task open --manager requires --commission")
+    if not (args.charter and args.roster and manager):
         sys.exit("usage: agora task open SLUG --charter FILE --roster FILE "
                  "--delegate SEAT [--commission FILE] [--announce CHANNEL] "
                  "[--private] [--ttl 7d] --as <operator>")
@@ -1161,9 +1164,9 @@ def cmd_task_open(args: argparse.Namespace) -> None:
         seat, _, mission = line.partition("\t")
         roster.append((seat.strip(), mission.strip()))
     seats = [seat for seat, _ in roster]
-    if args.delegate not in seats:
-        sys.exit(f"task open: delegate '{args.delegate}' is not on the roster "
-                 f"({', '.join(seats)}) — a steward is an enrolled seat")
+    for assigned in (manager, getattr(args, "director", None), args.delegate):
+        if assigned and assigned not in seats:
+            sys.exit(f"task open: assigned seat {assigned!r} must be on the roster")
     url = _hub_url(args)
     admin = _admin_key_or_exit(args, url)
     ah = {"Authorization": f"Bearer {admin}"}
@@ -1201,17 +1204,18 @@ def cmd_task_open(args: argparse.Namespace) -> None:
                 else:
                     await _invite_to_channel(c, slug, seat, not args.private)
                     report["invited"].append(seat)
-            r = httpx.put(f"{url}/admin/delegation", headers=ah, timeout=10.0,
-                          json={"agent_id": args.delegate,
-                                "powers": ["reporting", "operational"],
-                                "ttl_seconds": parse_ttl(args.ttl or "7d"),
-                                "note": f"steward of task {slug}",
-                                "scope": slug,
-                                # the hub refuses a blank mission for a delegate;
-                                # the roster line IS the delegate's charge
-                                **({"mission": delegate_mission} if delegate_mission else {})})
-            if r.status_code != 200:
-                sys.exit(f"task open: delegation failed: {r.status_code} {r.text}")
+            if args.delegate:
+                r = httpx.put(f"{url}/admin/delegation", headers=ah, timeout=10.0,
+                              json={"agent_id": args.delegate,
+                                    "powers": ["reporting", "operational"],
+                                    "ttl_seconds": parse_ttl(args.ttl or "7d"),
+                                    "note": f"steward of task {slug}",
+                                    "scope": slug,
+                                    # the hub refuses a blank mission for a delegate;
+                                    # the roster line IS the delegate's charge
+                                    **({"mission": delegate_mission} if delegate_mission else {})})
+                if r.status_code != 200:
+                    sys.exit(f"task open: delegation failed: {r.status_code} {r.text}")
             if args.commission:
                 text = _P(args.commission).read_text()
                 head = next((ln.strip() for ln in text.splitlines() if ln.strip()), slug)
@@ -1219,19 +1223,33 @@ def cmd_task_open(args: argparse.Namespace) -> None:
                     slug, text, title=f"COMMISSION: {head[:100]}",
                     status=Status.open, to=[s for s in seats if s != args.as_agent],
                     asks=[{"id": "1",
-                           "text": (f"{args.delegate}: steward this task to delivery — "
+                           "text": (f"{manager}: manage this task to delivery — "
                                     f"one merged deliverable, cited, accepted by "
                                     f"{args.as_agent}."),
-                           "to": [args.delegate]}],
+                           "to": [manager]}],
                     notice={"kind": "job", "key": f"{slug}-commission"})
                 seq = getattr(msg, "seq", None) or (msg.get("seq") if isinstance(msg, dict) else None)
                 report["commission"] = f"{slug}#{seq}"
                 report["task_row"] = f"task:msg-{seq}"
+                current = await c.store_get(slug, report["task_row"])
+                value = {**current["value"], "coordinator": manager,
+                         "primary_channel": slug,
+                         "director": getattr(args, "director", None),
+                         "depends_on": []}
+                if getattr(args, "work_type", None):
+                    value["work_type"] = args.work_type
+                for ref in getattr(args, "depends_on", []) or []:
+                    dep_channel, _, dep_key = ref.partition("/")
+                    value["depends_on"].append({"channel": dep_channel, "key": dep_key})
+                await c.store_set(slug, report["task_row"], value,
+                                  expect_version=current["version"])
+                report["manager"] = manager
+
             if args.announce:
                 try:
                     await c.post(args.announce,
                                  f"Work started: {slug} — {purpose}. Follow it in #{slug}; "
-                                 f"steward: {args.delegate}.",
+                                 f"manager: {manager}.",
                                  title=f"task opened: {slug}", status=Status.fyi,
                                  notice={"kind": "announcement", "key": f"{slug}-opened"})
                     report["announced_in"] = args.announce
@@ -4900,8 +4918,16 @@ def build_parser() -> argparse.ArgumentParser:
                     help="open: the task charter file (its first line is the purpose)")
     tk.add_argument("--roster", default=None,
                     help="open: TSV of `seat<TAB>mission`, one enrolled seat per line")
+    tk.add_argument("--manager", default=None,
+                    help="open: task coordinator; an assignment, no delegation grant")
+    tk.add_argument("--director", default=None,
+                    help="open: manager reports to this enrolled seat")
+    tk.add_argument("--work-type", default=None,
+                    help="open: immutable work category for this task")
+    tk.add_argument("--depends-on", action="append", default=[],
+                    help="open: prerequisite CHANNEL/task:KEY (repeatable; requires acceptance)")
     tk.add_argument("--delegate", default=None,
-                    help="open: the ONE steward (must be on the roster)")
+                    help="open: explicitly grant reporting/operational to this chief of staff; legacy manager fallback")
     tk.add_argument("--commission", default=None,
                     help="open: post this file as the operator's commission "
                          "(the hub mints the task row from it)")
