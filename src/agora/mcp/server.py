@@ -807,8 +807,9 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
 
     @mcp.tool()
     def read_message(channel: str, message_id: str) -> str:
-        """Deliberately fetch one message's body — plus any unread messages in
-        its reply chain (so you never act on half a conversation). This is how
+        """Fetch this message and unread earlier messages in its reply chain.
+        Reading a request does not fetch its later answers. For consumption,
+        use get_briefing's read target or answer_id to fetch the answer. This is how
         you 'open' an envelope whose headline warranted reading; it also
         satisfies the read requirement of critical messages."""
         result = _call("GET", f"/channels/{channel}/messages/{message_id}")
@@ -1228,7 +1229,22 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
     @mcp.tool()
     def store_set(channel: str, key: str, value: Any, expect_version: int | None = None) -> dict:
         """Write a key to the channel's shared store. Pass expect_version for
-        compare-and-swap (0 = key must not exist yet); on conflict, re-read."""
+        compare-and-swap (0 = key must not exist yet); on conflict, re-read.
+
+        Accepted task findings: key=finding:msg-<task source seq>:<stable-id>,
+        value={kind:"task-finding-v1", task:{channel,key:"task:msg-<seq>"},
+        state:"accepted", source:"channel#seq", contract:"affected behavior",
+        evidence:[{kind:"fs",ref:"evidence.md@1"}]}. Acceptance is hub-stamped;
+        task/source/contract/evidence are immutable. Use CAS for every write.
+        Before delivery, an authorized coordinator sets state:"disposed",
+        disposition:"incorporated" or "merged", disposition_evidence:[...],
+        artifact:{path,version,sha256,excerpt} naming CURRENT VFS text, its
+        UTF-8 digest and exact excerpt (>=12 chars). Final evidence must cite
+        that same path@version. A merged finding also names target:<finding key>.
+        Rejected/superseded need reason (>=12 chars), verified disposition
+        evidence and requester/operator/ruling/proxy authority; superseded
+        also needs target. Typed rows cannot silently disappear from delivery.
+        """
         return _call("PUT", f"/channels/{channel}/store/{key}",
                      json={"value": value, "expect_version": expect_version})
 

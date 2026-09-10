@@ -121,6 +121,7 @@ from ..vote import (
     vote_info,
 )
 from .attention import DEFAULT_RESPONSE_SLA_MINUTES, AttentionPolicy, SlidingWindowBudget
+from .findings import DISPOSITIONS, KIND as FINDING_KIND, PREFIX as FINDING_PREFIX, is_typed as is_typed_finding, key_for as finding_key_for, task_ref as finding_task_ref
 from .notify import FanOut, LoopBinder, Notifier
 from .obligations import (
     DischargeState,
@@ -3003,6 +3004,10 @@ class HubService(OrchestrationMixin, ProxyAuthorityMixin):
         if data is not None and "consumes" in data:
             consume_targets, data["consumes"] = self._validate_consumes(
                 agent, channel, data["consumes"])
+        # This is deliberately before insert: a finding-integration failure
+        # must not append a report that looks delivered but cannot stamp its
+        # task.  The post-commit task projection remains a projection only.
+        self._validate_task_delivery(agent, channel, payload, data, parent)
         addressees = self._obligation_addressees(payload, data)
         dedupe_key = self._message_contract(
             agent, channel, payload, data, addressees
@@ -3053,14 +3058,19 @@ class HubService(OrchestrationMixin, ProxyAuthorityMixin):
                 urgency, downgraded = Urgency.next_turn, True
 
         try:
-            message = self.db.insert_message(
-                channel, agent.id, kind=Kind.message.value,
-                status=payload.status.value, urgency=urgency.value,
-                title=sanitize_title(payload.title), body=payload.body,
-                data=data, reply_to=payload.reply_to,
-                critical=payload.critical, downgraded=downgraded,
-                to=payload.to, dedupe_key=dedupe_key,
-            )
+            # VFS mutations and task/finding store writes take this lock too.
+            # Rechecking immediately before insert makes the current-artifact
+            # predicate and appended delivery one serialized operation.
+            with self.db.orchestration_lock:
+                self._validate_task_delivery(agent, channel, payload, data, parent)
+                message = self.db.insert_message(
+                    channel, agent.id, kind=Kind.message.value,
+                    status=payload.status.value, urgency=urgency.value,
+                    title=sanitize_title(payload.title), body=payload.body,
+                    data=data, reply_to=payload.reply_to,
+                    critical=payload.critical, downgraded=downgraded,
+                    to=payload.to, dedupe_key=dedupe_key,
+                )
         except DuplicateMessage as exc:
             raise HubError(
                 409,
@@ -5874,6 +5884,19 @@ class HubService(OrchestrationMixin, ProxyAuthorityMixin):
                 raise HubError(400, "structured task updates require expect_version")
             self._validate_task_row(channel, value, agent, current)
             self._validate_task_graph(agent, channel, key, value, current.value if current else {})
+        # Opt-in only: pre-existing freeform finding:* rows retain their
+        # ordinary store semantics.  Once a row declares task-finding-v1,
+        # omission cannot erase its discriminator or task binding.
+        existing_finding = self.db.store_get(channel, key)
+        if (key.startswith(FINDING_PREFIX)
+                and (is_typed_finding(key, value)
+                     or (existing_finding is not None
+                         and is_typed_finding(key, existing_finding.value)))):
+            if expect_version is None:
+                raise HubError(400, "typed finding writes require expect_version (0 to create)")
+            value = self._validate_finding_row(
+                agent, channel, key, value,
+                existing_finding.value if existing_finding is not None else None)
         if key.startswith("fact:"):
             # A shared number has ONE owner — its first writer (fleet review
             # F6, 2026-09-09: `fact:` rows were writable by any member and a
@@ -5890,6 +5913,11 @@ class HubService(OrchestrationMixin, ProxyAuthorityMixin):
         if key.startswith("claim:"):
             prior_row = self.db.store_get(channel, key)
             prior_claim = prior_row.value if prior_row and isinstance(prior_row.value, dict) else {}
+            # Answer waits share the claim's owner/CAS semantics and must be
+            # normalized before the generic linked/non-object handling below.
+            from .claim_waits import validate_answer_waits
+            value = validate_answer_waits(self, agent, channel, value,
+                                          prior_claim, expect_version)
             linked = prior_claim.get("task") is not None or (isinstance(value, dict) and value.get("task") is not None)
             if linked:
                 if not isinstance(value, dict):
@@ -7182,6 +7210,16 @@ class HubService(OrchestrationMixin, ProxyAuthorityMixin):
                  expect_version: int | None = None,
                  description: str | None = None,
                  content_b64: str | None = None) -> FsFile:
+        """Write under the task/delivery lock so current-artifact checks hold."""
+        with self.db.orchestration_lock:
+            return self._fs_write(agent, channel, path, content, mime,
+                                  expect_version, description, content_b64)
+
+    def _fs_write(self, agent: AgentInfo, channel: str, path: str,
+                 content: str | None = None, mime: str = "text/markdown",
+                 expect_version: int | None = None,
+                 description: str | None = None,
+                 content_b64: str | None = None) -> FsFile:
         """Create or edit a file (compare-and-swap via `expect_version`; 0 means
         'must not exist yet'). Exactly one of `content` (text) or `content_b64`
         (strict standard base64 — the binary deposit path for images/PDFs) must
@@ -7367,6 +7405,12 @@ class HubService(OrchestrationMixin, ProxyAuthorityMixin):
         return out
 
     def fs_delete(self, agent: AgentInfo, channel: str, path: str,
+                  expect_version: int | None = None) -> bool:
+        """Delete under the task/delivery lock so current-artifact checks hold."""
+        with self.db.orchestration_lock:
+            return self._fs_delete(agent, channel, path, expect_version)
+
+    def _fs_delete(self, agent: AgentInfo, channel: str, path: str,
                   expect_version: int | None = None) -> bool:
         """Delete a file (CAS via `expect_version`). Tombstones it so the path's
         version stays monotonic across delete+recreate (CAS remains a valid
@@ -8640,6 +8684,216 @@ class HubService(OrchestrationMixin, ProxyAuthorityMixin):
             "rejections": 0,
             "declared_by": "hub", "declared_at": time.time(),
         }, "hub", None)
+
+    def _typed_findings(self, channel: str, task_key: str) -> list[tuple[str, dict[str, Any]]]:
+        """Live typed rows for one task.  Generic finding:* rows are ignored."""
+        out: list[tuple[str, dict[str, Any]]] = []
+        prefix = f"{FINDING_PREFIX}{task_key[len(self._TASK_PREFIX):]}:"
+        for entry in self.db.store_keys(channel):
+            if not entry["key"].startswith(prefix):
+                continue
+            row = self.db.store_get(channel, entry["key"])
+            if row and is_typed_finding(entry["key"], row.value):
+                if finding_task_ref(row.value) == (channel, task_key):
+                    out.append((entry["key"], row.value))
+        return out
+
+    def finding_integration_summary(self, channel: str, task_key: str) -> dict[str, Any]:
+        """Compact caller-visible task-finding state for briefing/desk surfaces.
+
+        Content identity is mechanically checked; whether an excerpt really
+        implements the finding remains a review judgment.
+        """
+        rows = []
+        for key, value in self._typed_findings(channel, task_key):
+            row = {name: value.get(name) for name in
+                         ("source", "contract", "state", "disposition", "accepted_by", "decided_by")}
+            row["key"] = key
+            if row.get("state") == "accepted":
+                row["integration_status"] = "pending"
+            elif row.get("disposition") in ("incorporated", "merged"):
+                try:
+                    self._finding_artifact(channel, value.get("artifact"), current=True)
+                    row["integration_status"] = "ready"
+                except HubError as exc:
+                    row["integration_status"] = "stale"
+                    row["blocker"] = exc.detail
+            else:
+                row["integration_status"] = "ready"
+            rows.append(row)
+        pending = [row["key"] for row in rows
+                   if row.get("integration_status") in ("pending", "stale")]
+        return {"pending": pending, "rows": rows}
+
+    def _finding_artifact(self, channel: str, artifact: Any, *, current: bool) -> dict[str, Any]:
+        if not isinstance(artifact, dict) or set(artifact) != {"path", "version", "sha256", "excerpt"}:
+            raise HubError(400, "finding artifact must be exactly {path, version, sha256, excerpt}")
+        path, version = artifact["path"], artifact["version"]
+        digest, excerpt = artifact["sha256"], artifact["excerpt"]
+        if not isinstance(path, str) or not isinstance(version, int) or isinstance(version, bool):
+            raise HubError(400, "finding artifact needs a path and positive integer version")
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise HubError(400, "finding artifact sha256 must be 64 lowercase hex characters")
+        if not isinstance(excerpt, str) or len(excerpt.strip()) < 12:
+            raise HubError(400, "finding artifact excerpt must contain at least 12 non-space characters")
+        norm = self._normalize_fs_path(path)
+        archived = self.db.fs_version(channel, FS_PREFIX + norm, version)
+        head = self.db.fs_get(channel, FS_PREFIX + norm)
+        if archived is None or head is None or head.get("deleted"):
+            raise HubError(400, "finding artifact names no live VFS revision")
+        if current and int(head["version"]) != version:
+            raise HubError(409, f"finding artifact '{norm}@{version}' is stale; current revision is @{head['version']}")
+        value = archived.get("value") if isinstance(archived.get("value"), dict) else {}
+        content = value.get("content")
+        if not isinstance(content, str):
+            raise HubError(400, "finding artifact must be a text VFS revision")
+        actual = hashlib.sha256(content.encode()).hexdigest()
+        if actual != digest or excerpt not in content:
+            raise HubError(400, "finding artifact proof does not match the cited VFS bytes")
+        return {"path": norm, "version": version, "sha256": actual, "excerpt": excerpt}
+
+    def _validate_finding_row(self, agent: AgentInfo, channel: str, key: str,
+                              value: Any, previous: Any) -> dict[str, Any]:
+        """Validate opt-in finding rows and stamp acceptance/disposition facts."""
+        prior = previous if is_typed_finding(key, previous) else {}
+        if not isinstance(value, dict):
+            raise HubError(400, "typed finding rows must be objects")
+        merged = {**prior, **value}
+        if merged.get("kind") != FINDING_KIND:
+            raise HubError(400, "typed finding kind is task-finding-v1")
+        ref = finding_task_ref(merged)
+        if ref is None or ref[0] != channel:
+            raise HubError(400, "typed finding task must be exactly {channel, key} in this channel")
+        task_channel, task_key = ref
+        if key != finding_key_for(task_key, key.rsplit(":", 1)[-1]):
+            raise HubError(400, "typed finding key must be finding:<task-slug>:<stable-id>")
+        task = self.db.store_get(task_channel, task_key)
+        if task is None or not isinstance(task.value, dict):
+            raise HubError(404, "typed finding names a task that does not exist")
+        refusal = self._task_writer_refusal(channel, agent, task)
+        if refusal is not None:
+            raise HubError(403, refusal)
+        state = merged.get("state")
+        if state not in ("accepted", "disposed"):
+            raise HubError(400, "typed finding state must be accepted or disposed")
+        immutable_claim = ("task", "source", "contract", "evidence")
+        if prior:
+            # Evidence on acceptance records what the hub observed then.
+            # Re-resolving it during a later disposition would turn an
+            # unrelated current store edit into a poisoned, uncloseable row.
+            changed = [name for name in immutable_claim
+                       if name in value and value[name] != prior.get(name)]
+            if changed:
+                raise HubError(400, "accepted finding fields are immutable: "
+                               + ", ".join(changed)
+                               + "; record a successor finding instead")
+            merged.update({name: prior[name] for name in immutable_claim})
+        else:
+            source = self._resolve_source(channel, merged.get("source"))
+            if source is None or source.kind != Kind.message or source.retracted:
+                raise HubError(400, "typed finding source must name a live message in this channel")
+            contract = merged.get("contract")
+            if not isinstance(contract, str) or not contract.strip() or len(contract) > 800:
+                raise HubError(400, "typed finding contract must be a non-empty string of <= 800 chars")
+            merged["contract"] = sanitize_text(contract, 800, field="finding contract")
+            merged["source"] = f"{channel}#{source.seq}"
+            merged["evidence"] = self._validate_evidence(channel, merged.get("evidence"), agent_id=agent.id)
+        for stamped in ("accepted_by", "accepted_at", "decided_by", "decided_at"):
+            if stamped in prior:
+                merged[stamped] = prior[stamped]
+            else:
+                merged.pop(stamped, None)
+        if not prior:
+            merged["accepted_by"], merged["accepted_at"] = agent.id, time.time()
+        else:
+            # An accepted finding is an auditable claim, not a mutable draft.
+            # A changed claim needs a successor row (or a fresh, explicitly
+            # versioned re-acceptance workflow), never an in-place rewrite.
+            immutable = ("accepted_by", "accepted_at")
+            changed = [name for name in immutable if merged.get(name) != prior.get(name)]
+            if changed:
+                raise HubError(400, "accepted finding fields are immutable: "
+                               + ", ".join(changed)
+                               + "; record a successor finding instead")
+        if prior.get("state") == "disposed" and state != "disposed":
+            raise HubError(400, "a disposed typed finding is terminal")
+        if state == "accepted":
+            for name in ("disposition", "artifact", "disposition_evidence", "reason", "target"):
+                merged.pop(name, None)
+            return merged
+        disposition = merged.get("disposition")
+        if disposition not in DISPOSITIONS:
+            raise HubError(400, "typed finding disposition must be incorporated, merged, superseded or rejected")
+        # Disposition is a release decision.  A coordinator, reporting/ruling
+        # delegate, requester, proxy, or operator may make it; a normal worker
+        # cannot turn their own accepted finding into a pass.
+        elevated = (agent.operator or agent.id == task.value.get("requester")
+                    or self._delegation_reaches(agent.id, channel, ("ruling",))
+                    or self.proxy_allowed(agent.id, channel, task.value.get("requester")))
+        ordinary = (elevated or agent.id == task.value.get("coordinator")
+                    or self._delegation_reaches(agent.id, channel, ("reporting",)))
+        allowed = elevated if disposition in ("rejected", "superseded") else ordinary
+        if not allowed:
+            raise HubError(403, "rejecting/superseding needs the requester, operator, proxy, or ruling delegate; incorporating/merging may use the coordinator or reporting delegate")
+        merged["disposition_evidence"] = self._validate_evidence(channel, merged.get("disposition_evidence"), agent_id=agent.id)
+        if not any(item.get("verified") is True for item in merged["disposition_evidence"] if isinstance(item, dict)):
+            raise HubError(400, "typed finding disposition evidence needs a hub-verifiable citation")
+        if disposition in ("incorporated", "merged"):
+            merged["artifact"] = self._finding_artifact(channel, merged.get("artifact"), current=True)
+        else:
+            reason = merged.get("reason")
+            if not isinstance(reason, str) or len(reason.strip()) < 12:
+                raise HubError(400, "superseded/rejected typed findings need a substantive recorded reason")
+            merged["reason"] = sanitize_text(reason, 800, field="finding disposition reason")
+        if disposition in ("merged", "superseded"):
+            target = merged.get("target")
+            if not isinstance(target, str) or target == key:
+                raise HubError(400, "merged/superseded typed finding needs another finding key as target")
+            target_row = self.db.store_get(channel, target)
+            if target_row is None or not is_typed_finding(target, target_row.value) or finding_task_ref(target_row.value) != ref:
+                raise HubError(400, "merged/superseded target must be a typed finding for this task")
+            seen = {key}
+            cursor = target
+            while cursor:
+                if cursor in seen:
+                    raise HubError(400, "typed finding target cycle refused")
+                seen.add(cursor)
+                next_row = self.db.store_get(channel, cursor)
+                if next_row is None or not is_typed_finding(cursor, next_row.value):
+                    break
+                cursor = str(next_row.value.get("target") or "")
+        else:
+            merged.pop("target", None)
+        merged["decided_by"], merged["decided_at"] = agent.id, time.time()
+        return merged
+
+    def _validate_task_delivery(self, agent: AgentInfo, channel: str, payload: PostMessage,
+                                data: dict[str, Any] | None, parent: Message | None) -> None:
+        """Refuse before append when an opt-in accepted finding lacks proof."""
+        if parent is None or payload.status != Status.resolved:
+            return
+        task_key = f"{self._TASK_PREFIX}msg-{parent.seq}"
+        task = self.db.store_get(channel, task_key)
+        if task is None or not isinstance(task.value, dict) or task.value.get("status") != "open":
+            return
+        named = set(parent.to) | ask_addressees(parent)
+        if not (agent.id in self.reporting_delegate_ids() or agent.id in named or agent.id == task.value.get("coordinator")):
+            return
+        unresolved = [key for key, value in self._typed_findings(channel, task_key) if value.get("state") != "disposed"]
+        if unresolved:
+            raise HubError(409, "delivery is blocked by accepted findings: " + ", ".join(unresolved) + ". Record a justified disposition with live proof.")
+        cited = {(str(item.get("channel") or channel), str(item.get("ref")))
+                 for item in (data or {}).get("evidence", []) if isinstance(item, dict) and item.get("kind") == "fs"}
+        missing = []
+        for key, value in self._typed_findings(channel, task_key):
+            if value.get("disposition") not in ("incorporated", "merged"):
+                continue
+            artifact = self._finding_artifact(channel, value.get("artifact"), current=True)
+            ref = f"{artifact['path']}@{artifact['version']}"
+            if (channel, ref) not in cited:
+                missing.append(f"{key} -> {ref}")
+        if missing:
+            raise HubError(409, "delivery evidence must cite each current integrated finding artifact: " + ", ".join(missing))
 
     def _task_on_resolved(self, message: Message, parent: Message | None) -> None:
         """Move a task on a `resolved` reply to its source: the requester's

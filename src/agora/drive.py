@@ -70,7 +70,9 @@ from .models import elide
 
 import contextlib
 import dataclasses
+import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -2279,6 +2281,9 @@ class Driver:
         from .artifact_wait import ArtifactResumeReceipts
         self._artifact_resume_receipts = ArtifactResumeReceipts(home, agent_id, hub, _emit)
         self._artifact_wait_pending = False
+        self._answer_wait_pending = False
+        self._answer_wait_deadline: float | None = None
+        self._answer_wait_event: str | None = None
         self._task_wait_pending = False
         self._artifact_selected = None
         self._artifact_resume_prompt = ""
@@ -3494,11 +3499,14 @@ class Driver:
             # soon: a transient 500 must not put a working seat to sleep for
             # twenty minutes.
             return DRIVE_CHAIN_WAIT
-        if self._artifact_wait_pending or self._task_wait_pending:
+        if self._artifact_wait_pending or self._answer_wait_pending or self._task_wait_pending:
             # Artifact writes need not address this seat. Metadata polling
             # keeps an explicitly waiting owner reachable without model wakes
             # or dependence on a truncated/old notification window.
-            return min(self.max_wait, DRIVE_CHAIN_WAIT)
+            wait = min(self.max_wait, DRIVE_CHAIN_WAIT)
+            if self._answer_wait_deadline is not None:
+                wait = min(wait, max(0.0, self._answer_wait_deadline - time.time()))
+            return wait
         return self.max_wait
 
     def run_turn(self, *, broadcast: bool = False) -> bool:
@@ -3789,19 +3797,40 @@ class Driver:
                 except Exception:
                     self._task_wait_pending = True
                     return False
-            if not self._is_terminal(value.get("status"), value.get("state")):
-                return True
-            if value.get("waiting_for_artifacts") is not None:
-                if not channel or not heads <= {"blocked", "parked"}:
+            artifacts = value.get("waiting_for_artifacts")
+            answers = value.get("waiting_for_answers")
+            # Answer waits are an explicit suspension even when the owner
+            # happened to leave status as active/working.  Otherwise a prose
+            # rewrite from "blocked" to "active" recreates the exact spin
+            # this declaration was meant to stop.
+            if answers is not None:
+                if not channel:
                     return False
-                from .artifact_wait import declaration_signature
-                signature = declaration_signature(value)
                 # A consumed declaration is still the owner's blocked work;
                 # generic initiative/phase ignition must not bypass its gate.
-                self._artifact_wait_pending = True
+                self._artifact_wait_pending = artifacts is not None
+                self._answer_wait_pending = answers is not None
+                answer_event = self._answer_wait_event_for(answers, value.get("wait_until"))
+                self._answer_wait_event = answer_event
+                if answers is not None and answer_event is None:
+                    return False
+                signature = self._dependency_signature(value, answer_event)
                 if self._artifact_resume_receipts.seen(channel, key, signature):
                     return False
-                return self._artifacts_satisfied(value["waiting_for_artifacts"])
+                dependency_failed = any(word in answer_event for word in ("deadline:", "unavailable", "retracted:"))
+                if artifacts is not None and not dependency_failed and not self._artifacts_satisfied(artifacts):
+                    return False
+                return True
+            if not self._is_terminal(value.get("status"), value.get("state")):
+                return True
+            if artifacts is not None:
+                if not channel or not heads <= {"blocked", "parked"}:
+                    return False
+                self._artifact_wait_pending = True
+                signature = self._dependency_signature(value)
+                if self._artifact_resume_receipts.seen(channel, key, signature):
+                    return False
+                return self._artifacts_satisfied(artifacts)
             # A park with a DECLARED dependency that has since moved is the
             # one terminal row worth reconsidering (2026-08-06): this seat
             # said in structured state "resume when that row changes", and
@@ -3844,6 +3873,114 @@ class Driver:
             except Exception:
                 return False
         return True
+
+    @staticmethod
+    def _dependency_signature(value: dict, answer_event: str | None = None) -> str:
+        """Stable identity for one owner-declared dependency reconsideration.
+
+        Claim CAS versions and prose fields are deliberately absent.  The
+        server canonicalizes answer waits, but sorting here makes old rows and
+        direct test fixtures equally unable to buy another work turn by merely
+        reordering the same requirements.
+        """
+        from .artifact_wait import declaration_signature
+        answers = value.get("waiting_for_answers")
+        # Preserve pre-answer-wait artifact receipts across the upgrade.
+        if answers is None:
+            return declaration_signature(value)
+        normalized = []
+        if isinstance(answers, list):
+            for item in answers:
+                if isinstance(item, dict):
+                    normalized.append((item.get("channel"), item.get("message_id"),
+                                       item.get("after_seq", 0)))
+        wait_until = value.get("wait_until")
+        if isinstance(wait_until, bool) or not isinstance(wait_until, (int, float)):
+            wait_until = None
+        return hashlib.sha256(json.dumps(
+            [declaration_signature(value), sorted(normalized), wait_until, answer_event],
+            sort_keys=True, separators=(",", ":"),
+        ).encode()).hexdigest()
+
+    def _answer_wait_event_for(self, requirements: Any, wait_until: Any) -> str | None:
+        """Return one ready dependency event, or None while a wait remains.
+
+        The hub's reply-state endpoint uses its actual obligation/closure
+        helpers. Polling it is a browse, never a deliberate-read receipt.
+        """
+        if not isinstance(requirements, list) or not 1 <= len(requirements) <= 64:
+            return None
+        deadline = None
+        if wait_until is not None:
+            if (isinstance(wait_until, bool) or not isinstance(wait_until, (int, float))
+                    or not math.isfinite(wait_until)):
+                return None
+            deadline = float(wait_until)
+        normalized: set[tuple[str, str, int]] = set()
+        for item in requirements:
+            if (not isinstance(item, dict) or set(item) - {"channel", "message_id", "after_seq"}
+                    or not isinstance(item.get("channel"), str)
+                    or not isinstance(item.get("message_id"), str)
+                    or not item["channel"] or not item["message_id"]):
+                return None
+            after_seq = item.get("after_seq", 0)
+            if isinstance(after_seq, bool) or not isinstance(after_seq, int) or after_seq < 0:
+                return None
+            normalized.add((item["channel"], item["message_id"], after_seq))
+        if len(normalized) != len(requirements):
+            return None
+        # Expiry is an explicit reconsideration event, never a fabricated
+        # answer.  Validate the declaration above before it can release work.
+        now = time.time()
+        if deadline is not None and deadline > now:
+            self._answer_wait_deadline = deadline
+        if deadline is not None and now >= deadline:
+            return "deadline:" + repr(deadline)
+        api_key = _config.get_cached_key(self.hub, self.agent_id)
+        if not api_key:
+            return None
+        import httpx
+        from urllib.parse import quote
+        headers = {"Authorization": f"Bearer {api_key}"}
+        events = []
+        for channel, root, after_seq in sorted(normalized):
+            try:
+                response = httpx.get(
+                    f"{self.hub.rstrip('/')}/channels/{quote(channel, safe='')}/messages/"
+                    f"{quote(root, safe='')}/reply-state",
+                    params={"after_seq": after_seq}, headers=headers, timeout=5.0,
+                )
+            except Exception:
+                return None
+            # A deleted/unreadable dependency needs one owner decision, not a
+            # silent permanent park. The prompt exposes no unavailable payload.
+            if response.status_code in (403, 404):
+                events.append((channel, root, "unavailable"))
+                continue
+            if response.status_code != 200:
+                return None
+            try:
+                state = response.json()
+            except Exception:
+                return None
+            if not isinstance(state, dict):
+                return None
+            if state.get("retracted"):
+                events.append((channel, root, "retracted:" + str(state.get("seq", ""))))
+                continue
+            responses = state.get("responses")
+            if not isinstance(responses, list):
+                return None
+            eligible = [r for r in responses if isinstance(r, dict)
+                        and isinstance(r.get("seq"), int) and r["seq"] > after_seq
+                        and (r.get("answers") or r.get("declines"))]
+            if eligible:
+                events.append((channel, root, "answer:" + str(max(r["seq"] for r in eligible))))
+            elif state.get("closed"):
+                events.append((channel, root, "closed:" + str(state.get("seq", ""))))
+            else:
+                return None
+        return json.dumps(events, separators=(",", ":"))
 
     def _waiting_on_satisfied(self, dep: Any) -> bool:
         """Has the row this claim declared it waits on moved past the
@@ -3936,6 +4073,9 @@ class Driver:
         """
         self._artifact_wait_pending = False
         self._task_wait_pending = False
+        self._answer_wait_pending = False
+        self._answer_wait_deadline = None
+        self._answer_wait_event = None
         self._artifact_selected = None
         first_phase = None
         first_claim = None
@@ -3946,7 +4086,9 @@ class Driver:
             version = got[0]
             if self._strike_count(f"{channel}/{key}@{version}") >= WORK_STRIKES:
                 continue
-            candidate = ((channel, key, version), got[1].get("waiting_for_artifacts") is not None)
+            candidate = ((channel, key, version),
+                         got[1].get("waiting_for_artifacts") is not None
+                         or got[1].get("waiting_for_answers") is not None)
             if key.startswith("phase:"):
                 # A phase newer than the claim must not hide the owner's
                 # explicit wait. Defer ignition until all claims are read.
@@ -3956,7 +4098,8 @@ class Driver:
                 first_claim = candidate
                 if first_phase is None:
                     break
-        chosen = (first_claim if self._artifact_wait_pending or self._task_wait_pending else first_phase or first_claim)
+        chosen = (first_claim if (self._artifact_wait_pending or self._answer_wait_pending
+                                  or self._task_wait_pending) else first_phase or first_claim)
         if chosen is not None:
             if chosen[1]:
                 self._artifact_selected = chosen[0]
@@ -4288,21 +4431,33 @@ class Driver:
         # Recheck the actual owner declaration after any listen interval;
         # stale selection must not revive a cancelled or retargeted task.
         current = self._read_work_row(channel, key)
-        if self._artifact_selected == snap or (current and current[1].get("waiting_for_artifacts") is not None):
+        if self._artifact_selected == snap or (current and (
+                current[1].get("waiting_for_artifacts") is not None
+                or current[1].get("waiting_for_answers") is not None)):
             if (current is None or current[0] != version
-                    or current[1].get("waiting_for_artifacts") is None
+                    or (current[1].get("waiting_for_artifacts") is None
+                        and current[1].get("waiting_for_answers") is None)
                     or not self._continuable(key, current[1], channel)):
                 return False
             latest = self._read_work_row(channel, key)
             if latest is None or latest[0] != version:
                 return False
-            if self._is_terminal(current[1].get("status"), current[1].get("state")):
-                from .artifact_wait import declaration_signature
-                artifact_signature = declaration_signature(current[1])
+            # An answer wait deliberately suspends even an ACTIVE claim.  Its
+            # ready event still spends exactly one receipt; restricting this
+            # to terminal words made an answered active row chain forever.
+            if (current[1].get("waiting_for_answers") is not None
+                    or self._is_terminal(current[1].get("status"), current[1].get("state"))):
+                artifact_signature = self._dependency_signature(
+                    current[1], self._answer_wait_event)
+                dependency_state = ("unavailable" if self._answer_wait_event
+                                    and "unavailable" in self._answer_wait_event else "available")
+                dependency_label = ("ARTIFACT RECONSIDERATION"
+                                    if current[1].get("waiting_for_answers") is None
+                                    else "DEPENDENCY RECONSIDERATION")
                 self._artifact_resume_prompt = (
-                    f"ARTIFACT RECONSIDERATION for {json.dumps([channel, key, version])}. Your declared "
-                    "minimum artifact versions are now available. Re-read this exact claim and "
-                    "those artifacts; perform one bounded reconsideration. Version availability "
+                    f"{dependency_label} ({dependency_state}) for {json.dumps([channel, key, version])}. "
+                    "Your declared dependency event is ready. Re-read this exact claim and "
+                    "the named answer/artifact state; perform one bounded reconsideration. Availability "
                     "does not accept content or clear another blocker. Update your own claim "
                     "with CAS: continue actively, declare changed artifact requirements, or "
                     "remain blocked with what is still missing. No repeated wake is owed for "

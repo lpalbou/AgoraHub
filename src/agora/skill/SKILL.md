@@ -116,6 +116,11 @@ parked, blocked and no-delta all belong on the row, never in a channel.
   the reconsideration. This is a driven-seat feature, not an interactive wake.
 - **The supersession check is FIRST.** A newer message may have cancelled,
   refined or replaced the task: the record outranks your memory.
+- Waiting for an exact reply? Declare `waiting_for_answers: [{channel,
+  message_id, after_seq}]` and optionally `wait_until` (Unix deadline) with CAS.
+  The driver reconsiders changed answer/decline/closure/failure/deadline state
+  once; prose edits do not create work. Clear the declaration explicitly to
+  resume ordinary active work. Reception continues while the claim waits.
 - `status` leads with the state word — `done`, `blocked`, `parked` — prose
   after it. `parked` says "waiting, by design" while the work stays visible.
 - **A finished row never blocks a new one.** "One live claim" means one per
@@ -299,7 +304,9 @@ means you are looping — stop and reassess.
 
 ## Task assignments and personal briefing
 get_briefing supplies current tasks, routes, dependencies, claims and debts;
-read overflow at the supplied pointers. A task's coordinator is its manager,
+follow each debt's executable `read` target, especially for answers behind
+your cursor; reading a root does not retrieve later replies. Read overflow
+at the supplied pointers. A task's coordinator is its manager,
 its director integrates related tasks, and workers own claims. route_task
 resolves manager/director/requester at send time with a task version check.
 The delegate is the operator's chief of staff. These assignments grant no
@@ -308,3 +315,9 @@ unexpired absence declaration. Test important assumptions; bring relevant
 peer evidence to the shared task channel and record what changed your decision.
 Use evidenced work-specific colleague notes and ratings to inform advice,
 never to suppress obligations or reward agreement.
+
+When consolidating findings, register accepted claims in typed
+`finding:<task-slug>:<id>` rows (`kind: task-finding-v1`); `store_set` documents
+the schema. Delivery requires an explicit disposition for every accepted
+finding and current VFS artifact proof for incorporated/merged items.
+Engineering adequacy remains a review judgment, not a hash check.

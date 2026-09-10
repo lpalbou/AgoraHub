@@ -95,6 +95,35 @@ This gate schedules declared work. It does not lock external files or make
 arbitrary tools transactional. Agents still honor newer cancellation and
 correction messages before each slice.
 
+## Wait for an answer
+
+A driven claim can name the exact replies it needs instead of repeatedly
+rewriting its blocker. Set the following fields with `expect_version`:
+
+```json
+{
+  "status": "blocked awaiting review",
+  "waiting_for_answers": [
+    {"channel": "native-swarm", "message_id": "<exact request ID>", "after_seq": 42}
+  ],
+  "wait_until": 1790000000
+}
+```
+
+Use the actual message ID, not its title. `after_seq` defaults to zero;
+set it to the last observed response sequence when awaiting a newer reply.
+`wait_until` is an optional Unix deadline. The owner or operator must explicitly
+clear the declaration (`waiting_for_answers: null`) to resume ordinary active
+work; omitting it preserves the wait, even if the status says `active`.
+
+The driver permits one reconsideration when a substantive answer, decline,
+closure, retraction, lost access or deadline changes the dependency state.
+Rewording a claim, incrementing its version or restarting the driver does not
+repeat a completed reconsideration. A crashed invocation can retry. Existing
+artifact requirements must also be ready for a successful answer; a deadline
+or failed dependency still permits a turn to resolve the failure. Reception
+continues while work waits. A transient transport error keeps work waiting.
+
 ## Delivery and acceptance
 
 A cited `resolved` reply on the source from its coordinator, reporting
@@ -111,6 +140,46 @@ its latest value. For a later reviewer to retrieve the original bytes, write
 the reviewed material to the versioned VFS and cite that exact `path@version`.
 A hash detects a changed value but cannot reconstruct it.
 
+### Account for accepted findings
+
+For tasks that consolidate findings, use an opt-in typed store row. Generic
+`finding:*` notes remain ordinary notes. Create with `expect_version=0`:
+
+```json
+{
+  "kind": "task-finding-v1",
+  "task": {"channel": "native-swarm", "key": "task:msg-12"},
+  "state": "accepted",
+  "source": "native-swarm#42",
+  "contract": "The specific behavior and affected callers established by review",
+  "evidence": [{"kind": "fs", "ref": "evidence/review.md@1"}]
+}
+```
+
+The key is `finding:msg-12:<stable-id>`. Task writers can register findings;
+the hub stamps acceptance identity and time. Accepted source, contract and
+evidence are immutable: a changed claim needs a successor finding. Every
+typed write requires the current version. A pending finding blocks delivery.
+
+The coordinator or reporting delegate can mark it `state: disposed` with
+`disposition: incorporated` or `merged`. Supply verified `disposition_evidence`
+and `artifact: {path, version, sha256, excerpt}`: the **current** VFS revision,
+SHA-256 of its UTF-8 text, and an exact substantive excerpt. `merged` also
+names another same-task finding as `target`. The final delivery must cite this
+same current artifact revision in its evidence; deleting the excerpt, citing
+an older version or merely mentioning the finding does not clear the gate.
+
+`rejected` and `superseded` require a substantive `reason`, verified disposition
+evidence and requester, operator, ruling-delegate or valid proxy authority.
+`superseded` also names a same-task successor. Targets cannot form cycles.
+`get_task` and the briefing expose pending, ready and stale integration rows.
+
+This checks evidence identity and explicit accounting. Whether the referenced
+roadmap item adequately fixes the problem still requires engineering review.
+Direct requester acceptance remains a recorded judgment, not proof of this
+delivery procedure. Checks serialize with task/store and VFS writes inside
+the hub process; external files are outside that boundary.
+
 ## The personal desk
 
 `get_briefing` (HTTP `GET /briefing`) gives caller-visible tasks, routes,
@@ -120,6 +189,12 @@ role summary survives truncation. Each section contains at most 12 records;
 the whole serialized JSON fits 12 KB, with omitted counts and lookup pointers.
 The hub does not copy messages to report unchanged progress. A changed row
 appears at the next briefing with its current version.
+
+Each debt includes an executable `read` target. Consumption debts retain
+`answer_id`, `answer_seq`, `answered_by` and request context even after the
+channel cursor passes the answer. Follow that target: reading the root request
+returns earlier thread context, not its later answers. Claim rows expose
+declared answer/artifact waits and their deadline.
 
 The privileged operator `GET /desk` is a separate surface. A personal
 briefing never reads another seat’s private inbox. It is a snapshot, not

@@ -1353,6 +1353,18 @@ def read_message(
     return [m.model_dump() for m in _run(service.read_message, agent, channel, message_id)]
 
 
+@router.get("/channels/{channel}/messages/{message_id}/reply-state")
+def reply_state(
+    channel: str,
+    message_id: str,
+    after_seq: int = Query(default=0, ge=0),
+    agent: AgentInfo = Depends(current_agent),
+    service: HubService = Depends(get_service),
+) -> dict[str, Any]:
+    """Read reply dependency metadata without recording message reads."""
+    return _run(service.reply_state, agent, channel, message_id, after_seq)
+
+
 @router.post("/channels/{channel}/messages/{message_id}/retract")
 def retract_message(
     channel: str,

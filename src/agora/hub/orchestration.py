@@ -13,6 +13,28 @@ def refuse(code, detail):
 
 
 class OrchestrationMixin:
+    def reply_state(self, agent, channel, message_id, after_seq=0):
+        """Scheduling metadata only: no message bodies or read receipts."""
+        from .obligations import declines_of, substantive_answers_of
+        self.require_membership(channel, agent.id)
+        root = self.db.get_message(message_id)
+        if root is None or root.channel != channel:
+            refuse(404, "reply dependency message not found")
+        replies = self.db.replies_to(root.id)
+        responses = []
+        for reply in replies:
+            if reply.retracted_at or reply.seq <= after_seq or reply.sender == root.sender:
+                continue
+            answers, declines = substantive_answers_of(reply), declines_of(reply)
+            if answers or declines:
+                responses.append({"id": reply.id, "seq": reply.seq, "sender": reply.sender,
+                                  "answers": list(answers), "declines": list(declines)})
+        responses.sort(key=lambda r: r["seq"])
+        return {"channel": channel, "message_id": root.id, "seq": root.seq,
+                "closed": self._closed_authoritatively(root, replies),
+                "retracted": bool(root.retracted_at),
+                "responses": responses[:64], "omitted": max(0, len(responses) - 64)}
+
     def _task_ref(self, agent, ref):
         if (not isinstance(ref, dict) or set(ref) != {"channel", "key"}
                 or not all(isinstance(ref[k], str) for k in ref)
@@ -114,6 +136,7 @@ class OrchestrationMixin:
                 "ready": not waiting and value.get("status") == "open",
                 "waiting_on": waiting, "report": value.get("report"),
                 "verdict": value.get("verdict"),
+                "integration": self.finding_integration_summary(channel, key),
                 "proxy_available": self.proxy_allowed(agent.id, channel, value.get("requester"))}
 
     def route_task(self, agent, channel, key, role, expect_version, message):
@@ -177,7 +200,8 @@ class OrchestrationMixin:
                     continue
                 v = row.value
                 if kind == "claim" and (v.get("owner") == agent.id or managed) and not self._claim_done(v):
-                    section, fields = "claims", ("owner", "status", "next_step", "needs", "task")
+                    section, fields = "claims", ("owner", "status", "next_step", "needs", "task",
+                                                 "waiting_for_answers", "waiting_for_artifacts", "wait_until")
                 elif kind == "phase" and v.get("status") == "open":
                     section, fields = "phases", ("steward", "current", "next", "status")
                 elif kind == "gate" and v.get("status") == "asked" and (managed or v.get("owner") == agent.id):
@@ -194,9 +218,20 @@ class OrchestrationMixin:
         owed = self.owed(agent).model_dump(mode="json")
         # Keep actionable identifiers, not full quoted messages or evidence.
         for field in ("to_answer", "to_consume", "to_close"):
-            sections[field] = [{k: v for k, v in r.items() if k in
-                               {"channel", "seq", "message_id", "sender", "title", "pending_asks", "asks_naming_you", "id", "thread_id"}}
-                              for r in owed[field]]
+            sections[field] = []
+            for debt in owed[field]:
+                row = {k: v for k, v in debt.items() if k in {
+                    "channel", "seq", "message_id", "sender", "title", "pending_asks",
+                    "asks_naming_you", "id", "thread_id", "answer_id", "answer_seq",
+                    "answered_by", "your_asks"}}
+                # Consumption rows identify the original question with `id`.
+                # Their answer can be older than the seat's channel cursor;
+                # reading the question does not fetch its later replies.
+                target = row.get("answer_id") if field == "to_consume" else row.get("id")
+                if target:
+                    row["read"] = {"tool": "read_message", "arguments": {
+                        "channel": row["channel"], "message_id": target}}
+                sections[field].append(row)
         result = {"seat": agent.id, "assignments": assignments, "sections": {}, "omitted": {},
                   "lookup": "get_task(channel,key), store_get(channel,key), check_inbox; private notes: get_colleague_notes",
                   "authority": "Task assignments route work; whoami.delegations grants authority."}
@@ -209,7 +244,8 @@ class OrchestrationMixin:
                 encoded = json.dumps(row, ensure_ascii=False)
                 if len(encoded.encode()) > 1800:
                     row = {k: v for k, v in row.items() if k in
-                           {"channel", "key", "version", "message_id", "seq", "id"}}
+                           {"channel", "key", "version", "message_id", "seq", "id",
+                            "answer_id", "answer_seq", "answered_by", "read"}}
                     row["detail"] = "read source; record exceeds briefing item budget"
                 kept.append(row)
                 if len(json.dumps(result, ensure_ascii=False).encode()) > 10500:

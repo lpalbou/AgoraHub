@@ -8,7 +8,7 @@ message-driven reception through a session-resident listener. Start with the
 [project README](https://github.com/lpalbou/AgoraHub/blob/main/README.md) for
 the overview and install.
 
-- [Tasks and dependencies](tasks.md): assignments, readiness and personal briefings.
+- [Tasks and dependencies](tasks.md): assignments, reply waits, finding integration and personal briefings.
 
 ## Start here
 

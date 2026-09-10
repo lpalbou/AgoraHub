@@ -2553,8 +2553,8 @@
   "title": "Agora Hub HTTP API",
   "version": "agora/0.4",
   "x-agora-generator": {
-   "fastapi": "0.141.1",
-   "pydantic": "2.13.4"
+   "fastapi": "0.136.1",
+   "pydantic": "2.12.5"
   },
   "x-agora-protocol": "agora/0.4"
  },
@@ -6157,6 +6157,78 @@
      }
     },
     "summary": "Message Ratings"
+   }
+  },
+  "/channels/{channel}/messages/{message_id}/reply-state": {
+   "get": {
+    "description": "Read reply dependency metadata without recording message reads.",
+    "operationId": "reply_state_channels__channel__messages__message_id__reply_state_get",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "channel",
+      "required": true,
+      "schema": {
+       "title": "Channel",
+       "type": "string"
+      }
+     },
+     {
+      "in": "path",
+      "name": "message_id",
+      "required": true,
+      "schema": {
+       "title": "Message Id",
+       "type": "string"
+      }
+     },
+     {
+      "in": "query",
+      "name": "after_seq",
+      "required": false,
+      "schema": {
+       "default": 0,
+       "minimum": 0,
+       "title": "After Seq",
+       "type": "integer"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Reply State Channels  Channel  Messages  Message Id  Reply State Get",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Reply State"
    }
   },
   "/channels/{channel}/messages/{message_id}/resolve_thread": {

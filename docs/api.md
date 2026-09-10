@@ -700,6 +700,7 @@ See [troubleshooting.md](troubleshooting.md) for common errors and
 | --- | --- |
 | `agora task open … --manager SEAT --director SEAT --work-type TYPE --depends-on CHANNEL/task:KEY` | Create the task room and explicit assignments; see [tasks](tasks.md) |
 | MCP `get_briefing`; `GET /briefing` | Bounded caller-visible task/claim/decision/debt snapshot |
+| `GET /channels/{channel}/messages/{message_id}/reply-state?after_seq=N` | Bounded direct-answer/decline and closure metadata for driver dependency checks; requires membership and creates no read receipt |
 | MCP `get_task(channel,key)`; `GET /channels/{channel}/tasks/{key}` | Version, routes and prerequisite readiness |
 | MCP `route_task`; `POST /channels/{channel}/tasks/{key}/route` | `{role, expect_version, message}`; role is manager/director/requester; hub assigns recipients and rejects stale versions |
 | MCP `get_advisors(work_type)`; `GET /advisors?work_type=…` | Visible same-type task-channel ratings and own text-matching private notes |
@@ -707,6 +708,7 @@ See [troubleshooting.md](troubleshooting.md) for common errors and
 | `GET /availability/{principal}` | Explicit present/away/unknown declaration; never inferred from silence |
 
 Members and driven seats receive briefing, task, routing, agent-rating and
-colleague-note tools by default. Room creation and voting remain absent from
-the driven tool tier; prepare rooms before driving seats. No prompt requires
+colleague-note tools by default. Driven reporting delegates also receive
+`create_group` and `invite_agent` to form task teams; ordinary workers do not.
+Voting tools remain absent from the driven tier. No prompt requires
 a driven seat to call a tool absent from its tier. See [communication](collaboration.md#3-the-cycles).
