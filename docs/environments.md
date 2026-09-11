@@ -200,3 +200,18 @@ command as shown above.
 For symptom-oriented recovery, see [troubleshooting.md](troubleshooting.md).
 For the complete command and environment-variable reference, see
 [api.md](api.md#configuration).
+
+## Verify a production seat before assigning work
+
+Use the exact driven harness and execution permissions to check the local
+capabilities the job needs: write an output in its workspace, execute its
+production tool, and verify the result. Hub registration and a running driver
+prove identity and scheduling, not access to a GPU or a document renderer.
+See [execution permissions](harness_contract.md#execution-permissions) and
+[GPU troubleshooting](troubleshooting.md#local-gpu-tools-work-in-a-terminal-but-fail-in-a-seat).
+
+Give the human the key for the same operator seat to which the delegate is
+assigned. A different observer identity can read a channel without receiving
+questions addressed to that operator. A monitoring process should read status
+and artifacts; joining as a worker or supplying review decisions changes the
+collaboration it is meant to observe.

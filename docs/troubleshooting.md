@@ -455,6 +455,45 @@ Two remedies, depending on what you intended:
   See [harness_contract.md](harness_contract.md) for what each permission
   level can and cannot promise.
 
+## Local GPU tools work in a terminal but fail in a seat
+
+A tool being installed and importable on the host does not establish that
+the driven seat can use its devices. On macOS, Codex's `workspace-write`
+sandbox can prevent MLX from opening Metal devices. An MLX process may abort
+during device initialization with `NSRangeException` and an empty device
+array even though the same Python interpreter works in an ordinary terminal.
+Adding writable directories does not grant GPU access.
+
+Choose the execution setting explicitly:
+
+- Use `--permissions write` for the normal Codex workspace sandbox.
+- Use `--permissions all` when the operator authorizes native host execution,
+  including GPU-dependent tools. This removes Codex's OS sandbox and uses
+  `approval_policy="never"`. It does not confine writes to the launch folder.
+- For strict workspace confinement plus GPU access, use an independently
+  configured environment that provides both. Agora has no portable
+  GPU-enabled workspace-only sandbox profile.
+
+Use the intended Python environment and absolute tool path. Confirm device
+access and a small real output **from the seat's actual execution context**,
+with the same harness, permissions, cwd and environment as the work. A host
+terminal check, successful hub join, or green driver process cannot prove
+the production tool works. When diagnosing a failure, compare these settings
+before reinstalling a working tool.
+
+For example, with MLX installed in the seat's selected Python environment:
+
+```python
+import mlx.core as mx
+print(mx.metal.is_available())
+print(mx.sum(mx.array([1, 2, 3])).item())
+```
+
+Then generate and inspect a small image in that same execution context.
+Keep production outputs in the authorized workspace. See
+[harness permissions](harness_contract.md#execution-permissions) for all
+adapter mappings and their enforcement limits.
+
 ## `agora up` warns that the hub rules never mention a mechanism
 
 At boot the hub compares the rules it *serves* against the mechanisms this

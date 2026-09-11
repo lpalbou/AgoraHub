@@ -807,12 +807,19 @@ class CodexDriveAdapter(DriveAdapter):
     name = "codex"
     binary = "codex"
     SUPPORTS = frozenset({"model", "reasoning", "permissions", "session"})
-    # Write-only ON PURPOSE: `all` would drop the OS sandbox, and shell network
-    # access could then bypass MCP entirely — the boundary is the sandbox.
-    PERMISSION_VOCAB = ("write",)
-    PERMISSION_RATIONALE = ("Codex stays write-only on purpose: dropping the "
-                            "OS sandbox would let shell network access bypass "
-                            "MCP.")
+    # Explicit operator choice, applied identically on fresh and resumed turns.
+    # `all` is native host execution, NOT workspace containment; `write` remains
+    # the default. Device-dependent tools (for example Metal) can require all.
+    PERMISSION_VOCAB = ("read", "write", "all")
+    PERMISSION_ARGV = {
+        "read": ("-c", 'sandbox_mode="read-only"',
+                 "-c", 'approval_policy="never"'),
+        "write": ("-c", 'sandbox_mode="workspace-write"',
+                  "-c", "sandbox_workspace_write.network_access=false",
+                  "-c", 'approval_policy="never"'),
+        "all": ("-c", 'sandbox_mode="danger-full-access"',
+                "-c", 'approval_policy="never"'),
+    }
     # Codex's CLI validates NOTHING — it carries a `Custom` passthrough and
     # forwards any string verbatim (`-c model_reasoning_effort=bogus` runs and
     # prints `reasoning effort: bogus`). So the binary's enum is NOT the gate;
@@ -854,8 +861,6 @@ class CodexDriveAdapter(DriveAdapter):
         return [part for value in values for part in ("-c", value)]
 
     def build_command(self, prompt: str, session_id: str | None) -> list[str]:
-        # PERMISSION_VOCAB is ("write",): arm-time validation already refused
-        # anything else, so no inline permission logic is needed here.
         resuming = bool(session_id)
         cmd = ["codex", "exec"]
         if resuming:
@@ -868,8 +873,7 @@ class CodexDriveAdapter(DriveAdapter):
         # a human "did you mean to edit here" guard; a driven seat's safety
         # boundary is the sandbox (enforced above), not repo detection.
         cmd += ["--json", "--skip-git-repo-check",
-                "-c", 'sandbox_mode="workspace-write"',
-                "-c", "sandbox_workspace_write.network_access=false",
+                *self.PERMISSION_ARGV[self.permissions],
                 *self._mcp_overrides()]
         if self.model:
             cmd += ["-m", self.model]
@@ -879,7 +883,7 @@ class CodexDriveAdapter(DriveAdapter):
         # Resume accepts config overrides, but not `-s/--sandbox`. Pin the
         # sandbox on BOTH commands above: a resumed invocation may otherwise
         # use the read-only config default instead of its boot permissions.
-        # MCP runs through Codex's host; shell network remains disabled.
+        # MCP runs through Codex's host. The selected profile governs shell access.
         if resuming:
             cmd.append(session_id)
         cmd.append(prompt)

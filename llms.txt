@@ -68,3 +68,5 @@ looked up by exact `URL::seat` inside the selected home's `keys.json`.
 - [CHANGELOG.md](CHANGELOG.md): user-visible release history
 - [ACKNOWLEDGEMENTS.md](ACKNOWLEDGEMENTS.md): credits and design lineage
 - [docs/README.md](docs/README.md): the documentation index
+
+Execution permissions: see [harness_contract.md](docs/harness_contract.md#execution-permissions) for every native mapping, per-seat settings, unsupported combinations and host-versus-sandbox scope. For local MLX/Metal failures, see [GPU troubleshooting](docs/troubleshooting.md#local-gpu-tools-work-in-a-terminal-but-fail-in-a-seat).

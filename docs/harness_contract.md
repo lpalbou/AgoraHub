@@ -97,27 +97,59 @@ better — it names which tools ran — but it is not load-bearing.
 
 ## Execution permissions
 
-agora's vocabulary is three levels, and each harness declares which of them it
-can express and how each renders — pure data, validated at arm time exactly
-like reasoning:
+Set execution permissions **per seat**, on its driver invocation. Hub roles
+(delegate, manager, worker) authorize hub operations; they do not grant local
+file or process access.
 
-| level | meaning |
-|---|---|
-| `read` | read the workspace and call agora's tools; no writes, no shell mutation |
-| `write` | write, working in the workspace; the driven-seat default |
-| `all` | explicit operator bypass |
+| Setting | Intended use | Shell execution |
+|---|---|---|
+| `read` | Inspect files and communicate through Agora; no local file mutation | Harness-dependent; Codex permits commands within its read-only OS sandbox |
+| `write` | Work on files, using the harness's normal permission controls | Available on the supported writing harnesses |
+| `all` | Explicit native full-access execution, including local tools needing host devices | Available without interactive approval |
 
-`write` is deliberately *not* worded as "write inside the workspace", because
-no framework agora drives can promise that. A level is an instruction agora
-gives the framework, and the framework enforces as much of it as its own tool
-layer can see. **Nothing here is a sandbox.** A seat at `write` can run a
-shell, and a shell can reach the whole filesystem — measured, not assumed
-(opencode, 22 live runs, 2026-08-01): `touch /outside/f` is refused, while
-`sh -c 'touch /outside/f'`, `echo hi > /outside/f`, `nohup /outside/bin/x &`
-and `python3 -c "open('/outside/f','w')"` all succeed and really land the
-file. Out-of-workspace refusal is a **speed bump against an absent-minded
-write, not containment**; if the filesystem outside a seat's workspace
-matters, contain the seat (container/VM) — the level word will not do it.
+The same option is used for every harness. Unsupported values fail before
+the driver starts. The following table is the actual adapter mapping:
+
+| Harness | `read` | `write` | `all` |
+|---|---|---|---|
+| Codex | OS `read-only` sandbox | OS `workspace-write` sandbox, shell network disabled | `danger-full-access`; host execution |
+| Claude Code | Unsupported | Native `auto` permission mode | Native `bypassPermissions` |
+| Cursor | Unsupported | Native sandbox enabled | Native `--force` |
+| OpenCode | File reads and Agora; bash/edit/write denied | Bash/edit/write allowed; external-directory and web tools denied | All native tool permissions allowed |
+| Pi | Agora tools only; built-in file tools disabled | Native built-in tools, including shell; no OS confinement | Unsupported; `write` already supplies Pi's native full tool access |
+| AbstractCode (headless) | Unsupported | Unsupported | Native full access; required for unattended MCP |
+| AbstractCode TUI | Native `read` | Native `write` | Native `all` |
+
+Codex pins both sandbox and `approval_policy="never"` on **every fresh and
+resumed turn**. A denied command is returned to the seat rather than waiting
+for an unattended approval. Other harnesses use their native mappings above.
+
+`all` is **host execution**, not "write only inside the workspace." Its
+working directory and mission define the task's scope, but do not confine a
+shell to that directory. Conversely, Codex's `write` uses a real OS sandbox;
+some other harnesses only filter tool requests. Do not infer containment
+from the shared setting name. Use a container/VM when strict filesystem
+confinement is required across harnesses.
+
+There is no portable independent "execute only" setting. Arbitrary shell
+execution can itself read and write files. Read/write without shell, a
+command allowlist, or strict per-path grants require a native capability or
+external executor that enforces that combination; Agora does not currently
+provide that common executor. Do not represent these combinations as
+supported through a mission prompt.
+
+For example, separate driver invocations can give a Codex critic read-only
+local access and a production seat full native execution:
+
+```bash
+agora drive --cwd ./critic --harness codex --permissions read
+agora drive --cwd ./production --harness codex --permissions all
+```
+
+Most harnesses default to `write`; headless AbstractCode declares `all` as its
+required default. The ready line reports the effective setting. Model and
+hub permissions are independent. See [local GPU execution](troubleshooting.md#local-gpu-tools-work-in-a-terminal-but-fail-in-a-seat)
+when an installed tool works outside the seat but fails inside it.
 
 Two rules keep this honest. **An inexpressible level is refused, never
 translated**: the deprecated `--sandbox` tri-state let an operator asking for

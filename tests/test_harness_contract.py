@@ -98,20 +98,11 @@ def test_process_scoped_identity_is_declared_and_drivable(home):
 
 
 def test_permission_requirement_is_a_vocabulary_not_a_branch(home):
-    """`if harness == "codex"` in generic validation is the shape being removed.
-
-    0.12.60: the codex-shaped `--sandbox` tri-state became the `permissions`
-    vocabulary. Codex declares ("write",) — the same declaration mechanism as
-    REASONING_VOCAB now carries what REQUIRES_SANDBOX used to hardcode, and the
-    legacy `--sandbox disabled` alias maps to `all` and is refused by it.
-    """
-    assert CodexDriveAdapter.PERMISSION_VOCAB == ("write",)
+    assert CodexDriveAdapter.PERMISSION_VOCAB == ("read", "write", "all")
     with pytest.raises(SystemExit) as excinfo:
         run_drive(agent_id="w", url="http://hub:1", harness="codex",
-                  sandbox="disabled", cwd=home, once=True)
-    detail = str(excinfo.value)
-    assert "accepts --permissions write" in detail
-    assert "bypass MCP" in detail          # the WHY survives the migration
+                  permissions="execute-only", cwd=home, once=True)
+    assert "accepts --permissions read|write|all" in str(excinfo.value)
 
 
 def test_harness_check_reports_per_capability_and_names_every_degrade(home):

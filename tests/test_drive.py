@@ -334,19 +334,26 @@ def test_codex_reasoning_effort_is_an_explicit_native_override():
     assert "model_reasoning_effort=\"xhigh\"" in cmd
 
 
-@pytest.mark.parametrize("level", ["read", "all"])
-def test_codex_permission_vocabulary_is_write_only(home, level):
-    """Codex declares PERMISSION_VOCAB=("write",) on purpose: `all` would drop
-    the OS sandbox, letting shell network access bypass MCP entirely. The
-    refusal comes from the same generic vocabulary check as reasoning — no
-    vendor branch, and the legacy `--sandbox disabled/none` aliases map to
-    `all` and are refused the same way."""
-    with pytest.raises(SystemExit, match=r"accepts --permissions write"):
-        Driver("worker", "http://hub:1", harness="codex", permissions=level,
-               cwd=home)
-    with pytest.raises(SystemExit, match=r"accepts --permissions write"):
-        Driver("worker", "http://hub:1", harness="codex", sandbox="disabled",
-               cwd=home)
+@pytest.mark.parametrize("session_id", [None, "existing-thread"])
+@pytest.mark.parametrize("level,mode", [("read", "read-only"),
+                                       ("write", "workspace-write"),
+                                       ("all", "danger-full-access")])
+def test_codex_operator_permissions_survive_resume(home, session_id, level, mode):
+    driver = Driver("worker", "http://hub:1", harness="codex",
+                    permissions=level, cwd=home)
+    cmd = driver._adapter.build_command("wake", session_id)
+    assert f'sandbox_mode="{mode}"' in cmd
+    assert 'approval_policy="never"' in cmd
+    assert sum(x.startswith("sandbox_mode=") for x in cmd) == 1
+    assert "mcp_servers.agora.required=true" in cmd
+
+
+def test_codex_default_remains_workspace_write(home):
+    driver = Driver("worker", "http://hub:1", harness="codex", cwd=home)
+    assert driver.permissions == "write"
+    cmd = driver._adapter.build_command("wake", None)
+    assert 'sandbox_mode="workspace-write"' in cmd
+    assert 'sandbox_mode="danger-full-access"' not in cmd
 
 
 def test_codex_turn_requires_successful_reception_mcp_calls():

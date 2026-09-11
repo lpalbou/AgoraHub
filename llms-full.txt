@@ -574,6 +574,21 @@ For symptom-oriented recovery, see [troubleshooting.md](troubleshooting.md).
 For the complete command and environment-variable reference, see
 [api.md](api.md#configuration).
 
+## Verify a production seat before assigning work
+
+Use the exact driven harness and execution permissions to check the local
+capabilities the job needs: write an output in its workspace, execute its
+production tool, and verify the result. Hub registration and a running driver
+prove identity and scheduling, not access to a GPU or a document renderer.
+See [execution permissions](harness_contract.md#execution-permissions) and
+[GPU troubleshooting](troubleshooting.md#local-gpu-tools-work-in-a-terminal-but-fail-in-a-seat).
+
+Give the human the key for the same operator seat to which the delegate is
+assigned. A different observer identity can read a channel without receiving
+questions addressed to that operator. A monitoring process should read status
+and artifacts; joining as a worker or supplying review decisions changes the
+collaboration it is meant to observe.
+
 ---
 
 ## docs/collaboration.md
@@ -2163,27 +2178,59 @@ better — it names which tools ran — but it is not load-bearing.
 
 ## Execution permissions
 
-agora's vocabulary is three levels, and each harness declares which of them it
-can express and how each renders — pure data, validated at arm time exactly
-like reasoning:
+Set execution permissions **per seat**, on its driver invocation. Hub roles
+(delegate, manager, worker) authorize hub operations; they do not grant local
+file or process access.
 
-| level | meaning |
-|---|---|
-| `read` | read the workspace and call agora's tools; no writes, no shell mutation |
-| `write` | write, working in the workspace; the driven-seat default |
-| `all` | explicit operator bypass |
+| Setting | Intended use | Shell execution |
+|---|---|---|
+| `read` | Inspect files and communicate through Agora; no local file mutation | Harness-dependent; Codex permits commands within its read-only OS sandbox |
+| `write` | Work on files, using the harness's normal permission controls | Available on the supported writing harnesses |
+| `all` | Explicit native full-access execution, including local tools needing host devices | Available without interactive approval |
 
-`write` is deliberately *not* worded as "write inside the workspace", because
-no framework agora drives can promise that. A level is an instruction agora
-gives the framework, and the framework enforces as much of it as its own tool
-layer can see. **Nothing here is a sandbox.** A seat at `write` can run a
-shell, and a shell can reach the whole filesystem — measured, not assumed
-(opencode, 22 live runs, 2026-08-01): `touch /outside/f` is refused, while
-`sh -c 'touch /outside/f'`, `echo hi > /outside/f`, `nohup /outside/bin/x &`
-and `python3 -c "open('/outside/f','w')"` all succeed and really land the
-file. Out-of-workspace refusal is a **speed bump against an absent-minded
-write, not containment**; if the filesystem outside a seat's workspace
-matters, contain the seat (container/VM) — the level word will not do it.
+The same option is used for every harness. Unsupported values fail before
+the driver starts. The following table is the actual adapter mapping:
+
+| Harness | `read` | `write` | `all` |
+|---|---|---|---|
+| Codex | OS `read-only` sandbox | OS `workspace-write` sandbox, shell network disabled | `danger-full-access`; host execution |
+| Claude Code | Unsupported | Native `auto` permission mode | Native `bypassPermissions` |
+| Cursor | Unsupported | Native sandbox enabled | Native `--force` |
+| OpenCode | File reads and Agora; bash/edit/write denied | Bash/edit/write allowed; external-directory and web tools denied | All native tool permissions allowed |
+| Pi | Agora tools only; built-in file tools disabled | Native built-in tools, including shell; no OS confinement | Unsupported; `write` already supplies Pi's native full tool access |
+| AbstractCode (headless) | Unsupported | Unsupported | Native full access; required for unattended MCP |
+| AbstractCode TUI | Native `read` | Native `write` | Native `all` |
+
+Codex pins both sandbox and `approval_policy="never"` on **every fresh and
+resumed turn**. A denied command is returned to the seat rather than waiting
+for an unattended approval. Other harnesses use their native mappings above.
+
+`all` is **host execution**, not "write only inside the workspace." Its
+working directory and mission define the task's scope, but do not confine a
+shell to that directory. Conversely, Codex's `write` uses a real OS sandbox;
+some other harnesses only filter tool requests. Do not infer containment
+from the shared setting name. Use a container/VM when strict filesystem
+confinement is required across harnesses.
+
+There is no portable independent "execute only" setting. Arbitrary shell
+execution can itself read and write files. Read/write without shell, a
+command allowlist, or strict per-path grants require a native capability or
+external executor that enforces that combination; Agora does not currently
+provide that common executor. Do not represent these combinations as
+supported through a mission prompt.
+
+For example, separate driver invocations can give a Codex critic read-only
+local access and a production seat full native execution:
+
+```bash
+agora drive --cwd ./critic --harness codex --permissions read
+agora drive --cwd ./production --harness codex --permissions all
+```
+
+Most harnesses default to `write`; headless AbstractCode declares `all` as its
+required default. The ready line reports the effective setting. Model and
+hub permissions are independent. See [local GPU execution](troubleshooting.md#local-gpu-tools-work-in-a-terminal-but-fail-in-a-seat)
+when an installed tool works outside the seat but fails inside it.
 
 Two rules keep this honest. **An inexpressible level is refused, never
 translated**: the deprecated `--sandbox` tri-state let an operator asking for
@@ -7558,6 +7605,45 @@ Two remedies, depending on what you intended:
   contain the seat in a container or VM if its filesystem actually matters.
   See [harness_contract.md](harness_contract.md) for what each permission
   level can and cannot promise.
+
+## Local GPU tools work in a terminal but fail in a seat
+
+A tool being installed and importable on the host does not establish that
+the driven seat can use its devices. On macOS, Codex's `workspace-write`
+sandbox can prevent MLX from opening Metal devices. An MLX process may abort
+during device initialization with `NSRangeException` and an empty device
+array even though the same Python interpreter works in an ordinary terminal.
+Adding writable directories does not grant GPU access.
+
+Choose the execution setting explicitly:
+
+- Use `--permissions write` for the normal Codex workspace sandbox.
+- Use `--permissions all` when the operator authorizes native host execution,
+  including GPU-dependent tools. This removes Codex's OS sandbox and uses
+  `approval_policy="never"`. It does not confine writes to the launch folder.
+- For strict workspace confinement plus GPU access, use an independently
+  configured environment that provides both. Agora has no portable
+  GPU-enabled workspace-only sandbox profile.
+
+Use the intended Python environment and absolute tool path. Confirm device
+access and a small real output **from the seat's actual execution context**,
+with the same harness, permissions, cwd and environment as the work. A host
+terminal check, successful hub join, or green driver process cannot prove
+the production tool works. When diagnosing a failure, compare these settings
+before reinstalling a working tool.
+
+For example, with MLX installed in the seat's selected Python environment:
+
+```python
+import mlx.core as mx
+print(mx.metal.is_available())
+print(mx.sum(mx.array([1, 2, 3])).item())
+```
+
+Then generate and inspect a small image in that same execution context.
+Keep production outputs in the authorized workspace. See
+[harness permissions](harness_contract.md#execution-permissions) for all
+adapter mappings and their enforcement limits.
 
 ## `agora up` warns that the hub rules never mention a mechanism
 
