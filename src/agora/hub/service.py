@@ -12022,11 +12022,18 @@ class HubService(TaskReviewsMixin, OrchestrationMixin, ProxyAuthorityMixin):
                 if stored is None or not isinstance(stored.value, dict):
                     continue
                 v = stored.value
-                if self._claim_done(v) or not self._claim_parked(v):
-                    continue
                 who = str(v.get("needs_from") or "").strip()
                 owner = str(v.get("owner") or stored.updated_by or "")
                 needs_txt = str(v.get("needs") or "").strip()
+                needs_seat = (
+                    self._claim_parked(v)
+                    and str(v.get("blocked_on") or "").strip().lower() == "seat")
+                reachable_blocker = (who in members and who != owner
+                                     and who not in self.operator_ids())
+                self._close_repaired_undeliverable_block_alerts(
+                    ch, key, needs_seat and not reachable_blocker)
+                if self._claim_done(v) or not self._claim_parked(v):
+                    continue
                 # THE HUB SAYS WHAT IT CANNOT DO (2026-08-07).
                 #
                 # A row that declares `blocked_on: seat` and does not name
@@ -12045,8 +12052,10 @@ class HubService(TaskReviewsMixin, OrchestrationMixin, ProxyAuthorityMixin):
                 # hub declining to do a thing and not saying so. So it tells
                 # the one party who DOES know — the owner — that its block
                 # is not reaching anyone.
-                if str(v.get("blocked_on") or "").strip().lower() == "seat" \
-                        and not who:
+                if needs_seat and not who:
+                    episode = self._undeliverable_block_alert_episode(ch, key)
+                    if episode is None:
+                        continue
                     try:
                         self._post_system(
                             ch,
@@ -12059,8 +12068,9 @@ class HubService(TaskReviewsMixin, OrchestrationMixin, ProxyAuthorityMixin):
                               "hub will tell them, or take the row off block.",
                             to=[owner], status=Status.open,
                             dedupe_key="undeliverable:" + hashlib.sha256(
-                                f"{ch}\0{key}\0{needs_txt}".encode()
-                            ).hexdigest()[:24])
+                                f"{ch}\0{key}\0{needs_txt}\0{episode}".encode()
+                            ).hexdigest()[:24],
+                            data={"undeliverable_block": {"key": key}})
                     except DuplicateMessage:
                         continue
                     fired.append(f"undeliverable-block:{ch}/{key}")
@@ -12118,6 +12128,57 @@ class HubService(TaskReviewsMixin, OrchestrationMixin, ProxyAuthorityMixin):
                     continue
                 fired.append(f"blocking:{ch}/{key}")
         return fired
+
+    def _close_repaired_undeliverable_block_alerts(
+            self, channel: str, key: str, still_undeliverable: bool) -> None:
+        """Retire the exact missing-``needs_from`` alert once it is fixed.
+
+        These alerts are open system obligations, so leaving one behind after
+        its claim names a reachable blocker makes the owner keep owing an
+        instruction they already followed.  Match the claim key, never the
+        owner, so another unresolved legacy block remains visible.
+        """
+        if still_undeliverable:
+            return
+        for alert in self._undeliverable_block_alerts(channel, key):
+            if not self._closed_authoritatively(alert,
+                                                self.db.replies_to(alert.id)):
+                self._post_system(
+                    channel,
+                    f"undeliverable block repaired: `{key}` no longer lacks "
+                    "a named blocker; this alert is closed.",
+                    status="resolved", reply_to=alert.id)
+
+    def _undeliverable_block_alerts(self, channel: str,
+                                    key: str) -> list[Message]:
+        """Find this claim's alert family, including pre-metadata alerts."""
+        marker = f"UNDELIVERABLE BLOCK on `{key}`:"
+        alerts: list[Message] = []
+        # Open roots remain status=open even after an authoritative closing
+        # reply. This unbounded obligation query preserves both old standing
+        # alerts and episode history without loading every channel message.
+        for alert in self.db.open_obligations([channel]):
+            if alert.sender != "hub":
+                continue
+            data = alert.data if isinstance(alert.data, dict) else {}
+            tagged_key = (data.get("undeliverable_block", {})
+                          if isinstance(data.get("undeliverable_block"), dict)
+                          else {}).get("key")
+            # Body matching also finds alerts created before metadata existed,
+            # without guessing from the owner's prose.
+            if tagged_key == key or (alert.body or "").startswith(marker):
+                alerts.append(alert)
+        return alerts
+
+    def _undeliverable_block_alert_episode(self, channel: str,
+                                           key: str) -> str | None:
+        """Return the next stable episode key, or None while one is open."""
+        alerts = self._undeliverable_block_alerts(channel, key)
+        for alert in alerts:
+            if not self._closed_authoritatively(alert,
+                                                self.db.replies_to(alert.id)):
+                return None
+        return max(alerts, key=lambda alert: alert.seq).id if alerts else "initial"
 
     def _ring_back_if_blocker_answered(self, channel: str, key: str,
                                        owner: str, blocker: str) -> None:

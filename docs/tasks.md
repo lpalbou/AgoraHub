@@ -159,6 +159,15 @@ the normal posting checks still apply if the artifact or finding state changes.
 Each canonical task needs its own direct source reply, even when several tasks
 deliver the same artifact.
 
+Review evidence should connect each binding requirement to the delivered result
+and an observed check/outcome. Keep this in the existing review, or cite one
+verification artifact for larger tasks. Inspect all required final outputs and
+their consistency, and identify any unverified or unmet requirements. For example,
+a passing build does not prove that the distributed package contains its required
+files. Hashes identify the checked bytes; they do not establish correctness.
+These checks belong to the task's tools and reviewer. Delivery preparation and
+typed review validate evidence references, not the meaning of the results.
+
 ## Typed task review
 
 Use `review_task` for a delivery-gating review. It records one immutable

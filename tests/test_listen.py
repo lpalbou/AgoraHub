@@ -512,6 +512,31 @@ def test_backlog_wake_fires_at_arm_for_missed_debt(tmp_path, monkeypatch,
     assert "backlog owed=2" in capsys.readouterr().out
 
 
+def test_backlog_shrink_does_not_rewake_the_unchanged_remainder(
+        tmp_path, monkeypatch, capsys, keep_signal_handlers):
+    """Removing settled debt is progress, not an obligation to revisit."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("AGORA_HOME", str(home))
+    (home / "bob-inbox.log").write_text("")
+    snapshots = iter([((2, 0), "id-a,id-b", None),
+                      ((1, 0), "id-b", None),
+                      ((2, 0), "id-b,id-c", None)])
+    monkeypatch.setattr("agora.listen._owed_snapshot",
+                        lambda hub, aid: next(snapshots, ((0, 0), None, None)))
+    common = dict(agent_id="bob", url="http://127.0.0.1:1", source="file",
+                  once=True, max_wait=0.1, debounce=0.01, heartbeat=0,
+                  poll=0.01, cwd=tmp_path)
+
+    assert run_listen(**common) == 2
+    capsys.readouterr()
+    assert run_listen(**common) == 0
+    assert "AGORA_WAKE" not in capsys.readouterr().out
+    assert (home / "listen-bob.owedsig").read_text() == "id-b"
+    assert run_listen(**common) == 2
+    assert "backlog owed=2" in capsys.readouterr().out
+
+
 def test_escalated_debt_re_rings_per_age_band(tmp_path, monkeypatch, capsys,
                                               keep_signal_handlers):
     """0106, the 'messages are forgotten' class (2026-07-23 forensics: an

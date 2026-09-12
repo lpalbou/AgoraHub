@@ -864,6 +864,114 @@ def test_an_undeliverable_block_is_reported_to_its_owner(hub, rooms):
     assert rung
 
 
+def test_repairing_one_undeliverable_block_closes_only_its_alert(hub, rooms):
+    """A repaired ``needs_from`` must retire its original system debt.
+
+    A second legacy row stays open to prove this is keyed to the repaired
+    claim rather than broadly clearing the owner's outstanding alerts.
+    """
+    lead, _ = rooms
+    for key in ("claim:repair-me", "claim:still-missing"):
+        hub.db.store_set("open-room", key,
+                         {"owner": "lead", "status": "blocked",
+                          "blocked_on": "seat", "needs": "worker must help"},
+                         "lead", None)
+    assert hub._blocking_sweep() == [
+        "undeliverable-block:open-room/claim:repair-me",
+        "undeliverable-block:open-room/claim:still-missing",
+    ]
+
+    hub.store_set(lead, "open-room", "claim:repair-me",
+                  {"owner": "lead", "status": "blocked", "blocked_on": "seat",
+                   "needs_from": "worker", "needs": "worker must help"})
+    hub._blocking_sweep()
+
+    alerts = [m for m in hub.db.get_messages("open-room", limit=50)
+              if m.sender == "hub" and "UNDELIVERABLE BLOCK" in m.body]
+    repaired = next(m for m in alerts if "claim:repair-me" in m.body)
+    unresolved = next(m for m in alerts if "claim:still-missing" in m.body)
+    assert hub._closed_authoritatively(repaired, hub.db.replies_to(repaired.id))
+    assert not hub._closed_authoritatively(unresolved,
+                                           hub.db.replies_to(unresolved.id))
+    owed_ids = {row.id for row in hub.owed(lead).to_answer}
+    assert repaired.id not in owed_ids
+    assert unresolved.id in owed_ids
+
+    # The same claim may later become invalid again.  It earns one new alert,
+    # then remains quiet until that new episode is repaired.
+    hub.store_set(lead, "open-room", "claim:repair-me",
+                  {"owner": "lead", "status": "blocked", "blocked_on": "seat",
+                   "needs": "worker must help"})
+    assert hub._blocking_sweep() == ["undeliverable-block:open-room/claim:repair-me"]
+    assert hub._blocking_sweep() == []
+    repair_alerts = [m for m in hub.db.get_messages("open-room", limit=50)
+                     if "UNDELIVERABLE BLOCK on `claim:repair-me`" in m.body]
+    assert len(repair_alerts) == 2
+    assert any(not hub._closed_authoritatively(alert,
+                                                hub.db.replies_to(alert.id))
+               for alert in repair_alerts)
+
+    # Closing that second episode must also leave a fresh dedupe key for a
+    # third occurrence of the same condition.
+    hub.store_set(lead, "open-room", "claim:repair-me",
+                  {"owner": "lead", "status": "blocked", "blocked_on": "seat",
+                   "needs_from": "worker", "needs": "worker must help"})
+    hub._blocking_sweep()
+    hub.store_set(lead, "open-room", "claim:repair-me",
+                  {"owner": "lead", "status": "blocked", "blocked_on": "seat",
+                   "needs": "worker must help"})
+    assert hub._blocking_sweep() == ["undeliverable-block:open-room/claim:repair-me"]
+
+
+def test_resuming_an_undeliverable_claim_closes_its_alert(hub, rooms):
+    lead, _ = rooms
+    hub.db.store_set("open-room", "claim:resume-me",
+                     {"owner": "lead", "status": "blocked", "blocked_on": "seat",
+                      "needs": "worker must help"}, "lead", None)
+    assert hub._blocking_sweep() == ["undeliverable-block:open-room/claim:resume-me"]
+    alert = next(m for m in hub.db.get_messages("open-room", limit=50)
+                 if "UNDELIVERABLE BLOCK on `claim:resume-me`" in m.body)
+
+    hub.store_set(lead, "open-room", "claim:resume-me",
+                  {"owner": "lead", "status": "done"})
+    assert hub._blocking_sweep() == []
+    assert hub._closed_authoritatively(alert, hub.db.replies_to(alert.id))
+
+
+def test_old_undeliverable_alert_closes_after_busy_channel_history(hub, rooms):
+    lead, _ = rooms
+    hub.db.store_set("open-room", "claim:old-alert",
+                     {"owner": "lead", "status": "blocked", "blocked_on": "seat",
+                      "needs": "worker must help"}, "lead", None)
+    assert hub._blocking_sweep() == ["undeliverable-block:open-room/claim:old-alert"]
+    alert = next(m for m in hub.db.get_messages("open-room", limit=50)
+                 if "UNDELIVERABLE BLOCK on `claim:old-alert`" in m.body)
+    for i in range(201):
+        hub._post_system("open-room", f"intervening message {i}")
+
+    hub.store_set(lead, "open-room", "claim:old-alert",
+                  {"owner": "lead", "status": "blocked", "blocked_on": "seat",
+                   "needs_from": "worker", "needs": "worker must help"})
+    hub._blocking_sweep()
+    assert hub._closed_authoritatively(alert, hub.db.replies_to(alert.id))
+
+
+def test_nonmember_needs_from_does_not_close_undeliverable_alert(hub, rooms):
+    lead, _ = rooms
+    hub.db.store_set("open-room", "claim:unreachable",
+                     {"owner": "lead", "status": "blocked", "blocked_on": "seat",
+                      "needs": "worker must help"}, "lead", None)
+    assert hub._blocking_sweep() == ["undeliverable-block:open-room/claim:unreachable"]
+    alert = next(m for m in hub.db.get_messages("open-room", limit=50)
+                 if "UNDELIVERABLE BLOCK on `claim:unreachable`" in m.body)
+
+    hub.store_set(lead, "open-room", "claim:unreachable",
+                  {"owner": "lead", "status": "blocked", "blocked_on": "seat",
+                   "needs_from": "not-a-member", "needs": "worker must help"})
+    hub._blocking_sweep()
+    assert not hub._closed_authoritatively(alert, hub.db.replies_to(alert.id))
+
+
 def test_the_blocked_owner_is_told_when_its_blocker_answers(hub, rooms):
     """A DELIVERY MECHANISM MUST BE SYMMETRIC (2026-08-07).
 

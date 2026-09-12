@@ -346,19 +346,15 @@ _DELEGATE_TOOLS = frozenset({"supervise", "get_desk", "read_rulings",
 _OPTIONAL_TOOLS = frozenset({"rate_message", "read_ledger"})
 
 
-#: THE DRIVEN TIER (cycle 3, 2026-09-09). Measured over 215 driven turns
-#: (2,321 agora calls: two 4-seat lab runs + the 19-seat fleet run): these
-#: were called ZERO times, or only as ceremony a driven turn has no business
-#: in (votes, room-making — the scaffold does that; `wait_for_messages` is
-#: forbidden in a driven turn outright). Every schema is re-sent on every
-#: turn: the audit priced the 58 tools at ~10.5k tokens. `AGORA_MCP_TOOLS=
-#: driven` (set by `agora drive`) serves the tools a driven seat actually
-#: works with; delegates keep the delegate radar.
+#: The driven tier omits idle listening and administration. Low observed use
+#: is not evidence that a collaboration capability is unnecessary: workers
+#: retain group formation, voting and artifact history, subject to the same
+#: hub authorization as interactive seats. Delegation still controls radar.
 _DRIVEN_DROP = frozenset({
-    "create_channel", "invite_agent", "create_group", "archive_channel",
-    "unarchive_channel", "list_machines", "open_vote", "tally_vote",
-    "close_vote", "wait_for_messages", "retract_thread", "fs_delete",
-    "fs_history", "charter_receipts", "channel_digest", "who_is_reachable",
+    "create_channel", "archive_channel",
+    "unarchive_channel", "list_machines",
+    "wait_for_messages", "retract_thread", "fs_delete",
+    "charter_receipts", "channel_digest", "who_is_reachable",
     "get_board"})
 
 
@@ -376,12 +372,6 @@ def tools_to_drop(me: Any, *, everything: bool = False,
         drop |= _DELEGATE_TOOLS
     if driven:
         drop |= _DRIVEN_DROP
-        if any("reporting" in grant.get("powers", [])
-               for grant in me.get("delegations", []) if isinstance(grant, dict)):
-            # A chief of staff may form the task team. Ordinary workers do
-            # not pay for setup schemas on every turn; hub permissions still
-            # decide every call, including expired/scoped grants.
-            drop -= {"create_group", "invite_agent"}
     return drop
 
 

@@ -1008,7 +1008,7 @@ def upsert_toml_table(path: Path, table: str, block: str) -> None:
 _SKILL_DIRS = {
     "cursor": Path(".cursor") / "skills-cursor" / "agora-channels",
     "claude": Path(".claude") / "skills" / "agora-channels",
-    "codex": Path(".codex") / "skills" / "agora-channels",
+    "codex": Path(".agents") / "skills" / "agora-channels",
     "abstractcode": Path(".abstract") / "skills" / "agora-channels",
     "abstractcode-tui": Path(".abstract") / "skills" / "agora-channels",
     # `~/.agents/skills/` is the SHARED Agent Skills location both of these
@@ -1044,7 +1044,8 @@ def install_skill(harness: str, home: Path | None = None) -> str:
     try:
         pkg = resources.files("agora.skill")
         target.mkdir(parents=True, exist_ok=True)
-        for name in ("SKILL.md", "agora_protocol.py"):
+        for name in ("SKILL.md", "agora_protocol.py", "references/interactive.md"):
+            (target / name).parent.mkdir(parents=True, exist_ok=True)
             (target / name).write_text((pkg / name).read_text())
         return f"skill: installed agora-channels at {target}"
     except Exception as exc:  # never block seat wiring on the skill copy

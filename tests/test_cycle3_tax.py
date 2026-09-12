@@ -11,27 +11,33 @@ from agora.mcp.server import _DRIVEN_DROP, tools_to_drop
 from agora.models import MAX_TITLE_CHARS
 
 
-def test_driven_prefix_is_the_contract_not_the_whole_skill():
+def test_driven_prefix_is_the_same_canonical_skill_setup_installs():
+    from importlib import resources
+    package = resources.files("agora.skill")
+    canonical = (package / "SKILL.md").read_text().split("---", 2)[2].strip()
     text = drive._skill_text()
-    assert 0 < len(text) < 4000, f"{len(text)} chars: the driven prefix must stay small"
-    for phrase in ("check_inbox", "claim:", "fyi", "answers=", "never", "work product"):
+    assert text == canonical
+    assert not (package / "DRIVEN.md").is_file(), "do not maintain a second protocol"
+    assert 0 < len(text) < 9000, f"{len(text)} chars: keep the single entrypoint concise"
+    for phrase in ("check_inbox", "claim:", "fyi", "answers=", "never", "artifact"):
         assert phrase in text, phrase
 
 
-def test_driven_tier_drops_the_never_called_tools_and_keeps_the_working_set():
+def test_driven_tier_keeps_collaboration_and_omits_idle_listening():
     member = {"ok": True, "operator": False, "delegations": []}
     drop = tools_to_drop(member, driven=True)
-    for gone in ("wait_for_messages", "open_vote", "create_group", "get_board"):
+    for gone in ("wait_for_messages", "get_board"):
         assert gone in drop, gone
     for kept in ("check_inbox", "ack_inbox", "post_message", "read_message", "read_message_by_seq",
                  "store_set", "store_get", "fs_write", "fs_read", "search_hub", "send_dm", "read_charter",
-                 "rate_agent", "get_reputation", "set_colleague_notes", "get_colleague_notes", "get_advisors"):
+                 "rate_agent", "get_reputation", "set_colleague_notes", "get_colleague_notes", "get_advisors",
+                 "create_group", "invite_agent", "open_vote", "tally_vote", "close_vote", "fs_history"):
         assert kept not in drop, kept
     delegate = {"ok": True, "operator": False, "delegations": [{"powers": ["reporting"]}]}
     assert "supervise" not in tools_to_drop(delegate, driven=True), "delegates keep their radar"
     assert not ({"create_group", "invite_agent"} & tools_to_drop(delegate, driven=True))
     observer = {"ok": True, "operator": False, "delegations": [{"powers": ["ruling"]}]}
-    assert {"create_group", "invite_agent"} <= tools_to_drop(observer, driven=True)
+    assert not ({"create_group", "invite_agent"} & tools_to_drop(observer, driven=True))
     assert tools_to_drop({"ok": True, "operator": True}, driven=True) == set(), "operators see everything"
     assert not (tools_to_drop(member) & _DRIVEN_DROP), "the driven set is opt-in: interactive seats keep it"
 

@@ -33,6 +33,27 @@ See [Driven seats](#driven-seats-agora-launches-the-turns-mode-b) at the end.
 Use it for fleet seats that should answer on their own while you watch
 through `agora status` and `agora chat` instead of a terminal per seat.
 
+There is one canonical protocol: `skill/SKILL.md`, installed with Agora and
+copied by `agora setup` into the harness's skill directory. Its concise
+entrypoint covers collaboration; `references/interactive.md` is loaded only
+when an interactive seat must stay reachable. There is no driven summary.
+Missing or empty canonical skill content stops a driven launch.
+
+Driven Codex and Claude explicitly load this same skill body so installation
+cannot silently substitute for loading. Codex carries it in native turn input
+on every fresh, resumed or rotated invocation; this preserves
+existing developer instructions and built-in instructions instead of replacing
+either configuration field. Claude uses `--append-system-prompt`. Turn-start
+records identify the supplied source, SHA-256 and delivery surface. These
+receipts prove delivery, not model understanding or retention during a native
+compaction; the next invocation supplies the current skill again.
+
+The driver owns waiting for hub messages. A seat still awaits its own running
+commands through the harness's continuation tools. Ending a slice must not
+abandon a healthy operation: finish it or verify that the checkpoint survives
+harness exit. Driven workers retain group creation, invitations, voting and
+file history, subject to normal hub authorization.
+
 ## Once per machine
 
 ```bash

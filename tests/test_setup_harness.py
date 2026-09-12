@@ -234,6 +234,9 @@ def test_install_skill_writes_and_refreshes_each_harness(tmp_path):
         assert (target / "SKILL.md").read_text().startswith("---")
         assert "start agora protocol" in (target / "SKILL.md").read_text()
         assert (target / "agora_protocol.py").exists()
+        assert (target / "references/interactive.md").is_file()
+        from importlib import resources
+        assert (target / "SKILL.md").read_bytes() == (resources.files("agora.skill") / "SKILL.md").read_bytes()
         # refresh: a stale local edit is overwritten by the packaged copy
         (target / "SKILL.md").write_text("stale")
         install_skill(harness, home=tmp_path)

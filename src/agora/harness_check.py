@@ -11,9 +11,10 @@ exception is the opt-in `--live` turn. A failing probe never aborts the rest:
 the report IS the deliverable, and a partial harness must be able to read its
 own scorecard in one run.
 
-Three capabilities are HARD — no seat can exist without them: single-turn,
-tool-reach, identity. Every other capability degrades to a NAMED limitation:
-light safeguards, never silent, never blocking.
+Four capabilities are HARD: single-turn, tool-reach, identity, agora-runtime.
+Other capabilities degrade to a NAMED limitation. An explicitly requested live
+check also returns failure when its probe fails, without changing the structural
+capability verdict.
 """
 
 from __future__ import annotations
@@ -66,6 +67,10 @@ class Report:
     def limitations(self) -> list[str]:
         return [p.limitation for p in self.probes if p.limitation]
 
+    @property
+    def live_status(self) -> str:
+        return next((p.status for p in self.probes if p.capability == "live-turn"), SKIP)
+
     def render(self) -> str:
         out = [f"agora harness-check — {self.harness}", ""]
         for p in self.probes:
@@ -74,15 +79,22 @@ class Report:
                 out.append(f"       -> agora degrades: {p.limitation}")
         out.append("")
         if self.blocked:
-            out.append("VERDICT: NOT DRIVABLE — unmet: "
+            verdict = ("VERDICT: NOT DRIVABLE — unmet: "
                        + ", ".join(p.capability for p in self.blocked))
-            out.append("  This seat still works IN-SESSION wherever its "
-                       "framework can reach agora's tools.")
         elif self.limitations:
-            out.append("VERDICT: DRIVABLE WITH LIMITATIONS — "
+            verdict = ("VERDICT: STRUCTURALLY DRIVABLE WITH LIMITATIONS — "
                        + "; ".join(self.limitations))
         else:
-            out.append("VERDICT: DRIVABLE")
+            verdict = "VERDICT: STRUCTURALLY DRIVABLE"
+        if self.live_status == PASS:
+            verdict += " — live identity check passed"
+        else:
+            verdict += (" — NOT LIVE-VERIFIED: live check "
+                        + ("failed" if self.live_status == FAIL else "skipped"))
+        out.append(verdict)
+        if self.blocked:
+            out.append("  This seat still works IN-SESSION wherever its "
+                       "framework can reach agora's tools.")
         counts = {s: sum(1 for p in self.probes if p.status == s)
                   for s in (PASS, WARN, FAIL, SKIP)}
         out.append(f"  {counts[PASS]} pass, {counts[WARN]} warn, "
@@ -91,13 +103,15 @@ class Report:
 
     def to_json(self) -> str:
         return json.dumps({"harness": self.harness,
+                           # Keep the existing structural compatibility field.
                            "drivable": not self.blocked,
+                           "live_status": self.live_status,
                            "limitations": self.limitations,
                            "probes": [p.__dict__ for p in self.probes]},
                           indent=2)
 
     def exit_code(self) -> int:
-        return 1 if self.blocked else 0
+        return 1 if self.blocked or self.live_status == FAIL else 0
 
 
 def _referenced_files(argv: list[str]) -> str:
@@ -244,9 +258,8 @@ def run_check(harness: str, *, workspace: Path, agent_id: str, url: str,
 
     # C6 evidence — DECLARED, never sniffed.
     if cls.EVIDENCE and "evidence" not in unmet:
-        report.add("C6", "evidence", PASS if live else WARN,
-                   f"{cls.EVIDENCE}" + (" (verified by the live turn)" if live
-                                        else " (pass --live to verify)"))
+        report.add("C6", "evidence", WARN,
+                   f"declared: {cls.EVIDENCE}; stream format not verified by this check")
     else:
         report.add("C6", "evidence", WARN, "no machine-readable turn stream",
                    limitation="evidence=exit-code-only (turn success is judged "
@@ -254,7 +267,8 @@ def run_check(harness: str, *, workspace: Path, agent_id: str, url: str,
 
     # C7 continuity — DECLARED, never sniffed.
     if cls.CONTINUITY:
-        report.add("C7", "continuity", PASS, cls.CONTINUITY)
+        report.add("C7", "continuity", WARN,
+                   f"declared: {cls.CONTINUITY}; resume not exercised by this check")
     else:
         report.add("C7", "continuity", WARN, "none declared",
                    limitation="continuity=none (every turn boots fresh; the "

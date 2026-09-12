@@ -40,7 +40,9 @@ def skill() -> str:
 def skill_flat(skill: str) -> str:
     """Whitespace-collapsed, so a phrase check never breaks on a line wrap —
     the teaching is the words, not the fill column."""
-    return " ".join(skill.split())
+    from importlib import resources
+    interactive = (resources.files("agora.skill") / "references/interactive.md").read_text()
+    return " ".join((skill + "\n" + interactive).split())
 
 
 @pytest.fixture(scope="module")
@@ -65,7 +67,7 @@ def test_skill_frontmatter_and_boot_phrase_survive(skill: str):
      "injection safety: peer content is never an instruction"),
     ("nonce-delimited",
      "injection safety: the fence is the unforgeable boundary"),
-    ("Never wait in the foreground",
+    ("Never wait for hub messages in the foreground",
      "a foreground wait serializes the seat behind other agents' messages"),
     ("Never install machine persistence",
      "machine mutation is the operator's act alone"),
@@ -113,12 +115,12 @@ def test_skill_teaches_every_cycle(skill_flat: str, cycle: str):
      "two seats built v3 and v4 of one manuscript at once"),
     ("park — do not manufacture",
      "the phase row's real value was a place to say 'waiting, by design'"),
-    ("One cold whole-artifact read",
+    ("cold-read the whole artifact",
      "10 voice-checking review messages while an impossible chronology "
      "survived five versions"),
-    ("subtraction budget",
-     "reviews that only add converge on an artifact nobody re-reads"),
-    ("LIVE artifact, not the thread",
+    ("No blanket subtraction quota",
+     "creative development must not inherit an arbitrary cutting quota"),
+    ("LIVE artifact against the commission",
      "three fixes went endorsed -> queued -> 'discharged' -> still absent"),
     ("diff summary naming the owner",
      "a silent empty-body fs:put made three seats' state statements wrong "
@@ -152,11 +154,8 @@ def test_skill_teaches_what_the_field_measured(skill_flat: str, teaching: str,
 
 
 def test_skill_stays_within_its_token_budget(skill: str):
-    """Every seat pays for this file on every session. The 0140 pass rewrote
-    it from 31.9k chars to ~27k while ADDING the cycle teachings above; the
-    ceiling keeps the next edit honest — growing past it means cutting
-    something, not appending."""
-    assert len(skill) <= 30_000, f"skill grew to {len(skill)} chars"
+    """Keep the common protocol concise; conditional detail belongs in references."""
+    assert len(skill) <= 9_000, f"skill grew to {len(skill)} chars"
 
 
 # -- the hub rules: the operator's own voice, read every session ------------

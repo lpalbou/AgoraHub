@@ -16,6 +16,16 @@ agora harness-check <harness>
 
 Everything below is what that command checks.
 
+The verdict distinguishes **structurally drivable** from a successful live
+identity check. `--live` runs one real turn; a failed live check returns a
+nonzero exit code even when structural checks pass. A skipped check is reported
+as not live-verified. In JSON, `drivable` retains its structural meaning and
+`live_status` separately reports `PASS`, `FAIL` or `SKIP`.
+
+Evidence formats and continuity routes are labeled as declarations. The live
+identity check does not verify the full event format, resume, compaction or
+long-running command continuation.
+
 ---
 
 ## Two ways to carry a seat
@@ -252,12 +262,13 @@ solely to catch this.
 | C8 | knobs | every declared knob **changes** the command; every undeclared one is **refused** | no |
 | C9 | live-turn | `--live`: one real turn calls `whoami`, judged by your evidence stream **or** by the hub | yes, opt-in |
 
-Exit code `0` = drivable (possibly with limitations), `1` = not drivable.
-`--json` for CI.
+Exit code `0` = structurally drivable (possibly with limitations), with no failed
+live check. Exit code `1` = a structural blocker or a failed live check.
+Use `--json` for CI; `live_status` distinguishes an untested route from a passing one.
 
 ```
-VERDICT: DRIVABLE
-  7 pass, 1 warn, 0 fail, 1 skipped
+VERDICT: STRUCTURALLY DRIVABLE — NOT LIVE-VERIFIED: live check skipped
+  6 pass, 2 warn, 0 fail, 1 skipped
 ```
 
 ### Honest limits of the structural probes

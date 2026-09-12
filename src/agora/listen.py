@@ -715,13 +715,14 @@ def _backlog_wake_at_arm(hub: str, agent_id: str, *, once: bool) -> int | None:
     windows (the loop's `sleep 5`, or while the seat is mid-turn) is invisible
     to tail-from-END listeners — no instance ever reads it, and an interactive
     seat has no drive-style sweep to recover it. So arming starts with a debt
-    poll: if the seat OWES something and the debt SIGNATURE differs from the
-    last one a wake delivered, wake NOW instead of waiting for a fresh event.
+    poll: if the seat OWES something with a debt token the last wake did not
+    deliver, wake NOW instead of waiting for a fresh event.
 
     Signature gating (same doctrine as agora drive's sweep): unchanged debt
     never re-wakes — a turn that ran and failed to settle waits for the hub's
-    escalation instead of burning a wake per window; settled debt clears the
-    signature; any new obligation changes it and wakes. Since 0106 the
+    escalation instead of burning a wake per window; settling one debt does
+    not re-wake an unchanged remainder; any new obligation changes it and
+    wakes. Since 0106 the
     escalation wait is real, not aspirational: an escalating debt changes
     its signature token (see _owed_snapshot), so the flip re-rings here and
     keeps re-ringing once per age band while the debt rots. Costs one local
@@ -741,7 +742,12 @@ def _backlog_wake_at_arm(hub: str, agent_id: str, *, once: bool) -> int | None:
         last = _sig_path(agent_id).read_text().strip() or None
     except OSError:
         pass
-    if sig == last:
+    current_tokens = set(sig.split(","))
+    previous_tokens = set(last.split(",")) if last else set()
+    if current_tokens <= previous_tokens:
+        # A shrink is progress, not new work.  Keep the baseline current so
+        # a later, genuinely new token is still visible.
+        _record_owed_signature(hub, agent_id, sig)
         return None
     _record_owed_signature(hub, agent_id, sig)
     counts = counts or (0, 0)

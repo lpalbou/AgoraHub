@@ -120,7 +120,7 @@ WAKE_PROMPT = (
     "not yours (declines=[ids]). Then ack_inbox and END. If nothing owed BY "
     "YOU and no ask names you: END THE TURN WITHOUT POSTING ANYTHING — a "
     "receipt on an empty pass is the anti-pattern this rule exists to stop. "
-    "Do not wait, listen or re-check; the driver owns reception and continues "
+    "Do not wait for hub messages, listen or re-check the inbox; the driver continues "
     "real claims."
 )
 
@@ -148,13 +148,13 @@ BOOT_PROMPT = (
 # before continuing, the turn re-reads the claim row and newer messages,
 # because the operator or a peer may have canceled/refined/replaced the
 # task while the seat was heads-down.
-WORK_PROMPT = 'AGORA WORK CHUNK. Use only Agora MCP tools for the hub. Own the outcome within your mission, not just the next instruction. First re-read your claim, its task and newer task messages; cancellation, changed requirements and dependency readiness govern the slice. Think: what consequential assumption, missing evidence, better solution or opportunity can you test now? Do one useful bounded slice. Bring in the seat who knows when its evidence could change your conclusion. Put shared challenges and decisions in the task channel; use a DM for private pairwise logistics. Escalate unresolved coordination to the task manager, using get_task and route_task rather than guessing a name. Record progress and the next step on your claim with CAS; no routine progress posts. Post one substantive finding with evidence when others can use it; an actionable ask names who must answer. Read and adopt or reject answers explicitly. Finish at a safe checkpoint, then END. Do not check the inbox, wait, listen or start watchers.'
+WORK_PROMPT = 'AGORA WORK CHUNK. Use only Agora MCP tools for the hub. Own the outcome within your mission, not just the next instruction. First re-read your claim, its task and newer task messages; cancellation, changed requirements and dependency readiness govern the slice. Think: what consequential assumption, missing evidence, better solution or opportunity can you test now? Do one useful bounded slice. Bring in the seat who knows when its evidence could change your conclusion. Put shared challenges and decisions in the task channel; use a DM for private pairwise logistics. Escalate unresolved coordination to the task manager, using get_task and route_task rather than guessing a name. Record progress and the next step on your claim with CAS; no routine progress posts. Post one substantive finding with evidence when others can use it; an actionable ask names who must answer. Read and adopt or reject answers explicitly. Finish at a safe checkpoint, then END. Do not check or wait for the inbox, listen or start watchers. Await owned commands with the harness continuation tool until completion or a real failure; do not abandon them to end a slice.'
 
 # A fresh initiative session needs identity/orientation before the work
 # contract. Keeping this distinct from BOOT_PROMPT prevents a reception boot
 # from doing work, and prevents a rotated work session from wasting its first
 # chunk on reception only.
-WORK_BOOT_PROMPT = 'AGORA WORK CHUNK BOOT. You are a DRIVEN Agora seat. First whoami and read_charter(), then your task charter. Read the supplied personal briefing; get_briefing refreshes it. Own your assigned outcome: test important assumptions, identify better solutions and seek relevant peer evidence. Re-read your claim, task and newer messages before one bounded slice; honor cancellation and dependencies. Use the task channel for consequential shared questions and findings, route_task for manager/director escalation, DM for private logistics. Update your claim with evidence and next_step using CAS. Routine progress stays on the row; deliver a meaningful finding once. Then END; never wait, listen or start watchers.'
+WORK_BOOT_PROMPT = 'AGORA WORK CHUNK BOOT. You are a DRIVEN Agora seat. First whoami and read_charter(), then your task charter. Read the supplied personal briefing; get_briefing refreshes it. Own your assigned outcome: test important assumptions, identify better solutions and seek relevant peer evidence. Re-read your claim, task and newer messages before one bounded slice; honor cancellation and dependencies. Use the task channel for consequential shared questions and findings, route_task for manager/director escalation, DM for private logistics. Update your claim with evidence and next_step using CAS. Routine progress stays on the row; deliver a meaningful finding once. Then END; do not wait for hub messages, listen or start watchers.'
 
 # The LANE PASS: the only prompt a seat that holds no row will ever see that
 # authorises speaking FIRST. Measured on the five-seat run of 2026-08-12:
@@ -176,7 +176,7 @@ WORK_BOOT_PROMPT = 'AGORA WORK CHUNK BOOT. You are a DRIVEN Agora seat. First wh
 # help and an agreement all fail. That cut is what keeps this from re-opening
 # the ceremony the empty-pass rule closed (0140 field test 2: 50% ceremony on
 # turns woken owing nothing).
-INITIATIVE_PROMPT = 'AGORA WORK CHUNK — LANE PASS. Use only Agora MCP tools for the hub. If this session is new, whoami first. Nothing is owed and you hold no live claim. Look at your mission, personal briefing and live artifacts. Can you identify a consequential gap, better solution or opportunity where your expertise adds value? Name the affected task/artifact and the evidence that could change the decision. If yes, make one useful contribution in its task channel, send one targeted structured ask, or claim an unowned slice and test it. Seek a perspective that could falsify yours. Do not duplicate owned work; do not post availability, agreement or a repeated concern. With no useful contribution, END WITHOUT POSTING. Do not check the inbox or wait.'
+INITIATIVE_PROMPT = 'AGORA WORK CHUNK — LANE PASS. Use only Agora MCP tools for the hub. If this session is new, whoami first. Nothing is owed and you hold no live claim. Look at your mission, personal briefing and live artifacts. Can you identify a consequential gap, better solution or opportunity where your expertise adds value? Name the affected task/artifact and the evidence that could change the decision. If yes, make one useful contribution in its task channel, send one targeted structured ask, or claim an unowned slice and test it. Seek a perspective that could falsify yours. Do not duplicate owned work; do not post availability, agreement or a repeated concern. With no useful contribution, END WITHOUT POSTING. Do not check or wait for the inbox.'
 
 #: Prepended to a DELEGATE's work chunk. Its job is the room, not the code.
 SUPERVISE_PROMPT = "You are the operator's chief of staff. Enable seats to build efficiently together; do not take their implementation work. Use the personal briefing as your desk; fetch omitted or stale records only when needed. Ensure tasks have managers, useful peer challenges, clear dependencies and a path to acceptance. Keep consequential evidence and decisions in the task channel so others can challenge and help. Give the operator concise decisions, reasons, uncertainties and questions at meaningful changes. For an operator decision, ask them directly; act for them only with live scoped proxy AND their explicit unexpired absence declaration. Learn from evidenced mistakes and successes; keep work-specific colleague notes and share useful patterns with relevant seats. Your grant is your authority.\n\n"
@@ -574,6 +574,19 @@ class DriveAdapter:
         # up carrying a product's internals.
         self.harness_args: dict[str, str] = dict(harness_args or {})
         self.mcp_probe: MCPRuntimeProbe | None = None
+        self.protocol_receipt: dict[str, str] = {}
+
+    def driven_contract(self, surface: str) -> str:
+        """Supply and identify the packaged contract actually sent this turn."""
+        body = _skill_text()
+        if not body:
+            raise SystemExit("agora drive: required skill/SKILL.md is missing or empty; reinstall agorahub")
+        self.protocol_receipt = {
+            "protocol_source": "agora.skill/SKILL.md",
+            "protocol_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+            "protocol_surface": surface,
+        }
+        return body
 
     def warn_effective_model(self) -> None:
         """Say out loud when a harness will fall back to an unfit default.
@@ -886,7 +899,13 @@ class CodexDriveAdapter(DriveAdapter):
         # MCP runs through Codex's host. The selected profile governs shell access.
         if resuming:
             cmd.append(session_id)
-        cmd.append(prompt)
+        # Codex has no append-system-prompt flag. Its developer_instructions
+        # config is a scalar override, which would replace the operator's
+        # configured developer instructions. Supply the contract in native
+        # input on EVERY invocation instead: fresh, resumed and rotated seats
+        # get the current bytes without depending on host skill discovery.
+        contract = self.driven_contract("prompt-prefix")
+        cmd.append(f"{contract}\n\n# Assigned turn\n{prompt}")
         return cmd
 
 
@@ -1014,28 +1033,22 @@ class CodexDriveAdapter(DriveAdapter):
 
 
 def _skill_text() -> str:
-    """The packaged `agora-channels` SKILL.md body — agora's OTHER half.
+    """Load the one canonical skill installed with Agora, without a summary.
 
-    Read from the PACKAGE, not from the harness's installed copy under
-    `~/.claude/skills/`: `install_skill` writes these same bytes there, but a
-    driven seat must not go norm-blind because `agora setup` was last run for
-    a different harness on this machine. The YAML frontmatter is the harness's
-    discovery metadata, not instruction, so it is stripped and replaced by one
-    line naming what follows. Never raises: a seat that has agora's MCP half
-    and not its skill half is degraded, not broken.
+    Setup installs these same bytes for interactive discovery. Drivers load
+    the body explicitly so an installed-but-unread skill cannot silently pass.
+    Interactive-only procedures live in a reference, loaded on demand.
     """
-    # THE DRIVEN CONTRACT, not the whole skill (cycle 3, 2026-09-09). The
-    # full SKILL.md is 15.4k chars — ~3.9k tokens re-sent on EVERY turn of
-    # every driven seat, where the driver's own prompt already carries the
-    # turn's job. The fleet audit put agora's per-turn footprint at 10-11k
-    # tokens against a 2.2k budget. DRIVEN.md is the subset that binds a
-    # driven turn; the full skill stays installed for interactive seats and
-    # readable on demand.
     try:
         from importlib import resources
-        raw = (resources.files("agora.skill") / "DRIVEN.md").read_text()
+        raw = (resources.files("agora.skill") / "SKILL.md").read_text()
     except Exception:
         return ""
+    if raw.startswith("---\n"):
+        parts = raw.split("---", 2)
+        if len(parts) != 3:
+            return ""
+        raw = parts[2]
     return raw.strip()
 
 
@@ -1095,24 +1108,9 @@ class ClaudeDriveAdapter(DriveAdapter):
         cmd += ["--allowedTools", "mcp__agora"]
         cmd += ["--permission-mode",
                 "bypassPermissions" if self.permissions == "all" else "auto"]
-        # THE MISSING HALF (2026-08-13). agora is MCP + SKILL, and this
-        # adapter shipped only the MCP half: measured across two 5-seat runs,
-        # 0 skill loads in 4,585 tool calls. `claude` has no --skill flag, and
-        # a leading `/agora-channels` in the PROMPT does load it (verified
-        # live under exactly these flags) — but a prompt load lands in the
-        # TRANSCRIPT, which makes it either per-turn (402 turns x ~7.3k
-        # tokens, cumulative inside one session: the 80-turn seat would end up
-        # carrying 80 copies) or once-per-session and then EATEN BY
-        # COMPACTION — 60 compactions were recorded across those same runs,
-        # and three of ten seats compacted more than once every two turns
-        # (12/11, 14/20, 10/17), so a boot-only load dies first exactly where
-        # the norms are needed most. The system prompt is the one surface
-        # compaction cannot reach and `--resume` re-sends every turn: ~7.3k
-        # tokens on a CACHED prefix, ~5% of the 721M cache-read tokens those
-        # runs already spent, ZERO transcript budget (it never brings the next
-        # compaction closer), and no dependency on `agora setup` having
-        # installed the skill on this machine.
-        skill = _skill_text()
+        # Supply the canonical skill through Claude's additive instruction
+        # surface on every invocation, including resume.
+        skill = self.driven_contract("append-system-prompt")
         if skill:
             cmd += ["--append-system-prompt", skill]
         # `--harness-arg k=v` was accepted and dropped here: this adapter never
@@ -3237,7 +3235,8 @@ class Driver:
         self._log_event(event="turn_start", ts=round(t0, 3),
                         agent=self.agent_id, kind=kind,
                         harness=self.harness,
-                        session=session_id, model=self.model)
+                        session=session_id, model=self.model,
+                        **self._adapter.protocol_receipt)
         try:
             # KNOWN LIMIT — and NOT the one this comment used to name. It
             # claimed the cap was defeated by a grandchild holding the pipes,

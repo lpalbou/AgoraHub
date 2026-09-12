@@ -301,6 +301,14 @@ def test_list_machines_is_readable_by_a_plain_member_and_is_empty(hub, monkeypat
     assert _call_tool(mcp, "list_machines", {}) == []
 
 
+def test_driven_worker_catalog_retains_collaboration_without_operator_powers(hub, monkeypatch):
+    key = _make_agent(hub, "driven-worker")
+    monkeypatch.setenv("AGORA_MCP_TOOLS", "driven")
+    names = _tool_names(_server_against(hub, monkeypatch, key))
+    assert {"create_group", "invite_agent", "open_vote", "tally_vote", "close_vote", "fs_history"} <= names
+    assert not ({"spawn_seat", "retire_agent", "wait_for_messages", "supervise"} & names)
+
+
 def test_stop_spawn_records_intent_only(hub, monkeypatch):
     import httpx
 

@@ -323,7 +323,8 @@ def test_codex_resume_omits_exec_only_sandbox_flag():
     assert "mcp_servers.agora.required=true" in cmd
     assert "--dangerously-bypass-hook-trust" not in cmd
     assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
-    assert cmd[-2:] == ["codex-thread", "wake"]
+    assert cmd[-2] == "codex-thread"
+    assert cmd[-1].endswith("# Assigned turn\nwake")
 
 
 def test_codex_reasoning_effort_is_an_explicit_native_override():
@@ -830,10 +831,11 @@ def test_codex_pins_workspace_permissions_and_network_policy_on_every_turn(sessi
     assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
     if session_id:
         assert cmd[:3] == ["codex", "exec", "resume"]
-        assert cmd[-2:] == [session_id, "work slice"]
+        assert cmd[-2] == session_id
+        assert cmd[-1].endswith("# Assigned turn\nwork slice")
     else:
         assert cmd[:2] == ["codex", "exec"] and cmd[2] != "resume"
-        assert cmd[-1] == "work slice"
+        assert cmd[-1].endswith("# Assigned turn\nwork slice")
 
 
 @pytest.mark.parametrize(
@@ -2006,8 +2008,27 @@ def test_claude_turn_carries_the_agora_skill():
     argv = _claude_adapter().build_command("p", None)
     assert "--append-system-prompt" in argv
     body = argv[argv.index("--append-system-prompt") + 1]
-    # Cycle 3 (2026-09-09): the driven turn carries the DRIVEN CONTRACT, not the
-    # whole skill — ~570 tokens instead of ~3.9k, re-sent on every turn.
-    assert "# The driven seat's contract" in body
+    from agora.drive import _skill_text
+    assert body == _skill_text()  # one canonical skill for both harnesses
     assert not body.lstrip().startswith("---")   # frontmatter is metadata
     assert argv[-1] == "p"                       # prompt stays positional
+
+
+@pytest.mark.parametrize("session", [None, "resumed-session", None])
+def test_codex_receives_current_contract_without_replacing_trusted_config(home, monkeypatch, session):
+    """Fresh/resumed/rotated commands must carry the protocol, not just MCP."""
+    from agora import drive
+    adapter = _make_adapter("codex", model="gpt-5.6-terra", provider=None,
+                            permissions="all", harness_args=None, cwd=home,
+                            mcp=_binding(home), reasoning_effort="medium")
+    body = drive._skill_text()
+    argv = adapter.build_command("WORK SENTINEL", session)
+    assert argv[-1] == body + "\n\n# Assigned turn\nWORK SENTINEL"
+    assert not any("developer_instructions=" in arg or "model_instructions_file=" in arg
+                   for arg in argv), "native trusted instruction config must remain intact"
+    assert adapter.protocol_receipt["protocol_sha256"] == __import__("hashlib").sha256(body.encode()).hexdigest()
+    monkeypatch.setattr(drive, "_skill_text", lambda: "CURRENT CONTRACT")
+    assert adapter.build_command("NEXT", session)[-1].startswith("CURRENT CONTRACT\n")
+    monkeypatch.setattr(drive, "_skill_text", lambda: "")
+    with pytest.raises(SystemExit, match="missing or empty"):
+        adapter.build_command("NEXT", session)

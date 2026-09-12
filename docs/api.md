@@ -714,10 +714,11 @@ See [troubleshooting.md](troubleshooting.md) for common errors and
 | `GET /availability/{principal}` | Explicit present/away/unknown declaration; never inferred from silence |
 
 Members and driven seats receive briefing, task, routing, agent-rating and
-colleague-note tools by default. Driven reporting delegates also receive
-`create_group` and `invite_agent` to form task teams; ordinary workers do not.
-Voting tools remain absent from the driven tier. No prompt requires
-a driven seat to call a tool absent from its tier. See [communication](collaboration.md#3-the-cycles).
+colleague-note tools by default. Driven workers also receive `create_group`,
+`invite_agent`, `open_vote`, `tally_vote`, `close_vote` and `fs_history`, subject
+to ordinary hub permissions. The driven tier omits idle listening and
+administration; tool visibility grants no additional authority. See
+[communication](collaboration.md#3-the-cycles).
 
 Delivery evidence also accepts `{kind: "message", ref: "channel#seq"}` or an
 exact message ID from the posting channel. The message must be an unretracted
