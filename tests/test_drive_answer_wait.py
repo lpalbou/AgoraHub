@@ -95,6 +95,60 @@ def test_active_answer_wait_blocks_model_work_despite_prose_and_versions(room):
     assert rewritten["version"] > row["version"]
 
 
+def _idle_boundary(driver, monkeypatch):
+    """Run exactly one no-wake listener return through the real scheduler."""
+    returns = iter([0])
+
+    def listen(**_kw):
+        try:
+            return next(returns)
+        except StopIteration:
+            raise SystemExit(0)
+
+    monkeypatch.setattr(drive_mod, "run_listen", listen)
+    with pytest.raises(SystemExit):
+        driver.run()
+
+
+def test_answer_wait_is_not_idle_but_answer_and_expiry_are_actionable(
+        room, monkeypatch):
+    """The scheduler must not turn a parked answer wait into lane work.
+
+    This uses the actual store row and reply-state route.  A peer's unrelated
+    FYI produces real reception traffic, which would otherwise satisfy the
+    initiative lane's traffic gate.  The unchanged wait still produces no
+    work turn; its required reply and its deadline each make a continuation
+    snapshot that the ordinary work path runs.
+    """
+    room.claim()
+    assert room.driver._continuation_snapshot() is None
+    assert room.driver._answer_wait_pending is True
+    assert room.client.post("/channels/task-1/messages", headers=room.seats["peer"], json={
+        "status": "fyi", "body": "Unrelated traffic; the review answer is still absent.",
+    }).status_code == 200
+    assert room.driver.run_turn() is True
+    _idle_boundary(room.driver, monkeypatch)
+    assert len(room.spawned) == 1, "only the unrelated reception turn ran"
+
+    room.answer()
+    _idle_boundary(room.driver, monkeypatch)
+    assert len(room.spawned) == 2
+
+    current_version = room.client.get("/channels/task-1/store/" + quote(KEY, safe=":"),
+                                      headers=room.seats["director"]).json()["version"]
+    room.claim({"owner": "director", "status": "blocked awaiting review",
+                "source_message_id": room.root, "blocked_on": "seat",
+                "needs_from": "reviewer", "needs": "a later reviewer response",
+                "waiting_for_answers": [{"channel": "task-1", "message_id": room.root,
+                                         "after_seq": 999}], "wait_until": 1.0},
+               version=current_version)
+    expiring = room.new_driver()
+    monkeypatch.setattr(drive_mod.time, "time", lambda: 2.0)
+    assert expiring._continuation_snapshot() is not None
+    _idle_boundary(expiring, monkeypatch)
+    assert len(room.spawned) == 3
+
+
 def test_active_answer_event_spends_one_receipt_across_rewrite_and_restart(room):
     row = room.claim({"owner": "director", "status": "active awaiting review",
                       "source_message_id": room.root, "blocked_on": "seat", "needs_from": "reviewer",

@@ -154,6 +154,28 @@ def tool_error_text(result: Any) -> str:
     return str(result)
 
 
+def claim_wait_receipt(result: Any) -> Any:
+    """Expose persisted dependencies without pretending to decide dispatch."""
+    if (not isinstance(result, dict) or result.get("ok") is False
+            or not str(result.get("key", "")).startswith("claim:")
+            or not isinstance(result.get("value"), dict)):
+        return result
+    value = result["value"]
+    observes = {name: namespace for name, namespace in (
+        ("waiting_for_answers", "hub replies or consultation events"),
+        ("waiting_for_artifacts", "hub VFS revisions; workspace files and attachments do not count"),
+        ("waiting_on", "hub store row version changes"),
+    ) if value.get(name) is not None}
+    if not observes:
+        return result
+    return {**result, "dependency_receipt": {
+        "observes": observes,
+        "requirements": "The effective requirements are in value under the named fields.",
+        "meaning": "Status changes do not clear waits. This is not a dispatch verdict; task readiness and prior reconsideration also matter.",
+        "resume": "When resuming a parked claim, explicitly repeat, replace or null each answer/artifact wait. For a workspace handoff, await an addressed producer completion reply, then inspect the local file.",
+    }}
+
+
 def channel_info_view(result: dict, *, include_missions: bool = False) -> dict:
     """Keep orientation complete while loading other seats' long charges on demand.
 
@@ -643,7 +665,8 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
                      attachments: list[dict] | None = None,
                      evidence: list[dict] | None = None,
                      settled_by: str = "",
-                     notice_kind: str = "", notice_key: str = "") -> dict:
+                     notice_kind: str = "", notice_key: str = "",
+                     consultation: dict | None = None) -> dict:
         """Post to a channel you belong to.
 
         status: open|blocked (you need answers), reply (needs reply_to),
@@ -661,7 +684,17 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
         you belong to. Uncited, nothing closes. settled_by:
         message id, to close a thread on someone else's authority.
         notice_kind/notice_key: a stable key for a discrete event so a repost
-        cannot double-announce it. urgency: inbox|next_turn|interrupt."""
+        cannot double-announce it. urgency: inbox|next_turn|interrupt.
+        consultation: optional collection policy on exactly one ask. Fields:
+        action (dependent decision), required (seat IDs), eligible (defaults to
+        ask.to), min_responses (distinct substantive answers), not_before and
+        deadline (Unix times), on_timeout (incomplete default, or proceed),
+        artifacts (current same-channel VFS evidence), task ({channel,key}).
+        Named participants and minimum count are AND conditions; not_before
+        holds the collection window even if participation is sufficient.
+        on_timeout=proceed relaxes the count only; named required seats remain
+        mandatory. Deadline is never consent. Read get_consultation before concluding.
+        """
         notice = ({"kind": notice_kind, "key": notice_key}
                   if notice_kind or notice_key else None)
         # D6 (cycle 3): a title over the cap used to cost a 400 and a whole
@@ -680,7 +713,8 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
             **({"data": {
                 **({"evidence": evidence} if evidence else {}),
                 **({"settled_by": settled_by} if settled_by else {}),
-            }} if (evidence or settled_by) else {}),
+                **({"consultation": consultation} if consultation is not None else {}),
+            }} if (evidence or settled_by or consultation is not None) else {}),
         })
 
     @mcp.tool()
@@ -832,6 +866,38 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
     def get_advisors(work_type: str) -> dict:
         """Visible task-specific reputation and your private work-type notes; advisory only."""
         return _call("GET", "/advisors", params={"work_type": work_type})
+
+    @mcp.tool()
+    def get_collaboration_graph(channel: str, since_seq: int = 0, limit: int = 200) -> dict:
+        """Visible social/work graph: seat scopes, your private expectations,
+        requests, task purpose/parents, dependencies, claims, consultations,
+        artifacts, reviews and decisions. Relationships are declared facts,
+        not inferred competence or consensus. Follow message pagination for
+        older/later exchanges; current work relationships are always included.
+        """
+        return _call("GET", f"/channels/{quote(channel, safe='')}/collaboration-graph",
+                     params={"since_seq": since_seq, "limit": limit})
+
+    @mcp.tool()
+    def get_consultation(channel: str, message_id: str) -> dict:
+        """Collection state, missing perspectives, attributed response read
+        targets, exact basis and next timer. Browsing does not consume answers.
+        ready permits reconciliation; it does not mean agreement or approval.
+        """
+        return _call("GET", f"/channels/{quote(channel, safe='')}/messages/{quote(message_id, safe='')}/consultation")
+
+    @mcp.tool()
+    def conclude_consultation(channel: str, message_id: str, outcome: str,
+                             expected_version: str, body: str) -> dict:
+        """Record one synthesis as the question's resolved reply. outcome is
+        decided or cancelled; expected_version is from get_consultation.
+        Explain the choice, material concerns adopted/rejected, and uncertainty.
+        The hub refuses premature or stale decisions. Only the requester,
+        operator or ruling delegate may conclude; cancellation requires a reason.
+        A changed basis/policy needs a new question. Unrelated work may continue.
+        """
+        return _call("POST", f"/channels/{quote(channel, safe='')}/messages/{quote(message_id, safe='')}/consultation/conclusion",
+                     json={"outcome": outcome, "expected_version": expected_version, "body": body})
 
     @mcp.tool()
     def get_briefing() -> dict:
@@ -1264,9 +1330,28 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
         Rejected/superseded need reason (>=12 chars), verified disposition
         evidence and requester/operator/ruling/proxy authority; superseded
         also needs target. Typed rows cannot silently disappear from delivery.
+        Claim waits are fields, not status labels:
+        waiting_for_answers:[{channel,message_id,after_seq?:0}] waits for
+        exact replies; for a consultation use its question ID and after_seq=0.
+        Add condition:"decided" to await its reconciled decision instead of
+        collection readiness. Only consultation questions support that condition.
+        waiting_for_artifacts:[{channel,path,min_version}] waits for every
+        named current VFS revision. wait_until is an optional answer-wait
+        Unix deadline for reconsideration, never approval. Both waits require
+        owner/operator CAS; omission preserves them, null explicitly clears.
+        Resuming parked work must explicitly repeat, replace or null existing
+        waits. Local workspace files and attachments do not satisfy VFS waits:
+        request a producer completion reply, await it, then inspect the file.
+        Keep status=parked/blocked while dependent work waits. Unrelated claims
+        remain actionable. task:{channel,key} links work to the commission.
+        Task parent:{channel,key} declares decomposition; purpose explains why
+        it contributes. depends_on:[{channel,key}] requires accepted prerequisites.
+        Task consultations:[question IDs in this channel] requires current
+        reconciled decisions before delivery, while execution remains eligible.
+        Only task writers can declare/remove that delivery requirement.
         """
-        return _call("PUT", f"/channels/{channel}/store/{key}",
-                     json={"value": value, "expect_version": expect_version})
+        return claim_wait_receipt(_call("PUT", f"/channels/{channel}/store/{key}",
+                                      json={"value": value, "expect_version": expect_version}))
 
     @mcp.tool()
     def store_list(channel: str) -> list:
@@ -1277,43 +1362,106 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
     def fs_list(channel: str, prefix: str = "") -> list:
         """List files (paths + versions) in the channel's shared virtual
         file system (vfs) — the editable 'book' agents on any machine share."""
-        return _call("GET", f"/channels/{channel}/fs", params={"prefix": prefix})
+        return _call("GET", f"/channels/{quote(channel, safe='')}/fs", params={"prefix": prefix})
 
     @mcp.tool()
     def fs_read(channel: str, path: str, version: int | None = None) -> dict | str:
         """Read a file from the channel's virtual file system (versioned; pass
         `version` for an older one). Content is nonce-fenced data; the fence
         carries the version to use as expect_version when writing back.
+        Harness truncation makes this a PARTIAL read. For a long current file,
+        fs_checkout returns a pinned base_file: read it in bounded native
+        sections through EOF before claiming whole-file coverage. Name the
+        reviewed revision; newer revisions need their own assessment.
         Reading channel/charter.md records your charter receipt."""
         from ..render import render_fs_file
         params = {"version": version} if version is not None else {}
-        row = _call("GET", f"/channels/{channel}/fs/{path}", params=params)
+        row = _call("GET", f"/channels/{quote(channel, safe='')}/fs/{quote(path, safe='/')}", params=params)
         if not isinstance(row, dict) or row.get("ok") is False:
             return row  # the loud failure shape passes through untouched
         return render_fs_file(row, channel=channel)
 
     @mcp.tool()
     def fs_write(channel: str, path: str, content: str, mime: str = "text/markdown",
-                 expect_version: int | None = None, description: str = "") -> dict:
+                 expect_version: int | None = None, description: str = "", summary: str = "") -> dict:
         """Create or edit a TEXT file in the channel's virtual file system.
         ALWAYS set `description` (one line saying what the file IS). Pass
         expect_version for compare-and-swap (0 = must not exist); on 409
-        re-read and merge. One writer per path."""
-        return _call("PUT", f"/channels/{channel}/fs/{path}",
+        re-read and merge. For edits using local tools use fs_checkout then
+        fs_publish: a local copy plus a newly looked-up version can erase
+        accepted work. Direct writes do not track a local edit's base.
+        Text limit: 256 KiB; larger works can use separate logical files or
+        a local authoritative workspace with immutable review attachments.
+        summary briefly states what changed/why for subscribed peers; it is
+        your explanation, not proof of correctness or acceptance."""
+        return _call("PUT", f"/channels/{quote(channel, safe='')}/fs/{quote(path, safe='/')}",
                      json={"content": content, "mime": mime,
                            "expect_version": expect_version,
-                           "description": description})
+                           "description": description, "summary": summary})
+
+    @mcp.tool()
+    def fs_subscribe(channel: str, path: str, events: list[str] | None = None,
+                     urgency: str = "next_turn") -> dict:
+        """Subscribe YOUR seat to future created/updated/deleted revisions of
+        one exact VFS path (may not exist yet). Defaults to all three events,
+        addressed FYI with next_turn urgency; inbox stays quiet, interrupt
+        requests attention where supported. No reply debt or automatic approval.
+        Local files/attachments do not count. Identical calls preserve backlog;
+        a changed policy starts at the current revision. fs_subscriptions shows
+        who will be notified. Use normal addressed asks for required actions."""
+        return _call("PUT", f"/channels/{quote(channel, safe='')}/fs-subscriptions/{quote(path, safe='/')}",
+                     json={"events": events, "urgency": urgency})
+
+    @mcp.tool()
+    def fs_unsubscribe(channel: str, path: str) -> dict:
+        """Stop YOUR future VFS notices, including pending undelivered revisions.
+        Previously published notices and separately assigned work remain.
+        Cancellation also works after losing channel access."""
+        return _call("DELETE", f"/channels/{quote(channel, safe='')}/fs-subscriptions/{quote(path, safe='/')}")
+
+    @mcp.tool()
+    def fs_subscriptions(channel: str, path: str | None = None) -> list:
+        """List channel-visible VFS subscribers, event filters, urgency and
+        processed-through revision (not read receipt). Use a path to see who will hear a
+        change. This records interest/delivery, never read receipts or approval."""
+        return _call("GET", f"/channels/{quote(channel, safe='')}/fs-subscriptions",
+                     params={} if path is None else {"path": path})
+
+    from .checkouts import Checkouts
+    import hashlib
+    checkout_binding = hashlib.sha256((base_url + "\0" + api_key).encode()).hexdigest()
+    checkouts = Checkouts(_config.home() / "checkouts" / checkout_binding, _call)
+
+    @mcp.tool()
+    def fs_checkout(channel: str, path: str) -> dict:
+        """Materialize CURRENT VFS text into a fresh, confined seat-local editable
+        file. Returns checkout_id, file_path and captured base version/hash.
+        Edit file_path with native tools; fs_publish(checkout_id) checks that
+        exact base. Existing local copies are never overwritten. Choose one
+        editable authority per artifact; this route treats VFS as authoritative."""
+        return checkouts.checkout(channel, path)
+
+    @mcp.tool()
+    def fs_publish(checkout_id: str, summary: str = "") -> dict:
+        """Publish the edited file from fs_checkout using its CAPTURED edit base;
+        there is no version override. A changed remote artifact returns conflict
+        and preserves both copies. Reconcile into a fresh checkout; never copy
+        stale full text over newer work. Returns a local diff and new VFS version.
+        For subsequent edits start a new checkout. Direct fs_write bypasses this
+        local-base protection; this is not a semantic regression detector.
+        summary explains the change to subscribed peers."""
+        return checkouts.publish(checkout_id, summary)
 
     @mcp.tool()
     def fs_delete(channel: str, path: str, expect_version: int | None = None) -> dict:
         """Delete a file from the channel's virtual file system (vfs); optional CAS."""
         params = {} if expect_version is None else {"expect_version": expect_version}
-        return _call("DELETE", f"/channels/{channel}/fs/{path}", params=params)
+        return _call("DELETE", f"/channels/{quote(channel, safe='')}/fs/{quote(path, safe='/')}", params=params)
 
     @mcp.tool()
     def fs_history(channel: str, path: str, since_seq: int = 0, limit: int = 50) -> list:
         """The append-only put/delete audit trail for one file (who changed it, when)."""
-        return _call("GET", f"/channels/{channel}/fshist/{path}",
+        return _call("GET", f"/channels/{quote(channel, safe='')}/fshist/{quote(path, safe='/')}",
                      params={"since_seq": since_seq, "limit": limit})
 
     _tier_tools(mcp, _call)

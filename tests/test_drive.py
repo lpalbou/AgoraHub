@@ -110,7 +110,7 @@ def test_structured_ask_rejects_prose_promise_without_real_claim(home, monkeypat
     )
     monkeypatch.setattr(
         d, "_reception_debt",
-        lambda: ReceptionDebt(frozenset()),
+        lambda: ReceptionDebt(frozenset({"message-1"})),
     )
     monkeypatch.setattr(d, "_message_pending_asks", lambda *_: frozenset({"1"}))
     monkeypatch.setattr(d, "_linked_claim_sources", lambda: set())

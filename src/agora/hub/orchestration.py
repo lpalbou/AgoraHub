@@ -30,6 +30,10 @@ class OrchestrationMixin:
                 refuse(409, "task source is not a live canonical source; read get_task and store_get before delivery")
             if task.get("status") != "open":
                 refuse(409, "only an open canonical task can prepare delivery")
+            pending = [s for s in self.task_consultations(channel, task) if s["status"] != "decided"]
+            if pending:
+                return {"task_version": row.version, "source_id": source.id, "blockers": pending,
+                        "note": "declared consultations need current reconciled decisions before delivery"}
             summary = self.finding_integration_summary(channel, key)
             if summary["pending"]:
                 return {"task_version": row.version, "source_id": source.id,
@@ -66,6 +70,7 @@ class OrchestrationMixin:
     def reply_state(self, agent, channel, message_id, after_seq=0):
         """Scheduling metadata only: no message bodies or read receipts."""
         from .obligations import declines_of, substantive_answers_of
+        from .consultations import is_consultation
         self.require_membership(channel, agent.id)
         root = self.db.get_message(message_id)
         if root is None or root.channel != channel:
@@ -80,10 +85,13 @@ class OrchestrationMixin:
                 responses.append({"id": reply.id, "seq": reply.seq, "sender": reply.sender,
                                   "answers": list(answers), "declines": list(declines)})
         responses.sort(key=lambda r: r["seq"])
-        return {"channel": channel, "message_id": root.id, "seq": root.seq,
+        result = {"channel": channel, "message_id": root.id, "seq": root.seq,
                 "closed": self._closed_authoritatively(root, replies),
                 "retracted": bool(root.retracted_at),
                 "responses": responses[:64], "omitted": max(0, len(responses) - 64)}
+        if not root.retracted and is_consultation(root):
+            result["consultation"] = self.consultation_state(agent, channel, message_id)
+        return result
 
     def _task_ref(self, agent, ref):
         if (not isinstance(ref, dict) or set(ref) != {"channel", "key"}
@@ -98,7 +106,7 @@ class OrchestrationMixin:
 
     def _validate_task_graph(self, agent, channel, key, value, prior):
         """Called under the hub's task-write lock, including persistence."""
-        for field in ("primary_channel", "director", "depends_on", "work_type"):
+        for field in ("primary_channel", "director", "depends_on", "work_type", "parent", "purpose", "consultations"):
             if field not in value and field in prior:
                 value[field] = prior[field]
         for field in ("work_type", "primary_channel"):
@@ -162,6 +170,34 @@ class OrchestrationMixin:
             if row and isinstance(row.value, dict):
                 pending.extend((r["channel"], r["key"]) for r in row.value.get("depends_on", []))
         value["depends_on"] = deps
+        consultations = value.get("consultations", [])
+        if (not isinstance(consultations, list) or len(consultations) > 32
+                or any(not isinstance(ref, str) or not ref for ref in consultations)
+                or len(set(consultations)) != len(consultations)):
+            refuse(400, "task consultations must be at most 32 distinct same-channel question IDs")
+        if consultations != prior.get("consultations", []):
+            for ref in consultations:
+                if self.consultation_state(agent, channel, ref)["status"] == "retracted":
+                    refuse(400, "cannot add a retracted consultation as a delivery dependency")
+        value["consultations"] = sorted(consultations)
+        purpose = value.get("purpose")
+        if purpose is not None and (not isinstance(purpose, str) or not purpose.strip() or len(purpose) > 1000):
+            refuse(400, "task purpose must explain its contribution in 1..1000 characters")
+        parent = value.get("parent")
+        if parent is not None:
+            self._task_ref(agent, parent)
+            # Decomposition and execution dependencies are different graphs:
+            # a parent may legitimately wait for its child's acceptance.
+            seen_parents = {target}
+            while parent is not None:
+                node = (parent["channel"], parent["key"])
+                if node in seen_parents:
+                    refuse(409, "task parent links must be acyclic")
+                seen_parents.add(node)
+                if len(seen_parents) > 4096:
+                    refuse(400, "task parent graph exceeds 4096 nodes")
+                row = self.db.store_get(*node)
+                parent = row.value.get("parent") if row and isinstance(row.value, dict) else None
 
     def task_context(self, agent, channel, key):
         row = self._task_ref(agent, {"channel": channel, "key": key})
@@ -183,11 +219,15 @@ class OrchestrationMixin:
                 "source": value.get("source"), "title": value.get("title"),
                 "status": value.get("status"), "primary_channel": value.get("primary_channel"),
                 "work_type": value.get("work_type"), "routes": routes,
+                "parent": (value.get("parent") if value.get("parent") is None
+                           or self.db.is_member(value["parent"]["channel"], agent.id)
+                           else {"unavailable": True}), "purpose": value.get("purpose"),
                 "ready": not waiting and value.get("status") == "open",
                 "waiting_on": waiting, "report": value.get("report"),
                 "verdict": value.get("verdict"),
                 "integration": self.finding_integration_summary(channel, key),
                 "reviews": self.task_review_summary(channel, key),
+                "consultations": self.task_consultations(channel, value),
                 "proxy_available": self.proxy_allowed(agent.id, channel, value.get("requester"))}
 
     def route_task(self, agent, channel, key, role, expect_version, message):
@@ -231,8 +271,24 @@ class OrchestrationMixin:
 
     def briefing(self, agent):
         """Personal state, not the privileged operator desk or another inbox."""
-        sections = {"tasks": [], "claims": [], "phases": [], "decisions": []}
+        sections = {"tasks": [], "claims": [], "phases": [], "decisions": [], "consultations": [], "colleagues": []}
         for channel in sorted(self.db.channels_of(agent.id)):
+            for member in self.db.list_members(channel):
+                if member.agent_id != agent.id and (member.about or member.mission):
+                    sections["colleagues"].append({"channel": channel, "seat": member.agent_id,
+                        "about": member.about[:400], "mission": member.mission[:700], "role": member.role})
+            for root in self.db.consultation_messages(channel):
+                policy = root.data["consultation"]
+                if agent.id not in {root.sender, *policy["eligible"]}:
+                    continue
+                state = self._consultation_state(root)
+                if state["status"] in ("decided", "cancelled"):
+                    continue
+                sections["consultations"].append({k: state[k] for k in (
+                    "channel", "message_id", "requester", "action", "status", "ready",
+                    "missing_required", "response_count", "next_event_at", "version")})
+                sections["consultations"][-1]["read"] = {"tool": "get_consultation", "arguments": {
+                    "channel": channel, "message_id": root.id}}
             tasks = []
             for entry in self.db.store_keys(channel):
                 if entry["key"].startswith("task:"):
@@ -284,10 +340,10 @@ class OrchestrationMixin:
                         "channel": row["channel"], "message_id": target}}
                 sections[field].append(row)
         result = {"seat": agent.id, "assignments": assignments, "sections": {}, "omitted": {},
-                  "lookup": "get_task(channel,key), store_get(channel,key), check_inbox; private notes: get_colleague_notes",
+                  "lookup": "get_task(channel,key), store_get(channel,key), get_consultation(channel,message_id), get_collaboration_graph(channel); private notes: get_colleague_notes",
                   "authority": "Task assignments route work; whoami.delegations grants authority."}
         # One total budget, not a cap per field that permits unbounded nesting.
-        for name in ("to_answer", "to_consume", "to_close", "decisions", "tasks", "claims", "phases"):
+        for name in ("to_answer", "consultations", "to_consume", "to_close", "decisions", "tasks", "claims", "phases", "colleagues"):
             rows = sections[name]
             kept = []
             result["sections"][name] = kept

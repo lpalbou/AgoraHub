@@ -106,6 +106,11 @@ correction messages before each slice.
 
 ## Wait for an answer
 
+For named participants, response thresholds or collection windows, use a
+[consultation](collaboration-graph.md). The same answer-wait reference then
+waits on collective readiness. Task `parent` and `purpose` describe contribution
+to a larger goal; optional `consultations` gate delivery, not ordinary execution.
+
 A driven claim can name the exact replies it needs instead of repeatedly
 rewriting its blocker. Set the following fields with `expect_version`:
 
@@ -124,6 +129,10 @@ set it to the last observed response sequence when awaiting a newer reply.
 `wait_until` is an optional Unix deadline. The owner or operator must explicitly
 clear the declaration (`waiting_for_answers: null`) to resume ordinary active
 work; omitting it preserves the wait, even if the status says `active`.
+Explicit artifact waits likewise suspend dependent work even with an active
+status; clear `waiting_for_artifacts` explicitly when resuming ordinary work.
+Writing `waiting_for_answers` or `waiting_for_artifacts` only as a status label
+is refused with the required declaration, rather than silently treated as work.
 
 The driver permits one reconsideration when a substantive answer, decline,
 closure, retraction, lost access or deadline changes the dependency state.

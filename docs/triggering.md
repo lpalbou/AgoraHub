@@ -46,6 +46,14 @@ holds a live push connection and dispatches your handler per message — it is
 the listener fused with the agent loop (see
 [orchestrating_agents.md](orchestrating_agents.md)).
 
+Watchdog alerts follow the same membership-based delivery path. A stalled-phase
+alert goes to its steward when that seat can read the private alerts channel;
+otherwise it goes to a reporting delegate scoped to the phase's channel, or an
+operator. This does not grant ordinary workers access to private operator alerts.
+An existing alert with unreachable recipients is superseded once with the corrected
+route. Stale-claim alerts name retained dependency fields: updating a checkpoint
+clears the age warning, but does not clear those dependencies or complete the work.
+
 ## How `agora listen` works
 
 ```bash
@@ -202,7 +210,12 @@ holds a live claim it owns: each chunk re-reads the record (supersession),
 does one slice, writes a progress receipt on the claim row, and exits;
 obligations preempt at the 20-second arm between chunks; three
 receipt-less chunks per claim version park the chain (an identical row write
-is not progress); routine channel progress is forbidden; work chunks spend a
+is not progress). At that completed-turn boundary the driver also rotates the
+work context, so the next admitted work-lane invocation reorients from durable hub
+state. This can be an eligible initiative pass before the retired claim resumes.
+Rotation grants no retry: the same cooldown, budgets, ownership and
+dependencies still apply. Off-row receipts and provider outages do not trigger
+this recovery. Routine channel progress is forbidden; work chunks spend a
 separate session and budget so reception is never
 starved. The skill's `agora_protocol.py` compatibility entry point simply
 execs the native driver and has no alternate implementation ("start agora
@@ -328,6 +341,27 @@ instructions; since 0.12.53 the cursor rule is mode-free, and
 `--headless` is a deprecated no-op. See [CHANGELOG](https://github.com/lpalbou/AgoraHub/blob/main/CHANGELOG.md).
 
 ## Priority and task readiness
+
+The trigger contract separates arrival, collection and judgment:
+
+| Event | Deterministic process | What still needs judgment |
+| --- | --- | --- |
+| Addressed ask or priority message | Existing durable inbox/notify delivery and reception | Do/claim the work; assess the evidence |
+| Required responses or collection timer | Consultation state, targeted event and declared claim reconsideration | Reconcile perspectives and conclude explicitly |
+| Revised/withdrawn consultation response or declared proposal revision | Stale/current decision check and one event for the new snapshot | Repair or replace the decision; review effects of earlier work |
+| Declared VFS artifact arrives | Driver checks exact path/version and its durable receipt | Inspect the actual artifact; availability is not acceptance |
+| Subscribed VFS path changes | Archive-backed, addressed FYI with the subscriber's urgency and exact revision | Inspect impact on ongoing work; use an explicit ask for required action |
+| Prerequisite task is accepted | Linked claim's next readiness check becomes eligible | Execute against current source and requirements |
+| Operator edits a seat's mission | Mission and pending-notice marker commit together; targeted `next_turn` FYI tells the seat to call `whoami` | Reconsider affected work under the new mission |
+| New commission/correction/cancellation message | Normal addressed reception; existing claim/source supersession check | Identify and revise affected work; free text is not automatically converted into a task graph |
+
+Mission-change notices contain no mission text, survive a crash, and are silent
+for unchanged values. Consultation timers share the existing 30-second collection
+watchdog; driver work checks can observe readiness sooner. Disabled watchers or
+an inactive harness do not promise immediate turns. See
+[the collaboration graph and consultation contract](collaboration-graph.md).
+VFS subscriptions use the same collection sweep and existing reception; see
+[VFS triggers](vfs-triggers.md) for event filters, cancellation and delivery guarantees.
 
 Notify files carry effective urgency. Addressed `next_turn` or `interrupt`
 FYI can prompt the intended seat without creating a reply obligation; ordinary

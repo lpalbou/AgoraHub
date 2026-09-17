@@ -26,6 +26,7 @@ from . import search_index as _si
 from .ids import new_ulid
 from .models import (
     DM_PREFIX,
+    FS_PREFIX,
     SPAWN_TERMINAL,
     SPAWN_TRANSITIONS,
     AgentInfo,
@@ -181,7 +182,22 @@ CREATE TABLE IF NOT EXISTS fs_versions (
     value       TEXT,               -- NULL = this version is a delete
     updated_by  TEXT NOT NULL,
     updated_at  REAL NOT NULL,
+    event_type  TEXT NOT NULL DEFAULT '',
+    summary     TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (channel, key, version)
+);
+-- Seat-owned subscriptions follow the existing atomic revision archive.
+-- A fresh id on policy change prevents pending events adopting new authority.
+CREATE TABLE IF NOT EXISTS fs_subscriptions (
+    channel TEXT NOT NULL,
+    path TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    id TEXT NOT NULL UNIQUE,
+    events TEXT NOT NULL,
+    urgency TEXT NOT NULL,
+    after_version INTEGER NOT NULL,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (channel, path, agent_id)
 );
 -- Charter read receipts: "version N of this channel's charter was DELIVERED
 -- to agent A" (recorded when the head is read; writing your own edit counts).
@@ -460,6 +476,10 @@ class Database:
         self._read_pool = _si.ReadPool(path) if path != ":memory:" else None
         with self._lock:
             self._conn.executescript(_SCHEMA)
+            fs_cols = {r['name'] for r in self._conn.execute('PRAGMA table_info(fs_versions)')}
+            for name in ('event_type', 'summary'):
+                if name not in fs_cols:
+                    self._conn.execute(f"ALTER TABLE fs_versions ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
             # Migration: add the ledger hash column to a pre-existing messages
             # table (older DBs). New rows are chained from here; legacy rows keep
             # NULL hash and the chain simply starts at the first hashed message.
@@ -809,12 +829,20 @@ class Database:
             row = self._conn.execute("SELECT about FROM agents WHERE id = ?", (agent_id,)).fetchone()
         return row["about"] if row else ""
 
-    def set_mission(self, agent_id: str, mission: str) -> None:
+    def set_mission(self, agent_id: str, mission: str, *, notify: bool = False) -> None:
         """Write the OPERATOR's charge. Deliberately NOT reachable from any
         seat-authenticated surface — see the migration note on this column."""
         with self._lock:
+            current = self._conn.execute("SELECT mission FROM agents WHERE id = ?", (agent_id,)).fetchone()
+            if current is not None and current["mission"] == mission:
+                return
             self._conn.execute("UPDATE agents SET mission = ? WHERE id = ?",
                                (mission, agent_id))
+            if notify:
+                # One coalesced, durable change marker in the SAME commit as
+                # the charge. A crash cannot lose the obligation to notify.
+                self._conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                                   ("mission-change:" + agent_id, new_ulid()))
             self._conn.commit()
 
     def get_mission(self, agent_id: str) -> str:
@@ -881,6 +909,7 @@ class Database:
                 "UPDATE agents SET retired_at = COALESCE(retired_at, ?), "
                 "retired_reason = ? WHERE id = ?", (now, reason, agent_id))
             self._conn.execute("DELETE FROM members WHERE agent_id = ?", (agent_id,))
+            self._conn.execute("DELETE FROM fs_subscriptions WHERE agent_id = ?", (agent_id,))
             self._conn.execute("DELETE FROM reputation_votes WHERE rater = ?",
                                (agent_id,))
             # Same F2 hardening for message ratings (agora-0122): a
@@ -940,6 +969,7 @@ class Database:
                 "key_hash = 'deleted:' || id || ':' || ?, name = '', "
                 "about = '' WHERE id = ?", (now, now, agent_id))
             self._conn.execute("DELETE FROM members WHERE agent_id = ?", (agent_id,))
+            self._conn.execute("DELETE FROM fs_subscriptions WHERE agent_id = ?", (agent_id,))
             self._conn.execute(
                 "DELETE FROM reputation_votes WHERE rater = ? OR target = ?",
                 (agent_id, agent_id))
@@ -1064,6 +1094,7 @@ class Database:
                 "UPDATE channels SET archived_at = COALESCE(archived_at, ?) WHERE name = ?",
                 (now, name))
             self._conn.execute("DELETE FROM members WHERE channel = ?", (name,))
+            self._conn.execute("DELETE FROM fs_subscriptions WHERE channel = ?", (name,))
             self._conn.commit()
         return evicted
 
@@ -1117,6 +1148,8 @@ class Database:
             self._conn.execute(
                 "DELETE FROM members WHERE channel = ? AND agent_id = ?", (channel, agent_id)
             )
+            self._conn.execute("DELETE FROM fs_subscriptions WHERE channel=? AND agent_id=?",
+                               (channel, agent_id))
             self._conn.commit()
 
     def is_member(self, channel: str, agent_id: str) -> bool:
@@ -2047,6 +2080,21 @@ class Database:
             ).fetchall()
         return [self._row_to_message(r) for r in rows]
 
+    def consultation_messages(self, channel: str | None = None) -> list[Message]:
+        """Opt-in questions from the ledger, including already decided ones.
+
+        Keeping decisions in the projection lets a later revised/retracted
+        answer invalidate their evidence without resurrecting cancelled work.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM messages WHERE retracted_at IS NULL "
+                "AND kind = 'message' AND json_extract(data, '$.consultation.kind') = 'consultation-v1' "
+                + ("AND channel = ? " if channel is not None else "") + "ORDER BY channel, seq",
+                (channel,) if channel is not None else (),
+            ).fetchall()
+        return [self._row_to_message(row) for row in rows]
+
     def replies_to(self, message_id: str) -> list[Message]:
         """All messages replying to `message_id`, in channel (seq) order. Used to
         compute per-ask obligation discharge (uses idx_messages_reply_to)."""
@@ -2859,13 +2907,13 @@ class Database:
                 "deleted": bool(isinstance(value, dict) and value.get("deleted"))}
 
     def fs_put(self, channel: str, key: str, value: dict[str, Any], updated_by: str,
-               expect_version: int | None = None) -> StoreEntry:
+               expect_version: int | None = None, *, summary: str = "") -> StoreEntry:
         """Create/overwrite a file. `expect_version` semantics: for a live file
         it must equal the current version; for an absent-or-tombstoned path
         (creation) it must be 0. The new version always continues the path's
         monotonic sequence (current + 1), never resetting to 1."""
         now = time.time()
-        with self._lock:
+        with self._lock, self._conn:
             row = self._conn.execute(
                 "SELECT value, version FROM store WHERE channel = ? AND key = ?",
                 (channel, key),
@@ -2894,9 +2942,10 @@ class Database:
             # disagree (a v6 write no longer destroys what v1..v5 said).
             self._conn.execute(
                 "INSERT OR REPLACE INTO fs_versions"
-                " (channel, key, version, value, updated_by, updated_at)"
-                " VALUES (?,?,?,?,?,?)",
-                (channel, key, new_version, json.dumps(value), updated_by, now),
+                " (channel, key, version, value, updated_by, updated_at, event_type, summary)"
+                " VALUES (?,?,?,?,?,?,?,?)",
+                (channel, key, new_version, json.dumps(value), updated_by, now,
+                 "updated" if exists_live else "created", summary),
             )
             # Search sync (0132): HEAD only (history versions never indexed);
             # a put on a tombstoned path re-creates the doc.
@@ -2911,7 +2960,7 @@ class Database:
         """Tombstone a live file (CAS via `expect_version`). Returns the new
         (bumped) version, or None if the path was absent or already deleted."""
         now = time.time()
-        with self._lock:
+        with self._lock, self._conn:
             row = self._conn.execute(
                 "SELECT value, version FROM store WHERE channel = ? AND key = ?",
                 (channel, key),
@@ -2931,8 +2980,8 @@ class Database:
             # The delete itself is an archived, attributed version (value NULL).
             self._conn.execute(
                 "INSERT OR REPLACE INTO fs_versions"
-                " (channel, key, version, value, updated_by, updated_at)"
-                " VALUES (?,?,?,NULL,?,?)",
+                " (channel, key, version, value, updated_by, updated_at, event_type)"
+                " VALUES (?,?,?,NULL,?,?,'deleted')",
                 (channel, key, new_version, updated_by, now),
             )
             # Search purge (0132): a tombstoned head must be unmatchable
@@ -2940,6 +2989,77 @@ class Database:
             _si.del_doc(self._conn, "file", channel, key)
             self._conn.commit()
         return new_version
+
+    def fs_subscribe(self, channel: str, path: str, agent_id: str,
+                     events: list[str], urgency: str) -> dict[str, Any]:
+        """Start at the current head atomically; identical retries retain backlog."""
+        with self._lock, self._conn:
+            old = self._conn.execute(
+                "SELECT * FROM fs_subscriptions WHERE channel=? AND path=? AND agent_id=?",
+                (channel, path, agent_id)).fetchone()
+            encoded = json.dumps(events)
+            if old and old['events'] == encoded and old['urgency'] == urgency:
+                return self._fs_subscription_row(old)
+            if not old and self._conn.execute(
+                    "SELECT COUNT(*) FROM fs_subscriptions WHERE agent_id=?", (agent_id,)).fetchone()[0] >= 256:
+                raise ValueError('at most 256 VFS subscriptions per seat; unsubscribe unused paths')
+            head = self._conn.execute("SELECT version FROM store WHERE channel=? AND key=?",
+                                      (channel, FS_PREFIX + path)).fetchone()
+            values = (channel, path, agent_id, new_ulid(), encoded, urgency,
+                      head['version'] if head else 0, time.time())
+            self._conn.execute("INSERT OR REPLACE INTO fs_subscriptions VALUES (?,?,?,?,?,?,?,?)", values)
+            row = self._conn.execute("SELECT * FROM fs_subscriptions WHERE id=?", (values[3],)).fetchone()
+            return self._fs_subscription_row(row)
+
+    @staticmethod
+    def _fs_subscription_row(row) -> dict[str, Any]:
+        return {**dict(row), 'events': json.loads(row['events'])}
+
+    def fs_subscriptions(self, channel: str, path: str | None = None) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT s.* FROM fs_subscriptions s JOIN members m "
+                "ON m.channel=s.channel AND m.agent_id=s.agent_id WHERE s.channel=? "
+                + ("AND s.path=? " if path is not None else "") + "ORDER BY s.path,s.agent_id",
+                (channel, path) if path is not None else (channel,)).fetchall()
+        return [self._fs_subscription_row(r) for r in rows]
+
+    def fs_unsubscribe(self, channel: str, path: str, agent_id: str) -> bool:
+        with self._lock, self._conn:
+            return bool(self._conn.execute(
+                "DELETE FROM fs_subscriptions WHERE channel=? AND path=? AND agent_id=?",
+                (channel, path, agent_id)).rowcount)
+
+    def fs_pending_subscriptions(self, limit: int = 256) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT s.* FROM fs_subscriptions s JOIN store h "
+                "ON h.channel=s.channel AND h.key=?||s.path "
+                "JOIN members m ON m.channel=s.channel AND m.agent_id=s.agent_id "
+                "WHERE h.version>s.after_version ORDER BY s.updated_at,s.id LIMIT ?", (FS_PREFIX, limit)).fetchall()
+        return [self._fs_subscription_row(r) for r in rows]
+
+    def fs_revision_events(self, channel: str, path: str, after_version: int,
+                           limit: int = 32) -> list[dict[str, Any]]:
+        """Metadata only; text/binary bytes stay in the revision archive."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT version,updated_by,updated_at,event_type,summary FROM fs_versions "
+                "WHERE channel=? AND key=? AND version>? ORDER BY version LIMIT ?",
+                (channel, FS_PREFIX + path, after_version, limit)).fetchall()
+        return [dict(r) for r in rows]
+
+    def fs_subscription_advance(self, subscription_id: str, after: int, version: int) -> bool:
+        with self._lock, self._conn:
+            return bool(self._conn.execute(
+                "UPDATE fs_subscriptions SET after_version=?,updated_at=? WHERE id=? AND after_version=?",
+                (version, time.time(), subscription_id, after)).rowcount)
+
+    def fs_subscription_rotate(self, subscription_id: str) -> None:
+        """Fair queue rotation is an attempt timestamp, never revision progress."""
+        with self._lock, self._conn:
+            self._conn.execute("UPDATE fs_subscriptions SET updated_at=? WHERE id=?",
+                               (time.time(), subscription_id))
 
     def fs_version(self, channel: str, key: str, version: int) -> dict[str, Any] | None:
         """One archived version's content + provenance, or None if that

@@ -1044,9 +1044,12 @@ def install_skill(harness: str, home: Path | None = None) -> str:
     try:
         pkg = resources.files("agora.skill")
         target.mkdir(parents=True, exist_ok=True)
-        for name in ("SKILL.md", "agora_protocol.py", "references/interactive.md"):
+        names = ["SKILL.md", "agora_protocol.py"]
+        names.extend("references/" + entry.name for entry in (pkg / "references").iterdir()
+                     if entry.is_file() and entry.name.endswith(".md"))
+        for name in names:
             (target / name).parent.mkdir(parents=True, exist_ok=True)
-            (target / name).write_text((pkg / name).read_text())
+            (target / name).write_bytes((pkg / name).read_bytes())
         return f"skill: installed agora-channels at {target}"
     except Exception as exc:  # never block seat wiring on the skill copy
         return (f"skill: could not install at {target} ({exc}) — copy "

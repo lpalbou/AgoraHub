@@ -20,6 +20,7 @@ import asyncio
 import json
 import warnings
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 import websockets
@@ -436,7 +437,7 @@ class AgoraClient:
         return headers, r.content
 
     async def fs_list(self, channel: str, prefix: str = "") -> list[dict[str, Any]]:
-        return self._json(await self._http.get(f"/channels/{channel}/fs",
+        return self._json(await self._http.get(f"/channels/{quote(channel, safe='')}/fs",
                                                params={"prefix": prefix}))
 
     async def fs_read(self, channel: str, path: str,
@@ -446,7 +447,7 @@ class AgoraClient:
         and `encoding` == "base64" — passed through untouched; decoding is the
         caller's move. Text entries carry `content` only."""
         params = {"version": version} if version is not None else {}
-        return self._json(await self._http.get(f"/channels/{channel}/fs/{path}",
+        return self._json(await self._http.get(f"/channels/{quote(channel, safe='')}/fs/{quote(path, safe='/')}",
                                                params=params))
 
     async def fs_write(self, channel: str, path: str,
@@ -454,7 +455,7 @@ class AgoraClient:
                        content_b64: str | None = None,
                        mime: str | None = None,
                        expect_version: int | None = None,
-                       description: str = "") -> dict[str, Any]:
+                       description: str = "", summary: str = "") -> dict[str, Any]:
         """Write one file: `content` (text, unchanged) OR `content_b64`
         (strict standard base64 of raw bytes; decoded cap 4 MiB) — exactly
         one, checked here so the mistake fails before it travels (the hub
@@ -471,20 +472,36 @@ class AgoraClient:
             body = {"content_b64": content_b64,
                     "mime": mime or "application/octet-stream"}
         body.update({"expect_version": expect_version, "description": description})
+        if summary:
+            body['summary'] = summary
         return self._json(await self._http.put(
-            f"/channels/{channel}/fs/{path}", json=body))
+            f"/channels/{quote(channel, safe='')}/fs/{quote(path, safe='/')}", json=body))
 
     async def fs_delete(self, channel: str, path: str, *,
                         expect_version: int | None = None) -> dict[str, Any]:
         params = {} if expect_version is None else {"expect_version": expect_version}
         return self._json(await self._http.request(
-            "DELETE", f"/channels/{channel}/fs/{path}", params=params))
+            "DELETE", f"/channels/{quote(channel, safe='')}/fs/{quote(path, safe='/')}", params=params))
 
     async def fs_history(self, channel: str, path: str, *,
                         since_seq: int = 0, limit: int = 200) -> list[dict[str, Any]]:
         return self._json(await self._http.get(
-            f"/channels/{channel}/fshist/{path}",
+            f"/channels/{quote(channel, safe='')}/fshist/{quote(path, safe='/')}",
             params={"since_seq": since_seq, "limit": limit}))
+
+    async def fs_subscribe(self, channel: str, path: str, *,
+                           events: list[str] | None = None, urgency: str = "next_turn") -> dict[str, Any]:
+        return self._json(await self._http.put(
+            f"/channels/{quote(channel, safe='')}/fs-subscriptions/{quote(path, safe='/')}",
+            json={"events": events, "urgency": urgency}))
+
+    async def fs_unsubscribe(self, channel: str, path: str) -> dict[str, Any]:
+        return self._json(await self._http.request("DELETE",
+            f"/channels/{quote(channel, safe='')}/fs-subscriptions/{quote(path, safe='/')}"))
+
+    async def fs_subscriptions(self, channel: str, path: str | None = None) -> list[dict[str, Any]]:
+        return self._json(await self._http.get(f"/channels/{quote(channel, safe='')}/fs-subscriptions",
+                                               params={} if path is None else {"path": path}))
 
     # -- charters (0146) -----------------------------------------------------------
 

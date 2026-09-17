@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .orchestration import OrchestrationMixin
+from .fs_triggers import FsTriggersMixin
 from .proxy_authority import ProxyAuthorityMixin
 from ..agent_id import validate_agent_id
 from ..db import (
@@ -285,9 +286,10 @@ class HubError(Exception):
 
 
 from .task_reviews import TaskReviewsMixin
+from .consultations import ConsultationsMixin, is_consultation
 
 
-class HubService(TaskReviewsMixin, OrchestrationMixin, ProxyAuthorityMixin):
+class HubService(FsTriggersMixin, ConsultationsMixin, TaskReviewsMixin, OrchestrationMixin, ProxyAuthorityMixin):
     def __init__(self, db: Database, *, rate_per_minute: float = 60.0,
                  interrupts_per_hour: int = 6, criticals_per_hour: int = 5,
                  notify_sink=None,
@@ -728,8 +730,38 @@ class HubService(TaskReviewsMixin, OrchestrationMixin, ProxyAuthorityMixin):
             raise HubError(400, "a mission must say what the seat is FOR — "
                                 "an empty one is how a delegate arrives with "
                                 "no idea that its job is to orchestrate")
-        self.db.set_mission(agent_id, cleaned)
+        with self.db.orchestration_lock:
+            self.db.set_mission(agent_id, cleaned, notify=True)
+            self._mission_change_sweep()
         return {"agent_id": agent_id, "mission": cleaned}
+
+    def _mission_change_sweep(self) -> list[str]:
+        """Deliver a changed charge through existing reception, without its text.
+
+        Setup before channel membership and crashes after a write retain the
+        marker. A publication retry is deduplicated by the ledger.
+        """
+        if self.hub_paused() is not None:
+            return []
+        fired = []
+        with self.db.orchestration_lock:
+            for seat, revision in self.db.meta_list_prefix("mission-change:").items():
+                channels = [c for c in sorted(self.db.channels_of(seat))
+                            if self.channel_state(c) not in ("closed", "archived")]
+                if not channels:
+                    continue
+                channel = "commons" if "commons" in channels else channels[0]
+                try:
+                    self._post_system(channel,
+                        "Your operator changed your mission. Call whoami and reconsider affected work before continuing.",
+                        to=[seat], status="fyi", urgency="next_turn",
+                        data={"mission_changed": {"seat": seat, "revision": revision}},
+                        dedupe_key=f"mission:{seat}:{revision}")
+                except DuplicateMessage as exc:
+                    self._wake(self.db.get_message(exc.message_id))
+                self.db.meta_delete("mission-change:" + seat)
+                fired.append(seat)
+        return fired
 
     def list_missions(self) -> list[dict[str, Any]]:
         """Every live seat and its charge, blanks included. The blanks are
@@ -2929,12 +2961,16 @@ class HubService(TaskReviewsMixin, OrchestrationMixin, ProxyAuthorityMixin):
             "reporting delegate.")
 
     def post_message(self, agent: AgentInfo, channel: str, payload: PostMessage,
-                     *, _task_review: dict | None = None) -> Message:
+                     *, _task_review: dict | None = None,
+                     _consultation_conclusion: dict | None = None) -> Message:
         """Post with a refusal audit: a refused send previously left no trace
         anywhere, so "agent X never answers" was indistinguishable from
         "agent X is being blocked" (field finding). Every HubError is recorded
         per agent and surfaced in the operator status overview."""
         try:
+            if _consultation_conclusion is not None:
+                return self._post_message(agent, channel, payload,
+                                          _consultation_conclusion=_consultation_conclusion)
             if _task_review is not None:
                 return self._post_message(agent, channel, payload, _task_review=_task_review)
             return self._post_message(agent, channel, payload)
@@ -2949,7 +2985,8 @@ class HubService(TaskReviewsMixin, OrchestrationMixin, ProxyAuthorityMixin):
             raise
 
     def _post_message(self, agent: AgentInfo, channel: str, payload: PostMessage,
-                      *, _task_review: dict | None = None) -> Message:
+                      *, _task_review: dict | None = None,
+                      _consultation_conclusion: dict | None = None) -> Message:
         self.require_membership(channel, agent.id)
         self._require_unpaused(agent, channel)
         state = self.channel_state(channel)
@@ -3015,6 +3052,16 @@ class HubService(TaskReviewsMixin, OrchestrationMixin, ProxyAuthorityMixin):
             if parent is None or parent.channel != channel:
                 raise HubError(400, "reply_to must reference a message in this channel")
         data = self._prepare_structured(payload, sender=agent.id, channel=channel)
+        data = self._validate_consultation(agent, channel, payload, data)
+        if data and {"consultation_conclusion", "consultation_event", "mission_changed"} & data.keys():
+            raise HubError(400, "consultation_conclusion, consultation_event and mission_changed are reserved; use conclude_consultation for a decision")
+        if (is_consultation(parent)
+                and payload.status == Status.resolved and _consultation_conclusion is None):
+            if agent.id != parent.sender and not agent.operator and agent.id not in self.ruling_delegate_ids(channel):
+                raise HubError(409, "answer a consultation with status=reply and answers=[ask_id]; its requester uses conclude_consultation after collection")
+            raise HubError(409, "use conclude_consultation to reconcile or explicitly cancel a collective question")
+        if _consultation_conclusion is not None:
+            data = {**(data or {}), "consultation_conclusion": _consultation_conclusion}
         if data and "task_review" in data:
             raise HubError(400, "task_review is reserved; use review_task")
         if _task_review is not None:
@@ -3084,6 +3131,7 @@ class HubService(TaskReviewsMixin, OrchestrationMixin, ProxyAuthorityMixin):
             # Rechecking immediately before insert makes the current-artifact
             # predicate and appended delivery one serialized operation.
             with self.db.orchestration_lock:
+                data = self._validate_consultation(agent, channel, payload, data)
                 self._validate_task_delivery(agent, channel, payload, data, parent)
                 message = self.db.insert_message(
                     channel, agent.id, kind=Kind.message.value,
@@ -3771,7 +3819,8 @@ class HubService(TaskReviewsMixin, OrchestrationMixin, ProxyAuthorityMixin):
                      status: str | None = None,
                      reply_to: str | None = None,
                      data: dict[str, Any] | None = None,
-                     dedupe_key: str | None = None) -> Message:
+                     dedupe_key: str | None = None,
+                     urgency: str = "inbox") -> Message:
         # `to` lets an alert ADDRESS its steward (0084): an addressed
         # message rides the to-me wake path and the owed ledger — a
         # broadcast alert would unpin on a bare read and decay.
@@ -3796,14 +3845,14 @@ class HubService(TaskReviewsMixin, OrchestrationMixin, ProxyAuthorityMixin):
                 "can never discharge; 'open' mints one and needs a closer.")
         message = self.db.insert_message(
             channel, "hub", kind=Kind.system.value,
-            status=status or "fyi", urgency="inbox",
+            status=status or "fyi", urgency=urgency,
             title="", body=body, data=data, reply_to=reply_to, to=to or [],
             dedupe_key=dedupe_key,
         )
         self._wake(message)
         return message
 
-    def _wake(self, message: Message) -> None:
+    def _wake(self, message: Message, *, require_notify: str | None = None) -> bool:
         payload = {"type": "message", "message": message.model_dump()}
         # New corpus content: shorten the embedder's idle sleep (the work
         # set is DERIVED, this is purely a latency nudge — fs/store writes
@@ -3816,15 +3865,19 @@ class HubService(TaskReviewsMixin, OrchestrationMixin, ProxyAuthorityMixin):
         # until the watcher restarted). The "agent/" prefix cannot collide
         # with channel names ("/" is rejected in channel slugs). Clients
         # dedup by per-channel seq, so double delivery is harmless.
+        notified = True
         for member in self.db.list_members(message.channel):
             self.fanout.publish(f"agent/{member.agent_id}", payload)
             # Hub-written notify file: each member's <id>-inbox.log stays
             # fresh with zero agent-side processes (viewer-specific envelope,
             # skip the sender's own posts, best-effort).
             if self.notify_sink is not None and member.agent_id != message.sender:
-                self.notify_sink.deliver(
+                delivered = self.notify_sink.deliver(
                     member.agent_id, self.envelope_for(member.agent_id, message))
+                if member.agent_id == require_notify and delivered is False:
+                    notified = False
         self.notifier.notify()
+        return notified
 
     def get_messages(self, agent: AgentInfo, channel: str,
                      since_seq: int = 0, limit: int = 200) -> list[MessageRow]:
@@ -4351,6 +4404,11 @@ class HubService(TaskReviewsMixin, OrchestrationMixin, ProxyAuthorityMixin):
         for m in live:
             note = body or ("thread closed: this work is stood down. Stop "
                             "here and post no further replies on it.")
+            if is_consultation(m):
+                state = self.consultation_state(agent, channel, m.id)
+                closed.append(self.conclude_consultation(
+                    agent, channel, m.id, "cancelled", state["version"], note).id)
+                continue
             reply = PostMessage(body=note, status=Status.resolved,
                                 reply_to=m.id, title="thread closed")
             closed.append(self.post_message(agent, channel, reply).id)
@@ -5950,7 +6008,13 @@ class HubService(TaskReviewsMixin, OrchestrationMixin, ProxyAuthorityMixin):
             prior_claim = prior_row.value if prior_row and isinstance(prior_row.value, dict) else {}
             # Answer waits share the claim's owner/CAS semantics and must be
             # normalized before the generic linked/non-object handling below.
-            from .claim_waits import validate_answer_waits
+            from .claim_waits import validate_answer_waits, validate_resume_waits
+            # Inspect original keys before normalization/merge erases whether
+            # a resuming owner deliberately acknowledged an existing gate.
+            # Stale-CAS and foreign-owner errors retain their normal paths.
+            if (prior_row is not None and expect_version == prior_row.version
+                    and (agent.operator or prior_claim.get("owner") == agent.id)):
+                validate_resume_waits(self, value, prior_claim)
             value = validate_answer_waits(self, agent, channel, value,
                                           prior_claim, expect_version)
             linked = prior_claim.get("task") is not None or (isinstance(value, dict) and value.get("task") is not None)
@@ -7258,17 +7322,17 @@ class HubService(TaskReviewsMixin, OrchestrationMixin, ProxyAuthorityMixin):
                  content: str | None = None, mime: str = "text/markdown",
                  expect_version: int | None = None,
                  description: str | None = None,
-                 content_b64: str | None = None) -> FsFile:
+                 content_b64: str | None = None, summary: str = "") -> FsFile:
         """Write under the task/delivery lock so current-artifact checks hold."""
         with self.db.orchestration_lock:
             return self._fs_write(agent, channel, path, content, mime,
-                                  expect_version, description, content_b64)
+                                  expect_version, description, content_b64, summary)
 
     def _fs_write(self, agent: AgentInfo, channel: str, path: str,
                  content: str | None = None, mime: str = "text/markdown",
                  expect_version: int | None = None,
                  description: str | None = None,
-                 content_b64: str | None = None) -> FsFile:
+                 content_b64: str | None = None, summary: str = "") -> FsFile:
         """Create or edit a file (compare-and-swap via `expect_version`; 0 means
         'must not exist yet'). Exactly one of `content` (text) or `content_b64`
         (strict standard base64 — the binary deposit path for images/PDFs) must
@@ -7356,9 +7420,11 @@ class HubService(TaskReviewsMixin, OrchestrationMixin, ProxyAuthorityMixin):
             value = {"content": content, "mime": mime}
         if description:
             value["description"] = description
-        entry = self.db.fs_put(channel, FS_PREFIX + norm, value, agent.id, expect_version)
+        summary = sanitize_text(summary, 500, field="change summary")
+        entry = self.db.fs_put(channel, FS_PREFIX + norm, value, agent.id, expect_version, summary=summary)
         audit = self._post_fs_audit(channel, agent.id, "put", norm,
                                     entry.version, size)
+        self._fs_trigger_after_write()
         # Phase advisory (0140/2) rides POST-commit and never fails the write:
         # a teaching gesture that could 500 an artifact edit would be worse
         # than the phase disorder it warns about.
@@ -7480,6 +7546,7 @@ class HubService(TaskReviewsMixin, OrchestrationMixin, ProxyAuthorityMixin):
         if new_version is None:
             return False
         self._post_fs_audit(channel, agent.id, "delete", norm, new_version, 0)
+        self._fs_trigger_after_write()
         return True
 
     def fs_history(self, agent: AgentInfo, channel: str, path: str,
@@ -8553,7 +8620,7 @@ class HubService(TaskReviewsMixin, OrchestrationMixin, ProxyAuthorityMixin):
                     "title", "report", "evidence", "delivered_by",
                     "delivered_at", "decided_by", "decided_at", "verdict",
                     "rejections", "declared_by", "declared_at",
-                    "primary_channel", "director", "depends_on", "work_type"}
+                    "primary_channel", "director", "depends_on", "work_type", "parent", "purpose", "consultations"}
     _TASK_STAMPED = {"requester", "report", "evidence", "delivered_by",
                      "delivered_at", "decided_by", "decided_at", "rejections",
                      "declared_by", "declared_at"}
@@ -8930,6 +8997,10 @@ class HubService(TaskReviewsMixin, OrchestrationMixin, ProxyAuthorityMixin):
         named = set(parent.to) | ask_addressees(parent)
         if not (agent.id in self.reporting_delegate_ids() or agent.id in named or agent.id == task.value.get("coordinator")):
             return
+        pending = [s for s in self.task_consultations(channel, task.value) if s["status"] != "decided"]
+        if pending:
+            raise HubError(409, "delivery is blocked by declared consultations: " + ", ".join(
+                f"{s['message_id']} ({s['status']})" for s in pending) + "; reconcile them or have the task writer explicitly revise its dependencies")
         unresolved = [key for key, value in self._typed_findings(channel, task_key) if value.get("state") != "disposed"]
         if unresolved:
             raise HubError(409, "delivery is blocked by accepted findings: " + ", ".join(unresolved) + ". Record a justified disposition with live proof.")
@@ -10709,6 +10780,9 @@ class HubService(TaskReviewsMixin, OrchestrationMixin, ProxyAuthorityMixin):
         alerted.extend(self._phase_sweep())
         alerted.extend(self._claim_due_sweep())
         alerted.extend(self._waiting_on_sweep())
+        alerted.extend(self._consultation_sweep())
+        alerted.extend(self._mission_change_sweep())
+        alerted.extend(self._fs_trigger_sweep())
         alerted.extend(self._blocking_sweep())
         alerted.extend(self._escalation_rewake_sweep())
         alerted.extend(self._dropped_wake_sweep())
@@ -11426,7 +11500,14 @@ class HubService(TaskReviewsMixin, OrchestrationMixin, ProxyAuthorityMixin):
                 info = self.db.get_channel(ch)
                 shown = (f"{ch}/{key}" if info is not None and not info.private
                          else "a private-channel claim")
-                live.append(f"{shown} (owner {owner}, idle {age / 60:.0f}m)")
+                line = f"{shown} (owner {owner}, idle {age / 60:.0f}m)"
+                waits = [field for field in ("waiting_for_answers", "waiting_for_artifacts")
+                         if stored.value.get(field)]
+                if waits:
+                    # Names only: dependency references may belong to a
+                    # private room that an alert reader cannot access.
+                    line += "; declared waits: " + ", ".join(waits)
+                live.append(line)
                 stewards_set.update(self._reporting_delegates(ch))
         sig = hashlib.sha256("\n".join(sorted(live_keys)).encode()).hexdigest()[:16]
         standing = self._standing_steward_alerts()
@@ -11486,9 +11567,11 @@ class HubService(TaskReviewsMixin, OrchestrationMixin, ProxyAuthorityMixin):
             "STALE CLAIMS (stewardship): " + "; ".join(live[:8])
             + (f" (+{len(live) - 8} more)" if len(live) > 8 else "")
             + ". Canvass the owners per your charter: one bundled ask "
-              "per seat, or reassign via the queue. Touching the claim "
-              "row is the progress receipt that clears this; a row "
-              "marked done/shipped never alerts. The hub closes this "
+              "per seat, or reassign via the queue. Inspect the effective "
+              "claim dependencies before calling work unblocked; artifact "
+              "waits observe VFS revisions, not workspace files. Updating a "
+              "checkpoint clears this age alert, not a dependency or the "
+              "unfinished work. The hub closes this "
               "alert itself when the set changes or empties.",
             # Explicit since the to/status coupling was removed: this one IS
             # a debt, and the hub closes it itself (see the resolved closer
@@ -11550,6 +11633,13 @@ class HubService(TaskReviewsMixin, OrchestrationMixin, ProxyAuthorityMixin):
         # fleet-wide conscription is what buried the operator's commission
         # under 15 housekeeping posts (2026-08-06).
         recipients: set[str] = set()
+        operators = set(self.operator_ids())
+        # _ensure_alerts_channel enrolls operators/reporting delegates only.
+        # A phase steward is often an ordinary worker: naming it in this
+        # private room does not grant access or deliver a notification.
+        alert_readers = operators | set(self._reporting_delegates())
+        alert_readers.update(m.agent_id for m in
+                             self.db.list_members(self.DARK_ALERTS_CHANNEL))
         op_owed: dict[str, Any] = {}
         for ch in self.db.channel_names():
             if ch == self.DARK_ALERTS_CHANNEL:
@@ -11576,8 +11666,11 @@ class HubService(TaskReviewsMixin, OrchestrationMixin, ProxyAuthorityMixin):
                 line = (f"{shown} '{stored.value.get('current', '?')}' open, "
                         f"untouched {age / 3600:.1f}h"
                         + (f", steward {steward}" if steward else ""))
-                if steward:
+                if steward in alert_readers:
                     recipients.add(steward)
+                else:
+                    recipients.update(self._reporting_delegates(ch) or operators)
+                if steward:
                     blocking = self._steward_blocking_ask(steward, op_owed)
                     if blocking is not None:
                         line += f"; blocking ask: {blocking}"
@@ -11593,20 +11686,28 @@ class HubService(TaskReviewsMixin, OrchestrationMixin, ProxyAuthorityMixin):
                     status="resolved", reply_to=old.id)
             return ["stalled-phase:cleared"] if standing else []
         live_set = set(live_keys)
+        if not recipients:
+            # No authorized supervisor exists; leave the phase pending
+            # rather than inventing access to private operator alerts.
+            return []
+        self._ensure_alerts_channel()
+        alert_readers = {m.agent_id for m in
+                         self.db.list_members(self.DARK_ALERTS_CHANNEL)}
         if standing and any(
                 isinstance(m.data, dict)
                 and (m.data.get("phase_sig") == sig
                      or (isinstance(m.data.get("phase_keys"), list)
                          and live_set <= set(m.data["phase_keys"])))
+                and recipients <= set(m.to)
+                and set(m.to) <= alert_readers
                 for m in standing):
             return []
         for old in standing:
             self._post_system(
                 self.DARK_ALERTS_CHANNEL,
                 "superseded by the next stalled-phase alert (the live set "
-                "changed); this episode is closed.",
+                "or reachable recipients changed); this episode is closed.",
                 status="resolved", reply_to=old.id)
-        self._ensure_alerts_channel()
         self._post_system(
             self.DARK_ALERTS_CHANNEL,
             "PHASE STALLED: " + "; ".join(live[:6])
@@ -12462,16 +12563,19 @@ class HubService(TaskReviewsMixin, OrchestrationMixin, ProxyAuthorityMixin):
 
     async def vote_watchdog(self,
                             interval_seconds: float = VOTE_SWEEP_SECONDS) -> None:
-        """Background loop for vote_sweep (started by the app lifespan;
-        interval 0 disables). Own loop, own cadence: a deadline the room was
-        promised must not wait on the 300s dark watchdog."""
+        """Collection timers share the existing fast watchdog (30s default).
+        Votes and consultations must not wait on the 300s dark watchdog.
+        The dark sweep also catches up if this optional fast loop is disabled.
+        """
         log = logging.getLogger("agora.hub.vote")
         while True:
             await asyncio.sleep(interval_seconds)
-            try:
-                await asyncio.to_thread(self.vote_sweep)
-            except Exception:
-                log.exception("vote sweep failed (will retry next interval)")
+            for sweep in (self.vote_sweep, self._consultation_sweep, self._mission_change_sweep,
+                          self._fs_trigger_sweep):
+                try:
+                    await asyncio.to_thread(sweep)
+                except Exception:
+                    log.exception("%s failed (will retry next interval)", sweep.__name__)
 
     async def dark_watchdog(self, interval_seconds: float = 300.0) -> None:
         """Background loop for dark_sweep (started by the app lifespan;

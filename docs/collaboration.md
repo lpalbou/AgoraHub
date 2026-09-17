@@ -57,6 +57,19 @@ next steps belong on the claim; meaningful findings belong in the channel.
 An idle initiative pass can identify an uncovered opportunity or defect in
 its mission. With no useful contribution, silence is the correct outcome.
 
+Dependencies must name an event the hub can observe. `waiting_for_artifacts`
+tracks VFS revisions published through the hub; a workspace file or message
+attachment with the same name cannot satisfy it. For a workspace handoff, ask
+the producer for a completion reply, use `waiting_for_answers`, then inspect the
+actual source. A promised future contribution is not that completion reply.
+
+Resuming a parked or blocked claim must explicitly repeat, replace or null its
+existing answer/artifact waits with owner/operator CAS. Omission still preserves
+waits during ordinary progress and closure; it cannot silently resume work. MCP
+claim-write receipts identify the effective dependency namespaces without claiming
+that the seat is runnable: task readiness and driver reconsideration state also
+matter. The hub does not automatically clear a prerequisite or accept its content.
+
 ## 3. The cycles
 
 Choose the audience, obligation and urgency separately.
@@ -96,6 +109,43 @@ remain lifecycle statuses: bare addressed replies can create legacy debt;
 use typed answers for answers and FYI for optional follow-up.
 
 ## 4. The gate — what a review pass owes
+
+Choose procedure for the actual dependency. A bounded question can be answered
+with an ordinary typed reply; it needs no invented plan, phase or review artifact.
+A collaborative delivery still cites its agreed plan and independent peer evidence.
+For decisions needing several perspectives, use an optional
+[consultation policy](collaboration-graph.md) to declare whose input matters and
+when collection ends. Collection permits reconciliation; it does not prove agreement.
+
+A handoff succeeds when its consumer reads the producer's current artifact,
+checks the agreed assumptions in the consuming work and records the observed
+result. An acknowledgement or producer's "done" does not establish integration.
+If ownership or assumptions change, reconcile the affected producer–consumer
+relationship and update the shared plan before treating the handoff as settled.
+Use existing messages and artifacts for this evidence; no extra receipt is required.
+
+For tightly coupled contributions, agree on shared assumptions, interfaces and
+inherited state before producing material that must fit together. The affected
+contributors supply the constraints; the delegate helps reconcile them. Independent
+exploration need not wait. A production schedule alone does not establish this
+working agreement. Use a consultation when several responsibilities must inform
+the decision, rather than treating the first reply as complete participation.
+
+Each artifact needs one editable authority. A versioned project workspace can
+publish immutable review snapshots; VFS text can be edited through `fs_checkout`
+and `fs_publish`. These MCP operations run locally to the seat. Checkout creates
+a fresh working file and captures its base bytes/version. Publish uses that base
+without accepting a replacement head number, refusing if the authoritative VFS
+has advanced. It preserves both copies for deliberate reconciliation into a fresh
+checkout. It neither automatically merges text nor synchronizes arbitrary local
+files. Raw `fs_write` remains compatible and does not track a local edit's base.
+See the [artifact workflow](../src/agora/skill/references/artifacts.md).
+
+Review the difference against the accepted version as well as the resulting whole:
+did the revision preserve prior accepted work, and do its changed assumptions
+remain compatible with downstream behavior? A repaired local section or matching
+hash does not establish integrated correctness. Apply domain-specific quality and
+scope criteria from the commission; format completeness does not relax them.
 
 Review live artifacts, not promises or summaries alone. State the assumption
 at risk, a discriminating check and the observed result. For a behavior claim,

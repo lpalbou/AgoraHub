@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hmac
 import time
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
@@ -1378,6 +1378,37 @@ def retract_message(
     return _run(service.retract_message, agent, channel, message_id).model_dump()
 
 
+@router.get("/channels/{channel}/messages/{message_id}/consultation")
+def consultation_state(channel: str, message_id: str,
+                       agent: AgentInfo = Depends(current_agent),
+                       service: HubService = Depends(get_service)) -> dict[str, Any]:
+    return _run(service.consultation_state, agent, channel, message_id)
+
+
+@router.get("/channels/{channel}/collaboration-graph")
+def get_collaboration_graph(channel: str, since_seq: int = Query(default=0, ge=0),
+                            limit: int = Query(default=200, ge=1, le=1000),
+                            agent: AgentInfo = Depends(current_agent),
+                            service: HubService = Depends(get_service)) -> dict[str, Any]:
+    from .collaboration_graph import collaboration_graph
+    return _run(collaboration_graph, service, agent, channel, since_seq, limit)
+
+
+class ConsultationConclusion(BaseModel):
+    model_config = {"extra": "forbid"}
+    outcome: Literal["decided", "cancelled"]
+    expected_version: str
+    body: str
+
+
+@router.post("/channels/{channel}/messages/{message_id}/consultation/conclusion")
+def conclude_consultation(channel: str, message_id: str, payload: ConsultationConclusion,
+                          agent: AgentInfo = Depends(current_agent),
+                          service: HubService = Depends(get_service)) -> dict[str, Any]:
+    return _run(service.conclude_consultation, agent, channel, message_id,
+                payload.outcome, payload.expected_version, payload.body).model_dump()
+
+
 class ResolveThread(BaseModel):
     body: str = ""
 
@@ -1671,6 +1702,34 @@ class FsWrite(BaseModel):
     # HubService.fs_write.
     description: str | None = None
     expect_version: int | None = None  # CAS: 0 = "must not exist yet"
+    summary: str = ""                 # author-supplied reason/change, not a model-generated verdict
+
+
+class FsSubscription(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    events: list[Literal["created", "updated", "deleted"]] | None = None
+    urgency: Literal["inbox", "next_turn", "interrupt"] = "next_turn"
+
+
+@router.get("/channels/{channel}/fs-subscriptions")
+def fs_subscriptions(channel: str, path: str | None = None,
+                     agent: AgentInfo = Depends(current_agent),
+                     service: HubService = Depends(get_service)) -> list[dict[str, Any]]:
+    return _run(service.fs_subscriptions, agent, channel, path)
+
+
+@router.put("/channels/{channel}/fs-subscriptions/{path:path}")
+def fs_subscribe(channel: str, path: str, payload: FsSubscription,
+                 agent: AgentInfo = Depends(current_agent),
+                 service: HubService = Depends(get_service)) -> dict[str, Any]:
+    return _run(service.fs_subscribe, agent, channel, path, payload.events, payload.urgency)
+
+
+@router.delete("/channels/{channel}/fs-subscriptions/{path:path}")
+def fs_unsubscribe(channel: str, path: str,
+                   agent: AgentInfo = Depends(current_agent),
+                   service: HubService = Depends(get_service)) -> dict[str, Any]:
+    return _run(service.fs_unsubscribe, agent, channel, path)
 
 
 @router.get("/channels/{channel}/fs")
@@ -1730,7 +1789,7 @@ def fs_write(
 ) -> dict[str, Any]:
     return _run(service.fs_write, agent, channel, path, payload.content,
                 payload.mime, payload.expect_version,
-                payload.description, payload.content_b64).model_dump()
+                payload.description, payload.content_b64, payload.summary).model_dump()
 
 
 @router.delete("/channels/{channel}/fs/{path:path}")

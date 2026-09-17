@@ -1,7 +1,9 @@
 # 0145 — Artifact watch + diff summaries: make `fs` events informative
 
-**Status:** proposed (design only — the writer-side discipline ships as a
-taught rule in the skill this pass; no hub change)
+**Status:** partially implemented (2026-09-12): durable exact-path subscriptions,
+author-supplied change summaries and targeted FYIs now use the revision archive.
+See [VFS triggers](../../vfs-triggers.md). The sketch below records the original
+proposal; shared watcher rows and computed diff counts were not implemented.
 **Rank:** 5 of 5 in the collaboration-model gap set (0141–0145)
 **Source:** `0140_collaboration_v2.md` P0-4 and P1-7; model page
 `docs/collaboration.md` §4.

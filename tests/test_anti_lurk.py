@@ -923,6 +923,30 @@ def test_blocked_claims_are_exempt_like_parked(client, room):
     assert {r["task"] for r in board["in_progress"]} >= {"waiting", "live"}
 
 
+def test_stale_claim_alert_exposes_retained_wait_without_private_references(client, room):
+    service = client.app.state.service
+    assert client.put("/admin/delegation", headers=_auth(ADMIN_KEY),
+                      json={"agent_id": "bystander", "powers": ["reporting"],
+                            "scope": "canvass"}).status_code == 200
+    response = client.put("/channels/canvass/store/claim:writing",
+                          headers=_auth(room["named"]),
+                          json={"value": {"owner": "named", "status": "active",
+                                          "waiting_for_artifacts": [{"channel": "canvass",
+                                              "path": "sensitive-revision.md", "min_version": 1}]},
+                                "expect_version": 0})
+    assert response.status_code == 200, response.text
+    service.db._conn.execute("UPDATE store SET updated_at=updated_at-7200 "
+                             "WHERE channel='canvass' AND key='claim:writing'")
+    service.db._conn.commit()
+    assert service._steward_sweep() == ["stale-claims:1"]
+    alert = service._standing_steward_alerts()[0]
+    assert "declared waits: waiting_for_artifacts" in alert.body
+    assert "VFS revisions, not workspace files" in alert.body
+    assert "not a dependency or the unfinished work" in alert.body
+    assert "sensitive-revision.md" not in alert.body
+    assert service._steward_sweep() == []
+
+
 def test_steward_bookkeeping_rows_do_not_feed_their_own_sweep(client, room):
     """Stewardship must not become its own backlog. The delegate opens claim
     rows in hub-alerts to track the alerts it is answering; on the live hub
@@ -1020,12 +1044,15 @@ def test_stalled_phase_alert_names_the_steward_and_its_blocking_ask(client, room
         "WHERE channel='canvass' AND key='phase:novel'")
     service.db._conn.commit()
 
-    # No reporting delegate: the steward alone is still alerted.
+    # No reporting delegate: the operator receives the private alert on
+    # behalf of the ordinary steward, who cannot read hub-alerts.
     out = service._phase_sweep()
     assert out == ["stalled-phase:1"]
     alerts = service.db.get_messages("hub-alerts", 0, 50)
     alert = next(m for m in reversed(alerts) if "PHASE STALLED" in m.body)
-    assert alert.to == ["named"] and alert.status.value == "open"
+    assert alert.to == ["op"] and alert.status.value == "open"
+    assert not service.db.is_member("hub-alerts", "named")
+    assert any(e.id == alert.id for e in service.owed(op_info).to_answer)
     assert "canvass/phase:novel" in alert.body
     assert f"canvass#{ask_seq} (to op)" in alert.body     # the blocking ask
     assert "relaunch" not in alert.body.lower()           # decide, not restart
@@ -1060,6 +1087,105 @@ def test_stalled_phase_alert_names_the_steward_and_its_blocking_ask(client, room
         "WHERE channel='canvass' AND key='phase:novel'")
     service.db._conn.commit()
     assert service._phase_sweep() == []
+
+
+@pytest.mark.parametrize("route", ["scoped-delegate", "operator", "steward"])
+def test_phase_alert_reaches_authorized_recipient_and_repairs_old_route(
+        client, room, tmp_path, route):
+    """The real notify/inbox path, including an already-stranded alert."""
+    from agora.hub.notify_sink import NotifySink
+    from agora.listen import parse_line, qualifies
+
+    service = client.app.state.service
+    service.notify_sink = NotifySink(tmp_path)
+    op, op_key = service.register_agent("op", "Op", operator=True, mission="operator")
+    lead_key = _register(client, "lead")
+    assert client.post("/channels/canvass/join", headers=_auth(lead_key),
+                       json={}).status_code == 200
+    assert client.post("/channels", headers=_auth(room["asker"]),
+                       json={"name": "elsewhere", "private": False}).status_code == 200
+    assert client.post("/channels/elsewhere/join", headers=_auth(room["bystander"]),
+                       json={}).status_code == 200
+
+    def grant(seat, scope):
+        response = client.put("/admin/delegation",
+                              headers=_auth(ADMIN_KEY),
+                              json={"agent_id": seat, "powers": ["reporting"],
+                                    "scope": scope})
+        assert response.status_code == 200, response.text
+
+    grant("bystander", "elsewhere")  # must not acquire this room's obligation
+    recipient, key = "op", op_key
+    if route == "scoped-delegate":
+        grant("lead", "canvass")
+        recipient, key = "lead", lead_key
+    elif route == "steward":
+        grant("named", "canvass")
+        recipient, key = "named", room["named"]
+
+    response = client.put("/channels/canvass/store/phase:article",
+                          headers=_auth(room["asker"]),
+                          json={"value": {"current": "integration", "status": "open",
+                                          "steward": "named"}, "expect_version": 0})
+    assert response.status_code == 200, response.text
+    service.db._conn.execute("UPDATE store SET updated_at=updated_at-7200 "
+                             "WHERE channel='canvass' AND key='phase:article'")
+    service.db._conn.commit()
+    service._ensure_alerts_channel()
+    legacy = None
+    if route != "steward":
+        assert not service.db.is_member("hub-alerts", "named")
+        legacy = service._post_system(
+            "hub-alerts", "PHASE STALLED: existing undeliverable episode",
+            to=["named"], status="open",
+            data={"phase_keys": ["canvass/phase:article"]})
+
+    assert service._phase_sweep() == ["stalled-phase:1"]
+    alert = service._standing_hub_alerts("PHASE STALLED")[0]
+    assert alert.to == [recipient]
+    if legacy:
+        assert alert.id != legacy.id
+        assert any(reply.status.value == "resolved"
+                   for reply in service.db.replies_to(legacy.id))
+        assert not service.db.is_member("hub-alerts", "named")
+        assert client.get(f"/channels/hub-alerts/messages/{alert.id}",
+                          headers=_auth(room["named"])).status_code == 403
+    assert client.get(f"/channels/hub-alerts/messages/{alert.id}",
+                      headers=_auth(key)).status_code == 200
+    assert any(row["id"] == alert.id for row in _inbox(client, key))
+    assert any(row["id"] == alert.id for row in
+               client.get("/owed", headers=_auth(key)).json()["to_answer"])
+    assert not any(row["id"] == alert.id for row in
+                   client.get("/owed", headers=_auth(room["bystander"])).json()["to_answer"])
+
+    events = [parse_line(line) for line in
+              (tmp_path / f"{recipient}-inbox.log").read_text().splitlines()]
+    event = next(event for event in events if event and event["id"] == alert.id)
+    assert qualifies(event, recipient, important_only=True)
+    other_events = [parse_line(line) for line in
+                    (tmp_path / "bystander-inbox.log").read_text().splitlines()]
+    other = next(event for event in other_events if event and event["id"] == alert.id)
+    assert not qualifies(other, "bystander", important_only=True)
+    if legacy:
+        assert not any(event and event["id"] == alert.id for event in
+                       [parse_line(line) for line in
+                        (tmp_path / "named-inbox.log").read_text().splitlines()])
+
+    count = len(service.db.get_messages("hub-alerts", 0, 100))
+    assert service._phase_sweep() == []
+    assert len(service.db.get_messages("hub-alerts", 0, 100)) == count
+    if route == "scoped-delegate":
+        # An active reporting grant is not proof of current membership.
+        # Re-enrol before the same-set no-op, without a duplicate alert.
+        assert client.post("/channels/hub-alerts/leave", headers=_auth(key),
+                           json={}).status_code == 200
+        assert not service.db.is_member("hub-alerts", recipient)
+        count = len(service.db.get_messages("hub-alerts", 0, 100))
+        assert service._phase_sweep() == []
+        assert service.db.is_member("hub-alerts", recipient)
+        assert client.get(f"/channels/hub-alerts/messages/{alert.id}",
+                          headers=_auth(key)).status_code == 200
+        assert len(service.db.get_messages("hub-alerts", 0, 100)) == count
 
 
 def test_waiting_on_sees_envelope_addressed_asks(client, room):

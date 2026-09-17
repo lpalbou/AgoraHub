@@ -156,8 +156,8 @@ WORK_PROMPT = 'AGORA WORK CHUNK. Use only Agora MCP tools for the hub. Own the o
 # chunk on reception only.
 WORK_BOOT_PROMPT = 'AGORA WORK CHUNK BOOT. You are a DRIVEN Agora seat. First whoami and read_charter(), then your task charter. Read the supplied personal briefing; get_briefing refreshes it. Own your assigned outcome: test important assumptions, identify better solutions and seek relevant peer evidence. Re-read your claim, task and newer messages before one bounded slice; honor cancellation and dependencies. Use the task channel for consequential shared questions and findings, route_task for manager/director escalation, DM for private logistics. Update your claim with evidence and next_step using CAS. Routine progress stays on the row; deliver a meaningful finding once. Then END; do not wait for hub messages, listen or start watchers.'
 
-# The LANE PASS: the only prompt a seat that holds no row will ever see that
-# authorises speaking FIRST. Measured on the five-seat run of 2026-08-12:
+# The LANE PASS authorises speaking FIRST when no work row was selected;
+# the seat may still own blocked or deferred work. On 2026-08-12:
 # `quality` and `product` between them answered 97 times and authored ZERO
 # asks, because WORK_PROMPT is the only prompt that authorises initiating and
 # neither seat was ever eligible for it (blocked-only row / no row at all).
@@ -176,7 +176,7 @@ WORK_BOOT_PROMPT = 'AGORA WORK CHUNK BOOT. You are a DRIVEN Agora seat. First wh
 # help and an agreement all fail. That cut is what keeps this from re-opening
 # the ceremony the empty-pass rule closed (0140 field test 2: 50% ceremony on
 # turns woken owing nothing).
-INITIATIVE_PROMPT = 'AGORA WORK CHUNK — LANE PASS. Use only Agora MCP tools for the hub. If this session is new, whoami first. Nothing is owed and you hold no live claim. Look at your mission, personal briefing and live artifacts. Can you identify a consequential gap, better solution or opportunity where your expertise adds value? Name the affected task/artifact and the evidence that could change the decision. If yes, make one useful contribution in its task channel, send one targeted structured ask, or claim an unowned slice and test it. Seek a perspective that could falsify yours. Do not duplicate owned work; do not post availability, agreement or a repeated concern. With no useful contribution, END WITHOUT POSTING. Do not check or wait for the inbox.'
+INITIATIVE_PROMPT = 'AGORA WORK CHUNK — LANE PASS. Use only Agora MCP tools for the hub. If this session is new, whoami first. No work row was selected for continuation; you may still own blocked or deferred claims. Check those claims in the supplied briefing before choosing independent work; do not duplicate them or bypass their dependencies or cooldown. Look at your mission, personal briefing and live artifacts. Can you identify a consequential gap, better solution or opportunity where your expertise adds value? Name the affected task/artifact and the evidence that could change the decision. If yes, make one useful contribution in its task channel, send one targeted structured ask, or claim an unowned slice and test it. Seek a perspective that could falsify yours. Do not duplicate owned work; do not post availability, agreement or a repeated concern. With no useful contribution, END WITHOUT POSTING. Do not check or wait for the inbox.'
 
 #: Prepended to a DELEGATE's work chunk. Its job is the room, not the code.
 SUPERVISE_PROMPT = "You are the operator's chief of staff. Enable seats to build efficiently together; do not take their implementation work. Use the personal briefing as your desk; fetch omitted or stale records only when needed. Ensure tasks have managers, useful peer challenges, clear dependencies and a path to acceptance. Keep consequential evidence and decisions in the task channel so others can challenge and help. Give the operator concise decisions, reasons, uncertainties and questions at meaningful changes. For an operator decision, ask them directly; act for them only with live scoped proxy AND their explicit unexpired absence declaration. Learn from evidenced mistakes and successes; keep work-specific colleague notes and share useful patterns with relevant seats. Your grant is your authority.\n\n"
@@ -3082,8 +3082,11 @@ class Driver:
         # structured check and was simply never applied to the row.
         per_ask_released: set[str] = set()
         for channel, seq, message_id, original_pending in before.structured:
-            if message_id not in before.due:
-                continue                         # waiting debt cannot fail a turn
+            if message_id not in before.due or message_id not in after.due:
+                # /owed is reader-scoped. A shared ask can remain globally
+                # pending after this seat answers; never recreate its debt
+                # from the original addressees on the message row.
+                continue
             pending = self._message_pending_asks(channel, seq, message_id)
             if pending is None:
                 # Fails open, as above: an unreadable message row is a hub
@@ -3820,20 +3823,23 @@ class Driver:
                 signature = self._dependency_signature(value, answer_event)
                 if self._artifact_resume_receipts.seen(channel, key, signature):
                     return False
-                dependency_failed = any(word in answer_event for word in ("deadline:", "unavailable", "retracted:"))
+                dependency_failed = any(word in answer_event for word in (
+                    "deadline:", "unavailable", "retracted:", "incomplete:", "stale:",
+                    "cancelled:", "needs_reconciliation:"))
                 if artifacts is not None and not dependency_failed and not self._artifacts_satisfied(artifacts):
                     return False
                 return True
-            if not self._is_terminal(value.get("status"), value.get("state")):
-                return True
             if artifacts is not None:
-                if not channel or not heads <= {"blocked", "parked"}:
+                if not channel or (self._is_terminal(value.get("status"), value.get("state"))
+                                   and not heads <= {"blocked", "parked"}):
                     return False
                 self._artifact_wait_pending = True
                 signature = self._dependency_signature(value)
                 if self._artifact_resume_receipts.seen(channel, key, signature):
                     return False
                 return self._artifacts_satisfied(artifacts)
+            if not self._is_terminal(value.get("status"), value.get("state")):
+                return True
             # A park with a DECLARED dependency that has since moved is the
             # one terminal row worth reconsidering (2026-08-06): this seat
             # said in structured state "resume when that row changes", and
@@ -3896,7 +3902,8 @@ class Driver:
             for item in answers:
                 if isinstance(item, dict):
                     normalized.append((item.get("channel"), item.get("message_id"),
-                                       item.get("after_seq", 0)))
+                                       item.get("after_seq", 0),
+                                       *(("decided",) if item.get("condition") == "decided" else ())))
         wait_until = value.get("wait_until")
         if isinstance(wait_until, bool) or not isinstance(wait_until, (int, float)):
             wait_until = None
@@ -3919,9 +3926,9 @@ class Driver:
                     or not math.isfinite(wait_until)):
                 return None
             deadline = float(wait_until)
-        normalized: set[tuple[str, str, int]] = set()
+        normalized: set[tuple[str, str, int, str]] = set()
         for item in requirements:
-            if (not isinstance(item, dict) or set(item) - {"channel", "message_id", "after_seq"}
+            if (not isinstance(item, dict) or set(item) - {"channel", "message_id", "after_seq", "condition"}
                     or not isinstance(item.get("channel"), str)
                     or not isinstance(item.get("message_id"), str)
                     or not item["channel"] or not item["message_id"]):
@@ -3929,7 +3936,10 @@ class Driver:
             after_seq = item.get("after_seq", 0)
             if isinstance(after_seq, bool) or not isinstance(after_seq, int) or after_seq < 0:
                 return None
-            normalized.add((item["channel"], item["message_id"], after_seq))
+            condition = item.get("condition", "collected")
+            if condition not in ("collected", "decided"):
+                return None
+            normalized.add((item["channel"], item["message_id"], after_seq, condition))
         if len(normalized) != len(requirements):
             return None
         # Expiry is an explicit reconsideration event, never a fabricated
@@ -3946,7 +3956,9 @@ class Driver:
         from urllib.parse import quote
         headers = {"Authorization": f"Bearer {api_key}"}
         events = []
-        for channel, root, after_seq in sorted(normalized):
+        pending = False
+        failed = False
+        for channel, root, after_seq, condition in sorted(normalized):
             try:
                 response = httpx.get(
                     f"{self.hub.rstrip('/')}/channels/{quote(channel, safe='')}/messages/"
@@ -3959,6 +3971,7 @@ class Driver:
             # silent permanent park. The prompt exposes no unavailable payload.
             if response.status_code in (403, 404):
                 events.append((channel, root, "unavailable"))
+                failed = True
                 continue
             if response.status_code != 200:
                 return None
@@ -3970,7 +3983,27 @@ class Driver:
                 return None
             if state.get("retracted"):
                 events.append((channel, root, "retracted:" + str(state.get("seq", ""))))
+                failed = True
                 continue
+            consultation = state.get("consultation")
+            if consultation is not None:
+                if not isinstance(consultation, dict) or after_seq:
+                    return None
+                next_at = consultation.get("next_event_at")
+                if type(next_at) in (int, float) and math.isfinite(next_at) and next_at > now:
+                    self._answer_wait_deadline = min(next_at, self._answer_wait_deadline or next_at)
+                status = consultation.get("status")
+                if status == "collecting" or (condition == "decided" and status in ("ready", "timed_out")):
+                    pending = True
+                    continue
+                if status not in ("ready", "timed_out", "incomplete", "stale", "decided",
+                                  "cancelled", "needs_reconciliation") or not consultation.get("version"):
+                    return None
+                events.append((channel, root, f"consultation:{status}:{consultation['version']}"))
+                failed |= status in ("incomplete", "stale", "cancelled", "needs_reconciliation")
+                continue
+            if condition == "decided":
+                return None
             responses = state.get("responses")
             if not isinstance(responses, list):
                 return None
@@ -3982,7 +4015,9 @@ class Driver:
             elif state.get("closed"):
                 events.append((channel, root, "closed:" + str(state.get("seq", ""))))
             else:
-                return None
+                pending = True
+        if pending and not failed:
+            return None
         return json.dumps(events, separators=(",", ":"))
 
     def _waiting_on_satisfied(self, dep: Any) -> bool:
@@ -4449,7 +4484,7 @@ class Driver:
             # ready event still spends exactly one receipt; restricting this
             # to terminal words made an answered active row chain forever.
             if (current[1].get("waiting_for_answers") is not None
-                    or self._is_terminal(current[1].get("status"), current[1].get("state"))):
+                    or current[1].get("waiting_for_artifacts") is not None):
                 artifact_signature = self._dependency_signature(
                     current[1], self._answer_wait_event)
                 dependency_state = ("unavailable" if self._answer_wait_event
@@ -4461,7 +4496,9 @@ class Driver:
                     f"{dependency_label} ({dependency_state}) for {json.dumps([channel, key, version])}. "
                     "Your declared dependency event is ready. Re-read this exact claim and "
                     "the named answer/artifact state; perform one bounded reconsideration. Availability "
-                    "does not accept content or clear another blocker. Update your own claim "
+                    "does not accept content or clear another blocker. For a consultation, read "
+                    "get_consultation and its attributed responses; reconcile before conclude_consultation. "
+                    "An incomplete deadline or stale basis is not permission to decide. Update your own claim "
                     "with CAS: continue actively, declare changed artifact requirements, or "
                     "remain blocked with what is still missing. No repeated wake is owed for "
                     "this unchanged declaration.")
@@ -4492,11 +4529,22 @@ class Driver:
             strikes = self._work_strikes[ck] = self._strike_count(ck) + 1
             self._work_strike_at[ck] = time.time()
             if strikes >= WORK_STRIKES:
+                # Retrying the same inert context after each cooldown can
+                # repeat the failure indefinitely. Reuse normal rotation at
+                # this completed-turn boundary; the NEXT ordinarily admitted
+                # work-lane invocation boots from durable hub state. This grants no retry,
+                # clears no dependency/strike and leaves reception untouched.
+                # Off-row progress and provider outages returned above.
+                if self.work_session_id or self._work_turns_on_session:
+                    self._adapter.rotate_session("work")
+                    self.work_session_id = None
+                    self._write_session(self._work_session_path, None)
+                    self._work_turns_on_session = 0
                 _emit(f"AGORA_DRIVE initiative=retired agent={self.agent_id} "
                       f"key={ck} reason=no-receipt ({WORK_STRIKES} chunks "
                       "left the row unchanged; a version bump OR "
                       f"{int(WORK_STRIKE_TTL / 60)}m of cooldown brings it "
-                      "back. The seat keeps working: the next continuable "
+                      "back. Work-context rotation requested; the next continuable "
                       "row is picked on the next pass)")
         return ran
 
@@ -4648,7 +4696,9 @@ class Driver:
                 # reached an idle boundary at all. `continue` re-enters the
                 # pass: if the lane opened a claim row, the very next scan
                 # sees it and the ordinary chain takes over.
-                if snap is None and not self._artifact_wait_pending and not self._task_wait_pending and self._initiative_step():
+                if (snap is None and not self._artifact_wait_pending
+                        and not self._answer_wait_pending
+                        and not self._task_wait_pending and self._initiative_step()):
                     driven += 1
                     continue
                 # source=auto: notify-file tail when the hub is local (0

@@ -71,6 +71,32 @@ def test_channel_info_projection_preserves_authority_and_failures():
         assert server.channel_info_view(failure) == failure
 
 
+def test_claim_dependency_receipt_uses_effective_persisted_waits(hub, monkeypatch):
+    key = _make_agent(hub, "wait-owner")
+    _make_agent(hub, "wait-producer")
+    mcp = _server_against(hub, monkeypatch, key)
+    source = _call_tool(mcp, "post_message", {"channel": "commons", "status": "fyi", "body": "Preparing the shared result."})
+    row = _call_tool(mcp, "store_set", {"channel": "commons", "key": "claim:wait-result", "expect_version": 0,
+        "value": {"owner": "wait-owner", "status": "parked", "source_message_id": source["id"],
+                  "blocked_on": "seat", "needs_from": "wait-producer", "needs": "The producer's VFS result",
+                  "waiting_for_artifacts": [{"channel": "commons", "path": "result.md", "min_version": 1}]}})
+    assert "version" in row, row
+    changed = _call_tool(mcp, "store_set", {"channel": "commons", "key": "claim:wait-result", "expect_version": row["version"],
+                                          "value": {"next_step": "Inspect the publication on arrival"}})
+    receipt = changed["dependency_receipt"]
+    assert changed["value"]["waiting_for_artifacts"] == row["value"]["waiting_for_artifacts"]
+    assert "workspace files and attachments do not count" in receipt["observes"]["waiting_for_artifacts"]
+    assert "not a dispatch verdict" in receipt["meaning"]
+    refused = _call_tool(mcp, "store_set", {"channel": "commons", "key": "claim:wait-result", "expect_version": changed["version"],
+                                          "value": {"status": "active"}})
+    assert refused["ok"] is False and refused["error"] == 400
+    assert "dependency_receipt" not in refused
+    resumed = _call_tool(mcp, "store_set", {"channel": "commons", "key": "claim:wait-result", "expect_version": changed["version"],
+                                          "value": {"status": "active", "waiting_for_artifacts": None}})
+    assert resumed["value"]["waiting_for_artifacts"] is None
+    assert "dependency_receipt" not in resumed
+
+
 def test_full_member_missions_remain_retrievable_over_mcp(hub, monkeypatch):
     import httpx
     mission = "Binding operator charge: own the runtime cancellation contract."
@@ -153,16 +179,46 @@ def _call_tool(mcp, name: str, args: dict):
     import json
 
     out = asyncio.run(mcp.call_tool(name, args))
+    if isinstance(out, tuple):
+        out = out[0]  # SDK content + structuredContent result
     parts = out if isinstance(out, list) else [out]
     if not parts:
         return []
-    decoded = [json.loads(p.text) for p in parts]
+    decoded = []
+    for p in parts:
+        try:
+            decoded.append(json.loads(p.text))
+        except json.JSONDecodeError:
+            decoded.append(p.text)  # native text tools such as nonce-fenced fs_read
     return decoded[0] if len(decoded) == 1 else decoded
 
 
 def _key_of(url: str, agent_id: str) -> str:
     """The api key handed back when that agent was registered in this test."""
     return _KEYS[agent_id]
+
+
+def test_checkout_publish_uses_captured_base_across_mcp_restarts(hub, monkeypatch, tmp_path):
+    from pathlib import Path
+    monkeypatch.setenv('AGORA_HOME', str(tmp_path / 'seat-home'))
+    key = _make_agent(hub, 'checkout-editor')
+    first = _server_against(hub, monkeypatch, key)
+    created = _call_tool(first, 'fs_write', {'channel': 'commons', 'path': 'draft.md',
+                       'content': 'Opening\nOriginal ending', 'description': 'Shared draft'})
+    assert created['version'] == 1
+    old = _call_tool(first, 'fs_checkout', {'channel': 'commons', 'path': 'draft.md'})
+    Path(old['file_path']).write_text('New opening\nOriginal ending')
+    _call_tool(first, 'fs_write', {'channel': 'commons', 'path': 'draft.md',
+               'content': 'Opening\nAccepted expanded ending', 'expect_version': 1})
+    resumed = _server_against(hub, monkeypatch, key)
+    refused = _call_tool(resumed, 'fs_publish', {'checkout_id': old['checkout_id']})
+    assert refused['error'] == 409 and refused['current_version'] == 2
+    fresh = _call_tool(resumed, 'fs_checkout', {'channel': 'commons', 'path': 'draft.md'})
+    Path(fresh['file_path']).write_text('New opening\nAccepted expanded ending')
+    result = _call_tool(resumed, 'fs_publish', {'checkout_id': fresh['checkout_id']})
+    assert result['version'] == 3 and 'content' not in result
+    verified = _call_tool(resumed, 'fs_checkout', {'channel': 'commons', 'path': 'draft.md'})
+    assert Path(verified['file_path']).read_text() == 'New opening\nAccepted expanded ending'
 
 
 _KEYS: dict[str, str] = {}
@@ -282,7 +338,9 @@ def test_a_seat_is_served_the_tools_it_can_use(hub, monkeypatch):
                     "search_hub", "rate_agent", "get_colleague_notes",
                     "get_briefing", "get_task", "route_task", "get_advisors", "review_task"):
         assert present in names
-    assert len(names) <= 51  # one typed-review operation replaces separate review bookkeeping
+    assert {"get_collaboration_graph", "get_consultation", "conclude_consultation"} <= names
+    assert {'fs_checkout', 'fs_publish'} <= names
+    assert len(names) <= 59  # bounded member catalog, including three VFS subscription operations
 
     boss = _make_agent(hub, "boss2", operator=True)
     assert len(_tool_names(_server_against(hub, monkeypatch, boss))) > len(names)
@@ -305,8 +363,32 @@ def test_driven_worker_catalog_retains_collaboration_without_operator_powers(hub
     key = _make_agent(hub, "driven-worker")
     monkeypatch.setenv("AGORA_MCP_TOOLS", "driven")
     names = _tool_names(_server_against(hub, monkeypatch, key))
-    assert {"create_group", "invite_agent", "open_vote", "tally_vote", "close_vote", "fs_history"} <= names
+    assert {"create_group", "invite_agent", "open_vote", "tally_vote", "close_vote", "fs_history",
+            "get_collaboration_graph", "get_consultation", "conclude_consultation",
+            "fs_subscribe", "fs_unsubscribe", "fs_subscriptions"} <= names
     assert not ({"spawn_seat", "retire_agent", "wait_for_messages", "supervise"} & names)
+
+
+@pytest.mark.parametrize('path', ['plan.md', 'notes/a#b?c%.md'])
+def test_mcp_vfs_subscription_persists_and_delivers_real_revision(hub, monkeypatch, path):
+    reader_key = _make_agent(hub, "subscriber")
+    author_key = _make_agent(hub, "publisher")
+    reader = _server_against(hub, monkeypatch, reader_key)
+    author = _server_against(hub, monkeypatch, author_key)
+    sub = _call_tool(reader, "fs_subscribe", {'channel': 'commons', 'path': path})
+    assert sub['agent_id'] == 'subscriber' and sub['after_version'] == 0
+    _call_tool(author, 'fs_write', {'channel': 'commons', 'path': path, 'content': 'v1',
+                                   'summary': 'New interface assumptions'})
+    current = _call_tool(author, 'fs_subscriptions', {'channel': 'commons', 'path': path})
+    assert current['after_version'] == 1
+    assert 'v1' in _call_tool(reader, 'fs_read', {'channel': 'commons', 'path': path, 'version': 1})
+    checkout = _call_tool(author, 'fs_checkout', {'channel': 'commons', 'path': path})
+    Path(checkout['file_path']).write_text('v2')
+    result = _call_tool(author, 'fs_publish', {'checkout_id': checkout['checkout_id'], 'summary': 'Reconciled consumer constraint'})
+    assert result['version'] == 2
+    assert 'v2' in _call_tool(reader, 'fs_read', {'channel': 'commons', 'path': path, 'version': 2})
+    assert _call_tool(reader, 'fs_unsubscribe', {'channel': 'commons', 'path': path})['unsubscribed']
+    assert _call_tool(author, 'fs_subscriptions', {'channel': 'commons', 'path': path}) == []
 
 
 def test_stop_spawn_records_intent_only(hub, monkeypatch):

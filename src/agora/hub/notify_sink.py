@@ -56,10 +56,8 @@ def notify_line(envelope: Envelope) -> str:
         # `addressed` narrowing to it — the operator naming 4 seats in prose
         # deafened the other 19 to their own operator (live, 2026-07-29).
         ("from-operator", envelope.from_operator),
-        # unassigned: a PEER open/blocked that names nobody. It stays visible
-        # at `check_inbox`, but important-only listeners must not buy a turn
-        # on work that currently has no owner. Older listeners ignore the
-        # flag and degrade toward noise, never deafness.
+        # unassigned: a PEER open/blocked put to the room. Important-only
+        # listeners wake members to consider it without creating reply debt.
         ("unassigned", peer_unassigned),
         ("retracted", envelope.retracted),
         (envelope.status.value, envelope.status.value in ("open", "blocked")),
@@ -96,6 +94,22 @@ class NotifySink:
         self._secured: set[Path] = set()  # perms repaired once per path/process
         self._dir_secured = False
 
+    @staticmethod
+    def _repair_incomplete_tail(fd: int) -> None:
+        """A killed previous writer may have left a partial JSON record."""
+        end = os.fstat(fd).st_size
+        if not end or os.pread(fd, 1, end-1) == b'\n':
+            return
+        while end:
+            start = max(0, end-4096)
+            chunk = os.pread(fd, end-start, start)
+            newline = chunk.rfind(b'\n')
+            if newline >= 0:
+                os.ftruncate(fd, start+newline+1)
+                return
+            end = start
+        os.ftruncate(fd, 0)
+
     def _append(self, path: Path, line: str) -> None:
         """Append under the lock; create 0600, repair pre-hardening perms once,
         rotate to `<file>.1` (atomic replace) when the size cap is exceeded."""
@@ -109,16 +123,30 @@ class NotifySink:
             os.chmod(rotated, 0o600)  # a pre-hardening file keeps its inode
             self._secured.discard(path)
         # O_CREAT's 0600 only applies at creation; fchmod repairs older files.
-        fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
+        fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_APPEND, 0o600)
         try:
             if path not in self._secured:
                 os.fchmod(fd, 0o600)
+                self._repair_incomplete_tail(fd)
                 self._secured.add(path)
-            os.write(fd, (line + "\n").encode("utf-8"))
+            data = (line + "\n").encode("utf-8")
+            start = os.fstat(fd).st_size
+            offset = 0
+            try:
+                while offset < len(data):
+                    written = os.write(fd, data[offset:])
+                    if written <= 0:
+                        raise OSError("notify write made no progress")
+                    offset += written
+            except OSError:
+                # One hub writer under this sink's lock. Do not leave half a
+                # JSON line that would swallow the complete retry's first line.
+                os.ftruncate(fd, start)
+                raise
         finally:
             os.close(fd)
 
-    def deliver(self, agent_id: str, envelope: Envelope) -> None:
+    def deliver(self, agent_id: str, envelope: Envelope) -> bool:
         try:
             line = notify_line(envelope)
             with self._lock:
@@ -126,6 +154,7 @@ class NotifySink:
             if self._failing:
                 self._failing = False
                 print("agora: notify-file writes recovered", file=sys.stderr)
+            return True
         except OSError as exc:
             # Best-effort by contract: never fail a post over a notify write.
             # But a silently stale file is the old "deaf agent" failure mode,
@@ -136,3 +165,4 @@ class NotifySink:
                 print(f"agora: notify-file write failed ({exc}); posts are "
                       "unaffected but notify files are stale until this "
                       "recovers", file=sys.stderr)
+            return False

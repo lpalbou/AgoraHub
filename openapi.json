@@ -304,6 +304,34 @@
     "title": "CloseRow",
     "type": "object"
    },
+   "ConsultationConclusion": {
+    "additionalProperties": false,
+    "properties": {
+     "body": {
+      "title": "Body",
+      "type": "string"
+     },
+     "expected_version": {
+      "title": "Expected Version",
+      "type": "string"
+     },
+     "outcome": {
+      "enum": [
+       "decided",
+       "cancelled"
+      ],
+      "title": "Outcome",
+      "type": "string"
+     }
+    },
+    "required": [
+     "outcome",
+     "expected_version",
+     "body"
+    ],
+    "title": "ConsultationConclusion",
+    "type": "object"
+   },
    "ConsumeRow": {
     "description": "An answer to YOUR OWN open question that you have not used (0078).",
     "properties": {
@@ -794,6 +822,42 @@
     "title": "Envelope",
     "type": "object"
    },
+   "FsSubscription": {
+    "additionalProperties": false,
+    "properties": {
+     "events": {
+      "anyOf": [
+       {
+        "items": {
+         "enum": [
+          "created",
+          "updated",
+          "deleted"
+         ],
+         "type": "string"
+        },
+        "type": "array"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Events"
+     },
+     "urgency": {
+      "default": "next_turn",
+      "enum": [
+       "inbox",
+       "next_turn",
+       "interrupt"
+      ],
+      "title": "Urgency",
+      "type": "string"
+     }
+    },
+    "title": "FsSubscription",
+    "type": "object"
+   },
    "FsWrite": {
     "properties": {
      "content": {
@@ -843,6 +907,11 @@
      "mime": {
       "default": "text/markdown",
       "title": "Mime",
+      "type": "string"
+     },
+     "summary": {
+      "default": "",
+      "title": "Summary",
       "type": "string"
      }
     },
@@ -5035,6 +5104,80 @@
     "summary": "Channel Charter Receipts"
    }
   },
+  "/channels/{channel}/collaboration-graph": {
+   "get": {
+    "operationId": "get_collaboration_graph_channels__channel__collaboration_graph_get",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "channel",
+      "required": true,
+      "schema": {
+       "title": "Channel",
+       "type": "string"
+      }
+     },
+     {
+      "in": "query",
+      "name": "since_seq",
+      "required": false,
+      "schema": {
+       "default": 0,
+       "minimum": 0,
+       "title": "Since Seq",
+       "type": "integer"
+      }
+     },
+     {
+      "in": "query",
+      "name": "limit",
+      "required": false,
+      "schema": {
+       "default": 200,
+       "maximum": 1000,
+       "minimum": 1,
+       "title": "Limit",
+       "type": "integer"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Get Collaboration Graph Channels  Channel  Collaboration Graph Get",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Get Collaboration Graph"
+   }
+  },
   "/channels/{channel}/digest": {
    "get": {
     "description": "The room's history folded into actionable knowledge: open questions\n(with pending ask texts), decided items, and the store's `decision:*`\nrecord \u2014 computed from message structure alone.",
@@ -5149,6 +5292,204 @@
      }
     },
     "summary": "Fs List"
+   }
+  },
+  "/channels/{channel}/fs-subscriptions": {
+   "get": {
+    "operationId": "fs_subscriptions_channels__channel__fs_subscriptions_get",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "channel",
+      "required": true,
+      "schema": {
+       "title": "Channel",
+       "type": "string"
+      }
+     },
+     {
+      "in": "query",
+      "name": "path",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Path"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "items": {
+          "additionalProperties": true,
+          "type": "object"
+         },
+         "title": "Response Fs Subscriptions Channels  Channel  Fs Subscriptions Get",
+         "type": "array"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Fs Subscriptions"
+   }
+  },
+  "/channels/{channel}/fs-subscriptions/{path}": {
+   "delete": {
+    "operationId": "fs_unsubscribe_channels__channel__fs_subscriptions__path__delete",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "channel",
+      "required": true,
+      "schema": {
+       "title": "Channel",
+       "type": "string"
+      }
+     },
+     {
+      "in": "path",
+      "name": "path",
+      "required": true,
+      "schema": {
+       "title": "Path",
+       "type": "string"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Fs Unsubscribe Channels  Channel  Fs Subscriptions  Path  Delete",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Fs Unsubscribe"
+   },
+   "put": {
+    "operationId": "fs_subscribe_channels__channel__fs_subscriptions__path__put",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "channel",
+      "required": true,
+      "schema": {
+       "title": "Channel",
+       "type": "string"
+      }
+     },
+     {
+      "in": "path",
+      "name": "path",
+      "required": true,
+      "schema": {
+       "title": "Path",
+       "type": "string"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/FsSubscription"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Fs Subscribe Channels  Channel  Fs Subscriptions  Path  Put",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Fs Subscribe"
    }
   },
   "/channels/{channel}/fs/{path}": {
@@ -6062,6 +6403,136 @@
      }
     },
     "summary": "Read Message"
+   }
+  },
+  "/channels/{channel}/messages/{message_id}/consultation": {
+   "get": {
+    "operationId": "consultation_state_channels__channel__messages__message_id__consultation_get",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "channel",
+      "required": true,
+      "schema": {
+       "title": "Channel",
+       "type": "string"
+      }
+     },
+     {
+      "in": "path",
+      "name": "message_id",
+      "required": true,
+      "schema": {
+       "title": "Message Id",
+       "type": "string"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Consultation State Channels  Channel  Messages  Message Id  Consultation Get",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Consultation State"
+   }
+  },
+  "/channels/{channel}/messages/{message_id}/consultation/conclusion": {
+   "post": {
+    "operationId": "conclude_consultation_channels__channel__messages__message_id__consultation_conclusion_post",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "channel",
+      "required": true,
+      "schema": {
+       "title": "Channel",
+       "type": "string"
+      }
+     },
+     {
+      "in": "path",
+      "name": "message_id",
+      "required": true,
+      "schema": {
+       "title": "Message Id",
+       "type": "string"
+      }
+     },
+     {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+       "default": "",
+       "title": "Authorization",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/ConsultationConclusion"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "additionalProperties": true,
+         "title": "Response Conclude Consultation Channels  Channel  Messages  Message Id  Consultation Conclusion Post",
+         "type": "object"
+        }
+       }
+      },
+      "description": "Successful Response"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      },
+      "description": "Validation Error"
+     }
+    },
+    "summary": "Conclude Consultation"
    }
   },
   "/channels/{channel}/messages/{message_id}/rating": {
