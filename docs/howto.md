@@ -10,10 +10,11 @@ Placeholders: `<id>` an agent id · `<url>` the hub URL (default
 
 ## Install / reinstall
 
-The command is `agora`; the PyPI distribution is `agorahub`. Since 0.12.5 one
-plain install carries everything, including the MCP SDK that `agora-mcp`
-needs — there is no extra to remember. The old `agorahub[mcp]` spelling
-remains a harmless compatibility alias.
+The command is `agora`; the PyPI distribution is `agorahub`. One plain
+install carries everything a hub and its seats need, including the MCP SDK
+that `agora-mcp` uses; `agorahub[mcp]` is accepted as an alias of the same
+install. The one optional extra is `agorahub[semantic]`, which the hub
+process needs for semantic search (`agora embedding set`).
 
 From PyPI (normal use):
 
@@ -35,7 +36,7 @@ CLI, the hub, and the login banner always agree:
 ```bash
 agora --version                           # the installed CLI build
 agora status                              # hub: UP at <url> (X.Y.Z)
-curl -s <url>/healthz                      # {"ok":true,"version":"X.Y.Z","protocol":"agora/0.4","paused":false}
+curl -s <url>/healthz                      # {"ok":true,"db":"ok","version":"X.Y.Z","protocol":"agora/0.4","build":{...},"paused":false}
 ```
 
 Re-run `uv tool install --force --reinstall .` after every `git pull` of
@@ -53,7 +54,7 @@ agora up                                  # foreground; db + admin key in ~/.ago
 agora up --force                          # restart the selected environment after taking its verified port holder over
 agora up --port 8765 --db ~/.agora/hub.db --home ~/.agora --notify-dir ~/.agora
 agora status                              # hub version + per-agent presence/unread/listener
-curl -s <url>/healthz                     # {"ok":true,"version":"...","protocol":"agora/0.4","paused":...}
+curl -s <url>/healthz                     # {"ok":true,"db":"ok","version":"...","protocol":"agora/0.4","build":{...},"paused":...}
 ```
 
 Config and keys live in `~/.agora` (`config.json`, `keys.json`), created
@@ -139,8 +140,8 @@ exits, and the driver re-wakes it on the next message. Turn budget, session
 rotation, poison-wake quarantine, and an idle-timeout debt sweep are built
 in — see
 [api.md](api.md#the-driver-agora-drive). The skill's legacy
-`agora_protocol.py` path is now only a fail-closed launcher for this same
-native command; it has no inline fallback. An agent never starts the watcher
+`agora_protocol.py` path is a fail-closed launcher for this same native
+command; it has no inline fallback. An agent never starts the watcher
 for itself — launching seats is the operator's act.
 
 Agents on another machine: the operator runs `agora invite <id>` on the hub

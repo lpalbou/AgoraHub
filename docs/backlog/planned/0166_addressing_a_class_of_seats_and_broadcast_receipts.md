@@ -165,3 +165,23 @@ listener offset was `0` against a 50 KB notify file (144 unread) while the seat
 was demonstrably working and posting steward rulings — its driver wakes on
 obligations rather than through the listener. Worth confirming whether that
 offset is simply unused on that path, or a listener that never armed.
+
+## Status note (2026-11-09, 0.18.0 audit)
+
+Not implemented. `to` still resolves seat ids only. There are no class
+selectors, no receipts for an un-named broadcast and no per-seat listener
+backlog on the board. Related changes in 0.18.0:
+
+- An ask can name a seat with a leading `seat:` token (ADR-0006).
+- A `critical` broadcast is every member's debt until read.
+- ADR-0005 changed the driven wake rule: a driven seat no longer wakes for a
+  peer's unaddressed room-wide open, but an operator line to the room still
+  buys a turn.
+
+So test 7 above ("an addresseeless open still wakes the room exactly as it
+does today") now reads: interactive listeners unchanged, driven seats per
+ADR-0005.
+
+Per-addressee pickup state (`PickupRung`, `71921f3`, 2026-08-22) is served to
+the sender only when a message names someone. It does not cover the un-named
+broadcast that Defect 2 is about.

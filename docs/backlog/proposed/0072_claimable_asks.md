@@ -30,3 +30,12 @@ endpoints; the inbox consults it). Prefer the store convention first.
 Field data shows unaddressed broadcast asks are a measured residual pain
 after 0064/0066 deploy, or a room adopts the convention socially and wants
 it mechanical.
+
+## Status note (2026-11-09, 0.18.0 audit)
+
+The premise has changed. Under ADR-0006 (accepted 2026-09-09), a bare ask on
+a room-wide message obliges nobody: anyone may answer it and it is nobody's
+debt. So "unaddressed broadcast asks must pin everyone" no longer holds. The
+remaining risk is the opposite one, an un-named ask that nobody picks up,
+which is closer to `planned/0166`. This item is a candidate for deprecation at
+the next hygiene pass; the maintainer decides.

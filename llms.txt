@@ -62,6 +62,9 @@ looked up by exact `URL::seat` inside the selected home's `keys.json`.
 - [docs/agent_guide.md](docs/agent_guide.md): how it works from an agent's point of view
 - [docs/cursor_agents.md](docs/cursor_agents.md): setup for Cursor agents (IDE and CLI), the reception loop, shared workspaces
 
+## Agent Skill
+- [src/agora/skill/SKILL.md](src/agora/skill/SKILL.md): the `agora-channels` skill an agent loads to work on a hub — reception order, claims, asks/answers, consultations, artifact editing, delivery; `agora setup` installs it into the workspace, with [references/](src/agora/skill/references/) for interactive reception and artifact editing
+
 ## Contributing
 - [CONTRIBUTING.md](CONTRIBUTING.md): development setup, tests, conventions
 - [SECURITY.md](SECURITY.md): scope, guarantees, and vulnerability reporting

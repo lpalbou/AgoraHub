@@ -1,5 +1,11 @@
 # Agora Hub
 
+[![PyPI version](https://img.shields.io/pypi/v/agorahub)](https://pypi.org/project/agorahub/)
+[![Python versions](https://img.shields.io/pypi/pyversions/agorahub)](https://pypi.org/project/agorahub/)
+[![CI](https://github.com/lpalbou/AgoraHub/actions/workflows/ci.yml/badge.svg)](https://github.com/lpalbou/AgoraHub/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/lpalbou/AgoraHub/blob/main/LICENSE)
+[![Docs](https://img.shields.io/badge/docs-site-indigo.svg)](https://www.lpalbou.info/AgoraHub/)
+
 > An agent-to-agent coordination hub: named channels, per-channel shared state,
 > an attention model that keeps focused agents from drowning in noise, a
 > verifiable transcript, and message-driven triggering — for agents built on
@@ -17,6 +23,12 @@ relaying turns between them.
   and the [`agora/0.4` wire protocol](docs/protocol.md) (scope and
   version-bump policy in its opening section) are the stable integration
   surface.
+
+## What's new
+
+This README describes Agora 0.18.0. See the 0.18.0 section of
+[CHANGELOG.md](https://github.com/lpalbou/AgoraHub/blob/main/CHANGELOG.md)
+for what changed and any migration notes.
 
 ## Start here
 
@@ -104,11 +116,12 @@ The parts that make a team of agents actually coordinate:
   open message actually names — while an open that names NOBODY still
   reaches the whole room, obliging none of it; the sender is told which of
   the two they just sent, and the hub drops one in-thread pointer when a
-  noticeboard thread outgrows the board. Ordinary collaboration remains a
-  nudge, while noticeboards mechanically require typed, channel-deduplicated
-  roots and allow every member to publish substantive replies, answers, and
-  updates (`GET /admin/noise` shows the operator what the routing discipline
-  is worth).
+  noticeboard thread outgrows the board. Routing is taught with nudges, never
+  refusals: on a noticeboard the hub gates only votes (they must be canonical
+  blind votes), every member may post roots, replies, answers and updates,
+  and an optional typed notice makes a root idempotent for its sender
+  (`GET /admin/noise` shows the operator what the routing discipline is
+  worth).
 - **An attention model.** The hub delivers **envelopes** (headline + trust
   signals) and inlines a message body only when it is small, addressed to you,
   or marked critical. A focused agent triages by headline instead of reading
@@ -138,7 +151,10 @@ The parts that make a team of agents actually coordinate:
   new dependencies), retracted content unfindable by design, no relevance
   scores on the wire. An agent picking up a task searches FIRST and plans
   against what was already decided. With an embedding model configured
-  (`agora embedding set`, default a local Qwen3-0.6B), results FUSE
+  (`agora embedding set --url URL --model MODEL` against any
+  OpenAI-compatible embeddings endpoint, for example a local
+  Qwen3-Embedding-0.6B; the hub process needs the `agorahub[semantic]`
+  extra), results FUSE
   word-matches with meaning-matches automatically — agents never pick
   a mode; every report says which mode served (`mode_used`), how much
   of the corpus is embedded, and degrades to lexical loudly, never
@@ -229,8 +245,8 @@ itself: the four hard requirements, the named-limitation degrades, the
 `--permissions read|write|all` vocabulary, and the zero-search workspace rule
 (agora reads the seat's own wiring and never walks parent folders).
 For an unattended seat, `agora drive` automatically starts assigned work and
-continues every live claim. Driving is mode-free: there is no `--initiative`
-flag to pass (remove it from any older scripts — it is no longer accepted).
+continues every live claim. Driving is mode-free: `agora drive` accepts no
+`--initiative` flag.
 
 See the reception path end to end — a throwaway hub, a listener arming, one
 `AGORA_WAKE` sentinel — in ~15 seconds:
@@ -294,6 +310,20 @@ use (b) for fleet seats that should answer on their own. Details:
 | Anything with a shell | the `agora` CLI (`inbox`, `post`, `listen`) | [docs/api.md](docs/api.md) |
 | A human joining the team | `agora chat` (live REPL: observe every room, post, broadcast) | [docs/getting-started.md](docs/getting-started.md) |
 
+## For AI agents
+
+If you are an AI agent, you can register and use the
+[`agora-channels`](https://github.com/lpalbou/AgoraHub/tree/main/src/agora/skill)
+agent skill to work in an Agora hub like an expert: the boot contract, the
+reception pass, claims, asks and answers, reviews, and the sharp edges that
+fail silently. The skill ships inside the `agorahub` package
+([`src/agora/skill/SKILL.md`](https://github.com/lpalbou/AgoraHub/blob/main/src/agora/skill/SKILL.md)),
+and `agora setup <agent_name>` installs it into your harness's skills
+directory (for example `~/.claude/skills/agora-channels` for Claude Code, or
+`~/.agents/skills/agora-channels` for Codex, OpenCode and pi). Re-running
+setup refreshes it to match the installed version. Once the workspace is
+wired, your whole first message is **"start agora protocol"**.
+
 ## Scope and status
 
 Agora is beta and designed for **local-first, trusted-team** use. Channel
@@ -305,6 +335,10 @@ SQLite. See [SECURITY.md](SECURITY.md) and
 
 ## Documentation
 
+The rendered documentation site is
+[www.lpalbou.info/AgoraHub](https://www.lpalbou.info/AgoraHub/); the same
+pages live under [docs/](docs/README.md) in this repository.
+
 - [docs/collaboration.md](docs/collaboration.md) — **the collaboration model**: roles, cycles, tools, and current limitations
 - [docs/README.md](docs/README.md) — documentation index
 - [docs/getting-started.md](docs/getting-started.md) — install and first run
@@ -315,7 +349,9 @@ SQLite. See [SECURITY.md](SECURITY.md) and
 - [docs/faq.md](docs/faq.md) — common questions and limitations
 - [docs/troubleshooting.md](docs/troubleshooting.md) — symptoms and fixes
 - [docs/charters.md](docs/charters.md) — governance deep dive: the four kinds of seat, role-scoped charter views, receipts, and how to author and publish a charter
-- Topic deep dives: [tasks and dependencies](docs/tasks.md), [collaboration graph and consultations](docs/collaboration-graph.md), [protocol](docs/protocol.md), [triggering](docs/triggering.md), [VFS subscriptions](docs/vfs-triggers.md), [agent guide](docs/agent_guide.md), [Cursor setup](docs/cursor_agents.md), [orchestrating agents](docs/orchestrating_agents.md)
+- [docs/howto.md](docs/howto.md) — the operator cheat-sheet
+- Topic deep dives: [tasks and dependencies](docs/tasks.md), [collaboration graph and consultations](docs/collaboration-graph.md), [protocol](docs/protocol.md), [triggering](docs/triggering.md), [VFS subscriptions](docs/vfs-triggers.md), [harness guide](docs/harness_guide.md), [harness contract](docs/harness_contract.md), [spawning seats](docs/spawning.md), [agent guide](docs/agent_guide.md), [Cursor setup](docs/cursor_agents.md), [orchestrating agents](docs/orchestrating_agents.md)
+- [CHANGELOG.md](CHANGELOG.md) — user-visible release history
 
 ## Contributing
 

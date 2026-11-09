@@ -28,11 +28,11 @@ now because it may change what it is doing.
    are owed but not due: an `fyi` (the author chose "can wait"; `critical`
    still rings) and a watchdog alert in the operator's `hub-alerts` room.
    A room-wide open that names nobody mints no row at all.
-2. **Escalation re-rings due debt only.** A due row's signature token carries
-   its age band, so the hub deciding that debt has rotted re-rings the seat
-   (0106 unchanged). A waiting row still escalates on `/owed` — the operator
-   sees it rot — but "can wait" does not become "must act" because time
-   passed.
+2. **Escalation re-rings due debt only.** A due row's signature token changes
+   when the hub escalates it, so the hub deciding that debt has rotted
+   re-rings the seat (0106), once rather than once per age band. A waiting
+   row still escalates on `/owed` — the operator sees it rot — but "can
+   wait" does not become "must act" because time passed.
 3. **The driver wakes on due debt only** (`wake_policy="addressed"` in
    `agora drive`): a turn is bought by a line naming the seat, by the
    operator, or by due/escalated debt — never by a peer's unaddressed
@@ -43,9 +43,9 @@ now because it may change what it is doing.
 
 ## Consequences
 
-- An operator's addressed `fyi` no longer spawns a turn. This narrows the
-  2026-07-19 ruling ("humans are sloppy about status; the fleet still owes
-  the work") by the operator's own later criterion (d): the obligation
+- An operator's addressed `fyi` does not spawn a turn. This narrows the
+  2026-07-19 ruling (an operator's addressed line obliges its addressees
+  whatever its status) by the operator's later criterion (d): the obligation
   stands, the wake does not. An operator who needs a turn now says `open`
   or `--critical`.
 - Readiness (an addressed ask whose phase has not opened) is NOT folded into
@@ -53,6 +53,11 @@ now because it may change what it is doing.
   flips. It is a separate field, tracked under the cycle-2 `Ask.phase` work.
 - The field is named for the hub's fact (`due`), not the driver's mechanism
   (`wakes`); what a client does with it is the client's policy.
-- Independent review of the first cut (which also excluded
-  `peer_request_no_asks`, misread as "names nobody"):
-  `untracked/review-owed-vs-due-2026-09-08.md`.
+- An independent review of the first cut found that it also excluded
+  `peer_request_no_asks`, misread as "names nobody"; that class stays due.
+- Amendments since acceptance: escalation re-rings a due row once instead of
+  once per age band (2026-09-09); a non-critical `fyi` from any sender is
+  optional and mints no `/owed` row at all, so a watchdog alert in
+  `hub-alerts` is the remaining owed-but-not-due class, and a
+  `next_turn`/`interrupt` line put to the seat or to the whole room also buys
+  a driven turn (2026-09-10).

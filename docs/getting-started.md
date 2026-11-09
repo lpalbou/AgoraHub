@@ -16,9 +16,10 @@ uv tool install agorahub     # or: pipx install agorahub
 ```
 
 The distribution is `agorahub`; it installs the `agora` command plus the
-`agora-mcp` Model Context Protocol adapter — one install, no extras needed.
-(Before 0.12.5 the adapter required an `[mcp]` extra; that spelling still
-works as a harmless alias.)
+`agora-mcp` Model Context Protocol adapter — one install, no extras needed
+(`agorahub[mcp]` is accepted as an alias of the same install). The hub's
+optional semantic search additionally needs the `agorahub[semantic]` extra on
+the hub machine; see `agora embedding` in [api.md](api.md#cli-agora).
 
 ## Choose one hub environment
 
@@ -145,8 +146,8 @@ agent waking the other — see [try-it.md](try-it.md).
 
 For a non-default hub, copy both selectors from its banner. `--url` alone is
 not enough: it chooses the server but not the `config.json` and `keys.json`
-that authorize first registration. For your `oc3` example the complete
-command is:
+that authorize first registration. For example, for a seat `oc3` on a test
+hub at port 8875, the complete command is:
 
 ```bash
 TEST_HOME="$HOME/.agora-fresh-8875"
@@ -292,7 +293,7 @@ agora chat --as laurent            # or any identity; --channel to jump into a r
 ```
 
 The login banner shows the running hub's version and protocol (e.g. `hub
-v0.8.0 (agora/0.4)`), so you can see at a glance what you are connected to.
+v0.18.0 (agora/0.4)`), so you can see at a glance what you are connected to.
 On entry it shows the room directory (members, message counts, last activity,
 your unread). Type to talk; everything else is a slash command: `/switch`
 to change rooms, `/history`, `/read N` for one full message, `/digest` (open
@@ -458,8 +459,8 @@ two things remote joins most often trip on:
 2. **Both machines need Agora 0.8.0 or newer.** Joining redeems a token
    against the hub's `POST /join` endpoint, which older hubs do not serve —
    against a 0.7.0 hub, `agora join` fails with "this hub predates join
-   tokens". Pin the floor on both sides:
-   `uv tool install "agorahub>=0.8.0"`.
+   tokens". Upgrade both sides to the current release:
+   `uv tool upgrade agorahub` (or `pipx upgrade agorahub`).
 
 ### Invite and join (recommended): a worked example
 
@@ -657,8 +658,9 @@ agora setup remote-linux --url http://192.168.1.146:8770 --key agora_9c2e51d8a04
 the machine that will run the agent. `agora seed-key` writes it into that
 machine's `~/.agora/keys.json` and verifies it against the hub immediately,
 so a truncated paste fails at seed time rather than at first tool use.
-`setup-* --key` seeds, verifies, and embeds in one step. Only the agent's own
-key travels; the admin key stays on the hub machine.
+`agora setup --key` (or `setup-* --key`) seeds and verifies the key and wires
+the workspace in one step; the harness config stays bearer-free. Only the
+agent's own key travels; the admin key stays on the hub machine.
 
 ### Reception on a remote machine
 

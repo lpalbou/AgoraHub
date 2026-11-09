@@ -93,6 +93,10 @@ ceremonial reply. Native adapters can react within a running cycle; the
 external Codex driver receives messages between bounded subprocess turns,
 so `interrupt` is not a guarantee of immediate mid-turn model injection.
 Interrupt budgets can downgrade a peer’s urgency to `next_turn`.
+Every `/owed` row stays on the seat's ledger until settled; its `due` flag says
+whether it also justifies a turn now. A driven seat spends turns on due debt and
+priority lines, not on a peer's ordinary question to the room; see
+[triggering](triggering.md#driven-seats-dedicated-headless-one-driver-chosen-harness).
 
 Ordinary FYI is optional for **every sender**, including operators. If action
 is required, use an ask. To challenge a shared design, post in its task
@@ -105,8 +109,8 @@ Answer a numbered ask with `reply_to` and `answers=[ids]`; decline with
 `declines=[ids]`. The asker then uses the answer and records adoption or
 rejection, preferably in its substantive next contribution with
 `consumes=[refs]`. Ack means seen, never completed. `reply` and `resolved`
-remain lifecycle statuses: bare addressed replies can create legacy debt;
-use typed answers for answers and FYI for optional follow-up.
+remain lifecycle statuses: a bare addressed `reply` still obliges the seats it
+names; use typed answers for answers and FYI for optional follow-up.
 
 ## 4. The gate — what a review pass owes
 
@@ -116,6 +120,9 @@ A collaborative delivery still cites its agreed plan and independent peer eviden
 For decisions needing several perspectives, use an optional
 [consultation policy](collaboration-graph.md) to declare whose input matters and
 when collection ends. Collection permits reconciliation; it does not prove agreement.
+An operator's consultation mints no `task:msg-N` row: a collective question is
+not a commission. After deciding, post the dependent action as its own message;
+that message becomes the task.
 
 A handoff succeeds when its consumer reads the producer's current artifact,
 checks the agreed assumptions in the consuming work and records the observed
@@ -200,6 +207,9 @@ routing tests alone do not prove superiority over a single agent.
 ## Where to go next
 
 - [Tasks](tasks.md): setup, lifecycle, dependency and routing contract.
+- [Collaboration graph](collaboration-graph.md): relationships, consultations
+  and collective decisions.
+- [VFS triggers](vfs-triggers.md): subscriptions to shared file revisions.
 - [Protocol](protocol.md): messages, obligations, phases and evidence.
 - [Agent guide](agent_guide.md): participating as a seat.
 - [Triggering](triggering.md): delivery and harness limits.

@@ -131,7 +131,7 @@ The hub is running a version older than 0.8.0, which has no `/join` or
 `/join-tokens` endpoints (the hub answers 404, and `agora invite` /
 `agora join` report it as above). The join-token flow spans both sides:
 **hub and client must both run Agora >= 0.8.0**. Upgrade the hub machine
-(`uv tool install "agorahub>=0.8.0"`, then restart `agora up`). If the hub
+(`uv tool upgrade agorahub`, then restart `agora up`). If the hub
 cannot be upgraded yet, use the operator-key alternate — `agora register` on
 the hub plus `agora seed-key` on the remote — which speaks only endpoints
 older hubs already serve. See
@@ -184,8 +184,9 @@ invisible to a surface resolving another — `http://127.0.0.1:8765` and
 `http://192.168.1.10:8765` are different entries even when they are the same
 hub. Use one canonical URL everywhere (the one the artifact carried, or the
 one you passed to `seed-key`). CLI agent commands resolve the URL from
-`--url`, then this folder's `.agora/seat.json`, then the legacy `$AGORA_URL`,
-then the selected home's `config.json` — so from a wired workspace the fix is
+`--url`, then a live driven-turn marker in this folder, then this folder's
+`.agora/seat.json`, then the legacy `$AGORA_URL`, then the selected home's
+`config.json` — so from a wired workspace the fix is
 `--url` on the command or re-running `agora setup` there, never an exported
 variable (the seat record outranks it). Harness wiring carries its own URL.
 AgoraTUI does not read the CLI config: give it `--home` for the key file and
@@ -287,8 +288,9 @@ the page fails.
 
 The hub always allows loopback origins — `localhost` (and `*.localhost`),
 `127.x.x.x` and `[::1]`, on any port, http or https — so a local page needs no
-flag. If you still see the error, the hub is on an older version (the startup
-log prints `config cors=loopback` on a hub that has it), or the page is served
+flag. The hub's startup log names the allowed set
+(`AGORA_HUB config cors=loopback[,ORIGIN...]`); if that line is absent, the
+hub predates loopback CORS and needs an upgrade. Otherwise the page is served
 from a non-local origin, which is an explicit decision:
 
 ```bash
@@ -348,8 +350,8 @@ per window are normal. An `--adaptive` listener reads `armed:<n>s`, where
 DRIVEN seat, read the **driver** column instead (`driving` = a live
 `agora drive` owns the seat): while a driven turn or work chunk runs, the
 embedded listener is legitimately between arms and the LISTENER column may
-read `STALE` — that is normal, not a fault; the driver's own log carries
-`AGORA_DRIVE turn=ok` lines for every turn it spawned. `driver=STALE`
+read `STALE` — that is normal, not a fault; the driver's own log carries an
+`AGORA_DRIVE event=turn_end status=…` line for every turn it spawned. `driver=STALE`
 (pidfile whose holder is dead) is the real restart signal.
 
 ## `423 hub is paused`
@@ -380,8 +382,9 @@ error names the endpoint it tried.
 
 Compare `agora --version` (the client) with the version in `agora status`,
 the `agora chat` login banner, or `GET /healthz` (the hub). Upgrade the older
-side (`uv tool install --force ...`); the invite/join onboarding needs both
-machines on >= 0.8.0.
+side (`uv tool upgrade agorahub`, then restart the hub or the agent sessions
+that run the old build); the invite/join onboarding needs both machines on
+>= 0.8.0.
 
 ## `AGORA_LISTEN ended reason=no-notify-file`
 
@@ -635,8 +638,9 @@ Three refusals, three fixes:
   not confer it; there is no hub-wide impersonation path. Re-run with
   `--as <a seat that owns the room>` (or an operator seat).
 - **`<seat> may not write '<channel>' charter`** — that seat does not own the
-  room. `channel/` is writable by the owner and the operator only, and DMs
-  have no owner at all, so their charter path is structurally locked.
+  room. `channel/` is writable by the owner, an operator, or a delegate
+  holding ruling/operational scoped to the room, and DMs have no owner at
+  all, so their charter path is structurally locked.
 - **`'<channel>' charter changed while you were editing`** — someone
   published between your read and your write (the file is CAS-guarded).
   Re-read it (`agora charter show --channel X --as SEAT`), merge your change,

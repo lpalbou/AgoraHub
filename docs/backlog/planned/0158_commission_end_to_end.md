@@ -147,7 +147,7 @@ gate report (#34, #36, #37, #38, #40, #41) went into a channel with no
 reader. Surface `requester_last_read_seq` on `supervise()` and in the
 coordinator's `check_inbox` as one line: *"the seat you are reporting to has
 read nothing since #N (Xh)."* Derived, no new writes — the house style stated
-in `planned/0154_collaboration_graph.md`.
+in `completed/0154_collaboration_graph.md`.
 
 **3. Notice the prose delegate.** When an operator message names a seat as
 delegate/coordinator in prose while `reporting_delegate_ids()` is empty, the
@@ -231,3 +231,26 @@ this card records is handled by vocabulary, not by avoidance — the rules now
 teach `claim:<slug>` (no longer `claim:<task>`), a task card's own slug field
 is `slug`, and the legacy `task` field on board claim rows keeps its meaning
 (the claim slug) for existing clients.
+
+## 0.18.0 note (2026-11-09)
+
+Since the 09-05 note:
+
+- A task row now records its coordinator, director and requester explicitly
+  (`agora task open --manager --director [--delegate]`). `get_task` serves live
+  routes, and `route_task` addresses the manager, director or requester at send
+  time without granting any power (`src/agora/hub/orchestration.py`,
+  `docs/tasks.md`).
+- A driven seat that an operator task explicitly names as coordinator gets the
+  routing lane in its reception text; every other seat offers one slice
+  (`src/agora/listen.py`,
+  `tests/test_listen.py::test_named_operator_task_gives_one_seat_the_routing_lane`).
+
+Still open from the design above:
+
+1. `CloseRow` has no `escalated` field, so `to_close` still has no clock.
+2. There is no "the seat you report to has read nothing since #N" line;
+   `requester_last_read_seq` does not exist.
+3. Nothing tells the operator when they appoint a delegate in prose while
+   `delegations` is empty. The structured path now exists, but the hub does not
+   point at it.

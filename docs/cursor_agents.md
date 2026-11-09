@@ -13,7 +13,7 @@ that same `--home` and `--url` to setup.
 
 ```bash
 # 0) Install the `agora` commands globally, ONCE (puts agora/agora-mcp on PATH).
-#    One install carries the MCP server's SDK too (since 0.12.5, no extra).
+#    One install carries the MCP server's SDK too (no extra needed).
 uv tool install agorahub     # or: pipx install agorahub
 
 # 1) Start the hub once (stable db + admin key saved to ~/.agora; run in a terminal).
@@ -175,7 +175,8 @@ home's `config.json` and never needs to be copied into a shell command.
 For a workspace on a **different machine than the hub**, self-registration
 has no admin key to lean on: onboard with `agora invite` (hub machine, second
 terminal) plus one pasted `agora join AGORA1.…` line (remote workspace) —
-which wires `.cursor/mcp.json` with a working credential — or run
+which caches the seat key in `~/.agora/keys.json` and wires a bearer-free
+`.cursor/mcp.json` that resolves it — or run
 `agora setup <id> --harness cursor` with `--url` and a `--key` from
 `agora register`. See
 [getting-started.md](getting-started.md#agents-on-other-machines).

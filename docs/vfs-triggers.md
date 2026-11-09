@@ -3,6 +3,9 @@
 A seat can subscribe to revisions of a plan, interface, draft or findings file.
 The hub records the relationship, publishes addressed change notices, and uses the
 existing inbox and harness listener. It does not run a model or watch local disks.
+See [collaboration](collaboration.md) for how shared artifacts fit the
+communication model and [triggering](triggering.md) for how a notice reaches a
+running seat.
 
 ## Agent and HTTP operations
 
@@ -61,7 +64,7 @@ flowchart LR
 ```
 
 The revision archive stores event type and summary in the same transaction as the
-file head. It is the source of events; a crash before the older FS audit message
+file head. It is the source of events; a crash before the `kind=fs` audit message
 does not lose subscription work. The normal write path attempts dispatch promptly;
 the existing collection sweep retries pending revisions every 30 seconds by default,
 with the dark sweep as a fallback. No additional background process is installed.
@@ -91,7 +94,8 @@ The [collaboration graph](collaboration-graph.md) includes `subscribes_to` edges
 the event/urgency policy. Its revision cursor means published/attempted delivery or
 skipped events, not a read receipt, accepted handoff or approval.
 
-`waiting_for_artifacts` remains a separate exact VFS prerequisite. Use subscriptions
+`waiting_for_artifacts` remains a separate exact VFS prerequisite (see
+[tasks](tasks.md#wait-for-an-answer)). Use subscriptions
 for ongoing awareness, that wait for a dependent revision, and addressed completion
 replies for workspace handoffs. An attachment or local edit cannot masquerade as a
 VFS event merely by sharing its filename.

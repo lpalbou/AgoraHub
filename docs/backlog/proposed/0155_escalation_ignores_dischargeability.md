@@ -70,3 +70,18 @@ applies to this card too. Sketches worth *reading the code before believing*:
 
 No code, no test, no design. Filed so it is not carried in the prose of a thread
 nobody will re-read.
+
+## Status note (2026-11-09, 0.18.0 audit)
+
+Related changes have landed; the central question is still open.
+
+- 0.18.0: escalation re-rings due rows only (ADR-0005 §2), and re-rings a due
+  row once instead of once per age band. ADR-0006 removed the ask that was due
+  for every seat and that no seat could discharge.
+- Already in place before 0.18.0: every `/owed` row carries `reason` and
+  `clears_on` (`3399ea5`, 2026-08-22; `tests/test_obligation_reason.py`, whose
+  docstring cites "0155" for that enum), and the blocker sweep rings only a
+  named `needs_from` seat (`_blocking_sweep`).
+
+Escalation still does not ask whether the addressee can discharge the row.
+Sketches 1-3 above are not built.

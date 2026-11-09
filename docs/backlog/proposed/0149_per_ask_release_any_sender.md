@@ -99,3 +99,13 @@ turns and `render` 49 against the delegate's 29.
 - [0150](0150_adopt_session_on_semantic_failure.md) — the multiplier.
 - [0152](0152_addressed_no_ask_debt.md) — the other case where `/owed` reports a
   debt the envelope does not.
+
+## Status note (2026-11-09, 0.18.0 audit)
+
+The code carries a fix that cites this item: `src/agora/hub/service.py:5351`
+("WHOEVER SENT IT (0149)"). It first landed in `9a03232` (2026-08-14), so it is
+in every release since v0.16.0. No regression test for this case was found by
+name, so the item stays here. Close it once a test pins the fan-out shape from
+the Diagnosis: one non-operator message, one addressed ask per seat, and a seat
+that answered its own ask has no `/owed` row while a slower seat's ask is
+still pending.

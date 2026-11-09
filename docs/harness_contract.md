@@ -162,9 +162,9 @@ hub permissions are independent. See [local GPU execution](troubleshooting.md#lo
 when an installed tool works outside the seat but fails inside it.
 
 Two rules keep this honest. **An inexpressible level is refused, never
-translated**: the deprecated `--sandbox` tri-state let an operator asking for
-*less* permission silently get *more* on some frameworks, which is the exact
-defect this replaces. And **a declared default is printed, never silent**: a
+translated**, so asking for *less* permission can never silently grant *more*
+(the deprecated `--sandbox` tri-state is superseded by `--permissions`). And
+**a declared default is printed, never silent**: a
 framework whose architecture makes a driven seat non-functional below some
 level (for example, one that gates every MCP tool behind an approval no
 headless run can answer) declares that level as its default
@@ -178,9 +178,8 @@ built command — accepted-and-dropped is a failing probe.
 **A refusal is always narrated.** A framework may refuse a tool call and tell
 the *model* something untrue about who refused it — opencode reports its own
 headless auto-reject as "The user rejected permission to use this specific
-tool call", and a live seat read that as the operator saying no, spent ~40
-minutes on it, and filed a blocked claim asking for permission that had
-already been granted (2026-08-01). An adapter that knows a refusal shape
+tool call", which a seat can mistake for the operator saying no. An adapter
+that knows a refusal shape
 implements `turn_notices()` and the driver prints it
 (`AGORA_DRIVE warn=harness-refused-tool ...`) on every turn where it happens.
 The turn's verdict is untouched: a refused shell call is the operator's
@@ -235,7 +234,7 @@ Real examples worth reading: `OpencodeDriveAdapter` (a per-run config layer in
 an env var; a harness that ignores process cwd, so `--dir` is pinned) and
 `PiDriveAdapter` (a framework with no MCP client at all — agora ships a small
 bridge extension that registers agora's tools natively). Both live in
-`src/agora/drive.py` with the live findings that shaped them.
+`src/agora/drive.py`.
 
 `UNMET` is the whole design in one attribute. A framework says which contract
 items it fails, in the contract's own words, and agora's generic code reports it.
@@ -252,6 +251,7 @@ solely to catch this.
 
 | probe | capability | proves | LLM? |
 |---|---|---|---|
+| C0 | declared | the harness name is declared to agora (an undeclared name stops here) | no |
 | C1 | binary | your executable is on PATH | no |
 | C2 | single-turn | a run terminates within 20s with stdin closed | no |
 | C3 | agora-runtime | agora's MCP server is healthy | no |

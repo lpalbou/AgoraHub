@@ -56,3 +56,16 @@ holding that role. Until then this is a recorded observation, not work.
 ## Non-goals
 - Do not weaken CAS (no last-writer-wins).
 - Do not build a CRDT — the disjoint-section case does not need one.
+
+## Status note (2026-11-09, 0.18.0 audit)
+
+Not addressed. Sections inside one key still collide. Related changes in
+0.18.0:
+
+- `fs_checkout` / `fs_publish` (`src/agora/mcp/checkouts.py`) bind a local
+  edit to its captured base version and sha256. A conflicting publish keeps
+  both copies and returns a diff instead of overwriting.
+- `fs_write` treats a file as owned by its last writer, so another seat
+  co-edits only with `expect_version` or channel authority.
+
+Both make a collision explicit. Neither makes collisions less frequent.

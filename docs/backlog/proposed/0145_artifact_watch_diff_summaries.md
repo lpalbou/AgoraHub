@@ -71,3 +71,11 @@ naturally a version reference). All three are the same underlying move:
 
 A rerun where bare no-information `fs` envelopes fall under 5% of traffic, and
 every dependent seat learns what changed without re-reading the artifact.
+
+## Status note (2026-11-09)
+
+The 2026-09-12 partial implementation shipped in 0.18.0
+(`src/agora/hub/fs_triggers.py`, `docs/vfs-triggers.md`,
+`tests/test_fs_triggers.py`, 17 tests). Hub-computed line counts and shared
+`watch:` rows are still not built. A delivery-path follow-up (the sweep runs
+inside the write request) is `0170`.

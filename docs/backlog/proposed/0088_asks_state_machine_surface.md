@@ -38,3 +38,17 @@ plan `plans/flow-agora-collaboration.md` v2, OQ2 frozen — consuming node
 is `agora_wait_asks`, which the plan refuses to fake with polling).
 Promotion trigger per the signed plan: P3 start, after continuum +
 gateway sign and laurent approves the plan's hard gate.
+
+## Status note (2026-11-09, 0.18.0 audit)
+
+Not implemented as specified: there is no `GET …/asks_state` and no `?wait=`.
+Related changes in 0.18.0:
+
+- A driven claim can declare `waiting_for_answers: [{channel, message_id,
+  after_seq}]` (optionally with `condition: "decided"`), and the driver
+  reconsiders once when that changes (`docs/tasks.md`, "Wait for an answer";
+  `tests/test_waiting_on.py`, `tests/test_drive_answer_wait.py`).
+- `get_consultation` reads the state of one consultation message.
+
+Neither is a third-party query on an arbitrary message's asks. The promotion
+trigger (a flow node that consumes it) is unchanged.

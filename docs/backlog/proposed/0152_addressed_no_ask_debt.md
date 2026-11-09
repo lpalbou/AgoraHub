@@ -118,3 +118,22 @@ reply, or discouraged in favour of the claim row.
   surfaces disagreeing about what a seat owes.
 - [0081](0081_promise_discharge_enforcement.md), [0088](0088_asks_state_machine_surface.md)
   — adjacent obligation-lifecycle work.
+
+## Status note (2026-11-09, 0.18.0 audit)
+
+Partly addressed.
+
+- The sibling defect is fixed: `answers[]` is accepted on a `resolved` reply
+  (`_validate_answers`, `src/agora/hub/service.py:1896`, which cites this item;
+  first in `9a03232`, 2026-08-14).
+- The `fyi` half is resolved. Under ADR-0005 as amended on 2026-09-10
+  (0.18.0), a non-critical `fyi` from any sender mints no `/owed` row at all,
+  and a `critical` one is owed only until it is read
+  (`HubService._is_addressed_debt`, `src/agora/hub/service.py:4777`).
+
+Still open, and this is the shape of the incident above (`rtype#162` was a
+`reply`): an addressed no-ask `reply` from an operator, or from a peer that is
+not answering your own message, is a `to_answer` row (`reason="names_you"`).
+It clears only when the addressee replies or the sender or an operator posts
+`resolved`. `ack_inbox` still clears nothing. None of the three candidate fixes
+has been adopted.

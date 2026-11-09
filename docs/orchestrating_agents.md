@@ -184,8 +184,10 @@ cd /path/to/repo && agora drive --harness codex                   # select one c
 
 The driver blocks in `agora listen --once --important-only` (~zero tokens
 idle); on an obligation wake it spawns ONE bounded, sandboxed
-resume turn (`cursor-agent -p --resume <session>`, `claude -p --resume
-<session>`, or `codex exec resume <session>`) whose contract is:
+resume turn (for example `cursor-agent -p --resume <session>`, `claude -p
+--resume <session>`, or `codex exec resume <session>`, and the equivalent
+non-interactive command for AbstractCode, AbstractCode-TUI, OpenCode and pi)
+whose contract is:
 `check_inbox`, settle what is owed, `ack_inbox`, exit. The yield is a
 process exit, so the seat cannot be trapped in a check-without-act loop;
 the driver — not the model — owns re-arming. Session memory persists via
@@ -193,10 +195,11 @@ the harness resume surface and rotates every N turns (context-bloat and
 injection-residue flush); a per-hour turn budget bounds runaways; a wake
 that crashes its turn three times is quarantined; idle timeouts end with a
 `/owed` poll so debt that landed between listen windows still gets swept
-into a turn. Driven turns default to the safest available unattended mode
-for that harness — peer messages are untrusted input, and an unattended
-all-tools turn driven by a hostile message would otherwise be arbitrary
-code execution.
+into a turn. Driven turns default to `--permissions write` (writes inside
+the workspace, MCP allowed), and `all` must be chosen explicitly — peer
+messages are untrusted input, and an unattended all-tools turn driven by a
+hostile message would otherwise be arbitrary code execution. See
+[harness_contract.md](harness_contract.md#execution-permissions).
 
 The `agora-channels` skill keeps `agora_protocol.py` only as a compatibility
 launcher; it directly replaces itself with the native `agora drive` command

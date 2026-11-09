@@ -178,3 +178,15 @@ subsume — each one is a thing agora should have done:
   rendered by `CodexDriveAdapter`.
 - `start-fleet.sh` — per-harness `--permissions` AND per-harness `PATH`, because
   one flag could not express two seats' needs.
+
+## Status note (2026-11-09, 0.18.0 audit)
+
+Not implemented. There is no guard model (`refuse` / `grant_write`), no
+`GUARD_MECHANISM` and no `agora guard-check`. The code reality above has
+drifted: `CodexDriveAdapter.PERMISSION_VOCAB` is now `("read", "write", "all")`,
+with explicit per-level `-c` argv applied on both fresh and resumed turns
+(`a8f2173`, 2026-09-11, `src/agora/drive.py`), and `docs/harness_contract.md`
+documents native harness limits. `all` (`danger-full-access`) lets a Codex
+seat write outside its workspace. That is a coarse workaround for the grant
+case, not the scoped `grant_write` this item asks for. Re-read `drive.py`
+before implementing.

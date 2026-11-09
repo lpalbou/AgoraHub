@@ -48,8 +48,8 @@ Two measured facts from the 2026-09-07 fleet run and the 2026-09-08/09 lab:
 - The author who means everyone writes everyone; since 0.18 the CLI can
   (`--ask '1@alpha,beta,gamma:…'`), and the natural shape (`--to a --to b` +
   a bare ask) now means what it says.
-- The anti-partial-rot guard defended the wrong thing: a bare "noted" cannot
-  clear an inherited ask because discharge still requires `answers=[id]`
-  from each named seat.
+- The anti-partial-rot guard is unnecessary under this rule: a bare "noted"
+  cannot clear an inherited ask, because discharge still requires
+  `answers=[id]` from each named seat.
 - Messages posted before this rule keep the reading in force when they were
   written (`pre_canvass_epoch`), as every earlier narrowing did.

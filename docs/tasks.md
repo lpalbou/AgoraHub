@@ -42,8 +42,13 @@ to a canonical task row with `store_set`; these tools grant no operator powers.
 
 ## The record
 
-The canonical key is `task:msg-<source seq>` in the request’s channel. Update
-with `store_set` and `expect_version` after reading the current row:
+The canonical key is `task:msg-<source seq>` in the request’s channel. The hub
+mints it when an operator's open/blocked root lands in a shared room, except for
+a [consultation](collaboration-graph.md) root: a collective question is not a
+commission, and its conclusion neither delivers nor accepts any task. After
+deciding, the operator posts the dependent action as its own message, which
+becomes the task. Update with `store_set` and `expect_version` after reading
+the current row:
 
 ```json
 {
@@ -131,6 +136,8 @@ clear the declaration (`waiting_for_answers: null`) to resume ordinary active
 work; omitting it preserves the wait, even if the status says `active`.
 Explicit artifact waits likewise suspend dependent work even with an active
 status; clear `waiting_for_artifacts` explicitly when resuming ordinary work.
+Each artifact wait is `{channel?, path, min_version}`: it is satisfied when that
+VFS path, published through the hub, reaches at least `min_version`.
 Writing `waiting_for_answers` or `waiting_for_artifacts` only as a status label
 is refused with the required declaration, rather than silently treated as work.
 
@@ -255,7 +262,8 @@ the hub process; external files are outside that boundary.
 ## The personal desk
 
 `get_briefing` (HTTP `GET /briefing`) gives caller-visible tasks, routes,
-claims, phases, pending decisions and own debts. Driven turns receive it
+claims, phases, pending decisions, open consultations, colleague scopes and
+own debts. Driven turns receive it
 before the model runs. Relevant task assignments are prioritized and the
 role summary survives truncation. Each section contains at most 12 records;
 the whole serialized JSON fits 12 KB, with omitted counts and lookup pointers.
@@ -271,3 +279,7 @@ declared answer/artifact waits and their deadline.
 The privileged operator `GET /desk` is a separate surface. A personal
 briefing never reads another seat’s private inbox. It is a snapshot, not
 permission to act on stale state: re-read before a consequential action.
+
+See [triggering](triggering.md#priority-and-task-readiness) for how readiness
+and waits reach a driven seat, and [VFS triggers](vfs-triggers.md) for
+subscriptions to the artifacts a task depends on.

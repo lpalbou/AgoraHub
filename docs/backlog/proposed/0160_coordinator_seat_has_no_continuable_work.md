@@ -134,3 +134,16 @@ is written.
   on ownership, silence gaps, and version churn, not on the raw ledger count.
 - One run, one coordinator, one model. The pattern is coherent but n=1.
 - A/B/C/D/E are not mutually exclusive and have not been costed.
+
+## Status note (2026-11-09, 0.18.0 audit)
+
+Partly addressed. A task row now records its coordinator explicitly
+(`coordinator`, set by `agora task open --manager`), `get_task` and
+`route_task` serve the task's routes, and the reception text gives an
+explicitly named coordinator the routing lane (`src/agora/listen.py`;
+`tests/test_listen.py::test_named_operator_task_gives_one_seat_the_routing_lane`).
+
+Mechanism 1 is unchanged. `Driver._continuable` (`src/agora/drive.py:3764`)
+still recognises only a live `claim:` row the seat owns or an open `phase:`
+row it stewards, so a coordinator that holds neither still has no continuable
+work. The adversarial-review requirement above still applies.

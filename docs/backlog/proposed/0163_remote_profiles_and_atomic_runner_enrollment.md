@@ -471,3 +471,21 @@ Preserve the runner's pull/claim authorization and local-consent boundaries.
 Do not "simplify" by scanning arbitrary home directories, sending cached
 bearers before hub verification, copying host state remotely, or hiding
 ambiguous selection behind last-used global configuration.
+
+## Status note (2026-11-09, 0.18.0 audit)
+
+Partly addressed: section 4, and only for choosing the hub.
+
+- The CLI resolves its hub from `--url`, then the driven turn marker
+  (`.agora/driven-<seat>.json`), then the workspace `.agora/seat.json`, then
+  the legacy `AGORA_URL`, then the home config. It refuses a foreign `--url` or
+  `--home` while a driven turn is running.
+- `agora listen` and `agora-mcp` read the workspace seat record after their own
+  flags (`read_workspace_seat`; `src/agora/cli.py:87`,
+  `src/agora/mcp/server.py:67`; CHANGELOG, "Configuration is flags and files").
+
+Not built: client profiles separate from server deployments, a durable hub
+identity, atomic runner enrollment, and a binding that names its local profile
+explicitly. Whether `run_drive()` now applies the workspace's recorded home
+(the gap under "Workspace wiring is not authoritative") was not re-checked.
+See also `0172`.

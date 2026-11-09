@@ -43,3 +43,13 @@ delayed (attaché refresh interval).
 
 ## Guidance for the implementing agent
 Keep it idempotent (subscribing an already-subscribed channel is a no-op).
+
+## Status note (2026-11-09)
+
+Partly stale, unrelated to 0.18.0: the attaché half no longer applies, because
+`src/agora/attache/` was removed in `933c0a7` (2026-07-13). The hub also
+publishes every message to each member's `agent/<id>` topic, not only the
+channel topic (`HubService._wake`, the 07-08 "membership-keyed fan-out" ledger
+row), which may already deliver a first-contact DM to a connected peer without
+`subscribe()`. Run the Validation scenario before implementing; deprecate this
+item if it passes.

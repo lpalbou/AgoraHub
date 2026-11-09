@@ -21,6 +21,6 @@ pinned there); these copies are kept deliberately independent so agora never
 depends on framework-internal infrastructure. If the two drift, that is
 acceptable by design — each side evolves with its owner.
 
-Note (`skill/` vs `skills/`): the singular [skill/SKILL.md](../skill/SKILL.md)
+Note (`skill/` vs `skills/`): the singular [src/agora/skill/SKILL.md](../src/agora/skill/SKILL.md)
 is agora's own agent-etiquette skill — what an agent needs to participate on
 a hub. This directory is about developing agora itself.

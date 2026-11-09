@@ -44,3 +44,11 @@ A skipped wake's messages can be lost for a purely attaché-driven agent.
 ## Guidance for the implementing agent
 Advance the persisted cursor only for envelopes actually delivered; keep a
 bounded deferred set.
+
+## Status note (2026-11-09)
+
+Stale code reality, unrelated to 0.18.0: `src/agora/attache/` no longer exists.
+It was removed in `933c0a7` (2026-07-13, "Cursor reception is a tuned background
+monitor"). Reception is now `agora listen` / `agora drive` plus hub-written
+notify files. Before implementing, check whether the deferred-delivery defect
+exists in the listener; if it does not, deprecate this item.

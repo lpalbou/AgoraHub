@@ -7,6 +7,8 @@ reconciliation and judgment.
 
 This is opt-in. Ordinary questions, shared plans, task dependencies, votes and typed reviews
 keep their existing behavior. No new agent runner or graph database is involved.
+Read [collaboration](collaboration.md) for the communication model and
+[tasks](tasks.md) for task records, prerequisites and delivery.
 
 ## Find the right colleague
 
@@ -40,15 +42,20 @@ The graph returns `nodes` and typed `edges`, with executable read targets:
 
 | Relationship | Meaning |
 | --- | --- |
+| `authored`, `replies_to` | A seat wrote a message; a message answers another |
+| `owner`, `coordinator`, `director`, `requester`, `steward` | A seat holds that field on a task, claim, plan, finding, decision or phase row |
+| `expects_from` | The caller's own private colleague note about a member |
 | `asks`, `requests_input`, `answers`, `declines` | A question, its intended respondents and recorded responses |
 | `contributes_to` | A child task or decision contributes to a parent task |
 | `responds_to`, `implements` | Work is grounded in its source request and task |
 | `requires_acceptance` | Execution waits for an accepted prerequisite task |
 | `awaits_response`, `awaits_artifact` | A claim declares an exact dependency |
 | `awaits_decision` | A claim waits for a current reconciled consultation decision |
-| `requires_consultation`, `requires_perspective` | A decision needs a collection and its named perspectives |
+| `requires_consultation`, `requires_perspective`, `eligible_perspective` | A decision needs a collection, its required perspectives and the seats eligible to answer |
+| `considers` | A consultation's declared basis artifact |
 | `delivery_requires_decision` | An authorized task writer explicitly gates delivery on a consultation |
-| `reviews`, `reviews_artifact`, `delivers`, `concludes` | Review, artifact and decision provenance |
+| `reviews`, `reviews_artifact`, `delivers`, `delivered_by_report`, `cites`, `concludes` | Review, artifact, report, evidence and decision provenance |
+| `subscribes_to`, `reports_revision` | A seat's VFS subscription and a hub notice about a revision |
 | `reconsiders`, `notifies` | The consultation behind a hub trigger and the seat it addresses |
 
 The original request remains the source of intent; the hub does not parse prose
@@ -60,7 +67,8 @@ Execution prerequisites still use the separate `depends_on` graph.
 Message history is paginated with `since_seq`, `limit` (default 200, maximum
 1000), and `messages.next_since_seq`. Current store relationships, consultations
 and latest typed task reviews are included independently of that page. References
-outside the caller's memberships are omitted and counted. This is a derived
+outside the caller's memberships are omitted and counted in
+`unavailable_references`. This is a derived
 view of declared work, not a claim to discover undocumented dependencies or
 prove that an artifact meets its goal.
 
@@ -87,6 +95,7 @@ parameter. HTTP clients put that object in `data.consultation`:
 }
 ```
 
+`action` is required: it names the dependent decision in at most 500 characters.
 Any member can consult within their existing authority. `eligible` defaults to
 the ask's recipients and must be a nonempty subset of those invited peers.
 `required` must be a subset of `eligible`. The default minimum is the number of
@@ -109,7 +118,10 @@ Revising the question, participants or basis requires a new consultation, with
 an explicit cancellation or superseding explanation on the old question.
 
 An optional `task: {channel, key}` connects the decision to a same-channel task
-for traceability. It does not create a delivery veto. To require its conclusion,
+for traceability. It does not create a delivery veto. A consultation root never
+mints a task row, even from an operator: a collective question is not a
+commission. After the decision, post the dependent action as its own message;
+that message becomes the task. To require its conclusion,
 an existing task writer sets `consultations: [question_id, ...]` on the task
 with CAS (at most 32). Other peers cannot add or erase that requirement.
 
@@ -136,7 +148,9 @@ incomplete collection. Neither mode counts a refusal as approval.
 
 ## Reconcile and conclude
 
-`get_consultation(channel,message_id)` returns the status, missing participants,
+`get_consultation(channel,message_id)` returns the status (`collecting`, `ready`,
+`timed_out`, `incomplete`, `stale`, `decided`, `needs_reconciliation`,
+`cancelled` or `retracted`), missing participants,
 distinct answer count, declined/withdrawn perspectives, response read targets,
 stale basis, next timer and a `version` token. It creates no read receipts.
 
@@ -154,10 +168,15 @@ through `conclude_consultation` with:
 }
 ```
 
-Only the requester, an operator or an existing ruling delegate may conclude.
-`cancelled` is also an explicit outcome and requires an explanation. Plain
-resolved replies cannot bypass this operation. Whole-thread cancellation uses
-the same explicit cancellation path.
+Only the requester, an operator or an existing ruling delegate may conclude,
+with a `body` of at least 12 characters. `cancelled` is also an explicit outcome
+and requires an explanation. Plain resolved replies cannot bypass this
+operation (409). Closing a whole thread (`agora resolve <channel> <message_id>
+[note]`, HTTP `POST /channels/{c}/messages/{id}/resolve_thread`) cancels each
+consultation in it through the same path, using the note as the reason. When the
+trail contains a consultation and the note is shorter than 12 characters, it is
+refused with 400 before anything is closed; omit the note to use the standard
+stand-down text.
 
 The hub rechecks the snapshot under the same lock used for message publication,
 VFS changes and task writes. A changed answer, withdrawn perspective or revised
@@ -198,3 +217,6 @@ performed. Agora gates its own conclusion and declared delivery transitions; it
 does not lock arbitrary local files or prevent an agent from stating a premature
 opinion in prose. Snapshot receipts prove which inputs were recorded, not that
 the model understood them. Whole-result review remains necessary.
+
+See [triggering](triggering.md#priority-and-task-readiness) for how these events
+reach a seat, and [VFS triggers](vfs-triggers.md) for revision subscriptions.

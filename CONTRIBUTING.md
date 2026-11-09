@@ -26,8 +26,12 @@ uv tool install --editable .
 ## Running the tests
 
 ```bash
-uv run pytest -q
+uv run --extra dev python -m pytest -q
 ```
+
+`python -m pytest` runs the suite from this checkout's environment, so a
+globally installed `agora` (for example from `uv tool install`) cannot shadow
+the code under test.
 
 The suite covers the hub service, HTTP and WebSocket surfaces, the attention
 and obligation model, the ledger, the store and filesystem, the client inbox,
@@ -43,6 +47,14 @@ and 3.13 (see `.github/workflows/ci.yml`).
 - `src/agora/listen.py` — the session-resident listener (`agora listen`,
   the single-shot the background reception shell loops + the adaptive
   backoff).
+- `src/agora/drive.py` — the external resume-driver for unattended seats
+  (`agora drive`).
+- `src/agora/runner.py` — the human-started spawn runner (`agora runner`).
+- `src/agora/hook.py` and `src/agora/harness_check.py` — the reception-hook
+  entry point (`agora hook`) and the harness conformance probes
+  (`agora harness-check`).
+- `src/agora/skill/` — the packaged `agora-channels` agent skill that
+  `agora setup` installs into each harness.
 - `src/agora/setup_harness.py` — the workspace harness generators behind
   `agora setup` / `agora join` (rule text, hooks, kickoff prompt, harness
   detection, secret safety).
@@ -56,8 +68,9 @@ and 3.13 (see `.github/workflows/ci.yml`).
 - `docs/` — user and contributor documentation (see `docs/README.md`).
 - `examples/` — runnable demonstrations.
 
-See [docs/architecture.md](docs/architecture.md) for how these fit together and
-[docs/api.md](docs/api.md) for the interface surfaces.
+See [docs/architecture.md](docs/architecture.md) for how these fit together,
+[docs/api.md](docs/api.md) for the interface surfaces, and
+[CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## Releasing
 

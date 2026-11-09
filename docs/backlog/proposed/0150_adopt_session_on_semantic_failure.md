@@ -111,3 +111,13 @@ riding one session forever.
   than fix it; both should land.
 - [0151](0151_turn_lane_classification.md) — same module, also a
   misclassification of a turn that ran fine.
+
+## Status note (2026-11-09, 0.18.0 audit)
+
+The code carries a fix that cites this item: "ADOPT THE SESSION THIS TURN JUST
+CREATED (0150)" in the reception lane (`src/agora/drive.py:3601`) and in the
+work lane (`:4369`), with rotation counted. It first landed in `9a03232`
+(2026-08-14), so it is in every release since v0.16.0. No regression test for
+this case was found by name, so the item stays here. Close it once a test
+shows that a semantically failed first turn leaves a session file and that
+the next turn is a `wake`, not a `boot`.

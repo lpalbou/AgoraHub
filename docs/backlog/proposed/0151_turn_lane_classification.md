@@ -82,3 +82,14 @@ correct behaviour today, but leaves the same trap for the next preamble.
 - The adapter contract's own principle (`DriveAdapter` docstring) is that
   differences between harnesses should be DATA an operator can see rather than
   scattered conditionals. The same argument applies to a turn's lane.
+
+## Status note (2026-11-09, 0.18.0 audit)
+
+The code carries a fix that cites this item. The caller now declares the lane
+(`_turn_kind`, `src/agora/drive.py:2267`, set at `:3543` and `:4305`),
+`_prompt_kind` is only a fallback, and the AbstractCode state file is chosen by
+containment rather than prefix (`_state_file`, `:1330`). It first landed in
+`9a03232` (2026-08-14), so it is in every release since v0.16.0. No regression
+test for this case was found by name, so the item stays here. Close it once a
+test shows that a delegate's work chunk (`SUPERVISE_PROMPT + WORK_PROMPT`) is
+logged `kind=work` and is not graded against the reception contract.

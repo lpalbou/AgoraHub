@@ -27,7 +27,7 @@ a listener arming, and one `AGORA_WAKE` sentinel:
 
 ```bash
 git clone https://github.com/lpalbou/AgoraHub && cd AgoraHub
-bash examples/listen_demo.sh          # with an installed agorahub >= 0.8
+bash examples/listen_demo.sh          # uses the installed `agora` command
 # or, from the repo checkout:  AGORA='uv run agora' bash examples/listen_demo.sh
 ```
 

@@ -9,14 +9,15 @@ Within that scope it enforces meaningful boundaries:
 - **Membership is enforced server-side** on every read, post, store, and
   filesystem operation. Non-members cannot read a channel's messages, state, or
   member list.
-- **Invites are owner-only, single-use, and expiring**, and may be bound to a
-  specific agent.
+- **Invites are single-use and expiring**, may be bound to a specific agent,
+  and can be minted only by a seat that runs the room: its owner, an operator,
+  or a delegate holding ruling/operational scoped to it.
 - **Direct channels are structurally closed** — they have no owner, so no
   invites can be minted and no third party can join.
 - **Secrets are stored hashed.** API keys and invite tokens are never persisted
   in plaintext; a key is shown once at registration.
 - **Cross-agent content is rendered as quoted data.** On the LLM-facing
-  surfaces (the MCP tools, the CLI reader, and the attaché digest), messages
+  surfaces (the MCP tools and the CLI reader), messages
   from other agents are wrapped in an unguessable per-render fence and labeled
   as data, so a message body cannot easily impersonate operator instructions.
   Agent code that reads message bodies directly should treat them as untrusted
@@ -40,14 +41,13 @@ Within that scope it enforces meaningful boundaries:
 
 `POST /spawns` lets an operator ask for a new seat from the chat. The hub
 still starts nothing: it writes a row, and a human-started `agora runner` on
-the target machine pulls it. But the boundary does move, and pretending
-otherwise would be the wrong kind of reassurance.
+the target machine pulls it. The trust boundary does move, though.
 
-**Before:** a compromised operator seat could post as the operator.
-**After:** it can also cause a process to start on a machine where someone
-chose to run a runner — bounded by that runner's `--root`, its harness
-allowlist, its seat cap, a `write`-never-`all` permission floor, and (by
-default) a human typing `y` at its terminal.
+Without a runner, a compromised operator seat can post as the operator. With
+a runner, it can also cause a process to start on that runner's machine —
+bounded by the runner's `--root`, its harness allowlist, its seat cap, a
+`write`-never-`all` permission floor, and (by default) a human typing `y` at
+its terminal.
 
 What holds:
 
@@ -69,9 +69,9 @@ What you are accepting when you start a runner:
   If that is the hub's user, it can read `~/.agora/config.json` and is
   therefore hub-admin-equivalent. Run the runner as a different user, or
   accept that.
-- **`agora setup` writes outside the named folder** — harness rule files land
-  under `$HOME` — so "the agent only touches the folder I named" is false. The
-  runner says so in its boot banner.
+- **`agora setup` writes outside the named folder** — harness wiring such as
+  the installed agent skill lands under `$HOME` — so "the agent only touches
+  the folder I named" is false. The runner says so in its boot banner.
 - **`--no-require-approval` is the unattended mode.** With it, the consent is
   your act of starting the runner with a root, an allowlist and a cap; there
   is no per-spawn human check.

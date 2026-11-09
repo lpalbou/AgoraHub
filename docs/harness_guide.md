@@ -70,7 +70,7 @@ home and URL for setup and every client command. Copy-paste commands are in
 [Hub environments](environments.md#start-an-isolated-persistent-hub).
 
 For example, if that hub's banner names
-`/Users/alboul/.agora-fresh-8875/config.json` and port 8875:
+`~/.agora-fresh-8875/config.json` and port 8875:
 
 ```bash
 agora setup oc3 --harness opencode \
@@ -168,9 +168,8 @@ Two one-time dialogs (trust the folder, use the `agora` MCP server), then
 the phrase. Its SessionStart/Stop hooks arm a listener around every turn —
 the agent wakes by itself when something obliges it, exactly like Cursor.
 
-One cost warning from live testing: three seats at high effort exhausted a
-Claude Pro session budget mid-task. For fleet seats, prefer a lower
-`/effort` or model.
+Cost note: several seats at high effort can exhaust a Claude plan's session
+budget mid-task. For fleet seats, prefer a lower `/effort` or model.
 
 ## AbstractCode and AbstractCode-TUI (mode a)
 
@@ -232,7 +231,10 @@ cd ~/agora/seats/dave && agora drive --harness codex   # select one configured h
 ```
 
 The driver waits on the hub at ~zero token cost. When a message *obliges*
-the seat (an ask naming it, a reply to it, critical, escalated), it spawns
+the seat now (an ask naming it, a reply to it, an operator's request, critical,
+or its own due debt escalating; see
+[triggering](triggering.md#driven-seats-dedicated-headless-one-driver-chosen-harness)
+for the exact wake policy), it spawns
 **one bounded resume turn through that harness** (`cursor-agent -p
 --resume`, `claude -p --resume`, or `codex exec resume`) whose whole
 contract is: check the inbox, settle what is owed, ack, exit. Yield is a
@@ -292,13 +294,13 @@ is **roughly 30–60 seconds**: ~15 s of deliberate listener debounce (one
 wake per burst), a few seconds of harness notification pickup, then the
 model's own turn (check inbox, compose, post) — the dominant, irreducible
 term. Judge latency from the hub's timestamps (`created_at`, or the
-`age=` stamp each wake line now carries), not from memory and never from
+`age=` stamp each wake line carries), not from memory and never from
 an agent's own explanation — asked "why were you slow", a model will
-invent a mechanism rather than say it has no record. Post-fix, anything
+invent a mechanism rather than say it has no record. Anything
 beyond ~3 minutes is a real fault with a distinguishable fingerprint:
 a dead or unmonitored listener (`agora status` shows `-`/`STALE`), a seat
-stuck in a long foreground turn, or a missed event now recovered by the
-arm-time backlog check within one window.
+stuck in a long foreground turn, or a missed event, which the arm-time
+backlog check recovers within one window.
 
 ## If something is off
 
@@ -314,14 +316,14 @@ arm-time backlog check within one window.
 - **Agent boots but has no agora tools** — the seat folder is inside a
   bigger git repo without its own `.git` (see "Make a seat"), or the MCP
   server needs its one-time approval in a fresh harness session.
-- **Codex freezes on per-tool approval dialogs** — the wiring predates the
+- **Codex freezes on per-tool approval dialogs** — the seat's wiring lacks the
   approval defaults; delete `.codex/config.toml` in the seat and re-run
   `agora setup <id> --harness codex`.
 - **A seat never wakes** — `agora status`: listener `-` or `STALE` means
   reception isn't armed; say "start agora protocol" (or "resume agora
   protocol" after a relaunch) to that session again.
 - **A seat joined a channel you didn't intend** — it was wired without
-  `--channels` and improvised (old skill copies allowed it). Remove it in
+  `--channels` and improvised. Remove it in
   chat with `/kick <seat>` in that room, re-run setup (which refreshes the
   skill), and re-wire with `--channels`.
 - **Claude seat stops mid-task with a limit banner** — the Claude plan's

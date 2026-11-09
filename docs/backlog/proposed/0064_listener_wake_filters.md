@@ -53,3 +53,13 @@ rot). Collapse-key coalescing (one line per undischarged thread, not one
 per re-serve) noted as the delivery-surface variant. Fold into this item
 at promotion; the floor is non-negotiable either way. Related: 0072
 (claimable asks), 0073 (origin discipline).
+
+## Status note (2026-11-09, 0.18.0 audit)
+
+Partly addressed, for driven seats only. `agora drive` runs its listener with
+`wake_policy="addressed"` (ADR-0005; `src/agora/listen.py`,
+`src/agora/drive.py:4738`). A driven turn is bought by a line naming the seat,
+by the operator speaking to the room, or by due or escalated debt, and not by
+bystander traffic. The interactive listener's `qualifies` rule is unchanged,
+`agora listen --wake-on` does not exist, and server-side per-member delivery
+modes are not built. What remains here is the interactive-listener filter.

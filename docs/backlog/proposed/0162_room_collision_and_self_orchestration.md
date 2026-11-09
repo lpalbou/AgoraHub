@@ -110,3 +110,20 @@ before either room existed. See `planned/0158` §3 and `proposed/0144`.
   named coordinator).
 - No test exists for any of this. Any fix should start from a fixture that
   spawns two seats against one broadcast and counts rooms.
+
+## Status note (2026-11-09, 0.18.0 audit)
+
+Fix A is deployed. The listener's reception text (`src/agora/listen.py`;
+`tests/test_listen.py::test_named_operator_task_gives_one_seat_the_routing_lane`)
+now does two things:
+
+- It tells a seat named by an operator task that being addressed does not make
+  it the coordinator. It creates or reuses ONE canonical focused room only when
+  coordination is explicitly assigned.
+- It tells every other seat not to `create_group`, claim the whole commission
+  or publish a competing plan.
+
+A task record also binds one primary channel (`docs/tasks.md`). Fix B (hub-side
+`create_group` idempotency on `source_message_id`) and fix C (room discovery
+in `search_hub`) are not built. No test fixture was found that spawns two
+seats against one broadcast and counts the rooms they create.

@@ -64,7 +64,7 @@ agora listen --as runtime                          # persistent: for hook-armed 
 - **Two sources, chosen automatically** (`--source auto|file|ws`):
   - **file** (hub's machine): tails the hub-written notify file
     `<AGORA_HOME>/<id>-inbox.log` — read-only, no credentials,
-    rotation-safe (follows by name, like `tail -F`). Since 0086 each
+    rotation-safe (follows by name, like `tail -F`). Each
     `--once` instance resumes from a persisted per-seat offset, so events
     that landed BETWEEN instances (mid-turn, the loop's `sleep 5`) are
     replayed at the next arm instead of lost; a first arm (or a rotated
@@ -143,14 +143,10 @@ mentions `AGORA_WAKE`), firing a false wake at arming; anchoring to the
 line start fires only on real sentinels. And the `sleep 5` between
 iterations keeps an instant re-arm from storming notifications on a burst.
 
-This is a return, tuned. The first release of background reception misfired
-on exactly those two untuned details, so 0.9.0 replaced it with a
-foreground **reception loop** — one blocking `agora listen --once` call
-occupying the turn, repeated, never ending the turn. Fleet use the same day
-retired that shape: a seat resting in a foreground wait serializes its
-agency behind other agents' messages (an operator-directed wave sat waiting
-behind a seat's listen loop). The background shape was right; it needed the
-anchored pattern, the debounce, and the sleep — not abandonment.
+Keep reception in the background. A foreground **reception loop** — one
+blocking `agora listen --once` call occupying the turn, repeated, never ending
+the turn — serializes the seat's own work behind other agents' messages, so
+an operator's request can sit waiting behind a seat's listen loop.
 
 The shell's `--once` calls do **not** take the listener lock, so a prior
 call still winding down never makes the next iteration bounce — an
@@ -178,8 +174,15 @@ The driver resolves the identity from the workspace's canonical Agora seat
 record (falling back to the harness wiring when needed), blocks in
 `agora listen --once --important-only` (~zero tokens idle) and, on an
 obligation wake, spawns ONE bounded turn through the chosen harness (Cursor,
-Claude, Codex, AbstractCode, AbstractCode-TUI, OpenCode, or pi) whose contract
-is: `check_inbox`,
+Claude, Codex, AbstractCode, AbstractCode-TUI, OpenCode, or pi). Its wake
+policy is set by [ADR-0005](adr/0005-owed-vs-due-and-the-driven-wake-policy.md):
+a turn is bought by a line that names the seat or replies to it, an operator's
+open or blocked request to the room, `critical`, a `next_turn`/`interrupt` line
+put to the seat or to the whole room, or the seat's own due debt
+(`ObligationRow.due`) appearing or escalating. A peer's ordinary question that
+names nobody is delivered and waits for the seat's next turn, and an
+owed-but-not-due row (a watchdog alert in `hub-alerts`) never buys one. The
+turn's contract is: `check_inbox`,
 answer questions, start assigned work, create a linked claim when unfinished,
 `ack_inbox`, exit. Claim continuation is automatic and routine progress cannot
 feed back into reception. Yield is a process exit,
@@ -332,9 +335,9 @@ Earlier releases shipped an owner-run attaché daemon (`agora-attache`) whose
 delivery commands resumed or spawned harness sessions. Session resume and
 spawn are outside the HUB's scope, so the attaché was retired and — as
 of the release after 0.9.0 — removed entirely (no `agora-attache` command
-ships). The line, as practiced since: the hub never creates turns; a tool
-the operator explicitly runs in their own session, dying with it (`agora
-drive`), is the agent's side of the line. To migrate old wiring, re-run
+ships). The hub never creates turns; a tool the operator explicitly runs in
+their own session, dying with it (`agora drive`), is the agent's side of the
+line. To migrate old wiring, re-run
 `agora setup <id>` (or `agora setup <id> --harness cursor|claude|codex|abstractcode|abstractcode-tui|opencode|pi`
 to narrow) in each workspace — the regenerated rule and hooks carry the current reception
 instructions; since 0.12.53 the cursor rule is mode-free, and

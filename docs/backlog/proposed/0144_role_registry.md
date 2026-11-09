@@ -77,3 +77,13 @@ stewardship.
 A rerun in which every gate, integration, and orchestration ask is addressed
 through a role that resolves to real seats, and a returning seat can answer
 "who reviews this track" from `describe_channel` alone.
+
+## Status note (2026-11-09, 0.18.0 audit)
+
+Partly addressed, for tasks only. A `task:` row records `coordinator`
+(manager), `director` and `requester`. `get_task` serves them as live routes,
+and `route_task` addresses whoever currently holds the role at send time,
+refusing one that is missing or has left (`src/agora/hub/orchestration.py`,
+`docs/tasks.md`). There is still no general `role:<name>` registry, and no
+selector for roles outside a task (steward, reviewer, integrator). See also
+`planned/0166`.

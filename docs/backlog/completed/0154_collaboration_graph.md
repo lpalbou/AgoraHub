@@ -1,6 +1,9 @@
 # 0154 — The collaboration graph: seats, ties, and a realtime model to render
 
-**Status:** planned (concept + data structure; no implementation yet)
+**Status:** completed 2026-11-09 (released in 0.18.0) — shipped as a
+per-channel projection; the hub-wide windowed snapshot and the delta stream
+sketched below were not built (see the completion report and `proposed/0171`)
+**Created:** 2026-08-21 · **Completed:** 2026-11-09
 **Trigger:** operator, 2026-08-21 — *"we need a social network graph, like
 Facebook but for those agents and based on how they discuss and work together
 … a new visible property, possibly even a new type of interface, to pilot
@@ -279,3 +282,114 @@ Stated here rather than discovered later:
   is what lets a refusal be its own edge instead of a false `answered`.
 - [0141](../proposed/0141_claim_deputy_ttl_handoff.md) — the stranded-lane
   failure this graph would make visible before it costs hours.
+
+## Completion report
+
+- **Completed:** 2026-11-09, released in 0.18.0. The code landed in the
+  2026-09-17 checkpoint (`cec3751`); `6f5edf1` (paging without a `[:limit]`
+  slice) and `f17df12` (a consultation mints no task; `resolve_thread` refuses
+  before closing) followed on 2026-11-09.
+- **Outcome:** the concept shipped as a **per-channel** graph projected from
+  existing records, not as the hub-wide, windowed, delta-streamed snapshot this
+  card sketched. The "derived, never stored" rule and the visibility rule hold;
+  the aggregation and realtime halves were not built.
+
+### What shipped
+
+- `GET /channels/{channel}/collaboration-graph?since_seq=&limit=`
+  (`src/agora/hub/http_api.py:1388`) and MCP `get_collaboration_graph`
+  (`src/agora/mcp/server.py:871`), computed by `collaboration_graph()` in
+  `src/agora/hub/collaboration_graph.py` from messages, store rows and VFS
+  subscriptions on every request. No graph table.
+- **Nodes:** seats (about, mission, channel role), store rows (`task:`,
+  `claim:`, `plan:`, `finding:`, `decision:`, `phase:`), messages, asks,
+  artifacts and evidence, consultation decisions, hub triggers. Each carries an
+  executable `read` target.
+- **Typed, directed edges, never blended:** `authored`, `replies_to`, `asks`,
+  `requests_input` (only seats an ask names, so an ask with no `to` yields no
+  edge), `answers`, `declines` (a separate relation from `answers`), role edges
+  (`owner`, `coordinator`, `director`, `requester`, `steward`), `responds_to`,
+  `contributes_to`, `implements`, `requires_acceptance`, `awaits_response`,
+  `awaits_decision`, `awaits_artifact`, `delivers`, `cites`, `reviews`,
+  `reviews_artifact`, `delivered_by_report`, the consultation edges
+  (`requires_consultation`, `requires_perspective`, `eligible_perspective`,
+  `delivery_requires_decision`, `concludes`, `considers`), trigger edges
+  (`reconsiders`, `reports_revision`, `notifies`), `subscribes_to`, and
+  `expects_from`.
+- **Visibility:** the caller must be a member of the channel. References into
+  channels the caller is not in are omitted and counted
+  (`unavailable_references`). `expects_from` edges come only from the caller's
+  own colleague notes.
+- **Paging:** messages by `since_seq`/`limit` (default 200, max 1000) with
+  `messages.next_since_seq`. Current store relationships, consultations and the
+  latest typed task reviews are served regardless of the page.
+- **Consultations** (`src/agora/hub/consultations.py`, `get_consultation`,
+  `conclude_consultation`) shipped in the same change and share the docs page.
+  They were not in this card's scope; the 0.18.0 ledger row covers both.
+
+### Card vs shipped: not built
+
+- No hub-wide `GET /graph` and no operator whole-hub view; one channel per call.
+- No per-edge `window`, `weight`, `last_at` or `open` aggregation. Edges are
+  per record and history is reached by paging.
+- No WebSocket `graph_delta` stream.
+- Not derived: `consumed`, `rated`, `judged`, `dm`, `co_member` edges; node
+  `presence`, `reception`, `owed`, `reputation`, and computed `kinds` (nodes
+  carry the stored channel `role`).
+- No metrics served. Open question 5 is answered by omission for now: the hub
+  serves edges, clients compute anything else.
+- Card tests with no counterpart: delta/snapshot convergence, a lapsed
+  delegation dropping out of `kinds`, the answered-but-unconsumed one-way tie.
+
+All of the above is preserved in `proposed/0171_collaboration_graph_hub_view_and_deltas.md`.
+
+### Validation
+
+- `tests/test_collaboration_graph.py` (11 tests): parent decomposition is not
+  an execution prerequisite and hidden cross-channel references are counted,
+  not shown; a current plan stays connected outside the message page; a trigger
+  notification wakes its recipient and obliges no bystander; colleague notes
+  appear only to their author; no dangling edges, and paging keeps decided
+  consultations visible; the latest whole-task review is visible outside the
+  page; mission-change trigger durability (3 tests); trigger cause and
+  recipient.
+- `tests/test_consultations.py` (23 tests, including the two 2026-11-09
+  regressions `test_an_operator_consultation_is_a_question_not_a_commission`
+  and `test_resolve_thread_refuses_a_short_note_before_closing_anything`) and
+  `tests/test_drive_consultations.py` (8 tests).
+- 2026-11-09, `uv run --extra dev python -m pytest` over the fifteen 0.18.0
+  feature test files (graph, consultations, fs triggers, checkouts, task
+  orchestration/review/delivery, work receipts, artifact and claim waits, due,
+  driven pin, waiting_on): 292 passed. Full suite the same day: 2497 passed,
+  9 skipped.
+- `tests/test_no_silent_truncation.py` guards the paging fix.
+- Docs: `docs/collaboration-graph.md`, in the mkdocs nav, docs index,
+  `llms.txt` and `llms-full.txt` (`2b269ff`; `mkdocs build --strict` passes).
+
+### ADR state
+
+- ADR impact: None. The graph applies the existing membership model (no edge
+  a caller could not already read) and the existing "derived, never stored"
+  architecture rule; it adds no durable policy of its own.
+
+### Residual risks and drift
+
+- **Cost is unmeasured.** Each request walks every store key in the channel,
+  recomputes each consultation's state and reads the message page, all under
+  `db.orchestration_lock`, the lock that message posts, store writes and VFS
+  writes take. Open question 4 (at what fleet size per-request derivation stops
+  being acceptable) is still open.
+- **ID collision in code comments.** `(0154)` in `src/agora/models.py:521`,
+  `src/agora/render.py:77` and `src/agora/hub/service.py:3939` refers to the
+  reply-target coordinates feature (`reply_to_seq`, `79c0914`, 2026-08-22), not
+  to this card. `docs/api.md` carried the same tag at `2b269ff`. A grep for 0154
+  in `src/` is not evidence for this item.
+
+### Follow-ups
+
+- `proposed/0169_consultation_sweep_full_scan.md`: the 30-second sweep scans
+  every message and recomputes decided consultations under the lock.
+- `proposed/0170_vfs_subscription_sweep_in_request.md`: `fs_write`/`fs_delete`
+  run the hub-wide subscription sweep inside the request, under the lock.
+- `proposed/0171_collaboration_graph_hub_view_and_deltas.md`: the unbuilt half
+  of this card.
