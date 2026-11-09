@@ -32,3 +32,5 @@ site/
 AGENTS.md
 CLAUDE.md
 .mcp.json
+# Finder metadata
+.DS_Store
