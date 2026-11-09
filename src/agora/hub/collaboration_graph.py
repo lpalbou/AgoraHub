@@ -129,8 +129,13 @@ def collaboration_graph(hub, agent, channel, since_seq=0, limit=200):
                 target = message_ref(report)
                 if target:
                     edge(current, "delivered_by_report", target)
-        messages = hub.db.get_messages(channel, since_seq=since_seq, limit=limit + 1)
-        for msg in messages[:limit]:
+        # Fetch one past the page to learn whether history continues; the
+        # page is `limit` rows and the omission is REPORTED (`next_since_seq`)
+        # in the same object the reader gets, so this is paging, not a cap.
+        fetched = hub.db.get_messages(channel, since_seq=since_seq, limit=limit + 1)
+        has_more = len(fetched) > limit
+        page = fetched[:-1] if has_more else fetched
+        for msg in page:
             current = message_ref(msg)
             edge(seat(msg.sender), "authored", current)
             if msg.retracted:
@@ -197,6 +202,6 @@ def collaboration_graph(hub, agent, channel, since_seq=0, limit=200):
             evidence(current, "considers", state["policy"]["artifacts"])
         return {"channel": channel, "nodes": list(nodes.values()), "edges": list(edges.values()),
                 "messages": {"since_seq": since_seq, "limit": limit,
-                             "next_since_seq": messages[limit - 1].seq if len(messages) > limit else None},
+                             "next_since_seq": page[-1].seq if has_more else None},
                 "unavailable_references": hidden,
                 "note": "Declared relationships and recorded evidence only. Purpose is judged against the source request; membership, roles and private notes do not grant authority. Page messages for history."}
