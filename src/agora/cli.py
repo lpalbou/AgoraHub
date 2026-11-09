@@ -2587,7 +2587,7 @@ def cmd_fs(args):
                 r = await c.fs_write(a.channel, a.path,
                                      content_b64=base64.b64encode(data).decode("ascii"),
                                      mime=mime, expect_version=a.expect_version,
-                                     description=a.describe or "")
+                                     description=a.describe)
                 print(f"wrote {a.path} -> version {r['version']} "
                       f"({r['size_bytes']} bytes, {mime})")
             else:
@@ -2597,7 +2597,7 @@ def cmd_fs(args):
                 content = io.TextIOWrapper(io.BytesIO(data), encoding="utf-8").read()
                 r = await c.fs_write(a.channel, a.path, content,
                                      expect_version=a.expect_version,
-                                     description=a.describe or "")
+                                     description=a.describe)
                 print(f"wrote {a.path} -> version {r['version']} ({r['size_bytes']} bytes)")
         elif a.fs_action == "rm":
             r = await c.fs_delete(a.channel, a.path, expect_version=a.expect_version)
@@ -4671,8 +4671,8 @@ def build_parser() -> argparse.ArgumentParser:
     ln = sub.add_parser("listen", help="session-resident listener: emit AGORA_WAKE "
                                        "sentinels when new messages arrive")
     ln.add_argument("--as", dest="as_agent", default=None, metavar="AGENT_ID",
-                    help="agent id (default: $AGORA_AGENT_ID, else the nearest "
-                         "THIS folder's harness config; no parent search)")
+                    help="agent id (default: $AGORA_AGENT_ID, else the seat "
+                         "`agora setup` wired in THIS folder; no parent search)")
     ln.add_argument("--source", choices=["auto", "file", "ws"], default="auto",
                     help="auto = tail the hub-written notify file when local, "
                          "else WebSocket push (default: auto)")
@@ -4735,8 +4735,8 @@ def build_parser() -> argparse.ArgumentParser:
     dr.add_argument("harness_pos", nargs="?", choices=DRIVABLE_HARNESSES,
                     help="optional harness selector (same as --harness)")
     dr.add_argument("--as", dest="as_agent", default=None, metavar="AGENT_ID",
-                    help="agent id (default: $AGORA_AGENT_ID, else the nearest "
-                         "workspace wired by `agora setup`)")
+                    help="agent id (default: $AGORA_AGENT_ID, else the seat "
+                         "`agora setup` wired in THIS folder; no parent search)")
     dr.add_argument("--harness", "--framework", choices=["auto", *DRIVABLE_HARNESSES],
                     default="auto",
                     help="harness to drive (default: auto = use the setup "
@@ -5047,7 +5047,9 @@ def build_parser() -> argparse.ArgumentParser:
     fs.add_argument("--version", type=int, default=None,
                     help="read: return this archived version instead of the head")
     fs.add_argument("--describe", default=None,
-                    help="write: one line saying what this file IS (shown in listings)")
+                    help="write: one line saying what this file IS (shown in "
+                         "listings); omit on an edit to keep the stored one, "
+                         "pass '' to clear it")
     fs.set_defaults(func=cmd_fs)
 
     ar = _agent_parser("archive-channel", "archive a channel (evict + delist, history kept); --undo reopens")

@@ -1383,9 +1383,11 @@ def build_server(credentials: tuple[str, str] | None = None):  # pragma: no cove
 
     @mcp.tool()
     def fs_write(channel: str, path: str, content: str, mime: str = "text/markdown",
-                 expect_version: int | None = None, description: str = "", summary: str = "") -> dict:
+                 expect_version: int | None = None, description: str | None = None,
+                 summary: str = "") -> dict:
         """Create or edit a TEXT file in the channel's virtual file system.
-        ALWAYS set `description` (one line saying what the file IS). Pass
+        Set `description` on creation (one line saying what the file IS).
+        On an edit, omit it to keep the current one; "" clears it. Pass
         expect_version for compare-and-swap (0 = must not exist); on 409
         re-read and merge. For edits using local tools use fs_checkout then
         fs_publish: a local copy plus a newly looked-up version can erase

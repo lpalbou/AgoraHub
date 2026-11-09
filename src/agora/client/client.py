@@ -455,12 +455,13 @@ class AgoraClient:
                        content_b64: str | None = None,
                        mime: str | None = None,
                        expect_version: int | None = None,
-                       description: str = "", summary: str = "") -> dict[str, Any]:
+                       description: str | None = None, summary: str = "") -> dict[str, Any]:
         """Write one file: `content` (text, unchanged) OR `content_b64`
         (strict standard base64 of raw bytes; decoded cap 4 MiB) — exactly
         one, checked here so the mistake fails before it travels (the hub
         400s the same way). `mime` defaults per branch: text/markdown for
-        text, application/octet-stream for binary."""
+        text, application/octet-stream for binary. `description` omitted
+        (None) on an edit keeps the stored one; "" clears it."""
         if (content is None) == (content_b64 is None):
             raise ValueError(
                 "fs_write takes exactly one of content (text) or "

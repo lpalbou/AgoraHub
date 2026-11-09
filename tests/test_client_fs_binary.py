@@ -72,7 +72,7 @@ def test_fs_write_text_body_unchanged():
     assert http.calls == [{
         "method": "PUT", "path": "/channels/design/fs/notes.md",
         "json": {"content": "hello", "mime": "text/markdown",
-                 "expect_version": None, "description": ""},
+                 "expect_version": None, "description": None},
     }]
 
 
@@ -164,7 +164,7 @@ def test_cli_write_utf8_file_goes_as_content(tmp_path, monkeypatch):
     assert client.writes == [{
         "channel": "design", "path": "notes.md", "content": "# hello\n",
         "content_b64": None, "mime": None, "expect_version": None,
-        "description": ""}]
+        "description": None}]
 
 
 def test_cli_write_png_autodetects_binary_with_guessed_mime(tmp_path,

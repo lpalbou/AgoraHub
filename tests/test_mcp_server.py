@@ -561,3 +561,25 @@ def test_each_ask_less_reason_gets_the_exit_the_hub_actually_honours(hub, monkey
     owed_lines = [ln for ln in text.splitlines() if ln.startswith("- ")]
     assert owed_lines, "no OWED rows rendered"
     assert not any("answers=[...]" in ln for ln in owed_lines)
+
+
+def test_mcp_fs_write_without_description_keeps_the_stored_one(hub, monkeypatch):
+    """The hub distinguishes an OMITTED description (keep) from "" (clear),
+    but the tool used to default to "" and send it on every call, so a
+    content-only edit over MCP blanked the room's table of contents for
+    that file. The tool now omits it unless the caller says otherwise."""
+    key = _make_agent(hub, "fs-writer")
+    mcp = _server_against(hub, monkeypatch, key)
+    _call_tool(mcp, "fs_write", {"channel": "commons", "path": "spec.md", "content": "v1",
+                                 "description": "the API contract everyone codes against"})
+    _call_tool(mcp, "fs_write", {"channel": "commons", "path": "spec.md", "content": "v2",
+                                 "expect_version": 1})
+    listed = {f["path"]: f for f in _call_tool(mcp, "fs_list", {"channel": "commons"})}
+    assert listed["spec.md"]["version"] == 2
+    assert listed["spec.md"]["description"] == "the API contract everyone codes against"
+    # An explicit empty string is still the way to clear it.
+    _call_tool(mcp, "fs_write", {"channel": "commons", "path": "spec.md", "content": "v3",
+                                 "expect_version": 2, "description": ""})
+    listed = {f["path"]: f for f in _call_tool(mcp, "fs_list", {"channel": "commons"})}
+    assert listed["spec.md"]["version"] == 3
+    assert listed["spec.md"]["description"] != "the API contract everyone codes against"
