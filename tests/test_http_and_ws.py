@@ -117,6 +117,75 @@ def test_cors_marks_allowed_origin_on_actual_response():
     assert response.headers["access-control-allow-origin"] == "http://static.local"
 
 
+def _preflight(client, origin):
+    return client.options(
+        "/inbox",
+        headers={
+            "Origin": origin,
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "authorization, content-type",
+        },
+    )
+
+
+@pytest.mark.parametrize("origin", [
+    "http://localhost:5174",
+    "http://localhost",
+    "https://localhost:8443",
+    "http://127.0.0.1:8890",
+    "http://127.1.2.3:3000",
+    "http://[::1]:3000",
+    "http://app.localhost:5173",
+])
+def test_cors_allows_loopback_origins_by_default(origin):
+    # The ordinary local setup: a page served by a dev server on one
+    # localhost port talking to a hub on another. No flag required — before
+    # this the browser dropped the request before the hub ever saw the key.
+    app = create_app(db_path=":memory:", admin_key=ADMIN_KEY,
+                     rate_per_minute=600.0)
+    client = TestClient(app)
+    preflight = _preflight(client, origin)
+    assert preflight.status_code == 200
+    assert preflight.headers["access-control-allow-origin"] == origin
+    actual = client.get("/healthz", headers={"Origin": origin})
+    assert actual.status_code == 200
+    assert actual.headers["access-control-allow-origin"] == origin
+
+
+@pytest.mark.parametrize("origin", [
+    "http://static.local",
+    "http://evil.example",
+    "http://localhost.evil.example",
+    "http://notlocalhost:5174",
+    "http://127.0.0.1.evil.example",
+    "http://10.0.0.7:5174",
+])
+def test_cors_still_refuses_non_loopback_origins_by_default(origin):
+    # Loopback is the only implicit trust; everything else stays an explicit
+    # `--cors-origin` decision, and the hub never answers with `*`.
+    app = create_app(db_path=":memory:", admin_key=ADMIN_KEY,
+                     rate_per_minute=600.0)
+    client = TestClient(app)
+    preflight = _preflight(client, origin)
+    assert preflight.status_code == 400
+    assert "access-control-allow-origin" not in preflight.headers
+    actual = client.get("/healthz", headers={"Origin": origin})
+    assert actual.status_code == 200
+    assert "access-control-allow-origin" not in actual.headers
+
+
+def test_cors_explicit_origin_adds_to_loopback_rather_than_replacing_it():
+    app = create_app(db_path=":memory:", admin_key=ADMIN_KEY,
+                     rate_per_minute=600.0,
+                     cors_origins=["http://static.local"])
+    client = TestClient(app)
+    for origin in ("http://static.local", "http://localhost:5174"):
+        response = client.get("/healthz", headers={"Origin": origin})
+        assert response.headers["access-control-allow-origin"] == origin
+    assert "access-control-allow-origin" not in client.get(
+        "/healthz", headers={"Origin": "http://evil.example"}).headers
+
+
 def test_websocket_fanout_and_backlog(client):
     alice = register(client, "alice")
     bob = register(client, "bob")

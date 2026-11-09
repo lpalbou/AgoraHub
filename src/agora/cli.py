@@ -441,10 +441,13 @@ def cmd_up(args: argparse.Namespace) -> None:
         hub_log("AGORA_HUB config notify="
                 + json.dumps(f"{notify_dir}/<agent>-inbox.log")
                 + " owner=hub")
-    if args.cors_origins:
-        hub_log("AGORA_HUB config cors="
-                + ",".join(origin.strip() for origin in args.cors_origins
-                           if origin.strip()))
+    # Loopback origins (localhost / 127.x / [::1], any port) are always
+    # allowed; the line names them so an operator reading the log knows a
+    # local page needs no flag, and sees exactly which remote origins do.
+    hub_log("AGORA_HUB config cors="
+            + ",".join(["loopback"] + [origin.strip()
+                                       for origin in (args.cors_origins or [])
+                                       if origin.strip()]))
     # Paste-safe hints (no <angle brackets>: the shell reads `<x>` as a
     # redirect). Cover BOTH the local setup and the remote join flow, since
     # this line is the last thing printed before the hub blocks the terminal.
@@ -4315,8 +4318,11 @@ def build_parser() -> argparse.ArgumentParser:
                          "(default: 1024)")
     up.add_argument("--cors-origin", dest="cors_origins", action="append",
                     default=None, metavar="ORIGIN",
-                    help="allow one browser origin for cross-origin REST CORS "
-                         "(repeatable; default off)")
+                    help="allow one extra browser origin for cross-origin REST "
+                         "CORS, e.g. https://ops.example (repeatable). "
+                         "Loopback origins — http://localhost:PORT, "
+                         "127.0.0.1, [::1] — are always allowed and need "
+                         "no flag")
     up.add_argument("--force", action="store_true",
                     help="take the port over: SIGTERM (then SIGKILL) a "
                          "VERIFIED agora hub already serving it and start "

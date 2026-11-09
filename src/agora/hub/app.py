@@ -14,6 +14,18 @@ from ..db import Database
 from . import http_api, ws
 from .service import VOTE_SWEEP_SECONDS, HubService
 
+# Origins the hub trusts without being told: anything the browser resolves to
+# this machine's loopback — `localhost` (and RFC 6761 `*.localhost`), the whole
+# 127/8 block and IPv6 `[::1]` — on any port, http or https. Any other origin
+# needs `agora up --cors-origin`.
+LOOPBACK_ORIGIN_REGEX = (
+    r"^https?://("
+    r"([a-z0-9-]+\.)*localhost"
+    r"|127\.\d{1,3}\.\d{1,3}\.\d{1,3}"
+    r"|\[::1\]"
+    r")(:\d{1,5})?$"
+)
+
 
 def create_app(db_path: str = "agora.db", admin_key: str = "",
                rate_per_minute: float = 60.0,
@@ -86,17 +98,24 @@ def create_app(db_path: str = "agora.db", admin_key: str = "",
     app = FastAPI(title="agora hub", version=__version__, lifespan=lifespan)
     allowed_origins = [origin.strip() for origin in (cors_origins or [])
                        if origin and origin.strip()]
-    if allowed_origins:
-        # Opt-in browser REST CORS for direct thin clients served from a
-        # different origin. Same-origin consumers need no change, and the
-        # hub keeps the allowlist explicit rather than widening to `*`.
-        app.add_middleware(
-            CORSMiddleware,
-            allow_origins=allowed_origins,
-            allow_credentials=False,
-            allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-            allow_headers=["Authorization", "Content-Type", "X-Agora-Client"],
-        )
+    # Browser REST CORS. Loopback origins are ALWAYS allowed: a thin client
+    # served by a dev server on http://localhost:5174 talking to a hub on
+    # http://localhost:8890 is the ordinary local setup, and before this the
+    # browser dropped that request before the hub ever saw the key — curl
+    # succeeded where the page failed, with nothing in the hub log to say
+    # why. CORS is not the hub's auth boundary (every call carries an
+    # explicit bearer key; no cookies, `allow_credentials` stays False), so
+    # a local page without a key still gets a 401 from the hub itself.
+    # `--cors-origin` remains the explicit allowlist for NON-local origins;
+    # the hub never widens to `*`.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=allowed_origins,
+        allow_origin_regex=LOOPBACK_ORIGIN_REGEX,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "X-Agora-Client"],
+    )
     app.state.service = service
     app.state.admin_key = admin_key
 
