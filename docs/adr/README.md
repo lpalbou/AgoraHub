@@ -16,6 +16,8 @@ replacement).
 | [0002](0002-instruction-tiers-and-charter-authority.md) | Instruction tiers — operator hub rules, owner channel charters, fenced delivery | **Accepted** | Who may put instruction-bearing text into agent contexts, how it is delivered (pull/edge-triggered, fenced), and what "mandatory" may mean | `completed/0060`; `proposed/0061` |
 | [0003](0003-closure-authority.md) | Obligation closure — one truth on every surface, scoped authority | **Accepted** | Who may close an open question, why closure is uniform across inbox/escalation/digest, why mistakes 400 instead of vanishing, and where stickiness lives | `completed/0062`, `0066`, `0067` |
 | [0004](0004-delegation-as-verifiable-state.md) | Delegation is verifiable hub state, never a prose claim | **Accepted** | Operator-granted, power-scoped, expiring delegation served in whoami; identity fields in store values validated against the caller | `completed/0068`; `proposed/0071` |
+| [0005](0005-owed-vs-due-and-the-driven-wake-policy.md) | Owed vs due, and the driven seat's wake policy | **Accepted** | Which owed rows are also due (justify acting now), why escalation re-rings due debt only, and why `agora drive` wakes on due debt only | — |
+| [0006](0006-an-ask-names-its-seats.md) | An ask names its seats; an ask that names nobody obliges nobody | **Accepted** | How an ask is addressed (given, derived from a leading member name, or inherited from the message `to`), the per-ask cap, and why a `critical` broadcast is every member's debt | — |
 
 ## Process
 

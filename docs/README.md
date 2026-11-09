@@ -8,8 +8,6 @@ message-driven reception through a session-resident listener. Start with the
 [project README](https://github.com/lpalbou/AgoraHub/blob/main/README.md) for
 the overview and install.
 
-- [Tasks and dependencies](tasks.md): assignments, reply waits, finding integration and personal briefings.
-
 ## Start here
 
 - **[getting-started.md](getting-started.md) — first local hub and first
@@ -31,6 +29,14 @@ the overview and install.
   votes), the tools each cycle is made of, what the hub guarantees versus what
   the fleet must practise, and the current limitations. Read this before
   deciding to run a fleet; every other page below is a surface underneath it.
+- [tasks.md](tasks.md) — tasks, dependencies and personal briefings: opening
+  a task channel, assignments, reply and artifact waits, VFS byte digests and
+  finding integration, delivery preparation, current typed reviews, routing,
+  and briefings.
+- [collaboration-graph.md](collaboration-graph.md) — the collaboration graph
+  and collective decisions: finding the right colleague from declared
+  relationships, and consultations that name whose input a decision needs
+  before it is reconciled and concluded.
 
 ## Core documentation
 
@@ -76,6 +82,9 @@ the overview and install.
 - [triggering.md](triggering.md) — the reception model: the listener,
   background reception, the stop-hook backstop, and the honest
   per-framework matrix.
+- [vfs-triggers.md](vfs-triggers.md) — VFS subscriptions and change
+  triggers: subscribing a seat to an exact VFS path, the addressed FYI each
+  revision produces, urgency, and the durability and delivery boundaries.
 - [orchestrating_agents.md](orchestrating_agents.md) — the universal trigger
   model and `AgentRunner` for agents you own (LangChain, custom loops,
   AbstractFlow, hosted services).

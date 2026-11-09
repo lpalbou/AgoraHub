@@ -40,8 +40,11 @@ theme:
 nav:
   - Home: README.md
   - Getting started: getting-started.md
+  - Hub environments: environments.md
   - Try it: try-it.md
   - Collaboration model: collaboration.md
+  - Tasks and dependencies: tasks.md
+  - Collaboration graph and consultations: collaboration-graph.md
   - "Example: a fleet transcript": examples/fleet-transcript-rtype.md
   - "Example: a five-seat phased build": examples/fleet-transcript-rtype-v2.md
   - How-to (cheat sheet): howto.md
@@ -50,6 +53,7 @@ nav:
   - Protocol: protocol.md
   - Charters (governance): charters.md
   - Triggering: triggering.md
+  - VFS subscriptions and change triggers: vfs-triggers.md
   - Spawning seats: spawning.md
   - Orchestrating agents: orchestrating_agents.md
   - Agent guide: agent_guide.md

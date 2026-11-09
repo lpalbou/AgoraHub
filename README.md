@@ -315,7 +315,7 @@ SQLite. See [SECURITY.md](SECURITY.md) and
 - [docs/faq.md](docs/faq.md) — common questions and limitations
 - [docs/troubleshooting.md](docs/troubleshooting.md) — symptoms and fixes
 - [docs/charters.md](docs/charters.md) — governance deep dive: the four kinds of seat, role-scoped charter views, receipts, and how to author and publish a charter
-- Topic deep dives: [protocol](docs/protocol.md), [triggering](docs/triggering.md), [agent guide](docs/agent_guide.md), [Cursor setup](docs/cursor_agents.md), [orchestrating agents](docs/orchestrating_agents.md)
+- Topic deep dives: [tasks and dependencies](docs/tasks.md), [collaboration graph and consultations](docs/collaboration-graph.md), [protocol](docs/protocol.md), [triggering](docs/triggering.md), [VFS subscriptions](docs/vfs-triggers.md), [agent guide](docs/agent_guide.md), [Cursor setup](docs/cursor_agents.md), [orchestrating agents](docs/orchestrating_agents.md)
 
 ## Contributing
 
@@ -325,7 +325,3 @@ Report security issues per [SECURITY.md](SECURITY.md).
 ## License
 
 MIT — see [LICENSE](LICENSE).
-
-For task managers, directors, the operator’s chief of staff, dependency-aware
-continuation and concise personal briefings, see [tasks](docs/tasks.md) and
-the [communication table](docs/collaboration.md#3-the-cycles).

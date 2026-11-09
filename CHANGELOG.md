@@ -245,6 +245,59 @@ semantics.
   `docs/api.md`, `docs/charters.md` and `docs/triggering.md` describe the
   surfaces above; `llms.txt` and `llms-full.txt` regenerated.
 
+### Main is green again
+
+The 2026-09-17 checkpoint landed the consultation, collaboration-graph and
+VFS-subscription work with CI red. Repaired without dropping any of it:
+
+- `agora-channels` skill back under its 9000-character budget (8986) with the
+  seven field-measured rules the regression tests guard restored verbatim
+  (`Never install machine persistence`, `Read the phase BEFORE starting
+  work`, `park — do not manufacture`, `window you announce BINDS you`, `hub
+  publishes the full result`, `names who has not delivered`, `re-route the
+  work AND tell the operator`). Every rule the rewrite added is kept.
+- `get_collaboration_graph` pages messages without a `[:limit]` slice: the
+  page and its `next_since_seq` are derived from one fetch, so the
+  no-silent-truncation tripwire no longer fires on honest paging.
+- `mkdocs build --strict` passes: `docs/collaboration.md` links the artifact
+  editing reference on GitHub (the skill tree is outside the docs site);
+  `environments`, `tasks`, `collaboration-graph` and `vfs-triggers` join the
+  nav, the docs index, `llms.txt` and `llms-full.txt`; ADR index lists
+  0005 and 0006.
+- Finder `.DS_Store` files untracked and ignored.
+
+Two defects the checkpoint shipped, found by an independent review of it and
+reproduced before fixing:
+
+- **A collective question is not a commission.** An operator's consultation
+  root in a shared room minted `task:msg-N`, but the only `resolved` reply a
+  consultation accepts is its own conclusion, so the task could never be
+  delivered — and the operator's cancellation, a resolved reply from the
+  requester, flipped it to `accepted`. The hub mints no task for a
+  consultation and never reads a conclusion as acceptance or delivery.
+- **`resolve_thread` refuses before it closes.** A trail holding a
+  consultation was closed root-first, and `conclude_consultation` then
+  refused a note under 12 characters, leaving the root resolved and the
+  question open — the partial close the verb promises never to make. The
+  note is checked up front; nothing is closed on refusal.
+
+### A local page can always reach the hub
+
+A thin client served by a dev server on `http://localhost:5174` could not
+call a hub on `http://localhost:8890`: the hub sent no CORS headers unless
+`agora up --cors-origin` named the page's origin, so the browser dropped the
+request before the hub ever saw the key. `curl` worked, the page did not, and
+the hub log had nothing to say about it.
+
+- The hub now always allows loopback origins — `localhost` (and
+  `*.localhost`), `127.x.x.x` and `[::1]`, on any port, http or https. A
+  local page needs no flag. `--cors-origin` remains the explicit allowlist
+  for non-local origins and adds to the loopback set; the hub never widens
+  to `*`, and credentials stay off (every call carries a bearer key, so a
+  local page without one still gets a `401`).
+- The startup log always prints the CORS line (`config cors=loopback,…`) so
+  an operator can see at a glance whether a page's origin needs a flag.
+
 ### One coordinator, one focused room
 
 - An operator task explicitly assigning coordination to one seat now gives

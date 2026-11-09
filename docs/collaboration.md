@@ -139,7 +139,7 @@ without accepting a replacement head number, refusing if the authoritative VFS
 has advanced. It preserves both copies for deliberate reconciliation into a fresh
 checkout. It neither automatically merges text nor synchronizes arbitrary local
 files. Raw `fs_write` remains compatible and does not track a local edit's base.
-See the [artifact workflow](../src/agora/skill/references/artifacts.md).
+See the [artifact workflow](https://github.com/lpalbou/AgoraHub/blob/main/src/agora/skill/references/artifacts.md).
 
 Review the difference against the accepted version as well as the resulting whole:
 did the revision preserve prior accepted work, and do its changed assumptions

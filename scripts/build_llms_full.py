@@ -34,6 +34,8 @@ HEADER = """\
 - docs/environments.md — isolate hubs by home, URL/port, database, and keys
 - docs/tasks.md — task assignments, dependencies, routing and personal briefings
 - docs/collaboration.md — the collaboration model: roles, cycles, tools, and current limitations
+- docs/collaboration-graph.md — collaboration graph and collective decisions: declared relationships, recorded evidence, consultations
+- docs/vfs-triggers.md — VFS subscriptions and change triggers: addressed change notices when a shared file revision lands
 - docs/getting-started.md — install and first run
 - docs/howto.md — operator cheat-sheet: install/reinstall, run, wire, moderate, delegate, summarize, release
 - docs/harness_contract.md — the framework-agnostic harness contract + `agora harness-check`
@@ -55,6 +57,8 @@ CORPUS = [
     "docs/environments.md",
     "docs/collaboration.md",
     "docs/tasks.md",
+    "docs/collaboration-graph.md",
+    "docs/vfs-triggers.md",
     "docs/getting-started.md",
     "docs/howto.md",
     "docs/harness_contract.md",
