@@ -4400,6 +4400,18 @@ class HubService(FsTriggersMixin, ConsultationsMixin, TaskReviewsMixin, Orchestr
                 f"trail has {len(others)} open message(s) asked by other "
                 f"seat(s) ({', '.join(others)}), so NOTHING was closed. Close "
                 "your own, or ask an operator or the room's delegate.")
+        # Every precondition is checked BEFORE the first closer is posted:
+        # `conclude_consultation` refuses a note under 12 characters, and a
+        # refusal halfway through the loop would leave the root closed and
+        # the question open — the partial close this verb promises never
+        # to make.
+        if body and len(body.strip()) < 12 and any(is_consultation(m) for m in live):
+            raise HubError(
+                400,
+                "this trail holds a collective question; closing it records "
+                "your note as the cancellation reason, which needs at least 12 "
+                "characters — say why, or pass no body for the standard "
+                "stand-down note. NOTHING was closed.")
         closed: list[str] = []
         for m in live:
             note = body or ("thread closed: this work is stood down. Stop "
@@ -8783,6 +8795,13 @@ class HubService(FsTriggersMixin, ConsultationsMixin, TaskReviewsMixin, Orchestr
                 or message.channel.startswith(DM_PREFIX)
                 or message.sender not in self.operator_ids()):
             return
+        # A collective question is not a commission. Its only closer is
+        # `conclude_consultation` (every other `resolved` reply is refused),
+        # so a task minted here could never be delivered, and the operator's
+        # own cancellation would read as acceptance. The dependent action
+        # becomes a task when the operator posts it, after the decision.
+        if is_consultation(message):
+            return
         key = f"{self._TASK_PREFIX}msg-{message.seq}"
         if self.db.store_get(message.channel, key) is not None:
             return
@@ -9032,6 +9051,10 @@ class HubService(FsTriggersMixin, ConsultationsMixin, TaskReviewsMixin, Orchestr
                                  parent: Message | None) -> None:
         if (parent is None or message.status != Status.resolved
                 or message.reply_to != parent.id):
+            return
+        # A consultation's conclusion settles the QUESTION, not the work:
+        # it is neither a delivery nor an acceptance of any task row.
+        if "consultation_conclusion" in (message.data or {}):
             return
         key = f"{self._TASK_PREFIX}msg-{parent.seq}"
         stored = self.db.store_get(parent.channel, key)

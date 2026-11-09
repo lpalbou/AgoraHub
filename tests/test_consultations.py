@@ -391,3 +391,64 @@ async def test_fast_watchdog_handles_consultations_even_when_vote_sweep_fails(la
     with pytest.raises(asyncio.CancelledError):
         await hub.vote_watchdog()
     assert calls == ["vote", "consultation", "mission"] and sleeps == [30.0, 30.0]
+
+
+def test_an_operator_consultation_is_a_question_not_a_commission(lab):
+    """Review of the 2026-09-17 checkpoint: an operator's consultation root in
+    a shared room minted `task:msg-N`, but every `resolved` reply to a
+    consultation except its own conclusion is refused, so the task could
+    never be delivered — and the operator's CANCELLATION, being a resolved
+    reply from the requester, flipped it to `accepted`."""
+    hub, seats, _ = lab
+    root = hub.post_message(seats["operator"], "room", PostMessage(
+        title="Commission", body="Collect views, then build it", status=Status.open,
+        to=["x"], asks=[{"id": "c", "text": "views?", "to": ["x", "y"]}],
+        data={"consultation": {"action": "build it", "eligible": ["x", "y"]}}))
+    key = f"task:msg-{root.seq}"
+    assert hub.db.store_get("room", key) is None, "a collective question mints no task"
+    # The ordinary operator open in the same room still does.
+    plain = hub.post_message(seats["operator"], "room", PostMessage(
+        title="Build it", body="Now build it", status=Status.open, to=["x"]))
+    assert hub.db.store_get("room", f"task:msg-{plain.seq}") is not None
+    # And a conclusion never reads as acceptance of a task, even if one exists
+    # for the same seq (defensive: rows may be declared by hand).
+    hub.db.store_set("room", key, {"source": f"room#{root.seq}", "requester": "operator",
+                                   "coordinator": "x", "rooms": [], "status": "open",
+                                   "title": "Commission", "rejections": 0,
+                                   "declared_by": "operator", "declared_at": time.time()},
+                     "operator", None)
+    st = hub.consultation_state(seats["operator"], "room", root.id)
+    hub.conclude_consultation(seats["operator"], "room", root.id, "cancelled", st["version"],
+                              "Not needed any more; withdrawn by operator.")
+    assert hub.db.store_get("room", key).value["status"] == "open"
+
+
+def test_resolve_thread_refuses_a_short_note_before_closing_anything(lab):
+    """`conclude_consultation` wants a reason of 12+ characters. Checked
+    halfway through the closing loop, that refusal left the root resolved
+    and the question open — the partial close `resolve_thread` promises
+    never to make."""
+    hub, seats, _ = lab
+    root = hub.post_message(seats["owner"], "room", PostMessage(
+        title="root", body="plain question", status=Status.open,
+        asks=[{"id": "a", "text": "plain", "to": ["x"]}]))
+    q = hub.post_message(seats["owner"], "room", PostMessage(
+        title="q", body="collective question", status=Status.open, reply_to=root.id,
+        asks=[{"id": "c", "text": "views?", "to": ["x", "y"]}],
+        data={"consultation": {"action": "decide something", "eligible": ["x", "y"]}}))
+    with pytest.raises(HubError) as err:
+        hub.resolve_thread(seats["owner"], "room", root.id, body="stop now")
+    assert err.value.status_code == 400
+    assert "NOTHING was closed" in err.value.detail
+    assert [m for m in hub.db.replies_to(root.id) if m.status == Status.resolved] == []
+    assert state(lab, q)["status"] not in ("cancelled", "decided")
+    # A real reason closes the whole trail, question included.
+    out = hub.resolve_thread(seats["owner"], "room", root.id, body="Stood down: scope moved to room-2.")
+    assert len(out["closed"]) == 2
+    assert state(lab, q)["status"] == "cancelled"
+    # No body at all still works: the standard note is long enough.
+    root2 = hub.post_message(seats["owner"], "room", PostMessage(
+        title="root2", body="another", status=Status.open,
+        asks=[{"id": "c", "text": "views?", "to": ["x", "y"]}],
+        data={"consultation": {"action": "decide", "eligible": ["x", "y"]}}))
+    assert len(hub.resolve_thread(seats["owner"], "room", root2.id)["closed"]) == 1
